@@ -129,7 +129,8 @@ export function createConversationTools(options: ConversationToolOptions) {
         const queued = (await harness.snapshot(SubagentRunQueueDoc, context))?.queue.some(item => item.conversationId === recipient.id);
         output = queued ? `Message durably admitted; ${SUBAGENT_QUEUED}` : 'Message durably admitted';
       } else if (args.op === 'wait') {
-        output = JSON.stringify(await options.lifecycle.wait(input.conversationId, { timeoutMs: args.timeoutMs, ...(input.signal ? { signal: input.signal } : {}) }));
+        // A message from the user ends the wait, as it ends the wait tool's: the round would otherwise hold it back.
+        output = JSON.stringify(await options.lifecycle.wait(input.conversationId, { timeoutMs: args.timeoutMs, untilMessage: true, ...(input.signal ? { signal: input.signal } : {}) }));
       } else if (args.op === 'stop') {
         if (group.self) throw new Error('Subagents cannot stop agents');
         const child = group.members.find(member => member.id === args.id && member.child);

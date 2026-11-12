@@ -134,7 +134,7 @@ test('with no answer the call ends at its timeout and the card stays open; a lat
     expect(f.requests).toHaveLength(1);
     vi.advanceTimersByTime(1000);
     const [, after] = await f.received(2);
-    expect(after).toContain('No answer yet; the request stays open in the chat.');
+    expect(after).toContain('No answer yet (the wait ran out, or the user sent a message); the request stays open in the chat.');
     await f.settled();
     expect((await f.harness.snapshot(QuestionsDoc, context))?.items[0]).toMatchObject({ answer: null, takeover: { waiting: false } });
     // No call waits for the card now: its tab's handback is the agent's next message, and it answers the card.
@@ -143,6 +143,21 @@ test('with no answer the call ends at its timeout and the card stays open; a lat
     expect(next).toContain('The user handed tab-a back.');
     await f.settled();
     expect((await f.harness.snapshot(QuestionsDoc, context))?.items[0]?.answer).toBe('handed-back');
+  } finally { await f.harness.close(context); }
+});
+
+test('a message sent to steer ends the wait unanswered: the card stays open and the message reaches the agent now', async () => {
+  const f = await open(new MemoryStorage());
+  try {
+    await f.root.submit({ type: 'input', requestId: 'sign-in', content: 'Open GitHub' }, context);
+    await f.card();
+    await f.waiting();
+    await f.root.submit({ type: 'input', content: 'Skip GitHub, use the docs site instead.', whenBusy: 'steer' }, context);
+    const [, after] = await f.received(2);
+    expect(after).toContain('No answer yet (the wait ran out, or the user sent a message)');
+    expect(after).toContain('Skip GitHub, use the docs site instead.');
+    await f.settled();
+    expect((await f.harness.snapshot(QuestionsDoc, context))?.items[0]).toMatchObject({ answer: null, takeover: { waiting: false } });
   } finally { await f.harness.close(context); }
 });
 

@@ -1,4 +1,4 @@
-import { defineDoc, defineTask, InboxDoc, type Harness, type TaskId, type TaskRuntime, type ToolExecutionApi } from '@earendil-works/pi-durable';
+import { defineDoc, defineTask, type Harness, type TaskId, type TaskRuntime, type ToolExecutionApi } from '@earendil-works/pi-durable';
 import type { JsonValue } from '@earendil-works/chord/json';
 import { boundedReplay } from './documents.js';
 import { awaitWithContext, BACKGROUND_CONTEXT, withAbortSignal, type Context } from '@earendil-works/chord/context';
@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { DaemonResponseSchema, DaemonSnapshotSchema, type DaemonSnapshot } from '@gitspace/supervisor/protocol';
 import type { OperationalServices } from './tasks.js';
 import { ConversationLifecycleDoc, handleEvents } from './conversation-lifecycle.js';
+import { watchSteer } from './steer.js';
 
 export type JobServices = OperationalServices & {
   deliverConversationEvent(input: { conversationId: string; requestId: string; kind: 'command-completed' | 'process-exited'; text: string; payload?: JsonValue }): Promise<void>;
@@ -386,7 +387,7 @@ export function createJobTool(services: JobServices, abortTask: Harness['abortTa
   async function observe(jobId: string, timeoutMs: number, api: ToolExecutionApi, context: Context): Promise<{ observation: RuntimeJobObservation; steered: boolean }> {
     const watch = await api.watchDoc(DurableJobsDoc, api.conversationId, context);
     if (!watch) throw new Error('Durable command observation missing');
-    const inbox = await api.watchDoc(InboxDoc, api.conversationId, context);
+    const steer = await watchSteer(api, context);
     let observation: RuntimeJobObservation | undefined;
     let steered = false;
     const settled = Promise.withResolvers<void>();
@@ -396,18 +397,16 @@ export function createJobTool(services: JobServices, abortTask: Harness['abortTa
       observation = storedObservation(current.observation, current.acceptance.job);
       if (observation.status === 'terminal' || observation.status === 'not-started') settled.resolve();
     };
-    const steer = (value: NonNullable<typeof inbox>['value']) => { if (value?.items.some(item => item.mode === 'steer')) { steered = true; settled.resolve(); } };
     const closed = (end: Awaited<typeof watch.closed>) => { if (end.kind === 'listener_error' || end.kind === 'failed') throw end.error; if (end.kind !== 'stopped') throw new Error(`Command observation ${end.kind}`); };
     const timer = setTimeout(settled.resolve, timeoutMs);
     try {
       observe(watch.value);
       watch.start(async call => { if (call.kind === 'value') observe(call.value); });
-      if (inbox) { steer(inbox.value); inbox.start(async call => { if (call.kind === 'value') steer(call.value); }); }
-      await awaitWithContext(Promise.race([settled.promise, watch.closed.then(closed), ...(inbox ? [inbox.closed.then(closed)] : [])]), context);
+      await awaitWithContext(Promise.race([settled.promise, steer.steered.then(() => { steered = true; }), watch.closed.then(closed)]), context);
       if (!observation) throw new Error('Durable command observation missing');
       // A job that settled as the steer arrived is answered, not handed off.
       return { observation, steered: steered && observation.status !== 'terminal' && observation.status !== 'not-started' };
-    } finally { clearTimeout(timer); await watch.stop(); await inbox?.stop(); }
+    } finally { clearTimeout(timer); await watch.stop(); await steer.stop(); }
   }
   /** A finished job the agent reads here is its answer: the completion message would only repeat it as a later turn. */
   async function consumeCompletion(observation: RuntimeJobObservation, api: ToolExecutionApi, context: Context) {

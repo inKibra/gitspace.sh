@@ -17,6 +17,7 @@ import { isSubagentToolCallAllowed } from '@gitspace/protocol-runtime';
 import { admitToolImages, imageLimits } from './inference/image-limits.js';
 import { ConversationLifecycleDoc, handleEvents } from './conversation-lifecycle.js';
 import { isTakeoverEvent } from './takeover.js';
+import { watchSteer } from './steer.js';
 import { CODEMODE_CHILD_OUTPUT_LIMITS, keepWholeOutput, TOOL_OUTPUT_LIMITS, type ToolResultStore } from './tool-results.js';
 import { declareTool, inputJsonSchema, toolCatalog, type ToolDeclarationSource } from './tool-declarations.js';
 export type CodemodeToolCall = { tool: string; args: JsonValue; callId: string; signal: AbortSignal };
@@ -265,11 +266,12 @@ const TakeoverOutcomeSchema = z.enum([TAKEOVER_ANSWERS.handedBack, TAKEOVER_ANSW
 const TAKEOVER_OUTCOME: Record<z.infer<typeof TakeoverOutcomeSchema>, string> = {
   'handed-back': 'The user handed the tab back; observe it again before acting.',
   declined: 'The user declined (Not now). Continue without that tab, or tell the user what still needs them.',
-  timeout: 'No answer yet; the request stays open in the chat. If the user takes the tab later, you are told when they hand it back.',
+  timeout: 'No answer yet (the wait ran out, or the user sent a message); the request stays open in the chat. If the user takes the tab later, you are told when they hand it back.',
 };
-/** Waits for an ask_takeover card's answer (`TAKEOVER_ANSWERS`), or until `until`: the card's question changes only by
- * commits (Not now, a delivered handback), so this watches it and never polls. The deadline is armed first: its timer
- * ends the wait while the object stays up, and the wake asked for at the deadline (`wakeAt`) ends it after it slept. */
+/** Waits for an ask_takeover card's answer (`TAKEOVER_ANSWERS`), until `until`, or until a message waits to steer the
+ * conversation, which ends it as unanswered: the card's question changes only by commits (Not now, a delivered
+ * handback), so this watches it and never polls. The deadline is armed first: its timer ends the wait while the object
+ * stays up, and the wake asked for at the deadline (`wakeAt`) ends it after it slept. */
 async function awaitTakeover(id: string, until: number, wakeAt: JobServices['wakeAt'], api: ToolExecutionApi, context: Context): Promise<JsonValue | 'timeout'> {
   const result = Promise.withResolvers<JsonValue | 'timeout'>();
   // An abort while the wake or the watch is still being set up rejects a wait that a failure of either then abandons.
@@ -282,6 +284,8 @@ async function awaitTakeover(id: string, until: number, wakeAt: JobServices['wak
     await wakeAt(until);
     const watch = await api.watchDoc(QuestionsDoc, context);
     if (!watch) throw new Error('Question document missing');
+    const steer = await watchSteer(api, context);
+    void steer.steered.then(() => result.resolve('timeout'), (error: unknown) => result.reject(error));
     const settle = (value: typeof watch.value) => {
       const question = value?.items.find(item => item.id === id);
       if (!question) result.reject(new Error('The take-over request was withdrawn: the conversation was stopped'));
@@ -290,7 +294,7 @@ async function awaitTakeover(id: string, until: number, wakeAt: JobServices['wak
     settle(watch.value);
     watch.start(async call => { if (call.kind === 'value') settle(call.value); });
     void watch.closed.then(end => { if (end.kind !== 'stopped') result.reject(new Error(`Take-over wait ended: ${end.kind}`)); });
-    try { return await result.promise; } finally { await watch.stop(); }
+    try { return await result.promise; } finally { await watch.stop(); await steer.stop(); }
   } finally { clearTimeout(timer); context.abortSignal?.removeEventListener('abort', abort); }
 }
 
@@ -399,7 +403,24 @@ export function createRuntimeTools(services: ToolServices, operations: JobServic
         };
         // A foreground command runs as a job the call waits for, so a long one moves to the background instead of
         // holding the call (and the machine request) until it ends.
-        const result = name === 'bash' ? await jobs.foreground(args, api, context) : await services.invoke({ ...invocation, ...(name === 'codemode' ? { codemodeTools, codemodeDescribe } : {}) });
+        let result: RuntimeToolResult;
+        const proc = name === 'proc' ? Arguments.RuntimeProcArgumentsSchema.parse(args) : null;
+        if (name === 'bash') result = await jobs.foreground(args, api, context);
+        else if (proc?.op === 'wait') {
+          // A process wait holds the round as a command does: a message waiting to steer the conversation ends it, and
+          // the process keeps running.
+          const steer = await watchSteer(api, context);
+          const waiting = new AbortController();
+          const invoked = services.invoke({ ...invocation, signal: context.abortSignal ? AbortSignal.any([context.abortSignal, waiting.signal]) : waiting.signal });
+          try {
+            if (await Promise.race([invoked.then(() => false), steer.steered.then(() => true)])) {
+              waiting.abort(new Error('A message arrived'));
+              void invoked.catch(() => {});
+              return { output: [{ type: 'text', text: `Stopped waiting: a message arrived. ${proc.name} keeps running; wait again with proc wait, or check it with proc status.` }], isError: false };
+            }
+          } finally { await steer.stop(); }
+          result = await invoked;
+        } else result = await services.invoke({ ...invocation, ...(name === 'codemode' ? { codemodeTools, codemodeDescribe } : {}) });
         if (name === 'proc') await watchProcessExit(operations, args, result, api, context);
         const content = result.content.length > 0 || result.status === 'completed' ? result.content : [{ type: 'text' as const, text: result.status === 'failed' ? result.error.message : 'The command was interrupted before it returned output; its outcome is unknown.' }];
         // An image the conversation's model cannot take never enters history: every later request would resend it. One

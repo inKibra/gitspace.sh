@@ -76,7 +76,7 @@ export const RuntimeProcArgumentsSchema = z.discriminatedUnion('op', [
 ]);
 const agentMessagingOptions = [
   z.strictObject({ op: z.literal('send').describe('Send a message to the parent or a sibling.'), to: path.describe('Address: parent, a sibling\'s name, or a conversation id.'), message: path.describe('The message.') }),
-  z.strictObject({ op: z.literal('wait').describe('Wait for the next event: a reply, a finished job or an exited process.'), timeoutMs: z.number().int().min(1).max(300_000).default(30_000).describe('Longest to wait, at most 5 minutes (default 30 seconds).') }),
+  z.strictObject({ op: z.literal('wait').describe('Wait for the next event: a reply, a finished job or an exited process; a message from the user also ends it.'), timeoutMs: z.number().int().min(1).max(300_000).default(30_000).describe('Longest to wait, at most 5 minutes (default 30 seconds).') }),
   z.strictObject({ op: z.enum(['list', 'status']).describe('list: every agent of this family; status: one.'), id: path.optional().describe('One agent to report; all when omitted.') }),
 ] as const;
 export const RuntimeChildAgentsArgumentsSchema = z.discriminatedUnion('op', agentMessagingOptions);

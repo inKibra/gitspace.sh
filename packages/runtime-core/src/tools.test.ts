@@ -513,6 +513,33 @@ test('a message sent to steer ends a running foreground command\'s wait: the com
   } finally { await harness.close(BACKGROUND_CONTEXT); }
 }, 5000);
 
+test('a message sent to steer ends a process wait: the machine request is released, the process is left running and the message reaches the model now', async () => {
+  const entered = Promise.withResolvers<void>();
+  const released = Promise.withResolvers<void>();
+  const invoke: ToolServices['invoke'] = async input => {
+    if (input.tool !== 'proc') return completed(input);
+    entered.resolve();
+    const aborted = Promise.withResolvers<void>();
+    input.signal?.addEventListener('abort', () => aborted.resolve(), { once: true });
+    await aborted.promise;
+    released.resolve();
+    return { status: 'interrupted', requestId: input.requestId, attemptId: input.attemptId, content: [] };
+  };
+  const { harness, root } = await registered([[call('proc', { op: 'wait', name: 'dev-server', for: 'ready' }, 'ready')]], invoke, { ...operations, wakeAt: async () => {} });
+  try {
+    await root.submit({ type: 'input', content: 'Start the site.' }, BACKGROUND_CONTEXT);
+    await entered.promise;
+    await root.submit({ type: 'input', content: 'Forget the site, check the docs instead.', whenBusy: 'steer' }, BACKGROUND_CONTEXT);
+    await root.waitForIdle(withAbortSignal(AbortSignal.timeout(3000), BACKGROUND_CONTEXT));
+    await released.promise;
+    const messages = (await root.context(BACKGROUND_CONTEXT)).messages;
+    const result = messages.findIndex(message => message.role === 'toolResult');
+    expect(messages[result]?.role === 'toolResult' && messages[result].isError).toBe(false);
+    expect(JSON.stringify(messages[result]?.content)).toContain('Stopped waiting: a message arrived. dev-server keeps running');
+    expect(JSON.stringify(messages.slice(result + 1))).toContain('Forget the site, check the docs instead.');
+  } finally { await harness.close(BACKGROUND_CONTEXT); }
+}, 5000);
+
 test('stopping a foreground command stops it on its machine', async () => {
   const cancelled: string[] = [];
   const entered = Promise.withResolvers<void>();
