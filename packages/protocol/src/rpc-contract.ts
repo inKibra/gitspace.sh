@@ -1607,6 +1607,13 @@ export const setWorkspaceRelationsContract = gitspaceRpc
   .output(WorkspaceViewCodec)
   .errors({ WorkspaceFailure: rpcErrors.workspaceFailure, WorkspaceNotFound: rpcErrors.workspaceNotFound, OperationFailed: rpcErrors.operationFailed })
   .mutation();
+/** What a workspace is called; its id and branch stay. */
+export const renameWorkspaceContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ workspaceId: wire.string, name: wire.string }))
+  .output(WorkspaceViewCodec)
+  .errors({ WorkspaceNotFound: rpcErrors.workspaceNotFound, OperationFailed: rpcErrors.operationFailed })
+  .mutation();
 /** Git position of a stacked workspace relative to its `stackedOn` parent, computed from the workspaces' cloud history. */
 export const StackStatusCodec = wire.object({
   parentId: wire.nullable(wire.string),
@@ -2700,6 +2707,7 @@ export const gitspaceContract = gitspaceRpc.contract({
     restore: restoreWorkspaceContract,
     delete: deleteWorkspaceContract,
     setRelations: setWorkspaceRelationsContract,
+    rename: renameWorkspaceContract,
     stackStatus: stackStatusContract,
   },
   terminals: {

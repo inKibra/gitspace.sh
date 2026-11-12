@@ -559,6 +559,7 @@ function AccountFrame({ children }: { children: ReactNode }) {
           finally { setReleasePendingSpaceId(null); }
         }}
         onArchive={(spaceId) => runSidebarAction(() => actions.onArchiveWorkspace(spaceId))}
+        onRename={(spaceId, name) => runSidebarAction(() => actions.onRenameWorkspace(spaceId, name))}
         onDelete={(spaceId) => runSidebarAction(() => actions.onDeleteWorkspace(spaceId))}
         onRestore={(spaceId) => runSidebarAction(() => actions.onRestoreWorkspace(spaceId))}
         onNewWorkspace={(id) => { setCreateError(null); setNewWorkspaceProject(id); }}
@@ -1353,6 +1354,7 @@ function useAccountWorkActions(account: NonNullable<ContextType<typeof AccountDi
     onSetWorkspaceRelations: async (workspaceId, relations) => {
       await mutate(rpcClient.workspace.setRelations({ workspaceId, dependsOn: [...relations.dependsOn], relatedTo: [...relations.relatedTo], stackedOn: relations.stackedOn }));
     },
+    onRenameWorkspace: async (workspaceId, name) => { await mutate(rpcClient.workspace.rename({ workspaceId, name })); },
   } satisfies ComponentProps<typeof AccountWorkPages>['actions'];
   return actions;
 }

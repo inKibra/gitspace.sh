@@ -17,7 +17,7 @@ import {
   listProjectsContract, listDevicesContract, revokeDeviceContract,
   getComposioSetupContract, putComposioSetupContract, deleteComposioSetupContract,
   ensureGitSpaceProjectContract,
-  spaceViewContract, setWorkspaceRelationsContract, createProjectContract, deploymentStatusContract, deploymentDiscardLaunchContract, deploymentBackToDefaultContract, deploymentLaunchPublishedContract, deploymentCheckCanonicalContract,
+  spaceViewContract, setWorkspaceRelationsContract, renameWorkspaceContract, createProjectContract, deploymentStatusContract, deploymentDiscardLaunchContract, deploymentBackToDefaultContract, deploymentLaunchPublishedContract, deploymentCheckCanonicalContract,
   environmentStateContract, recordIncidentContract, refreshProjectRemoteContract, projectOriginCheckContract, setProjectOriginCheckContract,
 } from '@gitspace/protocol/rpc-contract';
 import { inferenceListContract, inferenceCreateContract, inferenceUpdateContract, inferenceDeleteContract, inferenceAssignContract } from '@gitspace/protocol/rpc-contract';
@@ -326,6 +326,15 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
       return workspace ? ok(workspace) : err(errors.WorkspaceNotFound({ workspaceId: input.workspaceId }));
     } catch (error) { return err(errors.OperationFailed({ operation: 'set workspace relations', message: message(error) })); }
   });
+  const rename = server.implement(renameWorkspaceContract).handler(async ({ input, errors }) => {
+    try {
+      const projectId = await projectIndex.locateWorkspace(input.workspaceId);
+      if (!projectId) return err(errors.WorkspaceNotFound({ workspaceId: input.workspaceId }));
+      await (await authorityFor(projectId)).renameWorkspace(input.workspaceId, input.name);
+      const workspace = (await readCloudSpaceView(env, userId, projectId)).workspaces.find((candidate) => candidate.id === input.workspaceId);
+      return workspace ? ok(workspace) : err(errors.WorkspaceNotFound({ workspaceId: input.workspaceId }));
+    } catch (error) { return err(errors.OperationFailed({ operation: 'rename workspace', message: message(error) })); }
+  });
   const stackStatus = server.implement(stackStatusContract).handler(async ({ input, errors }) => {
     try {
       const projectId = await projectIndex.locateWorkspace(input.workspaceId);
@@ -441,7 +450,7 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
     secrets: configuration.secrets, configuration: configuration.configuration, skills: configuration.skills, automations: configuration.automations,
     settings: { get: getSettings, update: updateSettings, reserveHandle, git: { get: getGit }, runtime: { get: getRuntime, set: setRuntime }, state: settingsState },
     machines, machine: { createSandbox, updateNotes, updateAgentAttach, sleep, resume, destroy, image: { list: images, set: setImage, retry: retryImage, cancel: cancelImage, recover: recoverImage, defaults: { get: imageDefault, set: setImageDefault } } }, project: { list: projects, create: createProject, ensureGitSpace, remote: { refresh: refreshRemote, checkInterval, setCheckInterval }, ...lifecycle.project },
-    space: { view: spaceView }, workspace: { setRelations, stackStatus, ...lifecycle.workspace }, incidents: { record: recordIncident },
+    space: { view: spaceView }, workspace: { setRelations, rename, stackStatus, ...lifecycle.workspace }, incidents: { record: recordIncident },
     devices: { list: devices, revoke }, deployment: { status: deploymentStatus, checkCanonical: deploymentCheckCanonical, discardLaunch: deploymentDiscardLaunch, backToDefault: deploymentBackToDefault, launchPublished: deploymentLaunchPublished }, providers: providerCloudProcedures(env, userId, requireAdministration),
     storageIncidents: storageIncidentProcedures(env, requireAdministration),
     github: githubCloudProcedures(env, requireAdministration),

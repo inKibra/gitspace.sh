@@ -968,6 +968,20 @@ describe('cloud projects and workspace relations with no machines', () => {
     expect(await client.space.view({ projectId, workspaceId: 'missing' })).toMatchObject({ status: 'error', error: { data: { workspaceId: 'missing' } } });
   });
 
+  it('renames a workspace without changing its id or branch, and refuses an empty name or the base workspace', async () => {
+    const fixture = await account(['rpc.read', 'rpc.write']);
+    const { projectId, authority } = await inspectorWorkspace(fixture.userId);
+    const workspaceId = `space-${crypto.randomUUID()}`;
+    await authority.putWorkspace({ id: workspaceId, projectId, kind: 'worktree', name: 'Child', branch: 'child', phase: 'plan', sourceKind: 'base', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
+    await env.USER_PROJECTS.getByName(fixture.userId).putWorkspaceLocation(workspaceId, projectId);
+    const client = inspectorClient(fixture);
+    expect(await client.workspace.rename({ workspaceId, name: '  Pantry import  ' })).toMatchObject({ status: 'ok', value: { id: workspaceId, name: 'Pantry import', branch: 'child' } });
+    expect(await authority.getWorkspace(workspaceId)).toMatchObject({ name: 'Pantry import', branch: 'child', revision: 2 });
+    expect(await client.workspace.rename({ workspaceId, name: '   ' })).toMatchObject({ status: 'error' });
+    expect(await client.workspace.rename({ workspaceId: projectId, name: 'Renamed base' })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('named after its project') } } });
+    expect(await authority.getWorkspace(workspaceId)).toMatchObject({ name: 'Pantry import', revision: 2 });
+  });
+
   it('imports a public repository at its advertised default branch and asks for the branch it cannot read', async () => {
     const fixture = await account(['rpc.read', 'rpc.write']);
     const client = inspectorClient(fixture);

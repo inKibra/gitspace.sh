@@ -229,6 +229,7 @@ export const ACCOUNT_RPC_AUTHORITY = {
   'workspace.restore': 'cloud',
   'workspace.delete': 'cloud',
   'workspace.setRelations': 'cloud',
+  'workspace.rename': 'cloud',
   'workspace.stackStatus': 'cloud',
   'terminals.events': 'machine',
   'terminals.live': 'machine',

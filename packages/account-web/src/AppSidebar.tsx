@@ -29,8 +29,8 @@ import {
   Tooltip,
   type IconComponent,
 } from '@gitspace/ui';
-import { Activity, Archive, ArrowDown, BookOpen01, ChevronRight, Columns03, DotsHorizontal, FolderClosed, FolderPlus, Key01, Plus, PuzzlePiece01, RefreshCcw01, Rocket02, Settings01, Square, Stars01, Trash01, Zap } from '@untitledui/icons';
-import { createContext, Fragment, useContext, useState, type Dispatch, type ReactNode, type SetStateAction } from 'react';
+import { Activity, Archive, ArrowDown, BookOpen01, ChevronRight, Columns03, DotsHorizontal, Edit03, FolderClosed, FolderPlus, Key01, Plus, PuzzlePiece01, RefreshCcw01, Rocket02, Settings01, Square, Stars01, Trash01, Zap } from '@untitledui/icons';
+import { createContext, Fragment, useContext, useEffect, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from 'react';
 import { glyph } from './glyph.js';
 import { converging, latestLaunchProgress, launchPhaseLabel, machineConvergence, RELEASE_TARGETS, runningLabel, workspaceRelease, type LaunchTrack } from './release.js';
 import { PRODUCT_ROUTE_LABELS, type AppView, type ProductRoute } from './routes.js';
@@ -93,6 +93,7 @@ const SpaceSummaryContext = createContext<SidebarSpaceSummary | undefined>(undef
 const ArchiveGlyph = glyph(Archive);
 const DeleteGlyph = glyph(Trash01);
 const ReopenGlyph = glyph(RefreshCcw01);
+const RenameGlyph = glyph(Edit03);
 const CloseGlyph = glyph(Square);
 const LaunchGlyph = glyph(Rocket02);
 const SettingsGlyph = glyph(Settings01);
@@ -160,6 +161,8 @@ export interface AppSidebarProps {
   onReleaseMachines?(spaceId: string): void | Promise<void>;
   releasePendingSpaceId?: string | null;
   onArchive?(spaceId: string): void | Promise<void>;
+  /** Renames a workspace: its id and branch stay. */
+  onRename?(spaceId: string, name: string): void | Promise<void>;
   onDelete?(spaceId: string): void | Promise<void>;
   onRestore?(spaceId: string): void | Promise<void>;
   onNewWorkspace?(projectId: string): void;
@@ -186,7 +189,7 @@ function launchedFrom(deployment: SidebarDeploymentProps | null | undefined, wor
   return release !== null && RELEASE_TARGETS.some((target) => deployment.status.desired[target] === release.sha);
 }
 
-function SpaceMenu({ space, kind, summary, deployment, onReleaseMachines, releasePendingSpaceId, onArchive, onRestore, onDelete, onInspect, onNewWorkspace, onOpenProjectSettings, onOpenAutomations, triggerClassName }: { space: Pick<AgentScopeView, 'id' | 'name'>; kind: AgentScopeView['kind']; summary?: SidebarSpaceSummary; onInspect?: () => void; onNewWorkspace?: () => void; onOpenProjectSettings?: () => void; onOpenAutomations?: () => void; triggerClassName?: string } & Pick<AppSidebarProps, 'deployment' | 'onReleaseMachines' | 'releasePendingSpaceId' | 'onArchive' | 'onRestore' | 'onDelete'>) {
+function SpaceMenu({ space, kind, summary, deployment, onReleaseMachines, releasePendingSpaceId, onArchive, onRestore, onDelete, onRename, onInspect, onNewWorkspace, onOpenProjectSettings, onOpenAutomations, triggerClassName }: { space: Pick<AgentScopeView, 'id' | 'name'>; kind: AgentScopeView['kind']; summary?: SidebarSpaceSummary; onRename?: () => void; onInspect?: () => void; onNewWorkspace?: () => void; onOpenProjectSettings?: () => void; onOpenAutomations?: () => void; triggerClassName?: string } & Pick<AppSidebarProps, 'deployment' | 'onReleaseMachines' | 'releasePendingSpaceId' | 'onArchive' | 'onRestore' | 'onDelete'>) {
   const archived = !!summary?.closedAt;
   const held = !archived && summary?.holder.kind === 'held';
   const launchable = (held || (!archived && summary?.holder.kind === 'cloud')) && deployment?.isGitSpaceProject === true;
@@ -194,7 +197,8 @@ function SpaceMenu({ space, kind, summary, deployment, onReleaseMachines, releas
   const canRestore = kind === 'workspace' && archived && !!onRestore;
   const canArchive = kind === 'workspace' && !archived && !summary?.creation && !!onArchive;
   const canDelete = kind === 'workspace' && !!onDelete;
-  if (!onInspect && !onNewWorkspace && !onOpenProjectSettings && !onOpenAutomations && !canRelease && !canRestore && !canArchive && !canDelete && !launchable) return null;
+  const canRename = kind === 'workspace' && !summary?.creation && !!onRename;
+  if (!onInspect && !onNewWorkspace && !onOpenProjectSettings && !onOpenAutomations && !canRelease && !canRestore && !canArchive && !canDelete && !canRename && !launchable) return null;
   const launching = deployment?.launch?.status === 'running';
   let index = 0;
   return <DropdownMenu>
@@ -204,6 +208,7 @@ function SpaceMenu({ space, kind, summary, deployment, onReleaseMachines, releas
       {onNewWorkspace ? <MenuItem index={index++} icon={NewWorkspaceGlyph} label="New workspace" onSelect={onNewWorkspace} /> : null}
       {onOpenProjectSettings ? <MenuItem index={index++} icon={SettingsGlyph} label="Project settings" onSelect={onOpenProjectSettings} /> : null}
       {onOpenAutomations ? <MenuItem index={index++} icon={AutomationsGlyph} label="Automations" onSelect={onOpenAutomations} /> : null}
+      {canRename ? <MenuItem index={index++} icon={RenameGlyph} label="Rename workspace" onSelect={() => onRename?.()} /> : null}
       {canRelease ? <MenuItem index={index++} icon={CloseGlyph} label={releasePendingSpaceId === space.id ? 'Releasing machine caches…' : 'Release machine caches'} disabled={releasePendingSpaceId !== null && releasePendingSpaceId !== undefined} onSelect={() => void onReleaseMachines?.(space.id)} /> : null}
       {canRestore ? <MenuItem index={index++} icon={ReopenGlyph} label="Restore workspace" onSelect={() => void onRestore?.(space.id)} /> : null}
       {canArchive ? <MenuItem index={index++} icon={ArchiveGlyph} label="Archive workspace" onSelect={() => void onArchive?.(space.id)} /> : null}
@@ -306,32 +311,46 @@ function matches(item: RowItem, filter: SidebarFilter): boolean {
   return item.phase === filter;
 }
 
+/** The name being edited in place: Enter or leaving the field keeps it, Escape keeps the old one. */
+function RenameInline({ name, onDone }: { name: string; onDone(name: string | null): void }) {
+  const [value, setValue] = useState(name);
+  const input = useRef<HTMLInputElement>(null);
+  useEffect(() => { input.current?.select(); }, []);
+  return <input ref={input} autoFocus value={value} maxLength={160} aria-label="Workspace name" onChange={(event) => setValue(event.target.value)}
+    onKeyDown={(event) => { if (event.key === 'Enter') onDone(value.trim() || null); if (event.key === 'Escape') onDone(null); }} onBlur={() => onDone(value.trim() || null)}
+    className="h-6 min-w-0 flex-1 rounded-[6px] border border-[#6B97FF] bg-transparent px-1 text-body outline-none" />;
+}
+
 /** A workspace row: the status dot and name, then its stack parent, phase, pull request and what blocks it or what it
  * blocks. A focused workspace lights what it depends on (violet edge) and what depends on it (teal edge); unrelated rows
- * recede. Its actions sit centred on the row's two lines. */
-function WorkspaceRow({ item, kin, selected, inset, guides, meta, flags, dimmed, actions, onHover, onSelect }: { item: RowItem; kin: Relation; selected: boolean; inset: number; guides: readonly number[]; meta: ReactNode; flags: ReactNode; dimmed: boolean; actions: ReactNode; onHover(id: string | null): void; onSelect(): void }) {
+ * recede. Its actions sit centred on the row's two lines. While `renaming`, the name is a field and the row selects
+ * nothing; double-clicking the name starts it. */
+function WorkspaceRow({ item, kin, selected, inset, guides, meta, flags, dimmed, actions, renaming, onStartRename, onHover, onSelect }: { item: RowItem; kin: Relation; selected: boolean; inset: number; guides: readonly number[]; meta: ReactNode; flags: ReactNode; dimmed: boolean; actions: ReactNode; renaming?: { onDone(name: string | null): void }; onStartRename?(): void; onHover(id: string | null): void; onSelect(): void }) {
   const { summary } = item;
   const tone = kin === 'upstream' ? UPSTREAM_TONE : kin === 'downstream' ? DOWNSTREAM_TONE : null;
   const released = summary?.holder.kind === 'released';
   const freshness = summary?.freshness ?? (summary?.status ? 'fresh' : 'unknown');
+  const className = `relative flex w-full min-w-0 select-none flex-col gap-0.5 rounded-[10px] py-[5px] pr-2 text-left outline-none transition-[opacity,background-color] duration-150 group-hover/menu-sub-item:pr-8 focus-visible:ring-2 focus-visible:ring-[#6B97FF]/50 ${selected ? 'bg-active' : 'hover:bg-hover'} ${kin === 'unrelated' || dimmed ? 'opacity-40' : ''}`;
+  const body = <>
+    {guides.map(x => <span key={x} aria-hidden className="pointer-events-none absolute inset-y-0 w-px bg-border" style={{ left: x }} />)}
+    {tone ? <>
+      <span aria-hidden className="pointer-events-none absolute inset-y-0 right-0 rounded-[10px]" style={{ left: Math.max(inset - 6, 0), background: `linear-gradient(90deg, color-mix(in oklab, ${tone} 16%, transparent), transparent 75%)` }} />
+      <span aria-hidden className="pointer-events-none absolute inset-y-1 w-0.5 rounded-full" style={{ left: Math.max(inset - 6, 1), background: tone, boxShadow: `0 0 8px color-mix(in oklab, ${tone} 60%, transparent)` }} />
+    </> : null}
+    <span className="relative flex min-w-0 items-center gap-1.5">
+      <span className="inline-flex size-4 shrink-0 items-center justify-center" data-freshness={freshness}>{summary?.closedAt ? <ArchiveGlyph size={14} strokeWidth={1.5} /> : summary ? <WorkspaceStatusDot space={summary} /> : <StatusDot color="dim" />}</span>
+      {renaming ? <RenameInline name={item.name} onDone={renaming.onDone} />
+        : <span onDoubleClick={onStartRename ? (event) => { event.preventDefault(); onStartRename(); } : undefined} className={`min-w-0 truncate text-body ${released ? 'text-muted-foreground' : item.state === 'needs-you' || selected ? 'font-medium text-foreground' : 'text-foreground/90'}`}>{item.name}</span>}
+      {flags}
+    </span>
+    <span className="relative flex min-w-0 items-center gap-1.5 pl-[22px] text-[11px] text-muted-foreground">{meta}</span>
+  </>;
   return <SidebarMenuSubItem data-workspace={item.id} data-relation={kin}>
-    <button type="button" aria-current={selected ? 'page' : undefined} title={`${item.branch} · ${summary ? summaryLabel(summary) : 'Status unknown'}${released && !summary?.closedAt ? ' · released' : ''}`} aria-description={summary?.detail ?? undefined}
-      onMouseEnter={() => onHover(item.id)} onMouseLeave={() => onHover(null)} onFocus={() => onHover(item.id)} onBlur={() => onHover(null)} onClick={onSelect}
-      className={`relative flex w-full min-w-0 select-none flex-col gap-0.5 rounded-[10px] py-[5px] pr-2 text-left outline-none transition-[opacity,background-color] duration-150 group-hover/menu-sub-item:pr-8 focus-visible:ring-2 focus-visible:ring-[#6B97FF]/50 ${selected ? 'bg-active' : 'hover:bg-hover'} ${kin === 'unrelated' || dimmed ? 'opacity-40' : ''}`}
-      style={{ paddingLeft: inset }}>
-      {guides.map(x => <span key={x} aria-hidden className="pointer-events-none absolute inset-y-0 w-px bg-border" style={{ left: x }} />)}
-      {tone ? <>
-        <span aria-hidden className="pointer-events-none absolute inset-y-0 right-0 rounded-[10px]" style={{ left: Math.max(inset - 6, 0), background: `linear-gradient(90deg, color-mix(in oklab, ${tone} 16%, transparent), transparent 75%)` }} />
-        <span aria-hidden className="pointer-events-none absolute inset-y-1 w-0.5 rounded-full" style={{ left: Math.max(inset - 6, 1), background: tone, boxShadow: `0 0 8px color-mix(in oklab, ${tone} 60%, transparent)` }} />
-      </> : null}
-      <span className="relative flex min-w-0 items-center gap-1.5">
-        <span className="inline-flex size-4 shrink-0 items-center justify-center" data-freshness={freshness}>{summary?.closedAt ? <ArchiveGlyph size={14} strokeWidth={1.5} /> : summary ? <WorkspaceStatusDot space={summary} /> : <StatusDot color="dim" />}</span>
-        <span className={`min-w-0 truncate text-body ${released ? 'text-muted-foreground' : item.state === 'needs-you' || selected ? 'font-medium text-foreground' : 'text-foreground/90'}`}>{item.name}</span>
-        {flags}
-      </span>
-      <span className="relative flex min-w-0 items-center gap-1.5 pl-[22px] text-[11px] text-muted-foreground">{meta}</span>
-    </button>
-    <SidebarMenuActions showOnHover className="top-1/2 -translate-y-1/2">{actions}</SidebarMenuActions>
+    {renaming ? <div className={className} style={{ paddingLeft: inset }}>{body}</div>
+      : <button type="button" aria-current={selected ? 'page' : undefined} title={`${item.branch} · ${summary ? summaryLabel(summary) : 'Status unknown'}${released && !summary?.closedAt ? ' · released' : ''}`} aria-description={summary?.detail ?? undefined}
+        onMouseEnter={() => onHover(item.id)} onMouseLeave={() => onHover(null)} onFocus={() => onHover(item.id)} onBlur={() => onHover(null)} onClick={onSelect}
+        className={className} style={{ paddingLeft: inset }}>{body}</button>}
+    {renaming ? null : <SidebarMenuActions showOnHover className="top-1/2 -translate-y-1/2">{actions}</SidebarMenuActions>}
   </SidebarMenuSubItem>;
 }
 
@@ -347,7 +366,7 @@ function StateCounts({ items }: { items: readonly RowItem[] }) {
   </span>;
 }
 
-interface ProjectRowsProps extends Pick<AppSidebarProps, 'selected' | 'deployment' | 'onSelectProject' | 'onSelectWorkspace' | 'onReleaseMachines' | 'releasePendingSpaceId' | 'onArchive' | 'onRestore' | 'onDelete' | 'onNewWorkspace' | 'onOpenProjectSettings' | 'onOpenProjectAutomations'> {
+interface ProjectRowsProps extends Pick<AppSidebarProps, 'selected' | 'deployment' | 'onSelectProject' | 'onSelectWorkspace' | 'onReleaseMachines' | 'releasePendingSpaceId' | 'onArchive' | 'onRestore' | 'onDelete' | 'onRename' | 'onNewWorkspace' | 'onOpenProjectSettings' | 'onOpenProjectAutomations'> {
   project: SidebarProject;
   collapsed: boolean;
   onCollapse(projectId: string, collapsed: boolean): void;
@@ -358,9 +377,10 @@ interface ProjectRowsProps extends Pick<AppSidebarProps, 'selected' | 'deploymen
   stackStatuses: ReadonlyMap<string, StackStatus>;
 }
 
-function ProjectRows({ project, collapsed, onCollapse, selected, deployment, onSelectProject, onSelectWorkspace, onReleaseMachines, releasePendingSpaceId, onArchive, onRestore, onDelete, onNewWorkspace, onOpenProjectSettings, onOpenProjectAutomations, filter, groupBy, hovered, onHover, stackStatuses }: ProjectRowsProps) {
+function ProjectRows({ project, collapsed, onCollapse, selected, deployment, onSelectProject, onSelectWorkspace, onReleaseMachines, releasePendingSpaceId, onArchive, onRestore, onDelete, onRename, onNewWorkspace, onOpenProjectSettings, onOpenProjectAutomations, filter, groupBy, hovered, onHover, stackStatuses }: ProjectRowsProps) {
   const { base, workspaces, graph } = project;
   const [showArchived, setShowArchived] = useState(false);
+  const [renaming, setRenaming] = useState<string | null>(null);
   const items = workspaces.filter((workspace) => !workspace.closedAt).map((workspace) => rowItem(workspace, graph));
   const archived = workspaces.filter((workspace) => !!workspace.closedAt).map((workspace) => rowItem(workspace, undefined));
   const baseSelected = selected?.workspaceId === null && selected.projectId === project.id;
@@ -380,9 +400,12 @@ function ProjectRows({ project, collapsed, onCollapse, selected, deployment, onS
   const focus = [hovered, selectedId].map((id) => lit(items, id)).find((light): light is Lit => light !== null && light.upstream.size + light.downstream.size > 0) ?? null;
   const row = (item: RowItem, inset: number, guides: readonly number[], meta: ReactNode, dimmed: boolean) => {
     const summary = item.summary;
+    const startRename = onRename && !summary?.creation ? () => setRenaming(item.id) : undefined;
+    const renamed = renaming === item.id && onRename ? { onDone: (name: string | null) => { setRenaming(null); if (name !== null && name !== item.name) void onRename(item.id, name); } } : undefined;
     return <WorkspaceRow key={item.id} item={item} kin={relation(focus, item.id)} selected={selectedId === item.id} inset={inset} guides={guides} dimmed={dimmed} onHover={onHover} onSelect={() => onSelectWorkspace(item.workspace)} meta={meta}
+      renaming={renamed} onStartRename={startRename}
       flags={<>{item.workspace.definition?.remote?.behind ? <BehindOriginGlyph branch={item.branch} /> : null}{launchedFrom(deployment, item.id) ? <LaunchedGlyph /> : null}{summary?.holder.kind === 'released' && !summary.closedAt ? <span className="ml-1 shrink-0 text-caption text-muted-foreground/70">· released</span> : null}</>}
-      actions={<SpaceMenu space={item.workspace} kind="workspace" summary={summary} deployment={deployment} onReleaseMachines={onReleaseMachines} releasePendingSpaceId={releasePendingSpaceId} onArchive={onArchive} onRestore={onRestore} onDelete={onDelete} />} />;
+      actions={<SpaceMenu space={item.workspace} kind="workspace" summary={summary} deployment={deployment} onReleaseMachines={onReleaseMachines} releasePendingSpaceId={releasePendingSpaceId} onArchive={onArchive} onRestore={onRestore} onDelete={onDelete} onRename={startRename} />} />;
   };
   /** The second line after the stack caption and phase or state: the linked pull request and what blocks it or what it
    * blocks. A dependency blocks while it is open and not in Ship, as the server's `blockedBy` reads it; an archived one
@@ -455,7 +478,7 @@ function readGroupBy(): SidebarGroupBy {
   return GROUP_BYS.find((option) => option.id === stored)?.id ?? 'none';
 }
 
-export function AppSidebar({ view, onView, selected, selectedSummary, projects, onSelectProject, onSelectWorkspace, onReleaseMachines, releasePendingSpaceId = null, onArchive, onRestore, onDelete, onNewWorkspace, onNewProject, onOpenSettings, onOpenProjectSettings, onOpenProjectAutomations, failedAutomationRuns = 0, user, deployment, stackStatuses = new Map() }: AppSidebarProps) {
+export function AppSidebar({ view, onView, selected, selectedSummary, projects, onSelectProject, onSelectWorkspace, onReleaseMachines, releasePendingSpaceId = null, onArchive, onRestore, onDelete, onRename, onNewWorkspace, onNewProject, onOpenSettings, onOpenProjectSettings, onOpenProjectAutomations, failedAutomationRuns = 0, user, deployment, stackStatuses = new Map() }: AppSidebarProps) {
   const userName = user?.name || 'Your account';
   const [collapsedProjects, setCollapsedProjects] = useState(readCollapsedProjects);
   const [filter, setFilter] = useState<SidebarFilter>('all');
@@ -522,7 +545,7 @@ export function AppSidebar({ view, onView, selected, selectedSummary, projects, 
           </Tooltip> : null}
         </SidebarGroupActions>
         <SidebarMenu>
-          {shown.map((project) => <ProjectRows key={project.id} project={project} collapsed={collapsedProjects.has(project.id)} onCollapse={collapseProject} selected={selected} deployment={deployment} onSelectProject={onSelectProject} onSelectWorkspace={onSelectWorkspace} onReleaseMachines={onReleaseMachines} releasePendingSpaceId={releasePendingSpaceId} onArchive={onArchive} onRestore={onRestore} onDelete={onDelete} onNewWorkspace={onNewWorkspace} onOpenProjectSettings={onOpenProjectSettings} onOpenProjectAutomations={onOpenProjectAutomations}
+          {shown.map((project) => <ProjectRows key={project.id} project={project} collapsed={collapsedProjects.has(project.id)} onCollapse={collapseProject} selected={selected} deployment={deployment} onSelectProject={onSelectProject} onSelectWorkspace={onSelectWorkspace} onReleaseMachines={onReleaseMachines} releasePendingSpaceId={releasePendingSpaceId} onArchive={onArchive} onRestore={onRestore} onDelete={onDelete} onRename={onRename} onNewWorkspace={onNewWorkspace} onOpenProjectSettings={onOpenProjectSettings} onOpenProjectAutomations={onOpenProjectAutomations}
             filter={filter} groupBy={groupBy} hovered={hovered} onHover={setHovered} stackStatuses={stackStatuses} />)}
         </SidebarMenu>
       </SidebarGroup>

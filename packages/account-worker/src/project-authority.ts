@@ -1668,6 +1668,22 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
     return this.commitWorkspaceChange(workspaceId, { phase });
   }
 
+  /** Changes what a workspace is called; its id and branch stay. The base workspace is named after its project. */
+  renameWorkspace(workspaceId: string, name: string): CloudWorkspaceDefinition {
+    const renamed = cloudWorkspaceDefinitionSchema.shape.name.parse(name.trim());
+    const current = this.getWorkspace(workspaceId);
+    if (!current) throw new Error(`Workspace ${workspaceId} does not exist`);
+    if (current.kind === 'base') throw new Error('The base workspace is named after its project');
+    if (current.lifecycle === 'deleting') throw new Error(`Workspace ${current.name} is being deleted`);
+    if (current.name === renamed) return current;
+    return this.commit('workspace', workspaceId, () => {
+      const project = this.requireProject();
+      if (project.lifecycle === 'archived' || project.lifecycle === 'deleting') throw new Error(`Cannot rename a workspace of a ${project.lifecycle} project`);
+      this.ctx.storage.sql.exec('UPDATE workspaces SET name=?,revision=revision+1,updated_at=? WHERE workspace_id=?', renamed, new Date().toISOString(), workspaceId);
+      return workspaceDefinition(this.ctx.storage.sql.exec<WorkspaceRow>('SELECT * FROM workspaces WHERE workspace_id=?', workspaceId).one());
+    });
+  }
+
   /** The workspace object owns its lifecycle and phase; this row is the listing's copy, so the newest change wins. */
   private commitWorkspaceChange(workspaceId: string, change: { lifecycle: WorkspaceLifecycle } | { phase: WorkspacePhase }): CloudWorkspaceDefinition {
     const current = this.getWorkspace(workspaceId);

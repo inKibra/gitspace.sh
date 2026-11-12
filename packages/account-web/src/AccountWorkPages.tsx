@@ -22,7 +22,7 @@ export interface AccountWorkPagesProps {
   onRefresh(): void;
   onOpenWorkspace(projectId: string, workspaceId: string): void;
   onOpenProject(projectId: string): void;
-  actions: Pick<GitSpaceShellProps, 'onCreateProject' | 'onCreateWorkspace' | 'onArchiveWorkspace' | 'onArchiveProject' | 'onRestoreProject' | 'onDeleteProject' | 'onDeleteWorkspace' | 'onSetWorkspaceRelations'> & {
+  actions: Pick<GitSpaceShellProps, 'onCreateProject' | 'onCreateWorkspace' | 'onArchiveWorkspace' | 'onRenameWorkspace' | 'onArchiveProject' | 'onRestoreProject' | 'onDeleteProject' | 'onDeleteWorkspace' | 'onSetWorkspaceRelations'> & {
     onReleaseMachines?: (workspaceId: string) => void | Promise<void>;
     onRestoreWorkspace?: (workspaceId: string) => void | Promise<void>;
     onSetProjectBaseBranch?: (projectId: string, expectedRevision: number, baseBranch: string) => void | Promise<void>;

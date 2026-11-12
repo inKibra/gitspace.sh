@@ -56,6 +56,32 @@ it('offers only Restore for an archived workspace', async () => {
   })).toEqual(['Restore workspace']);
 });
 
+it('renames a workspace in place from its menu or by double-clicking its name; Escape keeps the old name', async () => {
+  const onRename = vi.fn();
+  await act(() => root.render(<SidebarProvider persist={false}><AppSidebar
+    view="projects" onView={() => undefined} selected={null}
+    projects={[{ id: 'project', name: 'Project', workspaces: [saved] }]} machines={[]}
+    onSelectWorkspace={() => undefined} onRename={onRename}
+  /></SidebarProvider>));
+  const field = () => container.querySelector<HTMLInputElement>('input[aria-label="Workspace name"]');
+  const type = async (value: string, key: string) => {
+    const input = field()!;
+    await act(() => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, value); input.dispatchEvent(new Event('input', { bubbles: true })); });
+    await act(() => { input.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true })); });
+  };
+  await act(() => container.querySelector<HTMLButtonElement>('button[aria-label="Space actions for Saved workspace"]')!.click());
+  await act(() => document.querySelector<HTMLElement>('[role="menuitem"][aria-label="Rename workspace"]')!.click());
+  expect(field()?.value).toBe('Saved workspace');
+  await type('Pantry import', 'Enter');
+  expect(onRename).toHaveBeenCalledWith('saved', 'Pantry import');
+  expect(field()).toBeNull();
+  const name = Array.from(container.querySelectorAll('span')).find((span) => span.textContent === 'Saved workspace');
+  await act(() => { name!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })); });
+  await type('Discarded', 'Escape');
+  expect(field()).toBeNull();
+  expect(onRename).toHaveBeenCalledTimes(1);
+});
+
 
 async function renderProject(props: Partial<AppSidebarProps> = {}) {
   await act(() => root.render(<SidebarProvider persist={false}><AppSidebar

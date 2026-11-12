@@ -183,6 +183,7 @@ export interface GitSpaceShellProps {
   onSelectWorkspace?: (workspaceId: string) => void;
   onSelectProject?: (projectId: string) => void;
   onArchiveWorkspace?: (workspaceId: string) => void | Promise<void>;
+  onRenameWorkspace?: (workspaceId: string, name: string) => void | Promise<void>;
   onCreateProject?: (input: CreateProjectInput) => void | Promise<void>;
   onCreateWorkspace?: (input: CreateWorkspaceInput) => void | Promise<void>;
   onArchiveProject?: (projectId: string, expectedRevision: number) => void | Promise<void>;

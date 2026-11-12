@@ -666,6 +666,12 @@ export const reviewedAnnotations: Record<string, ToolAnnotation> = {
     "idempotentHint": true,
     "openWorldHint": false
   },
+  "workspace.rename": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false
+  },
   "workspace.stackStatus": {
     "readOnlyHint": true,
     "openWorldHint": false
