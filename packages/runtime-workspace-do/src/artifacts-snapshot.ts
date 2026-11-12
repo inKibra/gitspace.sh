@@ -8,7 +8,7 @@ import { artifactsPushRefusal, collectBytes, sameGitLfsSnapshot, smallerArtifact
 
 export type RuntimeGitCheckpoint = z.infer<typeof RuntimeGitCheckpointSchema>;
 export type SnapshotMutation = { path: string; content: Uint8Array | null; mode?: string; oid?: string; type?: 'blob' | 'commit' };
-export type WriteSnapshotInput = { repository: string; workspaceId: string; previous: RuntimeGitCheckpoint; mutations: SnapshotMutation[]; /** Edit-history message for the tool change; absent for merges and system snapshots. */ message?: string; signal?: AbortSignal; machine?: RuntimeGitCheckpoint; indexMutations?: SnapshotMutation[]; trackedMutations?: SnapshotMutation[]; conflicts?: string[]; forcePublication?: boolean; /** The result's trees, already in the repository: a machine
+export type WriteSnapshotInput = { repository: string; workspaceId: string; previous: RuntimeGitCheckpoint; mutations: SnapshotMutation[]; /** Edit-history message for the tool change; absent for merges and system snapshots. */ message?: string; signal?: AbortSignal; machine?: RuntimeGitCheckpoint; indexMutations?: SnapshotMutation[]; trackedMutations?: SnapshotMutation[]; conflicts?: string[]; forcePublication?: boolean; /** Called with each step's name as it ends; the caller times the steps. */ mark?: (step: string) => void; /** The result's trees, already in the repository: a machine
  * publication onto an unchanged cloud adopts the machine's trees instead of rebuilding them from mutations. */ adopt?: { worktreeTree: string; indexTree: string; trackedTree: string } };
 export interface ArtifactsFetch { (input: string, init?: RequestInit): Promise<Response> }
 export class ArtifactsSnapshotError extends TaggedError('ArtifactsSnapshotError')<{ operation: string; message: string; certainty: 'not-published' | 'unknown' }> {}
@@ -457,6 +457,7 @@ export async function writeArtifactsSnapshot(repo: Pick<ArtifactsRepo, 'readComm
       }
     }
     const parent = await repo.readCommit(previous.worktreeCommit);
+    input.mark?.('readParent');
     if (!parent || parent.treeHash !== previous.worktreeTree) throw new Error('Previous snapshot is missing or inconsistent');
     const fs = createFsFromVolume(new Volume());
     const dir = '/snapshot';
@@ -523,6 +524,7 @@ export async function writeArtifactsSnapshot(repo: Pick<ArtifactsRepo, 'readComm
       return tree;
     };
     const worktreeTree = input.adopt?.worktreeTree ?? await editTree(previous.worktreeTree, mutations, false);
+    input.mark?.('worktreeTree');
     // Initial/recovery publications and missing inventories require the merged
     // worktree itself, not seeded conflict flags, to establish current markers.
     if (rescanConflicts) {
@@ -554,6 +556,7 @@ export async function writeArtifactsSnapshot(repo: Pick<ArtifactsRepo, 'readComm
     const trackedParent = await repo.readCommit(previous.trackedWorktreeCommit);
     if (!trackedParent) throw new Error('Previous tracked snapshot is missing');
     const trackedTree = input.adopt?.trackedTree ?? await editTree(trackedParent.treeHash, input.trackedMutations ?? mutations, input.trackedMutations === undefined);
+    input.mark?.('trackedTree');
     const identity = { name: 'GitSpace Checkpoint', email: 'checkpoint@gitspace.invalid', timestamp: parent.committedAt + 1, timezoneOffset: 0 };
     // A tool change is authored by the agent; GitSpace stays the committer of every checkpoint.
     const author = input.message === undefined ? identity : { ...identity, name: 'GitSpace Agent', email: 'agent@gitspace.invalid' };
@@ -566,6 +569,7 @@ export async function writeArtifactsSnapshot(repo: Pick<ArtifactsRepo, 'readComm
     const worktreeCommit = await git.writeCommit({ fs, dir, commit: { tree: worktreeTree, parent: [...new Set([previous.worktreeCommit, trackedWorktreeCommit, indexCommit, ...(input.machine ? [input.machine.worktreeCommit] : [])])], author, committer: identity, message: input.message ?? 'GitSpace cloud worktree snapshot\n' } });
     oids.add(worktreeCommit);
     const packed = await git.packObjects({ fs, dir, oids: [...oids] });
+    input.mark?.('pack');
     if (!packed.packfile) throw new Error('Git pack writer returned no pack');
     // A migrated workspace keeps its separate runtime ref: the immutable legacy
     // checkpoints/<generation> refs prohibit creating their parent as a Git ref.
@@ -574,8 +578,9 @@ export async function writeArtifactsSnapshot(repo: Pick<ArtifactsRepo, 'readComm
     const checkpointRef = workspaceRefs.includes(previous.checkpointRef) ? previous.checkpointRef : workspaceRefs[0]!;
     const info = await repo.info();
     const token = await repo.createToken('write', 60);
-    try { await publishSnapshotPack({ remote: info.remote, auth: { kind: 'bearer', token: token.plaintext }, ref: checkpointRef, previous: previous.worktreeCommit, commit: worktreeCommit, pack: packed.packfile, signal: input.signal, onPublicationState: state => { certainty = state; } }, request); }
-    finally { await repo.revokeToken(token.id); }
+    input.mark?.('token');
+    try { await publishSnapshotPack({ remote: info.remote, auth: { kind: 'bearer', token: token.plaintext }, ref: checkpointRef, previous: previous.worktreeCommit, commit: worktreeCommit, pack: packed.packfile, signal: input.signal, onPublicationState: state => { certainty = state; } }, request); input.mark?.('receivePack'); }
+    finally { await repo.revokeToken(token.id); input.mark?.('revoke'); }
     return RuntimeGitCheckpointSchema.parse({ ...(input.machine ?? previous), checkpointRef, indexCommit, indexTree, trackedWorktreeCommit, worktreeCommit, worktreeTree, conflicts });
   }, catch: error => new ArtifactsSnapshotError({ operation: 'writeSnapshot', certainty, message: error instanceof Error ? error.message : String(error) }) });
 }

@@ -265,12 +265,21 @@ export class CloudFileStore {
     const input = InvocationSchema.parse(raw);
     const active = this.running.get(input.attemptId);
     if (active) return active.then(result => { this.assertIdentity(input); return result; });
-    const operation = () => this.run(input, signal);
+    // Diagnostic for file tool latency (2026-11-12). Each phase's milliseconds since the previous mark. A Worker's clock
+    // advances only across I/O, so these are waits on storage, Artifacts and other objects; CPU work reads as near zero.
+    const started = performance.now();
+    let last = started;
+    const phases: Record<string, number> = {};
+    const mark = (phase: string) => { const now = performance.now(); phases[phase] = (phases[phase] ?? 0) + Math.round(now - last); last = now; };
+    const operation = () => { mark('queue'); return this.run(input, mark, signal); };
     // Reads wait for every mutation admitted before them, so an agent reads its own writes; they never hold the queue.
     const promise = (input.tool === 'read' || input.tool === 'find' ? this.admission.then(operation) : this.serialize(operation)).catch(error => {
       const saved = this.assertIdentity(input);
       if (saved?.pending && !(error instanceof CloudPublicationUncertain)) throw new CloudPublicationUncertain({ attemptId: input.attemptId, message: error instanceof Error ? error.message : String(error) });
       throw error;
+    }).then(result => {
+      console.log(JSON.stringify({ event: 'cloud_file_timing', workspaceId: this.workspaceId, tool: input.tool, status: result.status, totalMs: Math.round(performance.now() - started), phases }));
+      return result;
     }).finally(() => this.running.delete(input.attemptId));
     this.running.set(input.attemptId, promise);
     return promise;
@@ -280,10 +289,10 @@ export class CloudFileStore {
     if (row && row.input !== canonicalJson(input)) throw new Error('Cloud attempt identity was reused');
     return row;
   }
-  private async run(input: Invocation, signal?: AbortSignal): Promise<RuntimeToolResult> {
+  private async run(input: Invocation, mark: (phase: string) => void, signal?: AbortSignal): Promise<RuntimeToolResult> {
     const saved = this.assertIdentity(input);
     if (saved?.result) { await this.flushRetention(); return RuntimeToolResultSchema.parse(JSON.parse(saved.result)); }
-    if (saved?.pending) return this.finish(PendingSchema.parse(JSON.parse(saved.pending)));
+    if (saved?.pending) return this.finish(PendingSchema.parse(JSON.parse(saved.pending)), mark);
     const result = (status: 'completed' | 'failed', text: string): RuntimeToolResult => {
       const content: RuntimeToolResult['content'] = [{ type: 'text', text }];
       return status === 'failed'
@@ -295,6 +304,7 @@ export class CloudFileStore {
       signal?.throwIfAborted();
       const readOnly = input.tool === 'read' || input.tool === 'find';
       const previous = readOnly ? await this.snapshot() ?? await this.initializeSnapshot() : await this.initializeSnapshot();
+      mark('init');
       if (!previous) throw new Error('Workspace has no committed source snapshot');
       const path = input.tool === 'find' || input.tool === 'apply_patch' || input.tool === 'resolve_head' ? '' : PathSchema.parse(input.args).path.replace(/^\.\//u, '');
       if (path) validateSnapshotPath(path);
@@ -313,7 +323,7 @@ export class CloudFileStore {
         pending = { input, previous, mutations: [], conflicts: previous.conflicts.filter(conflict => conflict !== 'HEAD') };
         this.storage.sql.exec('UPDATE runtime_cloud_files SET pending=? WHERE id=?', JSON.stringify(pending), input.attemptId);
         await this.storage.sync();
-        return this.finish(pending);
+        return this.finish(pending, mark);
       }
       if (input.tool === 'apply_patch') {
         const args = ApplyPatchArgumentsSchema.parse(input.args);
@@ -340,9 +350,10 @@ export class CloudFileStore {
         pending = { input, previous, mutations };
         this.storage.sql.exec('UPDATE runtime_cloud_files SET pending=? WHERE id=?', JSON.stringify(pending), input.attemptId);
         await this.storage.sync();
-        return this.finish(pending);
+        return this.finish(pending, mark);
       }
       const trackedLfs = await this.isLfsPath(previous, path);
+      mark('lfsAttributes');
       const read = async () => {
         const blob = await this.code.readFile(artifactsWorkspaceRepository(this.workspaceId), previous.worktreeCommit, path);
         if (!blob) throw new Error(`File not found: ${path}`);
@@ -352,6 +363,7 @@ export class CloudFileStore {
       if (input.tool === 'read') {
         const parsed = RuntimeReadArgumentsSchema.parse(input.args);
         let bytes: Uint8Array<ArrayBuffer> = await read();
+        mark('read');
         const pointer = bytes.byteLength <= LFS_POINTER_LIMIT ? parseGitLfsPointer(bytes) : null;
         if (pointer) {
           assertCloudReadSize(pointer.size, path);
@@ -386,17 +398,20 @@ export class CloudFileStore {
         this.complete(input, completed); return completed;
       }
       if (trackedLfs || await this.hasLfsPointer(previous, path) || previous.lfs?.heldBack.some(entry => entry.path === path)) throw new Error(`LFS file ${path} cannot be ${input.tool === 'write' ? 'written' : 'edited'} in the cloud; use a machine and commit the LFS change.`);
+      mark('lfsPointer');
       let content: string;
       if (input.tool === 'write') content = RuntimeWriteArgumentsSchema.parse(input.args).content;
       else {
         const { edits } = RuntimeEditArgumentsSchema.parse(input.args);
         content = applyTextEdits(new TextDecoder('utf-8', { fatal: true }).decode(await read()), edits);
+        mark('read');
       }
       const mutations = [{ path, content }];
       assertValidMutations(mutations);
       pending = { input, previous, mutations };
       this.storage.sql.exec('UPDATE runtime_cloud_files SET pending=? WHERE id=?', JSON.stringify(pending), input.attemptId);
       await this.storage.sync();
+      mark('pendingSync');
     } catch (error) {
       const failed = result('failed', error instanceof Error ? error.message : String(error));
       this.storage.transactionSync(() => {
@@ -407,15 +422,15 @@ export class CloudFileStore {
       });
       return failed;
     }
-    return this.finish(pending);
+    return this.finish(pending, mark);
   }
-  private async finish(pending: z.infer<typeof PendingSchema>): Promise<RuntimeToolResult> {
+  private async finish(pending: z.infer<typeof PendingSchema>, mark: (phase: string) => void): Promise<RuntimeToolResult> {
     const { input, previous } = pending;
     // Derived only from the durable pending record, so a recovered publication reproduces the same commit.
     const supplied = input.tool === 'write' ? RuntimeWriteArgumentsSchema.parse(input.args).message : input.tool === 'edit' ? RuntimeEditArgumentsSchema.parse(input.args).message : input.tool === 'apply_patch' ? ApplyPatchArgumentsSchema.parse(input.args).message : input.tool === 'resolve_head' ? 'Resolve the HEAD conflict: keep the cloud\'s branch head' : undefined;
     const changed = [...new Set(pending.mutations.map(mutation => mutation.path))];
     const subject = supplied ?? `${input.tool} ${changed.length <= 3 ? changed.join(', ') : `${changed.slice(0, 3).join(', ')} and ${changed.length - 3} more`}`;
-    const written = await this.code.writeSnapshot({ repository: artifactsWorkspaceRepository(this.workspaceId), workspaceId: this.workspaceId, previous, message: `${subject}\n\nGitSpace-Tool: ${input.tool}\n`, mutations: pending.mutations.map(mutation => ({ path: mutation.path, content: mutation.content === null ? null : new TextEncoder().encode(mutation.content) })), ...(pending.conflicts ? { conflicts: pending.conflicts } : {}) });
+    const written = await this.code.writeSnapshot({ repository: artifactsWorkspaceRepository(this.workspaceId), workspaceId: this.workspaceId, previous, message: `${subject}\n\nGitSpace-Tool: ${input.tool}\n`, mutations: pending.mutations.map(mutation => ({ path: mutation.path, content: mutation.content === null ? null : new TextEncoder().encode(mutation.content) })), ...(pending.conflicts ? { conflicts: pending.conflicts } : {}), mark: step => mark(`write.${step}`) });
     if (written.isErr()) {
       if (written.error.certainty === 'unknown') throw new CloudPublicationUncertain({ attemptId: input.attemptId, message: written.error.message });
       const failed: RuntimeToolResult = { requestId: input.requestId, attemptId: input.attemptId, status: 'failed', content: [{ type: 'text', text: written.error.message }], error: { code: 'HOST_OPERATION_FAILED', message: written.error.message } };
@@ -440,7 +455,9 @@ export class CloudFileStore {
         this.storage.sql.exec('UPDATE runtime_snapshot_files_at SET commit_id=?,tree=? WHERE singleton=1', accepted.worktreeCommit, accepted.worktreeTree);
       }
     });
-    await this.storage.sync(); await this.flushRetention(); this.publish(); this.pruneHistory(); return completed;
+    await this.storage.sync(); mark('commitSync');
+    await this.flushRetention(); mark('retention');
+    this.publish(); this.pruneHistory(); return completed;
   }
   /** The file paths of `checkpoint`'s worktree. The stored list names its commit; one of another commit is moved by a
    * tree diff, and the whole tree is walked only when there is no list. */

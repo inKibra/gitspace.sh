@@ -128,9 +128,10 @@ export class ArtifactsCodeStore {
       catch: error => new ArtifactsSnapshotError({ operation: 'openRepository', certainty: 'not-published', message: error instanceof Error ? error.message : String(error) }),
     });
     if (opened.isErr()) return opened;
+    input.mark?.('open');
     const repo = opened.value;
     try { return await writeArtifactsSnapshot(repo, input); }
-    finally { await disposeArtifactsRepository(repo); }
+    finally { await disposeArtifactsRepository(repo); input.mark?.('dispose'); }
   }
 
   async mergeSnapshot(input: { repository: string; workspaceId: string; previous: RuntimeGitCheckpoint; base: RuntimeGitCheckpoint; machine: RuntimeGitCheckpoint; forcePublication?: boolean }) {

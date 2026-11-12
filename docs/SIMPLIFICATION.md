@@ -547,6 +547,8 @@ Phase 3 built 2026-10-25 (extension 5.10.0; APERTURE-DESIGN §7.2): one holder p
 
 **Later.** Remove the idle-wake diagnostics marked `Diagnostic for idle wakes (2026-10-22)` (`runtime_request_sample`, `runtime_cold_open`, `snapshot_commit_slow`, `slow_wait_until`) once they have named what keeps idle workspaces awake; `slow_runtime_request` stays.
 
+**Later.** Remove the file tool diagnostic marked `Diagnostic for file tool latency (2026-11-12)` (`cloud_file_timing`, and the `mark` steps of `WriteSnapshotInput`) once it has named where `edit` and `write` spend their ~3.5 s and `read` its ~1.2 s (72-hour sample of 2026-11-11: p50 edit 3.5 s, write 3.2 s, read 1.2 s; a workspace's edits are either all near 1 s or all near 4 s).
+
 **Later.** Resize images instead of refusing them (entry 66): browser screenshots at a capped scale, and image reads downscaled with the Images binding through pi-durable's `ImageProcessor.prepare(bytes, mimeType, limits)` interface, telling the model the scale ("Resized from 4000x6000 to 1333x2000; multiply coordinates by 3.00").
 
 **Later.** pi-durable 1.4, #160 (we are on 1.3.0): its crash-loop guard parks a task a reset cut off 5 times without progress (`settings.restartLimit`, reported `task_parked`), which replaces our `RESET_ATTEMPTS` (reset by every reply, so it never stopped inkibra's loop); its fix for idle-eviction timers that kept Durable Objects from hibernating under `nodejs_compat`; `onWake` instead of our `wakeAt` service; backoffs and polls that sleep durably instead of holding an invocation; `afterFailedRun`; per-model compaction thresholds. Breaking: `TaskRuntime.sleep()` removed, every `defineDoc` needs `checkpointWhen`, and SQLite storage migrates to schema 2 with no way back to 1.3.
