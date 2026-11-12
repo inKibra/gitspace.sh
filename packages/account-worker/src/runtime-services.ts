@@ -22,7 +22,6 @@ import { UI_BLOCK_BRIEF } from '@gitspace/protocol/gitspace-ui';
 import { parseResourceUri, resourceMediaType, selectResourceText } from '@gitspace/protocol/resource-uri';
 import { searchHistory, type RuntimeTranscriptRange } from '@gitspace/runtime-core/history';
 import { readRuntimeTranscript, readRuntimeHistory } from './runtime-transcript-reader.js';
-import type { RetainedRuleServices } from '@gitspace/runtime-core/retained-rules';
 import type { RuntimeInstructionLoader } from './runtime-instruction-loader.js';
 import { createDispatchSelector } from './runtime-dispatch-selection.js';
 import { invokeRuntimeSpaceTool, runtimeSpaceToolNames } from './runtime-space-tools.js';
@@ -56,7 +55,8 @@ type ServicesOptions = {
   runtime(): WorkspaceRuntime;
   schedule(timestamp: number): Promise<void>;
   generateImage(input: { args: z.infer<typeof RuntimeGenerateImageArgumentsSchema>; conversationId: string; signal?: AbortSignal }): Promise<RuntimeToolResult['content']>;
-  judge: RetainedRuleServices['judge'];
+  /** A model's 0–1 score for each question about `state`, by question key. */
+  judge(conversationId: string, state: string, questions: Record<string, string>): Promise<Record<string, number>>;
   model: RuntimeModelHelper;
   instructionLoader: RuntimeInstructionLoader;
   /** Requests a workspace attachment of the machine through the human cache-request path; returns before setup. */

@@ -288,13 +288,11 @@ At most four subagents of a workspace run at once (`MAX_RUNNING_SUBAGENTS`): a m
 
 Repository agent definitions are admitted independently. Invalid YAML, unavailable model selectors, and tools outside the read-only subagent policy make that definition unavailable, not the main conversation. Agent Setup and main-agent context report the exact file and reason; invalid definitions cannot spawn, and correcting or removing a file clears its diagnostic. Cloud saves remain strict, and a valid saved override masks an invalid repository file at the same path.
 
-### 8.4 Time-traveling stream rules (TTSR)
+### 8.4 Project rules
 
-Rules keep OMP's frontmatter (`condition`, `astCondition`, `question`, `scope`, `agents`, `interruptMode`) so existing rule files keep working.
+Committed `.agents/rules/*.md` and `.omp/rules/*.md` reach the system prompt: an `alwaysApply` rule inline, each other one as its name and description, read as `rule://<name>`; `agents` limits a rule to the agents it names. The rules are read again only when the branch moves to another commit.
 
-- **Tool-call rules** (`tool:edit(*.ts)` etc.): `beforeTool` hook with regex and ast-grep conditions; block and inject the rule. All three real hits in our transcripts were tool-call rules.
-- **Judged rules** (`question`): `afterResponse`/`onYield` plus one batched Jev `classify()` per output; threshold as OMP (≥ 0.7).
-- **Mid-stream text and thinking rules:** pi-durable has no streaming hook (`harness/types.ts:592-623`). Our provider wrapper sees every stream chunk; on a match it aborts the stream. pi-durable stores the partial as aborted and excludes aborted messages from later requests (spec §2.1), which is OMP's `contextMode: discard`. The rule is then steered in and the run continues. **[unverified]** how pi-durable's retry policy treats a provider-aborted stream; part of spike S1.
+Time-traveling stream rules (rules that interrupted a streamed reply or blocked a tool call on a `condition`, `astCondition` or `question`) were removed on 2026-11-12 (SIMPLIFICATION 239); that front matter is ignored.
 
 ### 8.5 Checkpoint and rewind
 

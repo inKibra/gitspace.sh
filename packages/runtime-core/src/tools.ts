@@ -232,7 +232,7 @@ async function awaitTakeover(id: string, until: number, wakeAt: JobServices['wak
   } finally { clearTimeout(timer); context.abortSignal?.removeEventListener('abort', abort); }
 }
 
-export function createRuntimeTools(services: ToolServices, operations: JobServices, abortTask: Harness['abortTask'], admitCodemodeTool: (call: { id: string; name: string; arguments: Record<string, unknown> }, api: ToolExecutionApi, context: Context) => Promise<void>): ToolRegistration[] {
+export function createRuntimeTools(services: ToolServices, operations: JobServices, abortTask: Harness['abortTask']): ToolRegistration[] {
   const jobs = createJobTool(operations);
   // One queue per conversation, shared by every registered mutator and every tool round.
   // Safe reads never join it; a failed/aborted mutation always releases its successor.
@@ -287,7 +287,7 @@ export function createRuntimeTools(services: ToolServices, operations: JobServic
           return { output: [{ type: 'text' as const, text: JSON.stringify(value) }], ...(result.success ? { isError: result.data.status !== 'completed', details: { executorStatus: result.data.status, executorResultReference: { attemptId: result.data.attemptId, sha256: await receiptDigest(result.data) } } } : {}) };
         }
         const codemodeTools = async (input: CodemodeToolCall): Promise<CodemodeToolOutcome> => {
-          let admitted = false;
+          let started = false;
           try {
           input.signal.throwIfAborted();
           if (input.tool === 'codemode' || input.tool === 'agents') throw new Error('Nested codemode and subagents are unavailable');
@@ -295,8 +295,7 @@ export function createRuntimeTools(services: ToolServices, operations: JobServic
           if (!tool) throw new Error(`Tool is not granted to this conversation: ${input.tool}`);
           const raw = z.record(z.string(), RuntimeJsonSchema).parse(input.args);
           const args = z.record(z.string(), RuntimeJsonSchema).parse(tool.prepareArguments ? tool.prepareArguments(raw) : raw);
-          await admitCodemodeTool({ id: input.callId, name: input.tool, arguments: args }, api, context);
-          admitted = true;
+          started = true;
           const taskId = await api.commit(async tx => {
             const assistant = await tx.appendEntry(AssistantEntry, api.conversationId, { model: [{ role: 'assistant', content: [{ type: 'toolCall', id: input.callId, name: input.tool, arguments: args }], api: 'codemode', provider: 'gitspace', model: 'codemode', stopReason: 'toolUse', timestamp: Date.now(), usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } }] });
             // Nested tool calls remain durable evidence, not a second assistant
@@ -336,7 +335,7 @@ export function createRuntimeTools(services: ToolServices, operations: JobServic
           const at = content.findIndex(item => item.type === 'text');
           return { status: 'completed', value: RuntimeJsonSchema.parse(content.filter((item, index) => item.type !== 'text' || index === at).map(item => item.type === 'text' ? { type: 'text', text } : item)) };
           } catch (error) {
-            return { status: admitted ? 'interrupted' : 'failed', error: error instanceof Error ? error.message : String(error) };
+            return { status: started ? 'interrupted' : 'failed', error: error instanceof Error ? error.message : String(error) };
           }
         };
         const result = await services.invoke({ ...invocation, ...(name === 'codemode' ? { codemodeTools } : {}) });

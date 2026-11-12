@@ -31,7 +31,7 @@ async function fixture(storage = new MemoryStorage()) {
       return answer;
     },
   };
-  const tools = createRuntimeTools(services, operations, (id, context) => harness.abortTask(id, context), async () => {});
+  const tools = createRuntimeTools(services, operations, (id, context) => harness.abortTask(id, context));
   const registry = createRegistry(); registry.install(defineExtension({ name: 'plan-proof', tools }));
   const models = scriptedModels(turns);
   const harness = await Harness.open(storage, { registry, models, settings: { toolExecution: 'parallel', compaction: { enabled: false } } }, BACKGROUND_CONTEXT);

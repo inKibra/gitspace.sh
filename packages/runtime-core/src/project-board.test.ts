@@ -46,7 +46,7 @@ async function fixture(options: { history?: number; script?: AssistantMessage[] 
       async invoke(input) { return { requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: '[]' }] }; },
       async projectBoard() { if (board.failure !== null) throw new Error(board.failure); return board.rows; } },
     operations: { execute: unused, reconcile: async () => null, cancel: unused, jobScope: () => ({ projectId: 'project', workspaceId: 'project' }), controlJob: unused, observeProcess: unused, stopProcess: unused, wakeAt: async () => {} },
-    retainedRules: { loadRules: async () => [], judge: unused, matchAst: unused }, editTool: () => 'edit',
+    retainedRules: { loadRules: async () => [] }, editTool: () => 'edit',
     onReport: error => { throw error; }, admitInference: unused, bindInferenceConversation: async () => {}, refuseRequest: unused,
     unfinished: { begin: () => 0, end: () => {} },
   });

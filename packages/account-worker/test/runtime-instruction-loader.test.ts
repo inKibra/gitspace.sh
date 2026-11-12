@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ArtifactsCodeStore } from '@gitspace/runtime-workspace-do';
 import { createRuntimeInstructionLoader, type InstructionsState } from '../src/runtime-instruction-loader.js';
-import { loadRuntimeRules } from '../src/runtime-instructions.js';
+import { createRuntimeRuleServices, readRuntimeRules } from '../src/runtime-instructions.js';
 
 function fixture() {
   const code = Object.create(ArtifactsCodeStore.prototype) as ArtifactsCodeStore;
@@ -29,9 +29,25 @@ describe('committed project rules', () => {
   it('reports a malformed rule and retains valid nested rules', async () => {
     const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
-      const rules = await loadRuntimeRules(fixture());
+      const rules = await readRuntimeRules(fixture(), 'commit');
       expect(rules.map(rule => [rule.name, rule.content])).toEqual([['valid', 'Nested instruction']]);
       expect(warning).toHaveBeenCalledWith(expect.stringContaining('.agents/rules/broken.md'), expect.anything());
+    } finally { warning.mockRestore(); }
+  });
+
+  it('reads the rules again only when the branch moves to another commit', async () => {
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const source = fixture();
+      const services = createRuntimeRuleServices(source);
+      const reads = vi.mocked(source.code.readCommit);
+      expect((await services.loadRules()).map(rule => rule.name)).toEqual(['valid']);
+      expect((await services.loadRules()).map(rule => rule.name)).toEqual(['valid']);
+      expect(reads).toHaveBeenCalledTimes(1);
+      vi.mocked(source.code.resolveRef).mockResolvedValue('moved');
+      await services.loadRules();
+      expect(reads).toHaveBeenLastCalledWith('project', 'moved');
+      expect(reads).toHaveBeenCalledTimes(2);
     } finally { warning.mockRestore(); }
   });
 

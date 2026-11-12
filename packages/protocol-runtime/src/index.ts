@@ -6,7 +6,6 @@ export * from './session-controls.js';
 export * from './machine-controls.js';
 export * from './scheduling.js';
 export * from './execution-contracts.js';
-export * from './rule-interruptions.js';
 export * from './canonical-json.js';
 export * from './browser.js';
 export * from './browser-share.js';

@@ -1,6 +1,6 @@
 import { ArtifactsCodeStore } from '@gitspace/runtime-workspace-do';
 import { parse as parseYaml } from 'yaml';
-import { loadRuntimeRules } from './runtime-instructions.js';
+import { readRuntimeRules } from './runtime-instructions.js';
 export type RuntimeInstructionLoader = { loadInstructions(): Promise<string>; read(uri: string): Promise<string> };
 
 /** A change of whether the instructions a generation gets are the repository's current ones. `notify` is true for at
@@ -110,7 +110,7 @@ export function createRuntimeInstructionLoader(options: { code: ArtifactsCodeSto
         if (content === null) throw new Error('Skill file not found'); return content;
       }
       if (match[3]) throw new Error('Rules do not have subpaths');
-      const rule = (await loadRuntimeRules({ ...options, ref: async () => commit })).find(item => item.name === match[2]);
+      const rule = (await readRuntimeRules(options, commit)).find(item => item.name === match[2]);
       if (rule) { const content = await file(commit, rule.path); if (content !== null) return content; }
       throw new Error('Rule not found');
     },

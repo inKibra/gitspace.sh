@@ -50,7 +50,7 @@ const samples: Record<string, ToolCall['arguments']> = {
   ask_takeover: { source: 'headless', targetId: 'tab', reason: 'Solve the CAPTCHA' },
 };
 async function registered(rounds: ToolCall[][], invoke: ToolServices['invoke'] = completed, jobServices: JobServices = operations, extraTools: ToolRegistration[] = [], chatModel: Model<Api> = model) {
-  const tools = [...createRuntimeTools({ ...services, invoke }, jobServices, (id, context) => harness.abortTask(id, context), async () => {}), ...extraTools];
+  const tools = [...createRuntimeTools({ ...services, invoke }, jobServices, (id, context) => harness.abortTask(id, context)), ...extraTools];
   const registry = createRegistry(); registry.install(defineExtension({ name: 'registration-proof', tools, tasks: [createJobTask(jobServices)] }));
   let generation = 0;
   const models: Models = Object.assign(createModels(), { getModel: () => chatModel, streamSimple(_model, context) {
@@ -220,7 +220,7 @@ test('agent environment registration rejects human lifecycle options before disp
 });
 
 test('agent advertised lifecycle schema excludes human options', () => {
-  const environment = createRuntimeTools(services, operations, unused, unused).find(tool => tool.name === 'environment');
+  const environment = createRuntimeTools(services, operations, unused).find(tool => tool.name === 'environment');
   if (!environment) throw new Error('Missing environment registration');
   const advertised = JSON.stringify(environment.parameters);
   expect(advertised).not.toContain('"interactive"');
@@ -246,7 +246,7 @@ test('background bash rejects unavailable execution before returning acceptance 
 
 test('a mutating machine command with no machine attached fails before dispatch', async () => {
   let dispatched = 0;
-  const tools = createRuntimeTools({ ...services, async invoke(input) { dispatched++; return completed(input); }, async preflight(input) { if (input.tool === 'bash') throw new Error('No machine attached: attach a ready workspace cache or choose an available execution machine.'); } }, operations, (id, context) => harness.abortTask(id, context), async () => {});
+  const tools = createRuntimeTools({ ...services, async invoke(input) { dispatched++; return completed(input); }, async preflight(input) { if (input.tool === 'bash') throw new Error('No machine attached: attach a ready workspace cache or choose an available execution machine.'); } }, operations, (id, context) => harness.abortTask(id, context));
   const registry = createRegistry(); registry.install(defineExtension({ name: 'preflight-proof', tools }));
   let generation = 0;
   const models: Models = Object.assign(createModels(), { getModel: () => model, streamSimple() {

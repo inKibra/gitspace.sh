@@ -1,14 +1,24 @@
 import { ArtifactsCodeStore } from '@gitspace/runtime-workspace-do';
-import { parseRetainedRule, type RetainedRuleServices } from '@gitspace/runtime-core/retained-rules';
-type RuleSource = { code: ArtifactsCodeStore; repository: string; ref(): Promise<string | null> };
-export function createRuntimeRuleServices(options: RuleSource & { judge: RetainedRuleServices['judge']; matchAst: RetainedRuleServices['matchAst'] }): RetainedRuleServices {
-  return { judge: options.judge, matchAst: options.matchAst, loadRules: () => loadRuntimeRules(options) };
-}
-export async function loadRuntimeRules(options: RuleSource) {
+import { parseRetainedRule, type RetainedRule, type RetainedRuleServices } from '@gitspace/runtime-core/retained-rules';
+type RuleSource = { code: ArtifactsCodeStore; repository: string };
+/** The rules of the branch's current commit: the commit is resolved for every generation, and its rules are read only
+ * when it changed. */
+export function createRuntimeRuleServices(options: RuleSource & { ref(): Promise<string | null> }): RetainedRuleServices {
+  let loaded: { commit: string; rules: Promise<RetainedRule[]> } | undefined;
+  return { async loadRules() {
     const ref = await options.ref();
-    if (!ref) return [];
-    const commit = await options.code.resolveRef(options.repository, ref);
+    const commit = ref ? await options.code.resolveRef(options.repository, ref) : null;
     if (!commit) return [];
+    if (loaded?.commit !== commit) {
+      const rules = readRuntimeRules(options, commit);
+      loaded = { commit, rules };
+      // A failed read is not kept: the next generation reads again.
+      void rules.catch(() => { if (loaded?.rules === rules) loaded = undefined; });
+    }
+    return loaded.rules;
+  } };
+}
+export async function readRuntimeRules(options: RuleSource, commit: string): Promise<RetainedRule[]> {
     const metadata = await options.code.readCommit(options.repository, commit);
     if (!metadata) throw new Error('Committed rule source is unavailable');
     const pending = [{ hash: metadata.treeHash, path: '' }];

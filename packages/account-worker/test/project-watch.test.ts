@@ -63,7 +63,7 @@ async function watchFixture(ctx: DurableObjectState) {
     code: { readFile: async () => null, listSnapshotPaths: async () => [], changedSnapshotPaths: unsupported, mergeSnapshot: unsupported, writeSnapshot: unsupported, reader: () => ({ readTree: async () => [], readBlob: async () => null, close: async () => {} }) },
     initialCheckpoint: async () => checkpoint,
     lfs: { has: unsupported, get: unsupported, put: unsupported }, retainLfs: async () => {},
-    retainedRules: { loadRules: async () => [], judge: unsupported, matchAst: unsupported }, editTool: () => 'edit',
+    retainedRules: { loadRules: async () => [] }, editTool: () => 'edit',
     admitInference: async () => ({ provider: 'fixture', modelId: 'fixture', thinking: 'high' }), bindInferenceConversation: async () => undefined, refuseRequest: () => {},
     session: { catalog: async () => ({ models: [], roles: [] }), reload: unsupported }, qa: { list: async () => [], act: unsupported },
     attachments: { seal: async value => value, open: async value => value, dispatch: unsupported },

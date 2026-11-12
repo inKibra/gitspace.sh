@@ -1,13 +1,9 @@
 import { describe, expect, test } from 'bun:test';
-import { RuntimeRuleInterruptionSchema } from './index.js';
 import { LifecycleRunRequestSchema } from '@gitspace/protocol-environment';
 import { RuntimeEnvironmentArgumentsSchema, RuntimeBashArgumentsSchema, RuntimeAgentsArgumentsSchema, runtimeOperationIsReadOnly } from './tool-arguments.js';
 import { RuntimeDispatchSelectionSchema } from './scheduling.js';
 
-const timestamp = '2026-10-03T00:00:00.000Z';
-const digest = 'a'.repeat(64);
 const job = { projectId: 'project', workspaceId: 'workspace', jobId: 'job', taskId: 'task', conversationId: 'conversation', requestId: 'request' };
-const interruption = { version: 1, kind: 'rule-interruption', projectId: 'project', workspaceId: 'workspace', conversationId: 'conversation', taskId: 'task', runId: 'run', generationId: 'generation', interruptionId: 'interruption', ruleId: 'rule', ruleRevision: digest, provenance: { source: 'project-rule', path: '.gitspace/rules/no-secrets.md', matcher: 'text', output: 'tool', outputOrdinal: 2, matchedDigest: digest, observedAt: timestamp }, instruction: 'Do not reveal secrets', discard: { state: 'discarded', generationId: 'generation', toolCalls: 'not-dispatched' }, state: 'pending', continuation: { state: 'pending' } };
 
 test('bash preserves background admission and exposes bounded durable controls', () => {
   expect(RuntimeBashArgumentsSchema.parse({ command: 'printf complete', background: true })).toEqual({ command: 'printf complete', background: true });
@@ -29,24 +25,6 @@ test('process and durable command observations are readonly but controls are mut
     for (const op of ['start', 'stop', 'restart', 'send', 'cancel']) expect(runtimeOperationIsReadOnly(tool, { op })).toBe(false);
   }
   expect(runtimeOperationIsReadOnly('bash', { command: 'true', background: true })).toBe(false);
-});
-
-
-describe('durable rule interruption contract', () => {
-  test('requires discarded generation and provenance rather than a successful response', () => {
-    expect(RuntimeRuleInterruptionSchema.parse(interruption).state).toBe('pending');
-    expect(RuntimeRuleInterruptionSchema.safeParse({ ...interruption, discard: undefined }).success).toBe(false);
-    expect(RuntimeRuleInterruptionSchema.safeParse({ ...interruption, provenance: undefined }).success).toBe(false);
-    expect(RuntimeRuleInterruptionSchema.safeParse({ ...interruption, status: 'completed' }).success).toBe(false);
-    expect(RuntimeRuleInterruptionSchema.safeParse({ ...interruption, discard: { ...interruption.discard, generationId: 'other' } }).success).toBe(false);
-  });
-
-  test('continuation must use a fresh generation and match interruption state', () => {
-    const continuation = { state: 'scheduled', generationId: 'next-generation', taskId: 'continuation-task', scheduledAt: timestamp };
-    expect(RuntimeRuleInterruptionSchema.parse({ ...interruption, state: 'continuing', continuation }).state).toBe('continuing');
-    expect(RuntimeRuleInterruptionSchema.safeParse({ ...interruption, continuation }).success).toBe(false);
-    expect(RuntimeRuleInterruptionSchema.safeParse({ ...interruption, state: 'continuing', continuation: { ...continuation, generationId: interruption.generationId } }).success).toBe(false);
-  });
 });
 
 test('agent lifecycle boundary excludes interactive runs without narrowing human lifecycle requests', () => {

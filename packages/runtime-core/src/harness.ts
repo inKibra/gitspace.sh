@@ -8,8 +8,7 @@ import { createOperationalTasks, type OperationalServices } from './tasks.js';
 import { QuestionsDoc, WorkspaceDoc } from './documents.js';
 import { sessionControlsExtension, SessionControlsDoc } from './session-controls.js';
 import { createBackgroundAgentTask, createSubagentReplyExtension } from './background-agents.js';
-import { admitRuntimeCodemodeTool, createRetainedRulesExtension, type RetainedRuleServices } from './retained-rules.js';
-import { ruleGenerationRegistry } from './rule-generations.js';
+import { createRetainedRulesExtension, type RetainedRuleServices } from './retained-rules.js';
 import { createJobTask, createProcessExitTask, type JobServices } from './jobs.js';
 import { RuntimeBrowserArgumentsSchema, RuntimeBrowserChromesArgumentsSchema, RuntimeBrowserCommentsArgumentsSchema, RuntimeChildAgentsArgumentsSchema, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
 import { RuntimeBrowserCapturesArgumentsSchema, RuntimeBrowserCaptureArgumentsSchema, RuntimeBrowserReplayArgumentsSchema } from '@gitspace/protocol-runtime';
@@ -156,7 +155,7 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
     context.abortSignal?.addEventListener('abort', abort, { once: true });
     try { return await waiting.promise; }
     finally { context.abortSignal?.removeEventListener('abort', abort); await watch.stop(); }
-  } }, jobs, (id, context) => harness.abortTask(id, context), (call, api, context) => admitRuntimeCodemodeTool(options.retainedRules, harness, options.identity, call, api, context));
+  } }, jobs, (id, context) => harness.abortTask(id, context));
   const extension = defineExtension({ name: 'gitspace', tools, tasks: [...createOperationalTasks(options.operations), backgroundAgentTask, createJobTask(jobs), createProcessExitTask(jobs)], sections: [{ key: 'gitspace', async render(input, context) {
     const workspace = await input.read.snapshot(WorkspaceDoc, context);
     const child = (await input.read.snapshot(AgentDefinitionContextDoc, input.conversationId, context))?.child;
@@ -282,12 +281,12 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
     };
   }) });
   const registry = createRegistry();
-  registry.install(createRetainedRulesExtension(options.retainedRules, () => harness, options.identity, (name, args) => tools.find(tool => tool.name === name)?.prepareArguments?.(args) ?? args));
+  registry.install(createRetainedRulesExtension(options.retainedRules));
   registry.install(extension);
   registry.install(sessionControlsExtension);
   registry.install(childExtension);
   registry.install(createSubagentReplyExtension(deliver));
-  const harness = await Harness.open(options.storage, { models: options.models, registry: ruleGenerationRegistry(registry), settings: { ...options.settings, extensions: options.settings?.extensions ?? registry.snapshot().installed().filter(item => item.name !== childExtension.name), followUpMode: 'one-at-a-time',
+  const harness = await Harness.open(options.storage, { models: options.models, registry, settings: { ...options.settings, extensions: options.settings?.extensions ?? registry.snapshot().installed().filter(item => item.name !== childExtension.name), followUpMode: 'one-at-a-time',
     // An idle conversation's parsed context (8 MB for a 250k-token conversation with screenshots) is dropped at once:
     // a workspace object holds many conversations, and re-reading one costs tens of milliseconds.
     contextRetentionMs: 0 }, onReport: report => options.onReport(report.error), ...(options.onWake ? { onWake: options.onWake } : {}) }, BACKGROUND_CONTEXT);

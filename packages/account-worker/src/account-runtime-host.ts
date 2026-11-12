@@ -8,7 +8,6 @@ import { workspaceBrowsersDocument } from './runtime-browser.js';
 import { createCloudRuntimeInference } from './runtime-inference.js';
 import { z } from 'zod';
 import { parseRuntimeSettings, type CloudProjectSummary } from '@gitspace/protocol';
-import { matchAstPatterns } from './ast-match.js';
 import { createRuntimeRuleServices } from './runtime-instructions.js';
 import { createRuntimeInstructionLoader } from './runtime-instruction-loader.js';
 import { createLatestSender } from './latest-sender.js';
@@ -205,8 +204,7 @@ export async function createAccountWorkspaceRuntime(
       return code.initialCheckpoint(repository, identity.workspaceId, branchRef.slice('refs/heads/'.length), readSourceCheckpoint(ctx.storage));
     },
     settings,
-    // Rule AST conditions match in this Worker, so they apply with or without an attached machine.
-    retainedRules: createRuntimeRuleServices({ code, repository, ref, judge, matchAst: (_conversationId, content, paths, patterns) => matchAstPatterns(content, paths, patterns) }),
+    retainedRules: createRuntimeRuleServices({ code, repository, ref }),
     ...services,
     browser: services.browser,
     storage: ctx.storage,

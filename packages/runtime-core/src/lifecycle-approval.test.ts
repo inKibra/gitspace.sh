@@ -35,7 +35,7 @@ async function open() {
       async lifecycleApproval(input) { return input.tool === 'environment' && !approved ? pending : null; },
     },
     operations: { execute: unused, reconcile: async () => null, cancel: unused, jobScope: () => ({ projectId: 'project', workspaceId: 'workspace' }), controlJob: unused, observeProcess: unused, stopProcess: unused, wakeAt: async () => {} },
-    retainedRules: { loadRules: async () => [], judge: unused, matchAst: unused }, editTool: () => 'edit',
+    retainedRules: { loadRules: async () => [] }, editTool: () => 'edit',
     onReport: () => {}, admitInference: async () => ({ provider: 'test', modelId: model.id }), bindInferenceConversation: async () => {},
     refuseRequest: unused, unfinished: { begin: () => 0, end: () => {} },
   });

@@ -1,6 +1,4 @@
-import { createModels, lazyStream, type Api, type AnyModel, type AuthResult, type Model, type Context, type ModelsApiStreamOptions, type Models, type AssistantMessageEventStream } from '@earendil-works/pi-ai';
-import { interceptRuntimeModelStream } from '../retained-rules.js';
-
+import { createModels, lazyStream, type Api, type AnyModel, type AuthResult, type Model, type Context, type ModelsApiStreamOptions, type Models } from '@earendil-works/pi-ai';
 /** API-specific options can only be forwarded to the same admitted transport. */
 function hasApi<T extends Api>(model: Model<Api>, api: T): model is Model<T> {
   return model.api === api;
@@ -15,20 +13,6 @@ export function createRunModelsRouter(initial: Models | null, resolve: (signal?:
     return rows.filter(row => { const id = key(row); if (seen.has(id)) return false; seen.add(id); return true; });
   }
   const modelKey = (model: AnyModel) => JSON.stringify([model.provider, model.type ?? 'chat', model.id]);
-  function intercept(signal: AbortSignal | undefined, start: (signal: AbortSignal) => AssistantMessageEventStream): AssistantMessageEventStream {
-    const controller = new AbortController();
-    const abort = () => controller.abort(signal?.reason);
-    if (signal?.aborted) abort();
-    else signal?.addEventListener('abort', abort, { once: true });
-    try {
-      const stream = interceptRuntimeModelStream(start(controller.signal), signal, controller);
-      void stream.result().finally(() => signal?.removeEventListener('abort', abort));
-      return stream;
-    } catch (error) {
-      signal?.removeEventListener('abort', abort);
-      throw error;
-    }
-  }
   /** Auth from the catalog that has the provider, as the other routed reads are. pi binds `getAuth` when a harness opens
    * (its client identity wrapper), so a router without it fails every open; spreading `catalog` copies no methods. */
   function getAuth(providerId: string, overrides?: Parameters<Models['getAuth']>[1]): Promise<AuthResult | undefined>;
@@ -54,13 +38,13 @@ export function createRunModelsRouter(initial: Models | null, resolve: (signal?:
         const models = await resolve(options?.signal);
         const canonical = models.getModel(model.provider, model.id);
         if (!canonical || !hasApi(canonical, model.api)) throw new Error('Model API is not admitted for this run');
-        return intercept(options?.signal, signal => models.stream<T>(canonical, context, Object.assign({}, options, { signal })));
+        return models.stream<T>(canonical, context, options);
       });
     },
     complete: (model, context, options) => routed.stream(model, context, options).result(),
-    streamSimple: (model, context, options) => lazyStream(model, async () => { const models = await resolve(options?.signal); const canonical = models.getModel(model.provider, model.id); if (!canonical) throw new Error('Model is not admitted for this run'); return intercept(options?.signal, signal => models.streamSimple(canonical, context, { ...options, signal })); }),
+    streamSimple: (model, context, options) => lazyStream(model, async () => { const models = await resolve(options?.signal); const canonical = models.getModel(model.provider, model.id); if (!canonical) throw new Error('Model is not admitted for this run'); return models.streamSimple(canonical, context, options); }),
     completeSimple: (model, context, options) => routed.streamSimple(model, context, options).result(),
-    streamDeferred: (model, handle, options) => lazyStream(model, async () => { const models = await resolve(options?.signal); const canonical = models.getModel(model.provider, model.id); if (!canonical) throw new Error('Model is not admitted for this run'); return intercept(options?.signal, signal => models.streamDeferred(canonical, handle, { ...options, signal })); }),
+    streamDeferred: (model, handle, options) => lazyStream(model, async () => { const models = await resolve(options?.signal); const canonical = models.getModel(model.provider, model.id); if (!canonical) throw new Error('Model is not admitted for this run'); return models.streamDeferred(canonical, handle, options); }),
     fetchDeferred: (model, handle, options) => routed.streamDeferred(model, handle, options).result(),
     cancelDeferred: async (model, handle, options) => { const models = await resolve(options?.signal); const canonical = models.getModel(model.provider, model.id); if (!canonical) throw new Error('Model is not admitted for this run'); await models.cancelDeferred(canonical, handle, options); },
     generateImages: async (model, context, options) => { const models = await resolve(options?.signal); const canonical = models.getModelOfType('image', model.provider, model.id); if (!canonical) throw new Error('Image model is not admitted for this run'); return models.generateImages(canonical, context, options); },

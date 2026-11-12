@@ -90,7 +90,7 @@ function openSmokeRuntime(ctx: DurableObjectState, storage: DurableObjectStorage
     initialCheckpoint: async () => await ctx.storage.get('definitions-enabled') ? definitionCheckpoint : null,
     lfs: { has: unsupported, get: unsupported, put: unsupported }, retainLfs: async () => {},
     tools: { images: { store: async image => image, load: async image => image }, invoke: unsupported, prepareBrowser: unsupported, takeoverTab: unsupported, lifecycleApproval: async () => null, instructions: async () => 'Deterministic local-only smoke. No external services or machine.', preflight: async () => {} },
-    operations, retainedRules: { loadRules: async () => [], judge: unsupported, matchAst: unsupported }, editTool: () => 'edit',
+    operations, retainedRules: { loadRules: async () => [] }, editTool: () => 'edit',
     onReport: error => console.error('RUNTIME_REPORT', String(error)),
     admitInference: async input => { await ctx.storage.put(`admission:${input.requestId}`, input.conversationId); return modelRef; },
     refuseRequest: (signal, reason) => { refused.set(signal, reason); },
