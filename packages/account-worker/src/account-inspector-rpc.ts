@@ -1,6 +1,6 @@
 import { inspectorArtifactFileContract, inspectorReadArtifactPageContract, inspectorReadResourcePageContract, inspectorRepositoryTreePageContract } from '@gitspace/protocol/rpc-contract';
 import { snapshotPage } from '@gitspace/protocol/snapshot-page';
-import { requireDeviceAdministration, type VerifiedDevice } from '@gitspace/protocol/device-grant';
+import { deviceHasCapability, requireDeviceAdministration, type VerifiedDevice } from '@gitspace/protocol/device-grant';
 import {
   inspectorViewContract,
   inspectorTranscriptContract,
@@ -232,7 +232,7 @@ export function inspectorCloudProcedures(env: Env, userId: string, currentDevice
   const setAcceptance = server.implement(inspectorSetRequirementAcceptanceContract).handler(async ({ input, errors }) => {
     try {
       const caller = await currentDevice();
-      if (caller.kind !== 'browser') return err(errors.InspectorState({ resource: 'goal', message: 'Only a person, in the browser, accepts or reopens a requirement' }));
+      if (!deviceHasCapability(caller, 'operator.decide')) return err(errors.InspectorState({ resource: 'goal', message: 'Only the person, or a client they let decide as them (operator.decide), accepts or reopens a requirement' }));
       const source = await readInspectorContext(env, userId, input.input.spaceId, input.input.projectId, input.expectedGeneration);
       const { goal, entry } = await source.context.setRequirementAcceptance({ ...input.input, ...source.identity }, caller.deviceId);
       await source.authority.appendEvent({ scope: 'workspace', entity: 'goal', entityId: goal.id, revision: goal.revision, operation: 'updated', payload: { spaceId: source.identity.spaceId } });

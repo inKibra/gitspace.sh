@@ -2179,7 +2179,7 @@ export const inspectorAttachRequirementEvidenceContract = gitspaceRpc
   .errors(inspectorMutationErrors)
   .mutation();
 
-/** A person, on a browser device, accepts a requirement or reopens it; agents and API clients cannot. */
+/** The person accepts a requirement or reopens it: a browser, or a client granted `operator.decide`. */
 export const inspectorSetRequirementAcceptanceContract = gitspaceRpc
   .procedure()
   .input(wire.object({ expectedGeneration: wire.integer({ min: 0 }), input: SetRequirementAcceptanceInputCodec }))

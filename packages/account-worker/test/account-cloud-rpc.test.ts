@@ -286,8 +286,9 @@ describe('cloud lifecycle inspection and explicit authorization', () => {
 
 describe('Inspector administrative authority', () => {
   it('rejects ordinary client approvals and records a delegated client rather than its claimed reviewer', async () => {
-    const owner = await account(['rpc.read', 'rpc.write', 'account.admin'], 'client');
+    const owner = await account(['rpc.read', 'rpc.write', 'account.admin', 'operator.decide'], 'client');
     const ordinary = await account(['rpc.read', 'rpc.write'], 'client');
+    const administrator = await account(['rpc.read', 'rpc.write', 'account.admin'], 'client');
     const { projectId, spaceId } = await inspectorWorkspace(owner.userId);
     const invoke = async (actor: typeof owner, path: string, input: unknown) => parse(await (await SELF.fetch(actor.request(single(path, { expectedGeneration: 0, input })))).text());
     const identity = { projectId, spaceId };
@@ -305,13 +306,16 @@ describe('Inspector administrative authority', () => {
     } })).toMatchObject({ status: 'ok' });
     const review = { ...identity, revision: 1, headCommit, reviewerId: 'forged-browser' };
     expect(await invoke(owner, 'inspector.guide.markSectionRead', { ...review, sectionId: 'section' })).toMatchObject({ status: 'ok', value: { reviewerStates: [{ reviewerId: owner.deviceId }] } });
-    expect(await invoke(ordinary, 'inspector.guide.setApproval', { ...review, decision: 'approved', note: null })).toMatchObject({ status: 'error' });
+    expect((await SELF.fetch(ordinary.request(single('inspector.guide.setApproval', { expectedGeneration: 0, input: { ...review, decision: 'approved', note: null } })))).status).toBe(403);
+    // Approving a guide decides as the person: account administration alone does not.
+    expect((await SELF.fetch(administrator.request(single('inspector.guide.setApproval', { expectedGeneration: 0, input: { ...review, decision: 'approved', note: null } })))).status).toBe(403);
     expect(await invoke(owner, 'inspector.guide.setApproval', { ...review, decision: 'approved', note: null })).toMatchObject({ status: 'ok', value: { reviewerStates: [{ reviewerId: owner.deviceId, decision: 'approved' }] } });
   });
 
-  it('lets only a person in the browser accept a requirement, recorded as their device', async () => {
+  it('lets only the person, or a client they let decide as them, accept a requirement, recorded as the deciding device', async () => {
     const person = await account();
     const client = await account(['rpc.read', 'rpc.write', 'account.admin'], 'client');
+    const delegate = await account(['rpc.read', 'rpc.write', 'operator.decide'], 'client');
     const { projectId, spaceId } = await inspectorWorkspace(person.userId);
     const invoke = async (actor: typeof person, path: string, input: unknown) => parse(await (await SELF.fetch(actor.request(single(path, { expectedGeneration: 0, input })))).text());
     const identity = { projectId, spaceId };
@@ -320,8 +324,37 @@ describe('Inspector administrative authority', () => {
       requirements: [{ id: 'saved', title: 'Saved', description: '', required: true, status: 'review', workflowNodeId: null, criterionId: null, evidence: [] }],
     } })).toMatchObject({ status: 'ok' });
     const accept = { ...identity, expectedRevision: 1, requirementId: 'saved', accepted: true };
-    expect(await invoke(client, 'inspector.requirement.setAcceptance', accept)).toMatchObject({ status: 'error' });
-    expect(await invoke(person, 'inspector.requirement.setAcceptance', accept)).toMatchObject({ status: 'ok', value: { revision: 2, requirements: [{ status: 'accepted', acceptedBy: person.deviceId }] } });
+    expect((await SELF.fetch(client.request(single('inspector.requirement.setAcceptance', { expectedGeneration: 0, input: accept })))).status).toBe(403);
+    expect(await invoke(delegate, 'inspector.requirement.setAcceptance', accept)).toMatchObject({ status: 'ok', value: { revision: 2, requirements: [{ status: 'accepted', acceptedBy: delegate.deviceId }] } });
+    expect(await invoke(person, 'inspector.requirement.setAcceptance', { ...accept, expectedRevision: 2, accepted: false })).toMatchObject({ status: 'ok', value: { revision: 3 } });
+  });
+});
+
+describe('deciding as the person', () => {
+  it('admits a decision only from a browser or a client granted operator.decide, command by command', async () => {
+    const administrator = await account(['rpc.read', 'rpc.write', 'session.prompt', 'account.admin'], 'client');
+    const { projectId, spaceId } = await inspectorWorkspace(administrator.userId);
+    const identity = { projectId, workspaceId: spaceId };
+    const decisions = [
+      single('github.person.set', { login: 'octocat' }),
+      single('runtime.answer', { ...identity, questionId: 'question', answer: 'yes' }),
+      single('runtime.session', { ...identity, command: { type: 'answerAsk', id: 'question', answers: [] } }),
+      single('runtime.session', { ...identity, command: { type: 'browserEverything', pairingId: crypto.randomUUID(), on: true } }),
+      single('runtime.qa', { ...identity, itemId: 'item', action: { kind: 'file', excerpt: 'what failed' } }),
+    ];
+    for (const decision of decisions) {
+      const refused = await SELF.fetch(administrator.request(decision));
+      expect([decision.path, refused.status, await refused.text()]).toEqual([decision.path, 403, expect.stringContaining('operator.decide')]);
+    }
+    // An ordinary command or action of the same procedures passes admission (the QA item does not exist, so its handler
+    // then fails on its own terms).
+    for (const ordinary of [single('runtime.session', { ...identity, command: { type: 'usage' } }), single('runtime.qa', { ...identity, itemId: 'item', action: { kind: 'dismiss' } })]) {
+      expect((await SELF.fetch(administrator.request(ordinary))).status).not.toBe(403);
+    }
+    const decider = await account(['rpc.read', 'rpc.write', 'session.prompt', 'account.admin', 'operator.decide'], 'client');
+    expect(parse(await (await SELF.fetch(decider.request(decisions[0]!))).text())).toMatchObject({ status: 'ok' });
+    const browser = await account(['rpc.read', 'rpc.write', 'session.prompt']);
+    expect(parse(await (await SELF.fetch(browser.request(single('github.person.set', { login: null })))).text())).toMatchObject({ status: 'ok' });
   });
 });
 

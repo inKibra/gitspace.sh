@@ -26,7 +26,7 @@ export const deviceCapabilitySchema = z.enum([
   'rpc.read',
   /** Mutations that change projects, workspaces, settings, or automations. */
   'rpc.write',
-  /** Talk to agents: prompt, steer, answer questions. */
+  /** Talk to agents: prompt and steer. Answering their questions also needs `operator.decide`. */
   'session.prompt',
   /** Create, sleep, resume, destroy machines. */
   'fleet.control',
@@ -38,6 +38,10 @@ export const deviceCapabilitySchema = z.enum([
   'account.admin',
   /** Explicit API-client authority for execution and browser-origin approval, lifecycle recovery, cancellation and retirement. */
   'lifecycle.control',
+  /** Decide as the person: answer agents, approve and accept, act on their Chrome and its shares, comment as them, file
+   * and share QA reports, decide the GitHub accounts the App serves, pause or resume storage. Browsers hold it; a
+   * client only when granted it. */
+  'operator.decide',
 ]);
 export type DeviceCapability = z.infer<typeof deviceCapabilitySchema>;
 
@@ -353,9 +357,11 @@ export function requiredCapability(procedurePath: string, kind: 'query' | 'mutat
   return kind === 'mutation' ? 'rpc.write' : 'rpc.read';
 }
 
-/** Browsers retain their existing administrative authority; clients must be explicitly granted it. */
+/** Browsers retain their existing administrative authority and decide as the person; clients must be explicitly granted
+ * either. */
 export function deviceHasCapability(device: { kind: DeviceKind; scope: DeviceScope; capabilities: readonly string[] }, capability: DeviceCapability): boolean {
   return device.capabilities.includes(capability)
+    || (capability === 'operator.decide' && device.kind === 'browser')
     || ((capability === 'account.admin' || capability === 'lifecycle.control')
       && device.kind === 'browser' && device.scope.kind === 'user' && device.capabilities.includes('rpc.write'));
 }
@@ -376,6 +382,35 @@ export function requiredAdministrativeCapability(path: string, input?: unknown):
   if (['environment.approve', 'environment.revokeApproval', 'environment.cancelRun'].includes(path)) return 'lifecycle.control';
   if (path === 'environment.runPhase' && input && typeof input === 'object' && (input as Record<string, unknown>).phase === 'cloud/destroy') return 'lifecycle.control';
   return null;
+}
+
+/** Procedures and session commands that decide as the person (`operator.decide`). */
+const OPERATOR_PROCEDURES: Readonly<Record<string, true>> = {
+  'runtime.answer': true, 'inspector.guide.setApproval': true, 'inspector.requirement.setAcceptance': true,
+  'github.request.cancel': true, 'github.installation.confirm': true, 'github.installation.uninstall': true,
+  'github.uninstalled.dismiss': true, 'github.removed.clear': true, 'github.person.set': true,
+  'storageIncidents.resume': true, 'storageIncidents.pause': true, 'storageIncidents.inspect': true,
+};
+export const OPERATOR_SESSION_COMMANDS = [
+  'answerAsk', 'browserEverything', 'browserTakeOver', 'browserResume', 'browserTabGroup', 'browserShareCreate', 'browserShareConnect',
+  'browserCaptureShareCreate', 'browserCommentAdd', 'browserCommentReply', 'browserCommentResolve',
+] as const;
+export const OPERATOR_QA_ACTIONS = ['file', 'share'] as const;
+/** Whether a call decides as the person: then the caller needs `operator.decide` beside its ordinary capability. */
+export function requiresOperatorDecision(path: string, input?: unknown): boolean {
+  if (OPERATOR_PROCEDURES[path]) return true;
+  if (!input || typeof input !== 'object') return false;
+  if (path === 'runtime.session') {
+    const command = Reflect.get(input, 'command');
+    const type = command && typeof command === 'object' ? Reflect.get(command, 'type') : undefined;
+    return OPERATOR_SESSION_COMMANDS.some(name => name === type);
+  }
+  if (path === 'runtime.qa') {
+    const action = Reflect.get(input, 'action');
+    const kind = action && typeof action === 'object' ? Reflect.get(action, 'kind') : undefined;
+    return OPERATOR_QA_ACTIONS.some(name => name === kind);
+  }
+  return false;
 }
 
 /** An explicit boot image changes executable deployment content, even when selecting the platform default. */

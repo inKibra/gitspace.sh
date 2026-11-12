@@ -64,6 +64,33 @@ describe('MCP tool failure detail', () => {
     } finally { await client.close(); }
   });
 
+  test('lets a connection granted operator.decide decide as the person, but never reach what only a browser can do', async () => {
+    const forwarded: string[] = [];
+    const handler = createGitSpaceMcpHandler({
+      key, capabilities: ['rpc.read', 'rpc.write', 'session.prompt', 'account.admin', 'operator.decide'], scope: { kind: 'user' },
+      fetch: Object.assign(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+        const decoded = deserialize(await new Request(input, init).text());
+        if (!decoded.ok) throw new Error('Invalid signed request');
+        forwarded.push(...z.object({ batch: z.array(z.object({ path: z.string() })) }).parse(decoded.value).batch.map(item => item.path));
+        return new Response(null, { status: 500 });
+      }, { preconnect: fetch.preconnect }),
+    });
+    const client = new Client({ name: 'gitspace-mcp-operator', version: '1.0.0' });
+    await client.connect(new StreamableHTTPClientTransport(new URL('https://account.test/mcp'), {
+      fetch: (input, init) => handler.fetch(new Request(input, init)),
+    }));
+    try {
+      const names = (await client.listTools()).tools.map(tool => tool.name);
+      for (const name of ['gitspace_runtime_answer', 'gitspace_inspector_guide_set_approval', 'gitspace_inspector_requirement_set_acceptance', 'gitspace_github_person_set', 'gitspace_storage_incidents_pause']) expect(names).toContain(name);
+      for (const name of ['gitspace_terminals_live', 'gitspace_runtime_browser_trust', 'gitspace_providers_login_start', 'gitspace_github_app_start', 'gitspace_github_request_record']) expect(names).not.toContain(name);
+      for (const [name, payload] of [
+        ['gitspace_runtime_session', { command: { type: 'answerAsk', id: 'q', answers: [] } }],
+        ['gitspace_runtime_qa', { itemId: 'q', action: { kind: 'file', excerpt: 'what failed' } }],
+      ] as const) await client.callTool({ name, arguments: { projectId: 'p', workspaceId: 's', ...payload } }).catch(error => error);
+      expect(forwarded).toEqual(['runtime.session', 'runtime.qa']);
+    } finally { await client.close(); }
+  });
+
   test('rejects unnamed machine tools and removed APIs without forwarding, but preserves an explicit target', async () => {
     const requests: unknown[] = [];
     const handler = createGitSpaceMcpHandler({

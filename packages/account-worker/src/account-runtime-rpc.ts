@@ -1,4 +1,4 @@
-import { deviceCanAdminister, type DeviceCapability, type GitSpaceRpcContext } from '@gitspace/protocol';
+import { deviceCanAdminister, deviceHasCapability, type DeviceCapability, type GitSpaceRpcContext } from '@gitspace/protocol';
 import {
   runtimeSnapshotContract, runtimeSubmitContract, runtimeCancelContract,
   runtimeAnswerContract, runtimeWatchContract, runtimeSessionContract, runtimeImageUploadContract,
@@ -74,7 +74,7 @@ export function runtimeCloudProcedures(env: Env, userId: string, deviceId: strin
   const answer = server.implement(runtimeAnswerContract).handler(observed('runtime.answer', async ({ input, errors }) => {
     try {
       const { authority, device } = await requireRuntimeAccess(env, userId, deviceId, input, 'session.prompt');
-      return ok(await authority.runtimeAnswer(input, { deviceId, kind: device.kind, canApprove: device.kind === 'browser' && deviceCanAdminister(device, 'account.admin'), lifecycleControl: deviceCanAdminister(device, 'lifecycle.control') }));
+      return ok(await authority.runtimeAnswer(input, { deviceId, kind: device.kind, canApprove: deviceHasCapability(device, 'operator.decide') && deviceCanAdminister(device, 'account.admin'), lifecycleControl: deviceCanAdminister(device, 'lifecycle.control') }));
     } catch (error) { return err(errors.OperationFailed({ operation: 'answer cloud conversation', message: message(error) })); }
   }));
   const session = server.implement(runtimeSessionContract).handler(observed('runtime.session', async ({ input, errors }) => {
@@ -83,8 +83,7 @@ export function runtimeCloudProcedures(env: Env, userId: string, deviceId: strin
       const { authority, device } = await requireRuntimeAccess(env, userId, deviceId, input, read ? 'rpc.read' : 'session.prompt');
       if (['setWorkspacePhase', 'saveAgentDefinition', 'reloadSettings', 'instructionsChanged', 'inferenceChanged'].includes(input.command.type)
         && !deviceCanAdminister(device, 'account.admin')) throw new Error('This session command requires account administration');
-      if (input.command.type === 'answerAsk' && device.kind !== 'browser') throw new Error('Human session decisions require the browser');
-      return ok(RuntimeSessionResultSchema.parse(await (await authority.runtimeSession(input, { deviceId, canApprove: device.kind === 'browser' && deviceCanAdminister(device, 'account.admin') })).json()));
+      return ok(RuntimeSessionResultSchema.parse(await (await authority.runtimeSession(input, { deviceId, canApprove: deviceHasCapability(device, 'operator.decide') && deviceCanAdminister(device, 'account.admin') })).json()));
     } catch (error) { return err(errors.OperationFailed({ operation: 'control cloud session', message: message(error) })); }
   }));
   const imageUpload = server.implement(runtimeImageUploadContract).handler(observed('runtime.imageUpload', async ({ input, errors }) => {
@@ -108,8 +107,8 @@ export function runtimeCloudProcedures(env: Env, userId: string, deviceId: strin
   const qa = server.implement(runtimeQaContract).handler(observed('runtime.qa', async ({ input, errors }) => {
     try {
       const { authority, device } = await requireRuntimeAccess(env, userId, deviceId, input, 'rpc.write');
-      if (input.action.kind === 'share' && (device.kind !== 'browser' || !deviceCanAdminister(device, 'account.admin'))) throw new Error('Sharing a QA report requires a browser administrator');
-      return ok(await authority.runtimeQa(input, { deviceId, canApprove: input.action.kind !== 'share' || (device.kind === 'browser' && deviceCanAdminister(device, 'account.admin')) }));
+      if (input.action.kind === 'share' && !deviceCanAdminister(device, 'account.admin')) throw new Error('Sharing a QA report requires account administration');
+      return ok(await authority.runtimeQa(input, { deviceId, canApprove: input.action.kind !== 'share' || (deviceHasCapability(device, 'operator.decide') && deviceCanAdminister(device, 'account.admin')) }));
     } catch (error) { return err(errors.OperationFailed({ operation: 'review runtime QA report', message: message(error) })); }
   }));
   const requestCacheAttachment = server.implement(runtimeCacheAttachmentRequestContract).handler(observed('runtime.attachment.cache.request', async ({ input, errors }) => {

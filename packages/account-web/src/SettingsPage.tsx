@@ -391,12 +391,13 @@ const API_CLIENT_TTLS: ReadonlyArray<{ value: string; label: string; ms: number 
 const API_CLIENT_CAPABILITIES: ReadonlyArray<{ id: DeviceCapability; label: string; description: string }> = [
   { id: 'rpc.read', label: 'Read', description: 'Queries and event streams' },
   { id: 'rpc.write', label: 'Write', description: 'Create and change workspaces, settings, automations' },
-  { id: 'session.prompt', label: 'Talk to agents', description: 'Prompt, steer, and answer' },
+  { id: 'session.prompt', label: 'Talk to agents', description: 'Prompt and steer (answering their questions needs Decide as you)' },
   { id: 'fleet.control', label: 'Fleet', description: 'Create, stop, start, destroy machines' },
   { id: 'deployment.control', label: 'Deployment', description: 'Select cloud images and control GitSpace runtime releases (account scope required)' },
   { id: 'devices.manage', label: 'Device management', description: 'Revoke enrolled browsers and API clients (whole account required)' },
   { id: 'account.admin', label: 'Account administration', description: 'Manage provider keys, inference, session approval policy and review decisions (whole account and Write required)' },
   { id: 'lifecycle.control', label: 'Lifecycle control', description: 'Approve execution content and browser origins through API/MCP, cancel and recover runs, retire resources (whole account and Write required)' },
+  { id: 'operator.decide', label: 'Decide as you', description: 'Answer agents\' questions and approvals, accept requirements, act on your Chrome and its share links, comment as you, file and share QA reports, decide which GitHub accounts the App serves, pause and resume storage. Off unless you need a client to stand in for you' },
 ];
 
 function ApiClientPermissions({ projects, projectId, setProjectId, capabilities, setCapabilities, ttl, setTtl, id }: {

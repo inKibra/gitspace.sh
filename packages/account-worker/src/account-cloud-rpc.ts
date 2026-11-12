@@ -3,7 +3,7 @@ import { DEVICE_AUTHORITY_UNAVAILABLE, DEVICE_AUTHORITY_UNAVAILABLE_MESSAGE, dev
 import { AgentIncidentChangeSchema } from '@gitspace/protocol-agent';
 import { MachineDiscardRequired } from '@gitspace/protocol/machine-discard';
 import {
-  credentialProtocolBase64, deviceCanAdminister, requiredCapability, requiresImageSelectionControl, RPC_DEVICE_HEADER, verifyDeviceGrantRecord,
+  credentialProtocolBase64, deviceCanAdminister, deviceHasCapability, requiredCapability, requiresImageSelectionControl, requiresOperatorDecision, RPC_DEVICE_HEADER, verifyDeviceGrantRecord,
   parseRuntimeSettings, runtimeSettingsView, GITSPACE_SOURCE_PROJECT_ROLE, type RuntimeConfigDocument,
   type DeviceCapability, type GitSpaceRpcContext,
 } from '@gitspace/protocol';
@@ -526,6 +526,10 @@ export async function handleAccountCloudRpc(request: Request, env: Env, userId: 
   if (authorized.status === 'error') {
     const { code, message: text } = authorized.error;
     return reject(code === 'RPC_FORBIDDEN' ? 403 : code === DEVICE_AUTHORITY_UNAVAILABLE ? 503 : 401, code, text);
+  }
+  // A browser decides as the person; any other device only when granted `operator.decide`.
+  if (items.some(item => requiresOperatorDecision(item.path, item.input)) && !deviceHasCapability(authorized.value.device, 'operator.decide')) {
+    return reject(403, 'RPC_FORBIDDEN', 'Deciding as the person requires the operator.decide permission');
   }
   const handler = createFetchHandler({
     router: accountRouter(env, userId, authorized.value.device.deviceId, env.ACCOUNT_URL), endpoint: url.pathname, maxBatchItems: MAX_BATCH_ITEMS, maxRequestBytes: MAX_REQUEST_BYTES, contractVersion: CONTRACT_VERSION, createContext: () => ({}),

@@ -5,7 +5,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema, ListResourcesRequestSche
 import { createGitSpaceClient, type GitSpaceClient } from '@gitspace/protocol/client';
 import { gitspaceContract } from '@gitspace/protocol/rpc-contract';
 import { accountRpcAuthority, rpcCallTarget } from '@gitspace/protocol/account-rpc';
-import { requiredCapability, requiredAdministrativeCapability, requiresImageSelectionControl } from '@gitspace/protocol/device-grant';
+import { OPERATOR_QA_ACTIONS, OPERATOR_SESSION_COMMANDS, requiredCapability, requiredAdministrativeCapability, requiresImageSelectionControl, requiresOperatorDecision } from '@gitspace/protocol/device-grant';
 import { procedureJsonRepresentation } from '@gitspace/protocol/json-representation';
 import { DEFAULT_SKILLS } from '@gitspace/protocol/default-skills';
 import { reviewedAnnotations } from './annotations.js';
@@ -32,30 +32,22 @@ const resourceReaders: Record<string, { path: string; description: string }> = {
   transcripts: { path: 'inspector.transcriptPage', description: 'Read a bounded page of cloud conversation rows using an Inspector context. Percent-encode the input for gitspace_inspector_transcript_page and preserve the returned generation when paging. Use transcript-content for a shortened row.' },
   'transcript-content': { path: 'inspector.transcriptContent', description: 'Retrieve full cloud conversation row content using an Inspector context. Percent-encode the input for gitspace_inspector_transcript_content with the same generation and rowId, starting at offset 0 and following nextOffset until null.' },
 };
-// Human authorization, protected terminal bytes and GitHub App credentials (manifest and install forms whose state the
-// browser callback consumes, private key upload) are browser-only, as are deciding which GitHub accounts the App serves
-// (keeping, uninstalling, forgetting requests and removals) and the person's own login, whose events automations skip.
+// Only what a browser alone can carry out: sign-in redirects and device codes, the GitHub App's manifest and install
+// forms (their state is consumed by the browser callback) and private key upload, recording an install request the
+// browser made on GitHub, pairing a Chrome, and protected terminal bytes. Decisions the person makes are tools for a
+// connection granted `operator.decide` (`requiresOperatorDecision`).
 const excluded = (path: string) => path.startsWith('providers.login.') || [
-  'mcp.composio.authorize', 'mcp.connections.signIn', 'terminals.live', 'runtime.answer', 'runtime.browserTrust',
-  'inspector.guide.setApproval', 'inspector.requirement.setAcceptance', 'github.app.start', 'github.app.rotateKey', 'github.install.start',
-  'github.request.cancel', 'github.request.record', 'github.installation.confirm', 'github.installation.uninstall', 'github.uninstalled.dismiss', 'github.removed.clear',
-  'github.person.set',
-  'storageIncidents.list', 'storageIncidents.resume', 'storageIncidents.pause', 'storageIncidents.inspect',
+  'mcp.composio.authorize', 'mcp.connections.signIn', 'terminals.live', 'runtime.browserTrust',
+  'github.app.start', 'github.app.rotateKey', 'github.install.start', 'github.request.record',
 ].includes(path);
-const agentSessionCommands = [
-  'control', 'agentSetup', 'historyAnchorId', 'historyPage', 'transcriptPage', 'transcriptContent', 'usage', 'persist', 'handoff', 'resume', 'stop',
-  'clearQueue', 'reloadSettings', 'instructionsChanged', 'inferenceChanged', 'prompt',
-  'setWorkspacePhase', 'cycleRole', 'setModel', 'setThinking', 'setFast', 'setGoal',
-  'compact', 'removeQueuedMessage', 'promoteQueuedMessage', 'navigateTree', 'saveAgentDefinition',
-];
-/** Narrow the owned wire schema without copying or replacing its command definitions. */
-function agentInputSchema(path: string, schema: Record<string, unknown>): Record<string, unknown> {
-  if (path !== 'runtime.session' && path !== 'runtime.qa') return schema;
+/** Without `operator.decide`, a session command or QA action that decides as the person is left out of the schema. */
+function agentInputSchema(path: string, schema: Record<string, unknown>, decides: boolean): Record<string, unknown> {
+  if (decides || (path !== 'runtime.session' && path !== 'runtime.qa')) return schema;
   const field = path === 'runtime.session' ? 'command' : 'action';
   const discriminator = path === 'runtime.session' ? 'type' : 'kind';
-  const values = path === 'runtime.session' ? agentSessionCommands : ['dismiss', 'merge'];
+  const values: readonly string[] = path === 'runtime.session' ? OPERATOR_SESSION_COMMANDS : OPERATOR_QA_ACTIONS;
   return { ...schema, allOf: [...(Array.isArray(schema.allOf) ? schema.allOf : []), {
-    properties: { [field]: { properties: { [discriminator]: { enum: values } }, required: [discriminator] } },
+    properties: { [field]: { properties: { [discriminator]: { not: { enum: values } } }, required: [discriminator] } },
     required: [field],
   }] };
 }
@@ -175,8 +167,7 @@ export function createGitSpaceMcpHandler(options: GitSpaceMcpOptions): { fetch(r
   const allowed = (path: string, input?: unknown) => {
     const procedure = gitspaceContract.procedures.get(path);
     if (!procedure || !accountRpcAuthority(path) || excluded(path) || !options.capabilities.includes(requiredCapability(path, procedure._def.kind))) return false;
-    if (input !== undefined && path === 'runtime.session' && !agentSessionCommands.includes(String(record(record(input).command).type))) return false;
-    if (input !== undefined && path === 'runtime.qa' && !['dismiss', 'merge'].includes(String(record(record(input).action).kind))) return false;
+    if (requiresOperatorDecision(path, input) && !options.capabilities.includes('operator.decide')) return false;
     const readOnly = reviewedAnnotations[path]?.readOnlyHint === true;
     if (procedure._def.kind !== 'mutation' && !readOnly && !options.capabilities.includes('rpc.write')) return false;
     if (path === 'machines' && !options.capabilities.includes('fleet.control')) return false;
@@ -206,7 +197,7 @@ export function createGitSpaceMcpHandler(options: GitSpaceMcpOptions): { fetch(r
     if (catalog.has(name)) throw new Error('MCP tool name collision');
     catalog.set(name, { path, tool: {
       name, title: title(path), description: `${toolDescriptions[path]} Authority: ${authority}.${authority === 'machine' ? ' Supply the explicit machineId; no holder or default machine is selected.' : ''}`,
-      inputSchema: agentInputSchema(path, representation.inputSchema) as Tool['inputSchema'], outputSchema: objectSchema({ result: embedSchema(representation.outputSchema, '#/properties/result') }) as Tool['outputSchema'],
+      inputSchema: agentInputSchema(path, representation.inputSchema, options.capabilities.includes('operator.decide')) as Tool['inputSchema'], outputSchema: objectSchema({ result: embedSchema(representation.outputSchema, '#/properties/result') }) as Tool['outputSchema'],
       annotations: reviewedAnnotations[path],
     } });
   }

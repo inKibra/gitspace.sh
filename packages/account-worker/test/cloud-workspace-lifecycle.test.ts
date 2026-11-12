@@ -522,11 +522,11 @@ describe('cloud workspace lifecycle with no machines', () => {
     });
   });
 
-  it('refuses to pause or inspect an object for a device without account administration', async () => {
-    const { client } = await account(['rpc.read', 'rpc.write'], 'client');
+  it('refuses to pause or inspect an object for a device that may not decide as the person', async () => {
+    const { client } = await account(['rpc.read', 'rpc.write', 'account.admin'], 'client');
     const objectId = env.SPACE_AUTHORITY.getByName(crypto.randomUUID()).id.toString();
-    expect(await client.storageIncidents.pause({ objectId, reason: 'no' })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('account.admin') } } });
-    expect(await client.storageIncidents.inspect({ objectId })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('account.admin') } } });
+    expect(await client.storageIncidents.pause({ objectId, reason: 'no' })).toMatchObject({ status: 'error', error: { _tag: 'client/http-failure', data: { status: 403 } } });
+    expect(await client.storageIncidents.inspect({ objectId })).toMatchObject({ status: 'error', error: { _tag: 'client/http-failure', data: { status: 403 } } });
     expect(await env.SPACE_AUTHORITY.get(env.SPACE_AUTHORITY.idFromString(objectId)).storageBreakerStatus()).toMatchObject({ quarantined: false });
   });
 
