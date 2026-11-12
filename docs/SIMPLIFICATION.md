@@ -553,7 +553,24 @@ Phase 3 built 2026-10-25 (extension 5.10.0; APERTURE-DESIGN §7.2): one holder p
 
 **Later.** Resize images instead of refusing them (entry 66): browser screenshots at a capped scale, and image reads downscaled with the Images binding through pi-durable's `ImageProcessor.prepare(bytes, mimeType, limits)` interface, telling the model the scale ("Resized from 4000x6000 to 1333x2000; multiply coordinates by 3.00").
 
-**Later.** pi-durable 1.4, #160 (we are on 1.3.0): its crash-loop guard parks a task a reset cut off 5 times without progress (`settings.restartLimit`, reported `task_parked`), which replaces our `RESET_ATTEMPTS` (reset by every reply, so it never stopped inkibra's loop); its fix for idle-eviction timers that kept Durable Objects from hibernating under `nodejs_compat`; `onWake` instead of our `wakeAt` service; backoffs and polls that sleep durably instead of holding an invocation; `afterFailedRun`; per-model compaction thresholds. Breaking: `TaskRuntime.sleep()` removed, every `defineDoc` needs `checkpointWhen`, and SQLite storage migrates to schema 2 with no way back to 1.3.
+**Later.** What pi-durable 1.4–1.5 opens up (we are on 1.5.2 since `3d9239da`, #160; recorded 2026-11-12 from the 10-25 to 11-11 notes). Open:
+1. **Crash-loop guard:** compare pi's `restartLimit` (default 5; since 1.5.0 it ends the task with `restart_limit`, it no longer parks it) with our `RESET_ATTEMPTS` full/full/lean retries (`runtime-core/src/harness.ts:67`), which still run beside pi's rule that a model request a crash cut off is not resent. Ours also covers runtime open failures (218), so probably both stay.
+2. **Run failure reasons in the chat:** nothing reads pi's `runFailure` (`restart_limit`, `interrupted`, `turn_limit`, `nothing_to_answer`); an interrupted run can end with no reason shown.
+3. **"Retrying in N s"** from `pi.live.generation.retry`.
+4. **Streaming replies (#214)** from `pi.live.generation.message` and `ConversationTranscript`.
+5. **Continue submissions** (`submit({ type: 'continue' })`): a scheduled retry ("wait for credit", "retry at 9:00") starts a run with no made-up user message.
+6. **The wait tool (#162)** on durable sleeps; the job abort handlers (`jobs.ts`) and the takeover wait (`awaitTakeover`) still hold an invocation through `services.wakeAt`.
+7. **The 30 s heartbeat** (`HEARTBEAT_MS`, `runtime-workspace-do/src/runtime.ts`) replaced by exact wake times through `onWake`.
+8. **Compaction per model and per conversation** (1.4, 1.5.1): decide pi's `compaction.modelOverrides` against our per-role context limits (`inference/admission.ts`) so only one decides; then compact subagents sooner and set `documentRetentionMs` so finished subagents free their documents.
+9. **`afterFailedRun`** (we get `keep`), **`afterRun`** run-end tasks (refreshing the guide, notifying), **`maxTurns`** as a cap on runaway agents.
+10. **A read-only harness (#175)** to ask an archived workspace.
+11. **`models` and `settings` as functions**, so configuration changes without reopening the harness (the upgrade typed them as plain values).
+12. **Content-free telemetry spans** (`HarnessOptions.telemetry`; we strip pi's option before the inference worker).
+13. **`beforeProviderRequest`:** added with the upgrade but never runs behind the inference worker (229); the Bedrock tool-streaming beta is set in `inference/attempts.ts`. Drop the hook or route it.
+14. **Upstream:** ask pi to drop document revisions older than the newest base; the ChatGPT email hunk is our last pi-ai patch.
+15. **An "Upgrade pi" automation** following `earendil-works/pi` releases (`docs/AUTOMATIONS-DESIGN.md`; mock only).
+16. **Not in our notes, maybe useful:** `HarnessOptions.identity` (User-Agent per request), `whenIdle: 'reject'` and `Conversation.submit(tx, …)` for admission inside our own commit, `Tx.submission` and `HookApi.entries()` for history reads that survive compaction (#210).
+Came with the upgrade, nothing to do: the idle-eviction timer fix, fewer storage writes (`persistWithinMs`, cheaper commits), the scheduler fix for turns stuck after parallel tool calls, the memory fixes for long streamed answers, and job polling and scheduled operations sleeping durably.
 
 **Later: ideas to research (recorded 2026-11-03).**
 1. **Pull requests, plans and the Change Guide (#183).** Study [what my pull requests look like now](https://hugorcd.com/writing/what-my-pull-requests-look-like-now), [spinal.sh](https://spinal.sh), [diffmap](https://github.com/tanishqkancharla/diffmap), [dev.fast](https://dev.fast) and [ref.tools](https://ref.tools) to decide what plans, the tenant GitHub App's pull request descriptions and comments, and the Change Guide look like. Then a skill that posts a before/after pull request comment, reused as the Change Guide's introduction, linking to the guide and including a diffmap.
