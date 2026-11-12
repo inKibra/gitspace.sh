@@ -1,8 +1,8 @@
 import { providerErrorText, WORKSPACE_REPORT_ENTRY, type WorkspaceTurnReport } from '@gitspace/blocks';
 import { createWithdrawnNotices } from './withdrawn-notices.js';
 import { SqliteStorage } from '@earendil-works/pi-durable/storage/sqlite';
-import type { Conversation, ConversationId, ConversationRecord, Cursor, EntryRecord, Harness, TaskId, TaskRecord, EntryId, CommitPublication, SubmissionRecord } from '@earendil-works/pi-durable';
-import { AssistantEntry, GenerationTask } from '@earendil-works/pi-durable';
+import type { Conversation, ConversationId, ConversationRecord, Cursor, EntryRecord, Harness, TaskId, TaskRecord, EntryId, CommitPublication, SubmissionRecord, RunFailure, RunFailureReason } from '@earendil-works/pi-durable';
+import { AssistantEntry, GenerationTask, LiveDoc } from '@earendil-works/pi-durable';
 import { appendNotice, CacheNoticesDoc, noticeInvalidBlocks } from './notices.js';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { diffRevisions } from '@earendil-works/chord/delta';
@@ -145,6 +145,19 @@ const TURN_ITEM_CHARACTERS = 400;
 const REPORT_VERB: Record<WorkspaceTurnReport['outcome'], string> = { finished: 'finished', failed: 'failed', asked: 'asked', approval: 'needs approval' };
 /** Why an unanswered input's turn ended, when pi recorded no detail. */
 const UNANSWERED: Record<string, string> = { aborted: 'it was stopped before it finished', reset: 'its context was reset before it answered', no_model: 'no model was available', withdrawn: 'it was withdrawn before it started' };
+/** Why the newest run ended without an answer, as the chat says it, from pi's `runFailure`; null for an ending the person
+ * caused (Stop, a reset) or that needs no notice (nothing to answer). `detail` is pi's: a provider error, the missing
+ * model, what was cut off and how often, or the tool rounds taken. */
+const RUN_FAILURE: Record<RunFailureReason, ((detail: string | undefined) => string) | null> = {
+  model_error: detail => providerErrorText(detail ?? 'The model request failed'),
+  no_model: detail => `No model was available${detail ? ` (${detail})` : ''}.`,
+  faulted: detail => `The run stopped on an internal error${detail ? `: ${detail}` : ''}. Send a message to start again.`,
+  orphaned: detail => `The run could not continue after an update${detail ? ` (${detail})` : ''}. Send a message to start again.`,
+  interrupted: detail => `The run stopped because the workspace kept restarting while the model answered${detail ? ` (${detail})` : ''}. Send a message to start again.`,
+  restart_limit: detail => `The run stopped after being cut off too often${detail ? ` (${detail})` : ''}. Send a message to start again.`,
+  turn_limit: detail => `The run reached its limit of tool rounds${detail ? ` (${detail})` : ''}. Send a message to continue.`,
+  aborted: null, reset: null, nothing_to_answer: null,
+};
 function textParts(content: ModelMessage['content']): string {
   if (typeof content === 'string') return content;
   const texts: string[] = [];
@@ -350,7 +363,7 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
   const conversationIds = new Map<string, ConversationId>();
   // Derived snapshot state is cached per conversation/task and refreshed only for records a commit touched, so a
   // rebuild reads O(changed) rows instead of every conversation's 256-entry window and every task on each commit.
-  type ConversationView = Omit<RuntimeSnapshot['conversations'][number], 'status' | 'error'> & { failure: string | null; subagent: (SubagentMetadata & { conversationId: string }) | null };
+  type ConversationView = Omit<RuntimeSnapshot['conversations'][number], 'status' | 'error'> & { failure: string | null; runFailure: string | null; subagent: (SubagentMetadata & { conversationId: string }) | null };
   type TaskView = RuntimeSnapshot['tasks'][number];
   const conversationViews = new Map<string, ConversationView>();
   const dirtyConversations = new Set<ConversationId>();
@@ -391,10 +404,15 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
     const child = (await harness.snapshot(AgentDefinitionContextDoc, record.id, BACKGROUND_CONTEXT))?.child;
     // A rejected model request leaves an empty assistant message; its error is the user's only explanation.
     const latest = entries.flatMap(entry => entry.model ?? []).findLast(message => message.role === 'assistant');
+    const live = await harness.snapshot(LiveDoc, record.id, BACKGROUND_CONTEXT);
+    const retry = live?.generation?.retry;
+    const ended: RunFailure | undefined = live?.runFailure;
     return {
       id: String(record.id), parentId: parentId === undefined ? null : String(parentId),
       title: child ? child.name : record.id === runtime.root.id ? 'Workspace' : `Agent ${record.id}`,
       failure: latest?.role === 'assistant' && latest.stopReason === 'error' ? providerErrorText(latest.errorMessage ?? 'The model request failed') : null,
+      runFailure: ended ? RUN_FAILURE[ended.reason]?.(ended.detail) ?? null : null,
+      ...(retry ? { retry: { at: new Date(retry.at).toISOString(), error: providerErrorText(retry.error) } } : {}),
       subagent: child ? { conversationId: String(record.id), ...child } : null,
       // The snapshot paints the conversation until its transcript page loads, which draws tool results from stored rows.
       // Carrying them here made a busy workspace's snapshot pass the 1 MB response limit, failing every watch.
@@ -490,8 +508,10 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
     // The newest generation decides; the transcript's failed reply speaks only for a conversation whose generations
     // are past the loaded task window.
     const views = [...conversationViews.values()].map(view => {
+      // pi's reason for the newest unanswered run says more than its generation's outcome (a turn limit, a restart loop).
       const generation = latestGenerations.get(view.id);
-      return generation === undefined ? view : { ...view, failure: generation.failure === null ? null : providerErrorText(generation.failure) };
+      const failure = view.runFailure ?? (generation === undefined ? view.failure : generation.failure === null ? null : providerErrorText(generation.failure));
+      return { ...view, failure };
     });
     const activity = agentActivity({ conversations: views, tasks: inspection.tasks.flatMap(task => task.state.kind === 'blocked' ? [] : [{ conversationId: String(task.record.conversationId), background: task.record.background }]), questions: questions?.items ?? [] });
     agents = agentCounts(views, activity);
@@ -499,7 +519,7 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
     const subagents: JsonValue[] = [];
     // A subagent waiting for a run slot is idle; the agents document says it is queued.
     const queued = new Set((await harness.snapshot(SubagentRunQueueDoc, BACKGROUND_CONTEXT))?.queue.map(item => item.conversationId));
-    for (const { failure, subagent, ...view } of views) {
+    for (const { failure, runFailure: _runFailure, subagent, ...view } of views) {
       const state = conversationStatus(activity.get(view.id) ?? 'idle');
       conversations.push({ ...view, status: state, ...(state === 'failed' && failure ? { error: failure } : {}) });
       if (subagent) subagents.push(queued.has(view.id) ? { ...subagent, queued: true } : subagent);

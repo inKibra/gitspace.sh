@@ -150,7 +150,8 @@ export interface GitSpaceShellProps {
   baseSpace: ProjectAgentView;
   workspaces: WorkspaceView[];
   projects?: readonly ProjectLifecycleView[];
-  mainAgent: { id: string; title: string; state: AgentSessionRenderState; model: string; recovering?: boolean; controlsAvailable?: boolean; errorMessage?: string | null; failed?: boolean } | null;
+  /** `retry`: the agent's model request failed and is tried again `at` (an ISO time); `error` says why it failed. */
+  mainAgent: { id: string; title: string; state: AgentSessionRenderState; model: string; recovering?: boolean; controlsAvailable?: boolean; errorMessage?: string | null; failed?: boolean; retry?: { at: string; error: string } | null } | null;
   turns: TurnBlock[];
   transcript?: TranscriptHistory;
   history?: { loading: boolean; error: string | null; onRetry(): void };
@@ -343,6 +344,20 @@ export function TranscriptHistoryNotice({ loading, error, onRetry }: NonNullable
   </div>;
 }
 
+/** The agent's failed model request and the seconds until it is tried again, counted down each second. */
+function RetryNotice({ retry }: { retry: { at: string; error: string } }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  const seconds = Math.ceil((Date.parse(retry.at) - now) / 1000);
+  return <p role="status" className="flex shrink-0 items-center gap-2 px-4 py-2 text-caption text-muted-foreground [overflow-wrap:anywhere]">
+    <ThinkingIndicator size="compact" showIcon={false} className="shrink-0 p-0" />
+    <span>{seconds > 0 ? `Retrying in ${seconds} s` : 'Retrying now'} · the model request failed: {retry.error}</span>
+  </p>;
+}
+
 // ── Agent canvas ──
 function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onRetryControls, onRetryAgent, turns, transcript, history, transport, onSend, draft, artifactUpload, sessionCommand, pending, error, providers, skills, banner, access, accessBanner }: {
   workspace: AgentScopeView;
@@ -458,6 +473,7 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onR
   return <div className="relative flex min-h-0 min-w-0 flex-1 flex-col" style={{ '--composer-overlay-height': `${composerOverlayHeight}px` } as CSSProperties}>
     {history ? <TranscriptHistoryNotice {...history} /> : null}
     {mainAgent?.errorMessage || mainAgent?.failed ? <p role="alert" className="shrink-0 whitespace-pre-wrap break-words px-4 py-2 text-caption text-destructive">Agent failure: {mainAgent.errorMessage ?? 'No failure reason was recorded for this session.'}</p> : null}
+    {mainAgent?.retry ? <RetryNotice key={mainAgent.retry.at} retry={mainAgent.retry} /> : null}
     {controlsError && !onRetryControls && !access ? <p role="alert" className="shrink-0 whitespace-pre-wrap break-words px-4 py-2 text-caption text-destructive">{controlsError}</p> : null}
     {accessBanner ? <div className="flex shrink-0 justify-center px-6 pt-3">{accessBanner}</div> : null}
     <ScrollArea ref={bindTranscriptViewport} onTouchStartCapture={transcript ? undefined : onTranscriptTouchStart} onTouchEndCapture={transcript ? undefined : onTranscriptTouchEnd} onTouchCancelCapture={transcript ? undefined : onTranscriptTouchEnd} className="min-h-0 flex-1" viewportClassName="h-full">

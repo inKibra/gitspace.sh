@@ -30,6 +30,8 @@ const definitionTrees = new Map<string, ArtifactsTreeEntry[]>([
 ]);
 /** Requests the runtime refused, by signal: they fail with the reason, as the cloud router fails them. */
 const refused = new WeakMap<AbortSignal, string>();
+/** Whether "overload the model once" was already refused: its first attempt fails as overloaded, which pi retries. */
+let overloaded = false;
 const stream: StreamFunction = (_model, context, options) => {
   const result = createAssistantMessageEventStream();
   const refusal = options?.signal ? refused.get(options.signal) : undefined;
@@ -42,6 +44,13 @@ const stream: StreamFunction = (_model, context, options) => {
   const last = context.messages.findLast(message => message.role !== 'system');
   const text = typeof last?.content === 'string' ? last.content : (last?.content ?? []).filter(part => part.type === 'text').map(part => part.text).join('\n');
   const ask = last?.role === 'user' && text === 'ask for a color';
+  if (last?.role === 'user' && text === 'overload the model once' && !overloaded) {
+    overloaded = true;
+    const failure: AssistantMessage = { role: 'assistant', api: 'fixture', provider: 'fixture', model: 'fixture', content: [], stopReason: 'error', errorMessage: 'fixture provider overloaded', timestamp: Date.now(), usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
+    result.push({ type: 'error', reason: 'error', error: failure });
+    result.end();
+    return result;
+  }
   if (last?.role === 'user' && text === 'fail the model') {
     // A provider that rejects a request reports no usage.
     const failure: AssistantMessage = { role: 'assistant', api: 'fixture', provider: 'fixture', model: 'fixture', content: [], stopReason: 'error', errorMessage: 'fixture provider rejected the request', timestamp: Date.now(), usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };

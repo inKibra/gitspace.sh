@@ -175,6 +175,16 @@ try {
 
   // A rejected model request must tell the user why instead of leaving an empty reply.
   const summary = (snapshot: RuntimeSnapshot) => RuntimeWorkspaceStatusSchema.parse(snapshot.documents['gitspace.status']).summary;
+  // pi retries an overloaded request after a backoff: until then the conversation says when, and why; the answer clears it.
+  await request('/submit?text=overload%20the%20model%20once');
+  const retrying = await until(snapshot => snapshot.conversations.some(item => item.retry !== undefined));
+  const retry = retrying.conversations.find(item => item.retry !== undefined)?.retry;
+  assert.match(retry?.error ?? '', /fixture provider overloaded/);
+  assert(retry && Number.isFinite(Date.parse(retry.at)), 'A retry has no time');
+  const answered = await until(snapshot => snapshot.conversations.some(item => item.messages.some(message => message.content.some(part => part.type === 'text' && part.text === 'fixture reply: overload the model once'))));
+  const root = answered.conversations.find(item => item.parentId === null);
+  assert(root && root.retry === undefined && root.status !== 'failed', 'A retried request that answered still shows its retry or a failure');
+  console.log('PASS an overloaded model request shows when it is retried and why, until the retry answers');
   await request('/submit?text=fail%20the%20model');
   const failed = await until(snapshot => snapshot.conversations.some(item => item.status === 'failed'));
   assert.match(failed.conversations.find(item => item.status === 'failed')?.error ?? '', /fixture provider rejected the request/);
