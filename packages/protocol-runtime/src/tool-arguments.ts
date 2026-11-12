@@ -146,7 +146,6 @@ export const RuntimeWebSearchArgumentsSchema = z.object({ query: z.string().min(
 export const RuntimeReportIssueArgumentsSchema = z.object({ message: z.string().min(1).max(16384), tool: z.string().max(160).optional(), model: z.string().max(256).optional(), reference: z.string().max(2048).optional() });
 export const RuntimeCheckpointArgumentsSchema = z.object({ goal: z.string() });
 export const RuntimeRewindArgumentsSchema = z.object({ checkpoint: z.string(), report: z.string() });
-export const RuntimeDelegateExportArgumentsSchema = RuntimeDispatchSelectionSchema.extend({ commit: z.string().regex(/^[a-f0-9]{40,64}$/u) });
 export const RuntimeMcpInvokeArgumentsSchema = RuntimeDispatchSelectionSchema.extend({ connectionId: path, name: path, arguments: z.record(z.string(), RuntimeJsonSchema).optional() }).strict();
 export const RuntimeMcpDiscoverArgumentsSchema = z.union([z.object({}).strict(), RuntimeDispatchSelectionSchema.extend({ connectionId: path, name: path.optional() }).strict()]);
 const MCP_LISTED_DESCRIPTION_CHARACTERS = 300;
