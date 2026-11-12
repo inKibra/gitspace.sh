@@ -7,6 +7,7 @@ import { http, HttpResponse } from 'msw';
 import { UserProjectIndexDO, ProjectAuthorityDO } from '../src/project-authority.js';
 import { DirectoryPublisher, type DirectorySource } from '../src/account-directory.js';
 import { invalidateDeviceAuthority } from '../src/device-authority.js';
+import { AUTHORITY_MAX_STALE_MS } from '../src/account-state.js';
 import { network } from './network.js';
 import { tenantRootPrivateKey } from './setup.js';
 import { persistPortableCheckpoint } from './portable-checkpoint-fixture.js';
@@ -204,7 +205,7 @@ describe('directory WebSocket authentication', () => {
     await env.USER_PROJECTS.getByName(env.ACCOUNT_ID).publishDirectory({ ...source, cursor: 1 });
     expect(await opened.events.next()).toMatchObject({ type: 'message', value: { type: expect.stringMatching(/^directory\./) } });
     await opened.events.next();
-    clock.mockReturnValue(now + 60_001);
+    clock.mockReturnValue(now + AUTHORITY_MAX_STALE_MS + 1);
     // The next refresh carries the lapsed platform observation.
     invalidateDeviceAuthority();
     await env.USER_PROJECTS.getByName(env.ACCOUNT_ID).publishDirectory({ ...source, cursor: 2, workspaces: [] });

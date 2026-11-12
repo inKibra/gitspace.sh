@@ -110,7 +110,7 @@ export async function createAccountWorkspaceRuntime(
     }
     return scores;
   };
-  const code = new ArtifactsCodeStore(env.ARTIFACTS);
+  const code = new ArtifactsCodeStore(env.ARTIFACTS, ctx.storage);
   const repository = artifactsWorkspaceRepository(identity.workspaceId);
   const ref = runtimeWorkspaceCodeRef(env, identity, () => metadata().branch);
   // Logged and told once per change of state: repeated failures while degraded only count up.

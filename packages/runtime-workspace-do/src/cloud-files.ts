@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { TaggedError } from 'better-result';
 import { applyTextEdits, canonicalJson, RuntimeGitCheckpointSchema, RuntimeToolResultSchema, RuntimeReadArgumentsSchema, RuntimeWriteArgumentsSchema, RuntimeEditArgumentsSchema, RuntimeFindArgumentsSchema, ApplyPatchArgumentsSchema, prepareV4APatch, type RuntimeToolResult } from '@gitspace/protocol-runtime';
-import { collectBytes, parseGitLfsPointer, type GitLfsConfirmedObject, type GitLfsStore } from '@gitspace/protocol-workspace';
+import { collectBytes, GitLfsSnapshotSchema, parseGitLfsPointer, sameGitLfsSnapshot, type GitLfsConfirmedObject, type GitLfsStore } from '@gitspace/protocol-workspace';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
 import type { AttachmentStore } from './attachments.js';
@@ -20,6 +20,8 @@ const MachinePendingSchema = z.object({ checkpoint: RuntimeGitCheckpointSchema, 
 const RetentionCheckpointSchema = RuntimeGitCheckpointSchema.extend({ publicationId: z.string().optional(), acceptedPublicationIds: z.array(z.string()).optional() });
 const CLOUD_FILE_READ_LIMIT = 8 * 1024 * 1024;
 const LFS_POINTER_LIMIT = 1024;
+/** A `.gitattributes` text longer than this is kept in memory only: a stored row must fit SQLite's value limit. */
+const ATTRIBUTE_TEXT_STORE_LIMIT = 256 * 1024;
 /** Recorded snapshots kept behind the current one, whatever their age: the search index measures how far its commit is
  * behind along them, up to this many. */
 export const KEPT_PREDECESSORS = 100;
@@ -94,6 +96,8 @@ export class CloudFileStore {
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_code_snapshot(singleton INTEGER PRIMARY KEY CHECK(singleton=1), checkpoint TEXT NOT NULL)');
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_code_commits(commit_id TEXT PRIMARY KEY, predecessor TEXT, checkpoint TEXT NOT NULL)');
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_lfs_retention_outbox(commit_id TEXT PRIMARY KEY, checkpoint TEXT NOT NULL, previous TEXT)');
+    storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_lfs_retention_last(singleton INTEGER PRIMARY KEY CHECK(singleton=1), lfs TEXT NOT NULL)');
+    storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_attribute_texts(commit_id TEXT NOT NULL, directory TEXT NOT NULL, text TEXT, PRIMARY KEY(commit_id, directory))');
     storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_machine_publications(id TEXT PRIMARY KEY, input TEXT NOT NULL, pending TEXT, checkpoint TEXT)');
     if (storage.sql.exec<{ name: string }>('PRAGMA table_info(runtime_machine_publications)').toArray().some(column => column.name === 'abandoned')) storage.sql.exec('ALTER TABLE runtime_machine_publications DROP COLUMN abandoned');
     storage.sql.exec('CREATE INDEX IF NOT EXISTS runtime_machine_publications_pending ON runtime_machine_publications(id) WHERE pending IS NOT NULL');
@@ -484,18 +488,26 @@ export class CloudFileStore {
     return blob !== null && blob.size <= LFS_POINTER_LIMIT && parseGitLfsPointer(new Uint8Array(await blob.arrayBuffer())) !== null;
   }
   /** `.gitattributes` texts of one head commit by directory, null where there is none: a commit's files never change,
-   * and the head moves only when its branch does. */
+   * and the head moves only when its branch does. They are stored too, so a woken object reads none again; a text past
+   * `ATTRIBUTE_TEXT_STORE_LIMIT` is kept in memory only. */
   private attributeTexts: { commit: string; texts: Map<string, Promise<string | null>> } | undefined;
   private attributesText(commit: string, directory: string): Promise<string | null> {
-    if (this.attributeTexts?.commit !== commit) this.attributeTexts = { commit, texts: new Map() };
+    if (this.attributeTexts?.commit !== commit) {
+      this.attributeTexts = { commit, texts: new Map() };
+      this.storage.sql.exec('DELETE FROM runtime_attribute_texts WHERE commit_id<>?', commit);
+    }
     const texts = this.attributeTexts.texts;
     let text = texts.get(directory);
     if (!text) {
+      const stored = this.storage.sql.exec<{ text: string | null }>('SELECT text FROM runtime_attribute_texts WHERE commit_id=? AND directory=?', commit, directory).toArray()[0];
       const path = `${directory ? `${directory}/` : ''}.gitattributes`;
-      text = this.code.readFile(artifactsWorkspaceRepository(this.workspaceId), commit, path).then(blob => {
+      text = stored ? Promise.resolve(stored.text) : this.code.readFile(artifactsWorkspaceRepository(this.workspaceId), commit, path).then(blob => {
         if (!blob) return null;
         assertCloudReadSize(blob.size, path);
         return blob.text();
+      }).then(found => {
+        if (found === null || found.length <= ATTRIBUTE_TEXT_STORE_LIMIT) this.storage.sql.exec('INSERT OR REPLACE INTO runtime_attribute_texts(commit_id,directory,text) VALUES(?,?,?)', commit, directory, found);
+        return found;
       });
       texts.set(directory, text);
       void text.catch(() => texts.delete(directory));
@@ -577,7 +589,12 @@ export class CloudFileStore {
   private enqueueRetention(checkpoint: Checkpoint, previous: Checkpoint | null, publicationId?: string): void {
     // A snapshot with no LFS objects retains none, and only a machine's publication holds pins of its own to release.
     if (!publicationId && !checkpoint.lfs?.objects.length) return;
+    // Snapshot retention is never released, so the set last queued (retained, or retained once the outbox drains)
+    // already covers a write that keeps it; recording it again under the new commit took a project round trip.
+    const last = this.storage.sql.exec<{ lfs: string }>('SELECT lfs FROM runtime_lfs_retention_last WHERE singleton=1').toArray()[0];
+    if (!publicationId && last && sameGitLfsSnapshot(GitLfsSnapshotSchema.parse(JSON.parse(last.lfs)), checkpoint.lfs)) return;
     this.storage.sql.exec('INSERT OR IGNORE INTO runtime_lfs_retention_outbox(commit_id,checkpoint,previous) VALUES(?,?,?)', publicationId ? `${checkpoint.worktreeCommit}:${publicationId}` : checkpoint.worktreeCommit, JSON.stringify({ ...checkpoint, ...(publicationId ? { publicationId } : {}) }), previous ? JSON.stringify(previous) : null);
+    if (checkpoint.lfs?.objects.length) this.storage.sql.exec('INSERT INTO runtime_lfs_retention_last(singleton,lfs) VALUES(1,?) ON CONFLICT(singleton) DO UPDATE SET lfs=excluded.lfs', JSON.stringify(checkpoint.lfs));
   }
   /** Whether a write's publication outcome is unknown (an uncertain push): its plan is kept to finish it. */
   hasPendingWrites(): boolean {

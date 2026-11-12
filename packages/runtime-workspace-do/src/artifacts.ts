@@ -122,7 +122,8 @@ export interface ArtifactsRepositoryReader {
 export class ArtifactsCodeStore {
   /** The objects snapshot writes of one repository share; a workspace runtime's store writes one repository. */
   private written: { repository: string; objects: SnapshotObjects } | undefined;
-  constructor(private readonly binding: Artifacts) {}
+  /** With `storage`, a workspace object's, those objects outlive its sleep. */
+  constructor(private readonly binding: Artifacts, private readonly storage?: Pick<DurableObjectStorage, 'sql'>) {}
 
   async writeSnapshot(input: WriteSnapshotInput) {
     const opened = await Result.tryPromise({
@@ -132,7 +133,7 @@ export class ArtifactsCodeStore {
     if (opened.isErr()) return opened;
     input.mark?.('open');
     const repo = opened.value;
-    if (this.written?.repository !== input.repository) this.written = { repository: input.repository, objects: new SnapshotObjects() };
+    if (this.written?.repository !== input.repository) this.written = { repository: input.repository, objects: new SnapshotObjects(this.storage ? { storage: this.storage, repository: input.repository } : undefined) };
     try { return await writeArtifactsSnapshot(repo, { ...input, objects: this.written.objects }); }
     finally { await disposeArtifactsRepository(repo); input.mark?.('dispose'); }
   }

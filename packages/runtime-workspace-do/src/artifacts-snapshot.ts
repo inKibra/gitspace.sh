@@ -10,17 +10,56 @@ export type RuntimeGitCheckpoint = z.infer<typeof RuntimeGitCheckpointSchema>;
 export type SnapshotMutation = { path: string; content: Uint8Array | null; mode?: string; oid?: string; type?: 'blob' | 'commit' };
 export type WriteSnapshotInput = { repository: string; workspaceId: string; previous: RuntimeGitCheckpoint; mutations: SnapshotMutation[]; /** Edit-history message for the tool change; absent for merges and system snapshots. */ message?: string; signal?: AbortSignal; machine?: RuntimeGitCheckpoint; indexMutations?: SnapshotMutation[]; trackedMutations?: SnapshotMutation[]; conflicts?: string[]; forcePublication?: boolean; /** Called with each step's name as it ends; the caller times the steps. */ mark?: (step: string) => void; /** Commits and trees earlier writes read or published, read here before the repository. */ objects?: SnapshotObjects; /** The result's trees, already in the repository: a machine
  * publication onto an unchanged cloud adopts the machine's trees instead of rebuilding them from mutations. */ adopt?: { worktreeTree: string; indexTree: string; trackedTree: string } };
+type SnapshotCommit = Pick<ArtifactsCommitMetadata, 'treeHash' | 'committedAt'>;
+const SnapshotTreeSchema = z.array(z.object({ name: z.string(), mode: z.string(), hash: z.string(), type: z.enum(['tree', 'blob', 'symlink', 'gitlink', 'exec']) }));
+const SnapshotCommitSchema = z.object({ treeHash: z.string(), committedAt: z.number() });
+/** A tree whose stored form is longer than this stays in memory only: a row must fit SQLite's value limit. */
+const SNAPSHOT_OBJECT_ROW_LIMIT = 256 * 1024;
+/** Stored objects, trees and commits together, are pruned to the newest twice `limit` after this many are added. */
+const SNAPSHOT_OBJECT_PRUNE_EVERY = 256;
 /** The commits and trees a workspace's snapshot writes read and publish, kept between writes by object id: a Git object
- * never changes, and one write's commits and trees are where the next write starts. Past `limit` of either, the oldest
- * goes. */
+ * never changes, and one write's commits and trees are where the next write starts. Past `limit` of either in memory,
+ * the oldest goes. Given a Durable Object's storage, they also outlive the object's sleep: a miss reads the stored
+ * copy, and the newest twice `limit` stay stored. */
 export class SnapshotObjects {
-  readonly trees = new Map<string, ArtifactsTreeEntry[]>();
-  readonly commits = new Map<string, Pick<ArtifactsCommitMetadata, 'treeHash' | 'committedAt'>>();
-  constructor(private readonly limit = 2048) {}
-  keep<T>(map: Map<string, T>, oid: string, value: T): void {
+  private readonly trees = new Map<string, ArtifactsTreeEntry[]>();
+  private readonly commits = new Map<string, SnapshotCommit>();
+  private added = 0;
+  constructor(private readonly stored?: { storage: Pick<DurableObjectStorage, 'sql'>; repository: string }, private readonly limit = 2048) {
+    if (!stored) return;
+    stored.storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_snapshot_objects(repository TEXT NOT NULL, oid TEXT NOT NULL, kind TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(repository, oid))');
+    this.prune();
+  }
+  tree(oid: string): ArtifactsTreeEntry[] | undefined { return this.read(this.trees, 'tree', oid, SnapshotTreeSchema); }
+  commit(oid: string): SnapshotCommit | undefined { return this.read(this.commits, 'commit', oid, SnapshotCommitSchema); }
+  keepTree(oid: string, entries: ArtifactsTreeEntry[]): void { this.keep(this.trees, 'tree', oid, entries); }
+  keepCommit(oid: string, commit: SnapshotCommit): void { this.keep(this.commits, 'commit', oid, { treeHash: commit.treeHash, committedAt: commit.committedAt }); }
+  private read<T>(map: Map<string, T>, kind: string, oid: string, schema: z.ZodType<T>): T | undefined {
+    const kept = map.get(oid);
+    if (kept !== undefined || !this.stored) return kept;
+    const row = this.stored.storage.sql.exec<{ value: string }>('SELECT value FROM runtime_snapshot_objects WHERE repository=? AND oid=? AND kind=?', this.stored.repository, oid, kind).toArray()[0];
+    if (!row) return undefined;
+    const value = schema.parse(JSON.parse(row.value));
+    this.remember(map, oid, value);
+    return value;
+  }
+  private keep<T>(map: Map<string, T>, kind: string, oid: string, value: T): void {
+    const known = map.has(oid);
+    this.remember(map, oid, value);
+    // An object in memory was stored when it was first kept or read.
+    if (!this.stored || known) return;
+    const encoded = JSON.stringify(value);
+    if (encoded.length > SNAPSHOT_OBJECT_ROW_LIMIT) return;
+    this.stored.storage.sql.exec('INSERT OR IGNORE INTO runtime_snapshot_objects(repository,oid,kind,value) VALUES(?,?,?,?)', this.stored.repository, oid, kind, encoded);
+    if (++this.added % SNAPSHOT_OBJECT_PRUNE_EVERY === 0) this.prune();
+  }
+  private remember<T>(map: Map<string, T>, oid: string, value: T): void {
     map.delete(oid);
     map.set(oid, value);
     if (map.size > this.limit) map.delete(map.keys().next().value!);
+  }
+  private prune(): void {
+    this.stored?.storage.sql.exec('DELETE FROM runtime_snapshot_objects WHERE rowid IN (SELECT rowid FROM runtime_snapshot_objects ORDER BY rowid DESC LIMIT -1 OFFSET ?)', this.limit * 2);
   }
 }
 export interface ArtifactsFetch { (input: string, init?: RequestInit): Promise<Response> }
@@ -470,10 +509,10 @@ export async function writeArtifactsSnapshot(repo: Pick<ArtifactsRepo, 'readComm
       }
     }
     const readCommit = async (oid: string) => {
-      const cached = input.objects?.commits.get(oid);
+      const cached = input.objects?.commit(oid);
       if (cached) return cached;
       const commit = await repo.readCommit(oid);
-      if (commit) input.objects?.keep(input.objects.commits, oid, { treeHash: commit.treeHash, committedAt: commit.committedAt });
+      if (commit) input.objects?.keepCommit(oid, commit);
       return commit;
     };
     const parent = await readCommit(previous.worktreeCommit);
@@ -494,12 +533,12 @@ export async function writeArtifactsSnapshot(repo: Pick<ArtifactsRepo, 'readComm
       if (cached) return cached;
       input.signal?.throwIfAborted();
       if (!input.machine && trees.size >= 256) throw new Error('Snapshot tree hydration budget exceeded');
-      const entries = input.objects?.trees.get(oid) ?? await repo.readTree(oid);
+      const entries = input.objects?.tree(oid) ?? await repo.readTree(oid);
       if (!entries) throw new Error(`Missing tree ${oid}`);
       hydratedEntries += entries.length;
       if (hydratedEntries > 200_000) throw new Error('Snapshot tree entry budget exceeded');
       trees.set(oid, entries);
-      input.objects?.keep(input.objects.trees, oid, entries);
+      input.objects?.keepTree(oid, entries);
       return entries;
     };
     const editTree = async (oid: string | undefined, edits: SnapshotMutation[], tracked: boolean, prefix = ''): Promise<string> => {
@@ -606,9 +645,9 @@ export async function writeArtifactsSnapshot(repo: Pick<ArtifactsRepo, 'readComm
     try { await publishSnapshotPack({ remote: info.remote, auth: { kind: 'bearer', token: token.plaintext }, ref: checkpointRef, previous: previous.worktreeCommit, commit: worktreeCommit, pack: packed.packfile, signal: input.signal, onPublicationState: state => { certainty = state; } }, request); input.mark?.('receivePack'); }
     finally { await repo.revokeToken(token.id); input.mark?.('revoke'); }
     if (input.objects) {
-      for (const [oid, entries] of written) input.objects.keep(input.objects.trees, oid, entries);
-      input.objects.keep(input.objects.commits, trackedWorktreeCommit, { treeHash: trackedTree, committedAt: identity.timestamp });
-      input.objects.keep(input.objects.commits, worktreeCommit, { treeHash: worktreeTree, committedAt: identity.timestamp });
+      for (const [oid, entries] of written) input.objects.keepTree(oid, entries);
+      input.objects.keepCommit(trackedWorktreeCommit, { treeHash: trackedTree, committedAt: identity.timestamp });
+      input.objects.keepCommit(worktreeCommit, { treeHash: worktreeTree, committedAt: identity.timestamp });
     }
     return RuntimeGitCheckpointSchema.parse({ ...(input.machine ?? previous), checkpointRef, indexCommit, indexTree, trackedWorktreeCommit, worktreeCommit, worktreeTree, conflicts });
   }, catch: error => new ArtifactsSnapshotError({ operation: 'writeSnapshot', certainty, message: error instanceof Error ? error.message : String(error) }) });

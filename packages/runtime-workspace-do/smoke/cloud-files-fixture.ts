@@ -18,7 +18,8 @@ export class CloudFilesProof extends DurableObject {
     let mergedCheckpoint: typeof checkpoint | undefined, observedMergeBase: typeof checkpoint | undefined;
     const published = new Map<string, typeof checkpoint>();
     const files = new Map<string, string>([['file.txt', 'one\ntwo\nthree'], ['repeat.txt', 'same same']]);
-    const headAttributes = new Map<string, string>();
+    // Each head commit's `.gitattributes` files; a commit's files never change, so new attributes come with a new head.
+    const headAttributes = new Map<string, Map<string, string>>([[checkpoint.headCommit!, new Map()]]);
     const blobs = new Map<string, Blob>();
     let blobReads = 0;
     class UnreadBlob extends Blob {
@@ -69,7 +70,7 @@ export class CloudFilesProof extends DurableObject {
       readFile: async (_repository: string, commit: string, path: string) => {
         const blob = blobs.get(path);
         if (blob) return blob;
-        const source = path.endsWith('.gitattributes') && commit === checkpoint.headCommit ? headAttributes : files;
+        const source = path.endsWith('.gitattributes') ? headAttributes.get(commit) ?? files : files;
         return source.has(path) ? new Blob([source.get(path)!]) : null;
       },
       writeSnapshot: async (input: WriteSnapshotInput) => {
@@ -241,11 +242,12 @@ export class CloudFilesProof extends DurableObject {
     files.set('asset.dat', pointer);
     payloads.set(oid, payload);
     const current = await store.snapshot(); assert(current);
-    await store.commitMachine({ ...current, headCommit: checkpoint.headCommit, worktreeCommit: 'c'.repeat(40), lfs: { objects: [{ ...object, source: 'r2' }], heldBack: [{ path: 'asset.dat', kind: 'modified' }] } }, current.worktreeCommit, 'machine');
-    headAttributes.set('.gitattributes', '*.dat filter=lfs\n[attr]large filter=lfs\n*.large large\n"space name.bin" filter=lfs\nliteral\\*.bin filter=lfs\ndeep/**/object.bin filter=lfs\n');
-    headAttributes.set('nested/.gitattributes', '*.bin filter=lfs\nplain.dat -filter\n');
-    // The fixture changes the head commit's attributes in place; a new store reads them, as a moved head would be.
-    store = open();
+    const lfsHead = 'e1'.repeat(20);
+    headAttributes.set(lfsHead, new Map([
+      ['.gitattributes', '*.dat filter=lfs\n[attr]large filter=lfs\n*.large large\n"space name.bin" filter=lfs\nliteral\\*.bin filter=lfs\ndeep/**/object.bin filter=lfs\n'],
+      ['nested/.gitattributes', '*.bin filter=lfs\nplain.dat -filter\n'],
+    ]));
+    await store.commitMachine({ ...current, headCommit: lfsHead, worktreeCommit: 'c'.repeat(40), lfs: { objects: [{ ...object, source: 'r2' }], heldBack: [{ path: 'asset.dat', kind: 'modified' }] } }, current.worktreeCommit, 'machine');
     assert.deepEqual((await invoke('read', { path: 'asset.dat' })).content, [{ type: 'text', text: 'real LFS content\nsecond line' }]);
     assert.deepEqual((await invoke('read', { path: 'asset.dat', offset: 2 })).content, [{ type: 'text', text: 'second line' }]);
     files.set('oversized.dat', `version https://git-lfs.github.com/spec/v1\noid sha256:${oid}\nsize ${8 * 1024 * 1024 + 1}\n`);
@@ -277,14 +279,17 @@ export class CloudFilesProof extends DurableObject {
     assert.match(JSON.stringify(largeArtifact.content), /8 MiB.*machine/u);
     blobs.set('not-a-pointer.txt', new UnreadBlob([new Uint8Array(1025)]));
     assert.equal((await invoke('write', { path: 'not-a-pointer.txt', content: 'replacement' })).status, 'completed');
-    // A head commit's files never change, so the store keeps what it read; a new store reads the replaced file.
+    // A head commit's files never change, so replaced attributes come with a new head.
     blobs.set('.gitattributes', oversizedBlob);
-    store = open();
+    const beforeLarge = await store.snapshot(); assert(beforeLarge);
+    await store.commitMachine({ ...beforeLarge, headCommit: 'e4'.repeat(20), worktreeCommit: 'e5'.repeat(20) }, beforeLarge.worktreeCommit, 'machine');
     const largeAttributes = await invoke('read', { path: 'asset.dat' });
     assert.equal(largeAttributes.status, 'failed');
     assert.match(JSON.stringify(largeAttributes.content), /8 MiB.*machine/u);
     assert.equal(blobReads, 0, 'Oversized Artifacts and non-candidate pointers must not be materialized');
     blobs.clear();
+    const afterLarge = await store.snapshot(); assert(afterLarge);
+    await store.commitMachine({ ...afterLarge, headCommit: lfsHead, worktreeCommit: 'e6'.repeat(20) }, afterLarge.worktreeCommit, 'machine');
     payloads.delete(oid);
     const unavailable = await invoke('read', { path: 'asset.dat' });
     assert.equal(unavailable.status, 'failed');
@@ -308,11 +313,17 @@ export class CloudFilesProof extends DurableObject {
     assert.deepEqual(beforeFailure.lfs.heldBack, [{ path: 'asset.dat', kind: 'modified' }]);
     failPush = true;
     await assert.rejects(invoke('write', { path: 'pending-retention.txt', content: 'pending' }, 'pending-retention'));
-    assert.deepEqual(retained.get(beforeFailure.worktreeCommit)?.lfs, beforeFailure.lfs);
+    assert.deepEqual([...retained.values()].at(-1)?.lfs, beforeFailure.lfs);
     assert.deepEqual((await store.snapshot())?.lfs, beforeFailure.lfs);
     failPush = false;
     assert.equal((await invoke('write', { path: 'pending-retention.txt', content: 'pending' }, 'pending-retention')).status, 'completed');
     retentionUnavailable = true;
+    // A write keeping the LFS set already retained neither waits for nor depends on the project's retention.
+    assert.equal((await invoke('write', { path: 'same-lfs.txt', content: 'same set' }, 'same-lfs')).status, 'completed');
+    assert.equal(this.ctx.storage.sql.exec('SELECT commit_id FROM runtime_lfs_retention_outbox').toArray().length, 0);
+    // Objects moving to the origin change the set: the next write is accepted with its retention pending, and a later
+    // transition rewrites the pending row.
+    await store.reconcileLfsSources([{ ...object, location: { origin: 'https://stale.example/repository.git', endpoint: 'https://stale.example/repository.git/info/lfs' } }]);
     await assert.rejects(invoke('write', { path: 'origin-outbox.txt', content: 'accepted with retention pending' }, 'origin-outbox'), /Retention unavailable/u);
     const location = { origin: 'https://origin.example/repository.git', endpoint: 'https://origin.example/repository.git/info/lfs' };
     await store.reconcileLfsSources([{ ...object, location }]);
@@ -387,8 +398,10 @@ export class CloudFilesProof extends DurableObject {
     assert.deepEqual(observedMergeBase, beforeStranded);
     assert.equal((await store.snapshot())?.worktreeCommit, mergedCheckpoint.worktreeCommit);
     mergedCheckpoint = undefined;
-    headAttributes.set('.gitattributes', '[[:alpha:]].bin filter=lfs\n');
-    store = open();
+    const strictHead = 'e2'.repeat(20);
+    headAttributes.set(strictHead, new Map([['.gitattributes', '[[:alpha:]].bin filter=lfs\n']]));
+    const beforeStrict = await store.snapshot(); assert(beforeStrict);
+    await store.commitMachine({ ...beforeStrict, headCommit: strictHead, worktreeCommit: 'e3'.repeat(20) }, beforeStrict.worktreeCommit, 'machine');
     const unsupportedPattern = await invoke('write', { path: 'a.bin', content: 'must not bypass LFS policy' });
     assert.equal(unsupportedPattern.status, 'failed');
     assert.match(JSON.stringify(unsupportedPattern.content), /Unsupported HEAD attribute.*machine/u);
