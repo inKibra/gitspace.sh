@@ -18,12 +18,13 @@ const STORAGE_ALERT_SNOOZE_MS = 6 * 60 * 60_000;
 /** Filed issues the account keeps: filing past this evicts the oldest resolved one, and is refused when all are open. */
 const FILED_ISSUE_LIMIT = 500;
 
-// A successful platform observation is authoritative for at most 60 seconds.
-// Refresh on use after 15 seconds; outage retries coalesce and wait 5 seconds.
-// The original observation time survives reconstruction and is never extended
-// by a failed refresh. A new tenant has no authorization until platform confirms it.
+// Refresh on use after 15 seconds; outage retries coalesce and wait 5 seconds. A successful platform observation stays
+// authoritative for 6 hours: an account's status rarely changes, and a platform that answers "blocked" ends access at
+// its next refresh, while one that cannot answer (2026-11-12: about 10 minutes) would otherwise take the whole tenant
+// down after a minute. The original observation time survives reconstruction and is never extended by a failed
+// refresh. A new tenant has no authorization until platform confirms it.
 const AUTHORITY_REFRESH_MS = 15_000;
-const AUTHORITY_MAX_STALE_MS = 60_000;
+export const AUTHORITY_MAX_STALE_MS = 6 * 60 * 60_000;
 const AUTHORITY_RETRY_MS = 5_000;
 const authoritySchema = z.object({
   accountId: z.string(), tenantId: z.string(), platformUrl: z.string(),
@@ -70,7 +71,9 @@ export class AccountStateDO extends BudgetedDurableObject {
      try {
        const state = platformControlSchema.parse(await tenantPlatformJson<unknown>(this.env, '/state', { signal: AbortSignal.timeout(2_000) }));
        cached = { accountId: this.env.ACCOUNT_ID, tenantId: this.env.TENANT_ID, platformUrl: this.env.PLATFORM_URL, checkedAt: now, retryAt: now + AUTHORITY_REFRESH_MS, status: state.control.status };
-     } catch {
+     } catch (error) {
+       // The platform's own logs do not record calls through the binding: this is where a failing check shows.
+       console.warn(JSON.stringify({ event: 'platform_authority_check_failed', ms: Date.now() - now, lastSuccessAt: cached?.checkedAt ?? null, message: error instanceof Error ? error.message : String(error) }));
        cached = {
          accountId: this.env.ACCOUNT_ID, tenantId: this.env.TENANT_ID, platformUrl: this.env.PLATFORM_URL,
          checkedAt: cached?.checkedAt ?? now, retryAt: Date.now() + AUTHORITY_RETRY_MS, status: cached?.status ?? null,

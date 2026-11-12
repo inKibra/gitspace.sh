@@ -9,7 +9,7 @@ import {
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { HttpResponse, http } from 'msw';
-import { AccountStateDO } from '../src/account-state.js';
+import { AccountStateDO, AUTHORITY_MAX_STALE_MS } from '../src/account-state.js';
 import { invalidateDeviceAuthority } from '../src/device-authority.js';
 import { network } from './network.js';
 import { tenantRootPrivateKey } from './setup.js';
@@ -127,7 +127,7 @@ function nextSocketEvent(socket: WebSocket): Promise<{ type: 'close' | 'message'
 }
 
 describe('account lifecycle authorization', () => {
-  it('serves cached account state between refreshes, then fails closed once its authority lapses and recovers', async () => {
+  it('serves cached account state through a platform outage, then fails closed once its authority lapses and recovers', async () => {
     const a = await account();
     const now = Date.now();
     const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
@@ -144,14 +144,18 @@ describe('account lifecycle authorization', () => {
     // Requests read the isolate's snapshot; none reaches the account authority.
     expect((await Promise.all(Array.from({ length: 5 }, request))).map(response => response.status)).toEqual([200, 200, 200, 200, 200]);
     expect(reads).toBe(1);
+    // An outage of minutes keeps serving on the last observation.
+    clock.mockReturnValue(now + 10 * 60_000);
+    invalidateDeviceAuthority();
+    expect((await request()).status).toBe(200);
     // The next refresh after the platform observation lapses carries the outage.
-    clock.mockReturnValue(now + 60_001);
+    clock.mockReturnValue(now + AUTHORITY_MAX_STALE_MS + 1);
     invalidateDeviceAuthority();
     const expired = await request();
     expect(expired.status).toBe(503);
     expect(await expired.json()).toMatchObject({ error: { code: 'ACCOUNT_AUTHORITY_UNAVAILABLE' } });
     available = true;
-    clock.mockReturnValue(now + 65_002);
+    clock.mockReturnValue(now + AUTHORITY_MAX_STALE_MS + 5_002);
     invalidateDeviceAuthority();
     expect((await request()).status).toBe(200);
   });
@@ -160,12 +164,12 @@ describe('account lifecycle authorization', () => {
     const state = env.ACCOUNT_STATE.getByName('account');
     const now = Date.now();
     const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
-    expect(await state.authorization(env.ACCOUNT_ID)).toEqual({ status: 'active', checkedAt: now, refreshAt: now + 15_000, expiresAt: now + 60_000 });
+    expect(await state.authorization(env.ACCOUNT_ID)).toEqual({ status: 'active', checkedAt: now, refreshAt: now + 15_000, expiresAt: now + AUTHORITY_MAX_STALE_MS });
     network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/state`, () => new HttpResponse(null, { status: 503 })));
-    expect(await runInDurableObject(state, (_instance, context) => new AccountStateDO(context, env).authorization(env.ACCOUNT_ID))).toEqual({ status: 'active', checkedAt: now, refreshAt: now + 15_000, expiresAt: now + 60_000 });
+    expect(await runInDurableObject(state, (_instance, context) => new AccountStateDO(context, env).authorization(env.ACCOUNT_ID))).toEqual({ status: 'active', checkedAt: now, refreshAt: now + 15_000, expiresAt: now + AUTHORITY_MAX_STALE_MS });
     network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/different-tenant/state`, () => new HttpResponse(null, { status: 503 })));
     expect(await runInDurableObject(state, (_instance, context) => new AccountStateDO(context, { ...env, TENANT_ID: 'different-tenant' }).authorization(env.ACCOUNT_ID))).toEqual({ status: 'unavailable' });
-    clock.mockReturnValue(now + 60_001);
+    clock.mockReturnValue(now + AUTHORITY_MAX_STALE_MS + 1);
     expect(await runInDurableObject(state, (_instance, context) => new AccountStateDO(context, env).authorization(env.ACCOUNT_ID))).toEqual({ status: 'unavailable' });
   });
 
