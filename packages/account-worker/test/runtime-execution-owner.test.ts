@@ -157,7 +157,7 @@ test('codemode executes in a cloud isolate without a machine and composes cloud 
       const read = await invoke('space_workspace', { method: 'questions', workspaceId: 'sibling' });
       expect(read.status).toBe('failed');
       expect(text(read)).toContain('Only the project agent (the project\'s base workspace) can read other workspaces\' questions');
-      const answered = await invoke('space_workspace', { method: 'answer', workspaceId: 'sibling', questionId: 'question', answers: [{ id: 'question', selectedOptions: ['Yes'], customInput: null }] });
+      const answered = await invoke('space_workspace', { method: 'answer', answers: [{ workspaceId: 'sibling', questionId: 'question', answer: 'Yes' }] });
       expect(answered.status).toBe('failed');
       expect(text(answered)).toContain('Only the project agent (the project\'s base workspace) can answer other workspaces\' questions');
       const child = await runtime.harness.commit(async tx => (await tx.createConversation({ ownership: { kind: 'ownerless' } })).id, BACKGROUND_CONTEXT);

@@ -1,11 +1,11 @@
 import { Harness, createRegistry, defineExtension, hook, GenerationTask, CompactionTask, LiveDoc, AgentDoc, type HarnessSettings, type ModelRef, type Storage, type ConversationId, type Cursor, type Wake } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
-import type { JsonValue } from '@earendil-works/chord/json';
 import type { Message, Models } from '@earendil-works/pi-ai';
 import { utf8ByteLength } from '@earendil-works/chord/output';
 import { BROWSER_TOOL_NAME, CODE_ONLY_TOOLS, createRuntimeTools, runtimeToolParameters, type ToolServices } from './tools.js';
 import { createOperationalTasks, type OperationalServices } from './tasks.js';
 import { QuestionsDoc, WorkspaceDoc } from './documents.js';
+import { expireLegacyQuestions } from './questions.js';
 import { sessionControlsExtension, SessionControlsDoc } from './session-controls.js';
 import { createBackgroundAgentTask, createSubagentReplyExtension } from './background-agents.js';
 import { createRetainedRulesExtension, type RetainedRuleServices } from './retained-rules.js';
@@ -35,7 +35,7 @@ export type RuntimeHarnessOptions = {
   /** Absent until explicit inference admission; history does not require a configured provider. */
   model?: ModelRef;
   settings?: HarnessSettings;
-  tools: Omit<ToolServices, 'question'>;
+  tools: ToolServices;
   operations: OperationalServices;
   retainedRules: RetainedRuleServices;
   editTool(model: ModelRef): 'edit' | 'apply_patch';
@@ -148,22 +148,7 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
   const deliver: ConversationLifecycle['deliver'] = async input => (await lifecycleReady.promise).deliver(input);
   const jobs: JobServices = { ...options.operations, deliverConversationEvent: deliver };
   const backgroundAgentTask = createBackgroundAgentTask(deliver);
-  const tools = createRuntimeTools({ ...options.tools, async question(id, api, context) {
-    const watch = await api.watchDoc(QuestionsDoc, context);
-    if (!watch) throw new Error('Question document missing');
-    const current = watch.value?.items.find(item => item.id === id);
-    if (current?.answer !== null && current?.answer !== undefined) { await watch.stop(); return current.answer; }
-    const waiting = Promise.withResolvers<JsonValue>();
-    watch.start(async call => {
-      const question = call.kind === 'value' ? call.value.items.find(item => item.id === id) : undefined;
-      if (question?.answer !== null && question?.answer !== undefined) waiting.resolve(question.answer);
-    });
-    void watch.closed.then(end => { if (end.kind !== 'stopped') waiting.reject(new Error(`Question wait ended: ${end.kind}`)); });
-    const abort = () => { waiting.reject(context.abortSignal?.reason); };
-    context.abortSignal?.addEventListener('abort', abort, { once: true });
-    try { return await waiting.promise; }
-    finally { context.abortSignal?.removeEventListener('abort', abort); await watch.stop(); }
-  } }, jobs, (id, context) => harness.abortTask(id, context));
+  const tools = createRuntimeTools(options.tools, jobs, (id, context) => harness.abortTask(id, context));
   const extension = defineExtension({ name: 'gitspace', tools, tasks: [...createOperationalTasks(options.operations), backgroundAgentTask, createJobTask(jobs), createProcessExitTask(jobs)], sections: [{ key: 'gitspace', async render(input, context) {
     const workspace = await input.read.snapshot(WorkspaceDoc, context);
     const child = (await input.read.snapshot(AgentDefinitionContextDoc, input.conversationId, context))?.child;
@@ -353,5 +338,6 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
       cursor = page.next;
     } while (cursor);
   }, BACKGROUND_CONTEXT);
+  await expireLegacyQuestions(harness);
   return { harness, root, registry, configureModel, lifecycle, backgroundAgentTask };
 }

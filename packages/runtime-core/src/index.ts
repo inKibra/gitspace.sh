@@ -10,4 +10,5 @@ export * from './automation-requests.js';
 export * from './subagent-state.js';
 export * from './conversation-lifecycle.js';
 export { takeoverAsked } from './takeover.js';
+export { postQuestion, questionRefusal, type QuestionClosure } from './questions.js';
 export { invalidBlocksNotice } from './block-notices.js';

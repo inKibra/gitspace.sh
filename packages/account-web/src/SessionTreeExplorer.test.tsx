@@ -4,7 +4,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { verticalSliceFixture } from './App.js';
-import { Composer } from './Composer.js';
+import { StandaloneComposer as Composer } from './Composer.js';
 import type { SessionControlsProps } from './GitSpaceShell.js';
 import { SessionTreeExplorer } from './SessionTreeExplorer.js';
 

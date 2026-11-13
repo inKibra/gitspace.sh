@@ -34,7 +34,7 @@ import { workspaceLiveKey } from '@gitspace/protocol/live-notice';
 import { servicesBlock } from './workspace-service-urls.js';
 import { createCloudCodemode } from './runtime-codemode.js';
 import type { RuntimeModelHelper, RuntimeWebSearchInput, RuntimeWebSearchResult } from './runtime-inference.js';
-import { PROCESS_MACHINE_DETACHED, RuntimeProcArgumentsSchema, RuntimeCodeSearchArgumentsSchema } from '@gitspace/protocol-runtime';
+import { PROCESS_MACHINE_DETACHED, RuntimeProcArgumentsSchema, RuntimeCodeSearchArgumentsSchema, questionState } from '@gitspace/protocol-runtime';
 import { fetchInternalService, isHostedServiceHostname } from './service-access.js';
 import { changeAgentWorkspace, setCloudWorkspacePhase } from './cloud-workspace-lifecycle.js';
 import { readProjectWorkspaces } from './workspace-board.js';
@@ -42,7 +42,8 @@ import { cutForAgent } from '@gitspace/protocol-workspace';
 import { machineCapabilities } from './runtime-attachments.js';
 import { compareCloudHistory, readCloudBaseTip } from './cloud-stack-status.js';
 import type { FleetMachineDefinition } from './fleet-catalog.js';
-import { QuestionsDoc } from '@gitspace/runtime-core';
+import { QuestionsDoc, postQuestion } from '@gitspace/runtime-core';
+import { proposeProjectAnswers } from './project-answers.js';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 
 import { projectEventSchema } from '@gitspace/protocol/project-authority';
@@ -357,11 +358,10 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
     const machine = chosen;
     if (machine.agentsMayAttach === false) {
       const questionId = await runtime.harness.commit(async tx => {
-        const questions = await tx.doc(QuestionsDoc);
-        const pending = questions.items.find(item => item.conversationId === conversationId && item.answer === null && item.id.startsWith(`machine-attach:${machine.id}:`));
+        const pending = (await tx.doc(QuestionsDoc)).items.find(item => item.conversationId === conversationId && questionState(item) === 'open' && item.id.startsWith(`machine-attach:${machine.id}:`));
         if (pending) return pending.id;
         const id = `machine-attach:${machine.id}:${crypto.randomUUID()}`;
-        questions.items.push({ id, conversationId, kind: 'approval', prompt: `Attach ${machine.label} to this workspace? Agents may not attach it on their own.`, choices: [APPROVE, REJECT], answer: null, tool: { name: 'machines', args: { op: 'attach', machine: machine.id } } });
+        await postQuestion(tx, { id, conversationId, kind: 'approval', prompt: `Attach ${machine.label} to this workspace? Agents may not attach it on their own.`, choices: [APPROVE, REJECT], tool: { name: 'machines', args: { op: 'attach', machine: machine.id } } });
         return id;
       }, BACKGROUND_CONTEXT);
       return { state: 'awaiting-approval', machineId: machine.id, label: machine.label, questionId };
@@ -763,15 +763,20 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
             if (!target || target.kind !== 'worktree') throw new Error(`Workspace ${args.workspaceId} is not a workspace in this project`);
             return completed(input, { workspaceId: target.id, name: target.name, ...await env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${target.id}`).projectProgress({ projectId: identity.projectId, workspaceId: target.id }) });
           }
-          case 'questions': case 'answer': {
-            projectAgentOnly(args.method === 'questions' ? 'read other workspaces\' questions' : 'answer other workspaces\' questions');
+          case 'questions': {
+            projectAgentOnly('read other workspaces\' questions');
             const target = await authority().getWorkspace(args.workspaceId);
             if (!target || target.kind !== 'worktree') throw new Error(`Workspace ${args.workspaceId} is not a workspace in this project`);
-            const space = env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${target.id}`);
-            const scope = { projectId: identity.projectId, workspaceId: target.id };
-            if (args.method === 'questions') return completed(input, { workspaceId: target.id, name: target.name, questions: await space.projectQuestions(scope) });
-            await space.projectAnswer(scope, { questionId: args.questionId, answers: args.answers });
-            return completed(input, { workspaceId: target.id, name: target.name, questionId: args.questionId, answered: true });
+            return completed(input, { workspaceId: target.id, name: target.name, questions: await env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${target.id}`).projectQuestions({ projectId: identity.projectId, workspaceId: target.id }) });
+          }
+          case 'answer': {
+            projectAgentOnly('answer other workspaces\' questions');
+            const posted = await proposeProjectAnswers({ runtime: options.runtime(), conversationId: input.conversationId, attemptId: input.attemptId, answers: args.answers, async workspace(workspaceId) {
+              const target = await authority().getWorkspace(workspaceId);
+              if (!target || target.kind !== 'worktree') throw new Error(`Workspace ${workspaceId} is not a workspace in this project`);
+              return { name: target.name, questions: await env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${target.id}`).projectQuestions({ projectId: identity.projectId, workspaceId: target.id }) };
+            } });
+            return { requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: posted.text }] };
           }
           case 'start': {
             projectAgentOnly('start other workspaces');

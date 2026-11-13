@@ -4,7 +4,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { verticalSliceFixture } from './App.js';
 import { GitSpaceShell } from './GitSpaceShell.js';
-import { Composer } from './Composer.js';
+import { StandaloneComposer as Composer } from './Composer.js';
 import type { TranscriptHistory } from './useTranscriptHistory.js';
 import type { GitSpaceShellProps, SessionControlsProps } from './GitSpaceShell.js';
 import { WorkspaceDraftController } from './workspace-draft.js';
@@ -123,6 +123,9 @@ it('preserves newer controlled text when a streaming queued send is accepted', a
   });
   await act(() => { textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })); });
   expect(send.mock.calls.map(([text, behavior]) => ({ text, behavior }))).toEqual([{ text: 'queued message', behavior: 'followUp' }]);
+  // The draft empties at Enter as an accepted send's would, not as an edit to save.
+  expect(textarea.value).toBe('');
+  expect(controller.snapshot()).toMatchObject({ text: '', dirty: false });
   await act(() => {
     Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(textarea, 'newer unsent message');
     textarea.dispatchEvent(new Event('input', { bubbles: true }));

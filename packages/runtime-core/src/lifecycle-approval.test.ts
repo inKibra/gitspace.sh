@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest';
-import { MemoryStorage, type ToolExecutionResult } from '@earendil-works/pi-durable';
+import { MemoryStorage } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT as context } from '@earendil-works/chord/context';
 import { createAssistantMessageEventStream, createModels, type Api, type AssistantMessage, type Model } from '@earendil-works/pi-ai';
 import { LIFECYCLE_APPROVAL_CHOICES, RuntimeIdentitySchema, type RuntimeLifecycleApprovalAnswer, type RuntimeLifecycleApprovalRequest } from '@gitspace/protocol-runtime';
@@ -15,14 +15,19 @@ const pending: RuntimeLifecycleApprovalRequest = { phase: 'machine/prepare', scr
   content: '#!/bin/sh\nbun install --frozen-lockfile\n', previous: { content: '#!/bin/sh\nbun install\n', approvedBy: 'device-1' },
 }] };
 
-/** A workspace runtime whose model runs `machine/prepare` once through `environment` and then answers "Done."; its
- * scripts await approval until a card is approved, and every run that reaches the account is recorded. */
+/** A workspace runtime whose model runs `machine/prepare` through `environment`, runs it again when told the scripts
+ * were approved, and otherwise answers "Done."; its scripts await approval until a card is approved, and every request
+ * and every run that reaches the account is recorded. */
 async function open() {
   const invoked: unknown[] = [];
+  const requests: string[] = [];
   let approved = false;
   const models = Object.assign(createModels(), { getModel: () => model, streamSimple(_model: Model<Api>, request: { messages: unknown[] }) {
-    const call = !JSON.stringify(request.messages).includes('"role":"toolResult"');
-    const reply: AssistantMessage = { role: 'assistant', content: call ? [{ type: 'toolCall', id: 'prepare-call', name: 'environment', arguments: { ...run } }] : [{ type: 'text', text: 'Done.' }], api: model.api, provider: model.provider, model: model.id, stopReason: call ? 'toolUse' : 'stop', timestamp: Date.now(), usage };
+    const text = JSON.stringify(request.messages);
+    requests.push(text);
+    const runs = text.split('"id":"prepare-call-').length - 1;
+    const call = runs === 0 || (runs === 1 && text.includes('Call environment again'));
+    const reply: AssistantMessage = { role: 'assistant', content: call ? [{ type: 'toolCall', id: `prepare-call-${runs + 1}`, name: 'environment', arguments: { ...run } }] : [{ type: 'text', text: 'Done.' }], api: model.api, provider: model.provider, model: model.id, stopReason: call ? 'toolUse' : 'stop', timestamp: Date.now(), usage };
     const stream = createAssistantMessageEventStream();
     stream.push({ type: 'done', reason: call ? 'toolUse' : 'stop', message: reply }); stream.end(reply);
     return stream;
@@ -39,53 +44,51 @@ async function open() {
     onReport: () => {}, admitInference: async () => ({ provider: 'test', modelId: model.id }), bindInferenceConversation: async () => {},
     refuseRequest: unused, unfinished: { begin: () => 0, end: () => {} },
   });
-  /** The approval card once the call opened it. */
+  /** The approval card, once the turn that posted it ended. */
   async function card() {
-    const watch = await runtime.harness.watchDoc(QuestionsDoc, context);
-    if (!watch) throw new Error('Question document missing');
-    const found = Promise.withResolvers<NonNullable<typeof watch.value>['items'][number]>();
-    const check = (value: typeof watch.value) => { const question = value?.items.find(item => item.kind === 'lifecycle-approval'); if (question) found.resolve(question); };
-    check(watch.value);
-    watch.start(async call => { if (call.kind === 'value') check(call.value); });
-    try { return await found.promise; } finally { await watch.stop(); }
+    await runtime.root.waitForIdle(context);
+    const question = (await runtime.harness.snapshot(QuestionsDoc, context))?.items.find(item => item.kind === 'lifecycle-approval');
+    if (!question) throw new Error('No lifecycle approval card was posted');
+    return question;
   }
-  /** The person's answer, as the account records it once it approved the scripts (an approval lands first). */
+  /** The person's answer, as the workspace runtime records it once the account approved the scripts (an approval lands
+   * first); the turn it starts ends before this returns. */
   async function answer(id: string, choice: RuntimeLifecycleApprovalAnswer) {
     if (choice !== 'not-now') approved = true;
-    await runtime.harness.commit(async tx => { const question = (await tx.doc(QuestionsDoc)).items.find(item => item.id === id); if (question) question.answer = choice; }, context);
-  }
-  /** The environment call's result once the turn ended. */
-  async function result(): Promise<Pick<ToolExecutionResult, 'isError'> & { text: string }> {
+    await runtime.lifecycle.closeQuestion(id, async () => ({ closure: { answer: choice }, value: undefined }));
     await runtime.root.waitForIdle(context);
-    const message = (await runtime.root.context(context)).messages.find(item => item.role === 'toolResult');
-    if (message?.role !== 'toolResult') throw new Error('The environment call has no result');
-    return { isError: message.isError, text: message.content.flatMap(item => item.type === 'text' ? [item.text] : []).join('') };
   }
-  return { ...runtime, invoked, card, answer, result };
+  /** Every tool result of the conversation, as its text. */
+  async function results() {
+    return (await runtime.root.context(context)).messages.flatMap(item => item.role === 'toolResult' ? [item.content.flatMap(part => part.type === 'text' ? [part.text] : []).join('')] : []);
+  }
+  return { ...runtime, invoked, requests, card, answer, results };
 }
-test.each<RuntimeLifecycleApprovalAnswer>(['project', 'workspace'])('a run with unapproved scripts waits on a card; approved (%s), it runs once', async choice => {
+test.each<RuntimeLifecycleApprovalAnswer>(['project', 'workspace'])('a run with unapproved scripts posts a card and ends the turn; approved (%s), the agent hears it and its next run runs', async choice => {
   const f = await open();
   try {
     await f.root.submit({ type: 'input', requestId: 'prepare', content: 'Prepare the machine' }, context);
     const question = await f.card();
-    expect(question).toMatchObject({ kind: 'lifecycle-approval', answer: null, choices: Object.values(LIFECYCLE_APPROVAL_CHOICES), lifecycle: { ...pending, callId: 'prepare-call' } });
+    expect(question).toMatchObject({ kind: 'lifecycle-approval', answer: null, choices: Object.values(LIFECYCLE_APPROVAL_CHOICES), lifecycle: { ...pending, callId: 'prepare-call-1' } });
     expect(question.prompt).toContain('10-install.sh');
     expect(f.invoked).toEqual([]);
+    expect(f.requests).toHaveLength(1);
+    expect(await f.results()).toEqual([expect.stringContaining(`Posted the approval of 10-install.sh, which machine/prepare runs (it did not run) to the user as question ${question.id}`)]);
     await f.answer(question.id, choice);
-    expect(await f.result()).toEqual({ isError: false, text: 'machine/prepare succeeded' });
+    expect(f.requests[1]).toContain(`The user approved 10-install.sh for ${choice === 'project' ? 'every workspace of the project' : 'this workspace'} (question ${question.id})`);
+    expect((await f.results()).at(-1)).toBe('machine/prepare succeeded');
     expect(f.invoked).toEqual([run]);
   } finally { await f.harness.close(context); }
 });
 
-test('Not now on the card returns that the scripts were not approved, and the run never starts', async () => {
+test('Not now on the card is the agent\'s next input, and the run never starts', async () => {
   const f = await open();
   try {
     await f.root.submit({ type: 'input', requestId: 'prepare', content: 'Prepare the machine' }, context);
     const question = await f.card();
     await f.answer(question.id, 'not-now');
-    const result = await f.result();
-    expect(result.isError).toBe(true);
-    expect(result.text).toContain('did not approve 10-install.sh (Not now)');
+    expect(f.requests[1]).toContain('did not approve 10-install.sh (Not now)');
     expect(f.invoked).toEqual([]);
+    expect((await f.harness.snapshot(QuestionsDoc, context))?.items.find(item => item.id === question.id)?.answer).toBe('not-now');
   } finally { await f.harness.close(context); }
 });

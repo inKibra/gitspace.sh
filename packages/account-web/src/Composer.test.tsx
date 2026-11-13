@@ -7,7 +7,7 @@ import type { RuntimeBrowserSharePreview, RuntimeDictationServerMessage } from '
 import { chatAttachments, withoutChatAttachments } from '@gitspace/protocol-runtime/chat-attachments';
 import type { SessionControlView } from '@gitspace/protocol-runtime/session-controls';
 import { verticalSliceFixture } from './App.js';
-import { Composer, type ComposerProps } from './Composer.js';
+import { StandaloneComposer as Composer, type ComposerProps } from './Composer.js';
 import { currentDevice } from './device-session.js';
 import type { GitSpaceShellProps, SessionControlsProps } from './GitSpaceShell.js';
 import type { ArtifactUploadClient } from './inspector/artifact-upload.js';
@@ -94,17 +94,62 @@ it('uploads an image and a PDF to the day\'s uploads folder and sends one messag
   await vi.waitFor(() => expect(container.querySelector('[aria-label^="Remove "]')).toBeNull());
 });
 
-it('keeps the draft and its attachments when an upload fails, and says which file failed', async () => {
+function outgoing(): HTMLElement | null {
+  return container.querySelector<HTMLElement>('[aria-label="Messages being sent"]');
+}
+
+it('empties the composer at Enter and shows the message sending; a failed upload stays on it, and Edit puts its text and file back with what was typed since', async () => {
   const onSend = vi.fn<NonNullable<GitSpaceShellProps['onSend']>>(async () => undefined);
-  const uploads = client(async () => { throw new Error('The workspace is no longer open on a machine.'); });
+  const stored = Promise.withResolvers<never>();
+  const uploads = client(() => stored.promise);
   await act(() => root.render(<Composer workspace={verticalSliceFixture.workspace} artifactUpload={uploads} running={false} pending={false} onSend={onSend} />));
 
   const textarea = await draftWithAttachment('Summarize this', new File([new Uint8Array(10)], 'report.pdf', { type: 'application/pdf' }));
+  expect(textarea.value).toBe('');
+  await vi.waitFor(() => expect(container.querySelector('[aria-label="Remove report.pdf"]')).toBeNull());
+  expect(outgoing()?.textContent).toContain('Summarize this');
+  expect([...outgoing()!.querySelectorAll('[role=status]')].map((status) => status.textContent)).toEqual(['Uploaded', 'Sending…']);
+  expect(outgoing()?.querySelector('[aria-label="Attachments"]')?.textContent).toContain('report.pdf');
 
+  await act(() => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(textarea, 'And this');
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await act(async () => { stored.reject(new Error('The workspace is no longer open on a machine.')); await stored.promise.catch(() => undefined); });
+  await settle();
   expect(onSend).not.toHaveBeenCalled();
-  expect(container.querySelector('[role=alert]')?.textContent).toBe('report.pdf did not upload: The workspace is no longer open on a machine.');
-  expect(textarea.value).toBe('Summarize this');
+  expect(outgoing()?.querySelector('[role=alert]')?.textContent).toBe('Not sent: report.pdf did not upload: The workspace is no longer open on a machine.');
+  expect(outgoing()?.textContent).not.toContain('Sending…');
+
+  await act(async () => { [...outgoing()!.querySelectorAll('button')].find((button) => button.textContent === 'Edit')!.click(); });
+  expect(textarea.value).toBe('Summarize this\n\nAnd this');
   expect(container.querySelector('[aria-label="Remove report.pdf"]')).not.toBeNull();
+  expect(outgoing()).toBeNull();
+});
+
+it('sends a failed message again on Retry', async () => {
+  const onSend = vi.fn<NonNullable<GitSpaceShellProps['onSend']>>(async () => undefined);
+  const uploads = client();
+  const commit = uploads.commit.getMockImplementation()!;
+  let failed = false;
+  uploads.commit.mockImplementation(async (link) => {
+    if (failed) return commit(link);
+    failed = true;
+    throw new Error('The workspace is no longer open on a machine.');
+  });
+  await act(() => root.render(<Composer workspace={verticalSliceFixture.workspace} artifactUpload={uploads} running={false} pending={false} onSend={onSend} />));
+
+  await draftWithAttachment('Summarize this', new File([new Uint8Array(10)], 'report.pdf', { type: 'application/pdf' }));
+  expect(outgoing()?.querySelector('[role=alert]')?.textContent).toBe('Not sent: report.pdf did not upload: The workspace is no longer open on a machine.');
+
+  await act(async () => { [...outgoing()!.querySelectorAll('button')].find((button) => button.textContent === 'Retry')!.click(); });
+  await settle();
+  expect(onSend).toHaveBeenCalledOnce();
+  const [text] = onSend.mock.calls[0]!;
+  expect(withoutChatAttachments(text)).toBe('Summarize this');
+  expect(chatAttachments(text).map((attachment) => attachment.name)).toEqual(['report.pdf']);
+  expect(outgoing()?.querySelector('[role=alert]')).toBeNull();
+  expect(outgoing()?.textContent).toContain('Sending…');
 });
 
 it('shows each attachment\'s remove button without hover, and it removes that file', async () => {
@@ -232,10 +277,10 @@ it('swaps a pasted share link out of the draft into a chip of its tab, connects 
   expect(onSend.mock.calls.map(([text]) => text)).toEqual(['[Connected tab "Checkout" (https://shop.example.com/checkout) on Work Chrome, pairingId 00000000-0000-4000-8000-0000000000a1, targetId tab-a; use web_browser with source "relay" and this pairingId]\nWhy does this fail?']);
   expect(textarea.value).toBe('');
   expect(container.querySelector('[aria-label="Shared tabs"]')).toBeNull();
-  expect(container.querySelector('[role=status]')?.textContent).toBe('Tab connected: shop.example.com joined this workspace\'s group in Work Chrome. The agent may use it while it stays there.');
+  expect([...container.querySelectorAll('[role=status]')].map((status) => status.textContent)).toContain('Tab connected: shop.example.com joined this workspace\'s group in Work Chrome. The agent may use it while it stays there.');
 });
 
-it('keeps the draft and its tab chip and shows why when the tab cannot be connected', async () => {
+it('keeps the message with its tab and shows why when the tab cannot be connected, and Edit puts both back into the composer', async () => {
   beforeShareExpiry();
   const link = `${window.location.origin}/s/${shareId}#${secret}`;
   vi.stubGlobal('fetch', vi.fn<typeof globalThis.fetch>(async () => Response.json({ status: 'ok', value: greeting })));
@@ -247,9 +292,15 @@ it('keeps the draft and its tab chip and shows why when the tab cannot be connec
   await send();
   expect(sessionCommand).toHaveBeenCalledOnce();
   expect(onSend).not.toHaveBeenCalled();
-  expect(container.querySelector('[role=alert]')?.textContent).toBe('This share has ended.');
-  expect(textarea.value).toBe('Look at ');
+  expect(outgoing()?.querySelector('[role=alert]')?.textContent).toBe('Not sent: This share has ended.');
+  expect(outgoing()?.textContent).toContain('shop.example.com');
+  expect(textarea.value).toBe('');
+  expect(container.querySelector('[aria-label="Tab Checkout"]')).toBeNull();
+
+  await act(async () => { [...outgoing()!.querySelectorAll('button')].find((button) => button.textContent === 'Edit')!.click(); });
+  expect(textarea.value).toBe('Look at');
   expect(container.querySelector('[aria-label="Tab Checkout"]')).not.toBeNull();
+  expect(outgoing()).toBeNull();
 });
 
 it('says when the shared tab’s Chrome is offline, so sending would not connect it', async () => {

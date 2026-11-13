@@ -18,7 +18,8 @@ import { useInference } from './InferenceContext.js';
 import type { WorkspaceDraftBinding } from './workspace-draft.js';
 import { uploadArtifactFile, uploadRejection, type ArtifactUploadClient } from './inspector/artifact-upload.js';
 import { previewShare } from './share/share-client.js';
-import { StagedChips, useComposerStaging } from './chat/staging.js';
+import { StagedChips, stagedMessage, useComposerStaging } from './chat/staging.js';
+import { OutgoingMessages, useOutbox, type Outbox, type OutgoingMessage, type SentMessage } from './chat/outbox.js';
 import { DictationControl } from './chat/dictation.js';
 
 export type SendBehavior = 'steer' | 'followUp';
@@ -27,7 +28,7 @@ function options(items: readonly { value: string; label: ReactNode }[]): ReactNo
   return <SelectContent>{items.map((item, index) => <SelectItem value={item.value} index={index} key={item.value}>{item.label}</SelectItem>)}</SelectContent>;
 }
 
-type ShareLink = { text: string; shareId: string; secret: string };
+export type ShareLink = { text: string; shareId: string; secret: string };
 type ShareChip = { state: 'reading' } | { state: 'ready'; preview: RuntimeBrowserSharePreview } | { state: 'failed'; message: string };
 const SHARE_ENDED: Record<NonNullable<RuntimeBrowserSharePreview['ended']>, string> = { revoked: 'Sharing stopped', expired: 'This share expired', closed: 'The shared tab was closed' };
 
@@ -141,9 +142,23 @@ export interface ComposerProps {
   /** Runs a command of this workspace's session; with it, a share link of this account in the draft moves out of its
    * text into a tab chip, and the tab is connected to the workspace (`browserShareConnect`) before the message is sent. */
   sessionCommand?: (command: RuntimeSessionCommand) => Promise<RuntimeSessionResult>;
+  /** Holds each message from Enter until the transcript shows it; the transcript shows its messages. */
+  outbox: Outbox;
 }
 
-export function Composer({ workspace, controls, providers, skills = [], running, onSend, draft: workspaceDraft, artifactUpload, pending, recovering = false, error, controlsError, onRetryControls, sessionCommand }: ComposerProps) {
+/** A composer with no transcript beside it: the messages it is sending show above it until the session's queue or
+ * `sent` (the person's messages, as a transcript would show them) has each. */
+export function StandaloneComposer({ sent = [], ...props }: Omit<ComposerProps, 'outbox'> & { sent?: readonly SentMessage[] }) {
+  const queue = props.controls?.value.queue;
+  const arrivals = useMemo(() => ({ sent, queue: [...(queue?.steering ?? []), ...(queue?.followUp ?? [])], latest: true }), [sent, queue]);
+  const outbox = useOutbox(arrivals);
+  return <>
+    <div className="mx-auto w-full max-w-xl"><OutgoingMessages outbox={outbox} /></div>
+    <Composer {...props} outbox={outbox} />
+  </>;
+}
+
+export function Composer({ workspace, controls, providers, skills = [], running, onSend, draft: workspaceDraft, artifactUpload, pending, recovering = false, error, controlsError, onRetryControls, sessionCommand, outbox }: ComposerProps) {
   const icons = useIcons();
   const inference = useInference();
   const assignment = inference?.state?.assignments.find((entry) => entry.projectId === workspace.projectId);
@@ -157,11 +172,10 @@ export function Composer({ workspace, controls, providers, skills = [], running,
   const [attachments, setAttachments] = useState<File[]>([]);
   const [showHistory, setShowHistory] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
-  // Bytes stored so far of each file of the message being sent; null while nothing uploads.
-  const [progress, setProgress] = useState<ReadonlyMap<File, number> | null>(null);
   // Files already stored by an earlier attempt to send them, so sending again does not store them twice.
   const stored = useRef(new WeakMap<File, { url: string; hash: string }>());
-  const [connecting, setConnecting] = useState(false);
+  // One message sends at a time, so they reach the runtime in the order they were sent.
+  const sending = outbox.messages.some((outgoing) => outgoing.status === 'sending');
   const sharing = sessionCommand !== undefined;
   // Share links pasted into the draft, swapped out of its text into tab chips.
   const [tabs, setTabs] = useState<readonly ShareLink[]>([]);
@@ -201,70 +215,97 @@ export function Composer({ workspace, controls, providers, skills = [], running,
     if (!sessionCommand) { named([]); return; }
     void sessionCommand({ type: 'browserCaptures' }).then((result) => named(result.browserCaptures ?? []), () => named([]));
   }, [captures]);
-  const submit = async (draft: string, draftAttachments: File[], behavior: SendBehavior = 'followUp'): Promise<boolean> => {
-    const text = draft.trim();
-    if ((!text && !staging?.chips.length) || !onSend || pending || recovering || inferenceUnavailable || progress !== null || connecting) return false;
-    setSubmitError(null);
-    setJoined([]);
-    const sentDraft = workspaceDraft?.capture();
+  // Sends a message of the outbox: each pasted tab joins this workspace, each file is stored in the drive, then the
+  // message goes. A failure stays on the message.
+  const send = async (outgoing: OutgoingMessage): Promise<void> => {
+    if (!onSend) return;
+    const progress = new Map(outgoing.files.map((file): [File, number] => [file, stored.current.has(file) ? file.size : 0]));
+    outbox.update(outgoing.id, { status: 'sending', error: null, progress: outgoing.files.length ? new Map(progress) : null });
     try {
-      // Each pasted tab joins this workspace before the message naming it is sent; a share that ended is not connected.
       const connected: RuntimeBrowserConnectedTab[] = [];
-      const links = sessionCommand ? tabs.filter((link) => shareEnded(shareChips.get(link.text)) === null) : [];
-      if (sessionCommand && links.length) {
-        setConnecting(true);
-        try {
-          for (const link of links) {
-            const tab = (await sessionCommand({ type: 'browserShareConnect', shareId: link.shareId, secret: link.secret })).browserConnectedTab;
-            if (!tab) throw new Error('The workspace did not connect the shared tab.');
-            connected.push(tab);
-          }
-        } finally { setConnecting(false); }
+      if (sessionCommand) for (const { link } of outgoing.tabs) {
+        const tab = (await sessionCommand({ type: 'browserShareConnect', shareId: link.shareId, secret: link.secret })).browserConnectedTab;
+        if (!tab) throw new Error('The workspace did not connect the shared tab.');
+        connected.push(tab);
       }
       // What the agent reads in place of the links and chips: the tabs, the captures (the workspace adds each one's
       // summary), then the message with the staged choices' lines.
-      const lead = [...connected.map(connectedTabText), ...(captures.length ? [captures.map(captureMention).join(' ')] : [])];
+      const lead = [...connected.map(connectedTabText), ...(outgoing.captures.length ? [outgoing.captures.map(({ id }) => captureMention(id)).join(' ')] : [])];
       const attached: string[] = [];
-      if (draftAttachments.length) {
-        if (!artifactUpload) throw new Error('Files can only be attached in an open workspace.');
-        for (const file of draftAttachments) {
-          const rejection = uploadRejection(file);
-          if (rejection) throw new Error(`${file.name}: ${rejection}`);
-        }
-        const folder = `uploads/${new Date().toISOString().slice(0, 10)}`;
-        setProgress(new Map(draftAttachments.map((file): [File, number] => [file, stored.current.has(file) ? file.size : 0])));
-        // Sequential, like the Inspector's uploads: one chunk body in flight keeps requests under the Worker's size cap.
-        for (const file of draftAttachments) {
-          let artifact = stored.current.get(file);
-          if (!artifact) {
-            try {
-              artifact = await uploadArtifactFile(artifactUpload, file, { signal: new AbortController().signal, folder, onSession: (session) => setProgress((current) => current && new Map(current).set(file, session.received)) });
-            } catch (failure) {
-              throw new Error(`${file.name} did not upload: ${rpcErrorMessage(failure, 'Upload')}`);
-            }
-            stored.current.set(file, artifact);
+      const folder = `uploads/${new Date().toISOString().slice(0, 10)}`;
+      // Sequential, like the Inspector's uploads: one chunk body in flight keeps requests under the Worker's size cap.
+      for (const file of outgoing.files) {
+        let artifact = stored.current.get(file);
+        if (!artifact) {
+          if (!artifactUpload) throw new Error('Files can only be attached in an open workspace.');
+          try {
+            artifact = await uploadArtifactFile(artifactUpload, file, { signal: new AbortController().signal, folder, onSession: (session) => { progress.set(file, session.received); outbox.update(outgoing.id, { progress: new Map(progress) }); } });
+          } catch (failure) {
+            throw new Error(`${file.name} did not upload: ${rpcErrorMessage(failure, 'Upload')}`);
           }
-          attached.push(chatAttachmentTag({ name: file.name, url: artifact.url, type: file.type, size: file.size, hash: artifact.hash }));
+          stored.current.set(file, artifact);
+          progress.set(file, file.size);
+          outbox.update(outgoing.id, { progress: new Map(progress) });
         }
+        attached.push(chatAttachmentTag({ name: file.name, url: artifact.url, type: file.type, size: file.size, hash: artifact.hash }));
       }
-      const send = async (body: string, decisions?: RuntimeMessageDecision[]) => { await onSend([[...lead, body].join('\n'), ...attached].join('\n\n'), behavior, sentDraft, decisions); };
-      if (staging) await staging.deliver(text, send);
-      else await send(text);
-      if (workspaceDraft && sentDraft !== undefined) workspaceDraft.accepted(sentDraft);
-      // The input sends its text trimmed; a link swapped out of the draft can leave a space behind.
-      else setLocalMessage(current => current.trim() === text ? '' : current);
-      // What was attached or mentioned while the message was sending stays for the next one.
-      setAttachments((current) => current.filter((file) => !draftAttachments.includes(file)));
-      setTabs((current) => current.filter((link) => !tabs.includes(link)));
-      setCaptures((current) => current.filter((id) => !captures.includes(id)));
+      let body = '';
+      const deliver = async (message: string, decisions?: RuntimeMessageDecision[]) => {
+        body = [[...lead, message].join('\n'), ...attached].join('\n\n');
+        await onSend(body, 'followUp', outgoing.draft, decisions);
+      };
+      if (staging) await staging.deliver(outgoing.text, deliver);
+      else await deliver(outgoing.text);
+      outbox.update(outgoing.id, { status: 'sent', body, progress: null });
       setJoined(connected);
-      return true;
     } catch (failure) {
-      setSubmitError(rpcErrorMessage(failure, 'Send message'));
-      return false;
-    } finally {
-      setProgress(null);
+      outbox.update(outgoing.id, { status: 'failed', error: rpcErrorMessage(failure, 'Send message'), progress: null });
     }
+  };
+  // The composer empties at once for the next message; the sent one shows in the outbox until the transcript has it.
+  const submit = (draft: string, draftAttachments: File[]): boolean => {
+    const text = draft.trim();
+    if ((!text && !staging?.chips.length) || !onSend || pending || recovering || inferenceUnavailable || sending) return false;
+    const rejection = draftAttachments.length && !artifactUpload ? 'Files can only be attached in an open workspace.'
+      : draftAttachments.flatMap((file) => { const reason = uploadRejection(file); return reason ? [`${file.name}: ${reason}`] : []; })[0];
+    if (rejection) { setSubmitError(rejection); return false; }
+    setSubmitError(null);
+    setJoined([]);
+    const outgoing = outbox.add({
+      text,
+      shown: staging ? stagedMessage(text, staging.chips) : text,
+      files: draftAttachments,
+      // A pasted share that ended is not connected.
+      tabs: (sessionCommand ? tabs : []).flatMap((link) => {
+        const chip = shareChips.get(link.text);
+        if (shareEnded(chip) !== null) return [];
+        const preview = chip?.state === 'ready' ? chip.preview : null;
+        return [{ link, host: preview?.page.site ?? 'Shared tab', browser: preview?.browser ?? null }];
+      }),
+      captures: captures.map((id) => ({ id, name: captureViews.get(id)?.capture.name ?? 'Capture' })),
+      draft: workspaceDraft?.capture(),
+    });
+    // The workspace draft empties without a save of its own: the runtime clears the sent draft once it accepts the send.
+    if (workspaceDraft && outgoing.draft) workspaceDraft.accepted(outgoing.draft);
+    else setLocalMessage('');
+    setAttachments([]);
+    setTabs([]);
+    setCaptures([]);
+    void send(outgoing);
+    return true;
+  };
+  outbox.actions.current = {
+    // The failed message's text, files, tabs and captures go back into the composer ahead of what was added since.
+    edit(outgoing) {
+      if (outgoing.text) setMessage(message.trim() ? `${outgoing.text}\n\n${message}` : outgoing.text);
+      setAttachments((current) => [...outgoing.files, ...current.filter((file) => !outgoing.files.includes(file))]);
+      setTabs((current) => [...outgoing.tabs.map(({ link }) => link).filter((link) => !current.some((tab) => tab.text === link.text)), ...current]);
+      setCaptures((current) => [...outgoing.captures.map(({ id }) => id).filter((id) => !current.includes(id)), ...current]);
+      outbox.remove(outgoing.id);
+    },
+    retry(outgoing) {
+      if (!sending && !pending && !recovering) void send(outgoing);
+    },
   };
   const runControl = (operation: Promise<void>): void => {
     setSubmitError(null);
@@ -304,7 +345,7 @@ export function Composer({ workspace, controls, providers, skills = [], running,
       }
       const known = new Set(queue.map((item) => item.id));
       const added = next.find((item) => !known.has(item.id));
-      if (added) return submit(added.text, added.files, 'followUp');
+      if (added) return submit(added.text, added.files);
     } catch (failure) {
       setSubmitError(rpcErrorMessage(failure, 'Update message queue'));
       return false;
@@ -370,7 +411,7 @@ export function Composer({ workspace, controls, providers, skills = [], running,
       return <li key={link.text} aria-label={`Tab ${preview ? preview.page.title || preview.page.site : 'from a share link'}`} className="flex min-w-0 flex-wrap items-center gap-2">
         <TabChip host={preview?.page.site ?? 'Shared tab'} detail={preview?.browser ?? null} />
         <span className={`min-w-0 text-caption ${chip?.state === 'failed' ? 'text-destructive' : 'text-muted-foreground'}`}>{caption}</span>
-        <Button variant="ghost" size="icon-compact" aria-label="Remove tab" disabled={connecting} onClick={() => setTabs((current) => current.filter((item) => item.text !== link.text))}><XClose width={14} height={14} /></Button>
+        <Button variant="ghost" size="icon-compact" aria-label="Remove tab" onClick={() => setTabs((current) => current.filter((item) => item.text !== link.text))}><XClose width={14} height={14} /></Button>
       </li>;
     })}</ul> : null}
     {captures.length ? <ul aria-label="Mentioned captures" className="flex flex-wrap gap-1.5">{captures.map((id) => {
@@ -382,7 +423,7 @@ export function Composer({ workspace, controls, providers, skills = [], running,
         <Button variant="ghost" size="icon-compact" aria-label="Remove capture" onClick={() => setCaptures((current) => current.filter((item) => item !== id))}><XClose width={14} height={14} /></Button>
       </li>;
     })}</ul> : null}
-    {staging ? <StagedChips staging={staging} disabled={pending || progress !== null || connecting} /> : null}
+    {staging ? <StagedChips staging={staging} disabled={pending || sending} /> : null}
     {controls && automationRuns.length ? <ul aria-label="Automation runs waiting" className="flex flex-col gap-1.5">{automationRuns.map(({ index, message: run }) => <AutomationQueueRow key={run.run ?? `followUp:${index}`} message={run} dismissing={run.run !== null && dismissing === run.run}
       onDeliver={() => runControl(controls.onPromoteQueuedMessage(index))}
       onDismiss={() => { if (run.run === null) runControl(controls.onRemoveQueuedMessage('followUp', index)); else dismissRun(run.run); }}
@@ -392,11 +433,11 @@ export function Composer({ workspace, controls, providers, skills = [], running,
       onBlurCapture={() => workspaceDraft?.onBlur()}
       value={message}
       onValueChange={setMessage}
-      onSend={(text, files, meta) => { if (meta?.queuedId) return; void submit(text, files); }}
+      onSend={(text, files, meta) => { if (meta?.queuedId) return; submit(text, files); }}
       placeholder={recovering ? 'Recovering agent…' : staging?.chips.length ? 'Say why, or add context; your choices go with it…' : `Ask the ${workspace.kind === 'project' ? 'project' : 'workspace'} agent…`}
       sendable={!!staging?.chips.length}
       disabled={!onSend || recovering || inferenceUnavailable}
-      busy={pending || progress !== null || connecting}
+      busy={pending || sending}
       files={attachments}
       onFilesChange={setAttachments}
       accept={CHAT_ATTACHMENT_ACCEPT}
@@ -436,11 +477,6 @@ export function Composer({ workspace, controls, providers, skills = [], running,
         </DropdownMenu>
       </> : null}
     />
-    {progress !== null ? <ul aria-label="Uploads" className="flex flex-col gap-0.5 text-caption text-muted-foreground">{[...progress].map(([file, received]) => <li key={`${file.name}:${file.size}:${file.lastModified}`} role="status" className="flex min-w-0 items-center gap-2">
-      <span className="min-w-0 truncate">{received >= file.size ? 'Uploaded' : 'Uploading'} {file.name}</span>
-      <span className="shrink-0 tabular-nums">{Math.floor((received / file.size) * 100)}%</span>
-    </li>)}</ul> : null}
-    {connecting ? <p role="status" className="text-caption text-muted-foreground">Connecting the shared tab…</p> : null}
     {error || submitError ? <p role="alert" className="text-caption text-destructive">{error ?? submitError}</p> : null}
   </div>;
 }

@@ -7,7 +7,9 @@ import { RuntimeGitCheckpointSchema, RuntimeIdentitySchema, type RuntimeTakeover
 import { QuestionsDoc } from '@gitspace/runtime-core';
 import { createWorkspaceRuntime, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
 import type { WorkspaceTurnReport } from '@gitspace/blocks';
+import type { ProjectQuestion } from '@gitspace/runtime-workspace-do';
 import { projectProgress, projectWatchHooks, startFromProject } from '../src/project-watch.js';
+import { proposeProjectAnswers, settleProjectAnswers } from '../src/project-answers.js';
 import { createWorkspaceMetadataTables } from '../src/workspace-metadata.js';
 import { automationTurnHooks, cancelAutomationTurn, submitAutomationTurn } from '../src/automation-turns.js';
 import type { AutomationTurnReport } from '../src/project-automations.js';
@@ -302,7 +304,7 @@ test('progress shows the running turn\'s newest messages; a question in it repor
   });
 });
 
-test('the project agent reads a pending ask and answers it: the asking call resumes with the answer, told the project agent gave it', async () => {
+test('the project agent answers an open ask for the person: the answer is the asking conversation\'s next input, and a closed question takes no other answer', async () => {
   await runInDurableObject(room(), async (_instance, ctx) => {
     const f = await watchFixture(ctx);
     try {
@@ -315,19 +317,58 @@ test('the project agent reads a pending ask and answers it: the asking call resu
       expect(others).toEqual([]);
       expect(question).toEqual({ id: question.id, conversation: 'main', kind: 'ask', prompt: 'Which bucket?', choices: ['assets', 'uploads'], answerable: true, why: null });
       // An option the question does not offer is refused before anything is recorded.
-      await expect(f.runtime.projectAnswer({ questionId: question.id, answers: [{ id: question.id, selectedOptions: ['archive'], customInput: null }] })).rejects.toThrow('archive is not one of its choices: assets, uploads');
+      await expect(f.runtime.projectAnswer({ questionId: question.id, answers: [{ id: question.id, selectedOptions: ['archive'], customInput: null }], for: 'Brad' })).rejects.toThrow('archive is not one of its choices: assets, uploads');
       f.reply('Moved to uploads.');
-      await f.runtime.projectAnswer({ questionId: question.id, answers: [{ id: question.id, selectedOptions: ['uploads'], customInput: null }] });
+      const answers = [{ id: question.id, selectedOptions: ['uploads'], customInput: null }];
+      expect(await f.runtime.projectAnswer({ questionId: question.id, answers, for: 'Brad' })).toEqual({ delivered: true });
       await f.settle();
       const stored = (await f.runtime.harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items.find(item => item.id === question.id);
-      expect(stored).toMatchObject({ answer: [{ id: question.id, selectedOptions: ['uploads'], customInput: null }], answeredBy: { by: 'project-agent' } });
+      expect(stored).toMatchObject({ answer: answers, answeredBy: { by: 'project-agent', for: 'Brad' } });
       expect(Number.isNaN(Date.parse(stored?.answeredBy?.at ?? ''))).toBe(false);
-      const result = (await f.root.context(BACKGROUND_CONTEXT)).messages.find(message => message.role === 'toolResult' && message.toolName === 'ask');
-      expect(result?.role === 'toolResult' ? result.content : null).toEqual([{ type: 'text', text: `The project agent answered this question, not the person: [{"id":"${question.id}","selectedOptions":["uploads"],"customInput":null}]` }]);
-      expect(result?.role === 'toolResult' ? result.details : null).toMatchObject({ answeredBy: { by: 'project-agent' } });
+      const heard = (await f.root.context(BACKGROUND_CONTEXT)).messages.some(message => message.role === 'user' && JSON.stringify(message.content).includes(`The project agent answered your question (question ${question.id}) for Brad`));
+      expect(heard).toBe(true);
       expect(await f.runtime.projectQuestions()).toEqual([]);
-      // Answered once; a second answer is refused.
-      await expect(f.runtime.projectAnswer({ questionId: question.id, answers: [{ id: question.id, selectedOptions: ['assets'], customInput: null }] })).rejects.toThrow('already answered');
+      // A retried delivery of the same answer is delivered; another answer is not.
+      expect(await f.runtime.projectAnswer({ questionId: question.id, answers, for: 'Brad' })).toEqual({ delivered: true });
+      expect(await f.runtime.projectAnswer({ questionId: question.id, answers: [{ id: question.id, selectedOptions: ['assets'], customInput: null }], for: 'Brad' })).toEqual({ delivered: false, reason: `Question ${question.id} is already answered (by the project agent); it takes no other answer.` });
+    } finally { await f.runtime.harness.close(BACKGROUND_CONTEXT); }
+  });
+});
+
+test('the project agent\'s batch of answers posts one approval card and sends nothing; approved, each answer\'s outcome is reported, rejected, nothing is sent', async () => {
+  await runInDurableObject(room(), async (_instance, ctx) => {
+    const f = await watchFixture(ctx);
+    try {
+      const open = (id: string, prompt: string): ProjectQuestion => ({ id, conversation: 'main', kind: 'ask', prompt, choices: ['assets', 'uploads'], answerable: true, why: null });
+      const workspaces: Record<string, { name: string; questions: ProjectQuestion[] }> = { 'ws-a': { name: 'Uploads', questions: [open('question:1', 'Which bucket?')] }, 'ws-b': { name: 'Docs', questions: [open('question:2', 'Where do the docs go?'), open('question:3', 'Keep the old page?')] } };
+      const workspace = async (id: string) => { const found = workspaces[id]; if (!found) throw new Error(`Workspace ${id} is not a workspace in this project`); return found; };
+      const answers = [{ workspaceId: 'ws-a', questionId: 'question:1', answer: 'uploads' }, { workspaceId: 'ws-b', questionId: 'question:2', answer: 'In the wiki' }, { workspaceId: 'ws-b', questionId: 'question:3', answer: ['assets'] }];
+      // A question that is not open is refused before any card is posted.
+      await expect(proposeProjectAnswers({ runtime: f.runtime, conversationId: String(f.root.id), attemptId: 'attempt-0', answers: [{ workspaceId: 'ws-a', questionId: 'question:9', answer: 'uploads' }], workspace })).rejects.toThrow('Question question:9 is not open in workspace Uploads');
+      const posted = await proposeProjectAnswers({ runtime: f.runtime, conversationId: String(f.root.id), attemptId: 'attempt-1', answers, workspace });
+      const card = (await f.runtime.harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items.find(item => item.id === posted.questionId);
+      expect(card).toMatchObject({ kind: 'approval', answer: null, conversationId: String(f.root.id), tool: { name: 'space_workspace' } });
+      expect(card?.prompt).toContain('1. Uploads: Which bucket?\n   Answer: uploads');
+      expect(card?.prompt).toContain('2. Docs: Where do the docs go?\n   Answer: In the wiki');
+      const delivered: { workspaceId: string; questionId: string; answers: unknown; for: string }[] = [];
+      const settle = (approved: boolean) => settleProjectAnswers({ questionId: posted.questionId, card: card?.tool?.args, decision: { approved, note: null }, person: 'Brad', async deliver(workspaceId, answer) {
+        delivered.push({ workspaceId, ...answer });
+        if (answer.questionId === 'question:2') return { delivered: false, reason: 'Question question:2 is closed (the person dismissed it), so it can no longer be answered.' };
+        if (answer.questionId === 'question:3') throw new Error('Workspace ws-b did not respond');
+        return { delivered: true };
+      } });
+      const rejected = await settle(false);
+      expect(delivered).toEqual([]);
+      expect(rejected).toBe(`The user rejected your proposed answers (question ${posted.questionId}); nothing was sent.`);
+      const outcome = await settle(true);
+      expect(delivered).toEqual([
+        { workspaceId: 'ws-a', questionId: 'question:1', answers: [{ id: 'question:1', selectedOptions: ['uploads'], customInput: null }], for: 'Brad' },
+        { workspaceId: 'ws-b', questionId: 'question:2', answers: [{ id: 'question:2', selectedOptions: [], customInput: 'In the wiki' }], for: 'Brad' },
+        { workspaceId: 'ws-b', questionId: 'question:3', answers: [{ id: 'question:3', selectedOptions: ['assets'], customInput: null }], for: 'Brad' },
+      ]);
+      expect(outcome).toContain('- Uploads (ws-a), question question:1: delivered');
+      expect(outcome).toContain('- Docs (ws-b), question question:2: not delivered, the question had already closed.');
+      expect(outcome).toContain('- Docs (ws-b), question question:3: failed: Workspace ws-b did not respond');
     } finally { await f.runtime.harness.close(BACKGROUND_CONTEXT); }
   });
 });
@@ -337,7 +378,7 @@ test('plan, tool and lifecycle approvals and take-over requests are listed as a 
     const f = await watchFixture(ctx);
     try {
       const conversationId = String(f.root.id);
-      const takeover: RuntimeTakeoverQuestion = { source: 'cloud', pairingId: null, browser: 'Cloud browser', groupId: '0b6a4c1e-2f3d-4a5b-8c7d-9e0f1a2b3c4d', targetId: 'tab', url: 'https://shop.test/checkout', title: 'Checkout', holder: 'agent', callId: 'call', askedAt: '2026-11-07T10:00:00.000Z', until: '2026-11-07T10:30:00.000Z', waiting: true };
+      const takeover: RuntimeTakeoverQuestion = { source: 'cloud', pairingId: null, browser: 'Cloud browser', groupId: '0b6a4c1e-2f3d-4a5b-8c7d-9e0f1a2b3c4d', targetId: 'tab', url: 'https://shop.test/checkout', title: 'Checkout', holder: 'agent', callId: 'call', askedAt: '2026-11-07T10:00:00.000Z' };
       await f.runtime.harness.commit(async tx => {
         (await tx.doc(QuestionsDoc)).items.push(
           { id: 'plan', conversationId, kind: 'approval', prompt: 'Approve the plan?', choices: [], answer: null },
@@ -350,7 +391,7 @@ test('plan, tool and lifecycle approvals and take-over requests are listed as a 
       expect(listed.map(question => [question.id, question.kind, question.answerable])).toEqual([['plan', 'plan-approval', false], ['machine', 'tool-approval', false], ['scripts', 'lifecycle-approval', false], ['tab', 'takeover', false]]);
       expect(listed.every(question => question.why?.startsWith('A person'))).toBe(true);
       for (const { id, choice, kind } of [{ id: 'plan', choice: 'Approve', kind: 'plan-approval' }, { id: 'machine', choice: 'Approve', kind: 'tool-approval' }, { id: 'scripts', choice: 'project', kind: 'lifecycle-approval' }, { id: 'tab', choice: 'Not now', kind: 'takeover' }]) {
-        await expect(f.runtime.projectAnswer({ questionId: id, answers: [{ id, selectedOptions: [choice], customInput: null }] })).rejects.toThrow(`Question ${id} is a ${kind}, not a plain question`);
+        await expect(f.runtime.projectAnswer({ questionId: id, answers: [{ id, selectedOptions: [choice], customInput: null }], for: 'Brad' })).rejects.toThrow(`Question ${id} is a ${kind}, not a plain question`);
       }
       const items = (await f.runtime.harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items ?? [];
       expect(items.map(item => [item.id, item.answer, item.answeredBy])).toEqual([['plan', null, undefined], ['machine', null, undefined], ['scripts', null, undefined], ['tab', null, undefined]]);

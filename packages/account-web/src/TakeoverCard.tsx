@@ -1,39 +1,28 @@
-import { createContext, useState, type ReactNode } from 'react';
-import { TAKEOVER_ANSWERS, TAKEOVER_CHOICES, type RuntimeLifecycleApprovalAnswer, type RuntimeQuestion, type RuntimeTakeoverQuestion } from '@gitspace/protocol-runtime';
-import type { RuntimeSessionCommand, RuntimeSessionResult } from '@gitspace/protocol-runtime/session-controls';
+import { useState } from 'react';
+import { questionState, TAKEOVER_ANSWERS, TAKEOVER_CHOICES, type RuntimeQuestion, type RuntimeTakeoverQuestion } from '@gitspace/protocol-runtime';
+import type { RuntimeSessionCommand } from '@gitspace/protocol-runtime/session-controls';
 import { Badge, Button, useShape } from '@gitspace/ui';
 import { Cloud01, Monitor01 } from '@untitledui/icons';
 import { GitSpaceMarkdown } from './GitSpaceMarkdown.js';
+import { CLOSED_REASON, type QuestionCards } from './QuestionCards.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
-
-/** What a transcript needs to show the cards agent calls wait on (ask_takeover, and an `environment` run's lifecycle
- * approval): the workspace's questions (each card finds its own by the agent call it belongs to), the main
- * conversation's session commands, a lifecycle approval's answer, and the Watch dialog for a cloud tab. */
-export interface TakeoverCards {
-  questions: readonly RuntimeQuestion[];
-  request(command: RuntimeSessionCommand): Promise<RuntimeSessionResult>;
-  /** Answers a lifecycle approval card as the person; approving needs their lifecycle control. */
-  answer(questionId: string, answer: RuntimeLifecycleApprovalAnswer): Promise<void>;
-  /** The Watch dialog on the card's cloud tab, until `onClose`. */
-  watch(card: RuntimeTakeoverQuestion, onClose: () => void): ReactNode;
-}
-/** Absent outside a cloud workspace's transcript: ask_takeover and environment calls then show as plain tool calls. */
-export const TakeoverCardsContext = createContext<TakeoverCards | null>(null);
 
 /**
  * An ask_takeover card (docs/APERTURE-DESIGN.md §7.2), in the look of the agent's questions: why the agent asks, the
  * browser and the tab, and Take over or Not now. Take over makes you the tab's holder, then brings the tab to the front
  * in Chrome or opens the Watch dialog on the cloud browser; while you hold it the card says so and offers Resume agent.
- * A card that ended (handed back, or Not now) is read-only.
+ * Until you take the tab you can Dismiss the card. A card that ended (handed back, Not now, or closed unanswered) is
+ * read-only and says how it ended.
  */
-export function TakeoverCard({ question, card, cards }: { question: RuntimeQuestion; card: RuntimeTakeoverQuestion; cards: TakeoverCards }) {
+export function TakeoverCard({ question, card, cards }: { question: RuntimeQuestion; card: RuntimeTakeoverQuestion; cards: QuestionCards }) {
   const shape = useShape();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [watching, setWatching] = useState(false);
   const target = { groupId: card.groupId, targetId: card.targetId };
   const chrome = card.source === 'chrome';
-  const open = question.answer === null;
+  const state = questionState(question);
+  const open = state === 'open';
   const yours = open && card.holder === 'you';
   const url = URL.parse(card.url);
   async function perform(label: string, commands: RuntimeSessionCommand[], then?: () => void) {
@@ -47,8 +36,9 @@ export function TakeoverCard({ question, card, cards }: { question: RuntimeQuest
   }
   const status = question.answer === TAKEOVER_ANSWERS.handedBack ? <Badge variant="dot" color="green">Handed back</Badge>
     : question.answer === TAKEOVER_ANSWERS.declined ? <Badge variant="dot" color="gray">Not now</Badge>
-      : yours ? <Badge variant="dot" color="blue">You’re in control</Badge> : null;
-  return <section aria-label={`Take over · ${card.browser}`} data-takeover={open ? card.holder : String(question.answer)} className={`relative w-full max-w-[520px] overflow-hidden border border-border bg-card ${shape.container}`}>
+      : yours ? <Badge variant="dot" color="blue">You’re in control</Badge>
+        : state === 'closed' && question.closed ? <Badge variant="dot" color="gray">{CLOSED_REASON[question.closed.reason]}</Badge> : null;
+  return <section aria-label={`Take over · ${card.browser}`} data-takeover={open ? card.holder : state === 'closed' ? 'closed' : String(question.answer)} className={`relative w-full max-w-[520px] overflow-hidden border border-border bg-card ${shape.container}`}>
     <div className="flex items-center justify-between gap-2 px-4 pb-2 pt-3.5 text-[12px] text-muted-foreground sm:px-5 sm:pt-4">
       <span>The agent asks you to take over</span>
       {status}
@@ -60,8 +50,7 @@ export function TakeoverCard({ question, card, cards }: { question: RuntimeQuest
         <span className="shrink-0 text-foreground">{card.browser}</span>
         <span className="min-w-0 truncate">· {url ? `${url.host}${url.pathname === '/' ? '' : url.pathname}` : card.url}</span>
       </p>
-      {yours ? <p className="text-caption text-muted-foreground">The agent is paused · it sees your changes when it resumes</p>
-        : open && !card.waiting ? <p className="text-caption text-muted-foreground">The agent stopped waiting. If you take the tab, it hears when you hand it back.</p> : null}
+      {yours ? <p className="text-caption text-muted-foreground">The agent is paused · it sees your changes when it resumes</p> : null}
       {error ? <p role="alert" className="text-caption text-destructive [overflow-wrap:anywhere]">{error}</p> : null}
     </div>
     {open ? <div className="px-4 pb-2 pt-1 sm:px-5">
@@ -73,6 +62,7 @@ export function TakeoverCard({ question, card, cards }: { question: RuntimeQuest
               <Button variant="primary" size="sm" disabled={busy} onClick={() => void perform('Resume agent', [{ type: 'browserResume', ...target }])}>Resume agent</Button>
             </>
           : <>
+              <Button variant="ghost" size="sm" disabled={busy} onClick={() => void perform('Dismiss', [{ type: 'dismissQuestion', id: question.id }])}>Dismiss</Button>
               <Button variant="ghost" size="sm" disabled={busy} onClick={() => void perform(TAKEOVER_CHOICES.notNow, [{ type: 'answerAsk', id: question.id, answers: [{ id: question.id, selectedOptions: [TAKEOVER_CHOICES.notNow], customInput: null }] }])}>{TAKEOVER_CHOICES.notNow}</Button>
               {/* Chrome brings the tab you now hold to the front; the cloud browser has no window of yours, so its Watch dialog opens. */}
               <Button variant="primary" size="sm" disabled={busy} onClick={() => void perform(TAKEOVER_CHOICES.takeOver, chrome ? [{ type: 'browserTakeOver', ...target }, { type: 'browserFocusTab', ...target }] : [{ type: 'browserTakeOver', ...target }], chrome ? undefined : () => setWatching(true))}>{TAKEOVER_CHOICES.takeOver}</Button>

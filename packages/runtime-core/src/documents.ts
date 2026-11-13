@@ -1,4 +1,4 @@
-import type { RuntimeLifecycleApprovalQuestion, RuntimePlanStep, RuntimeQuestionTool, RuntimeTakeoverQuestion, RuntimeTodoItem } from '@gitspace/protocol-runtime';
+import type { RuntimeLifecycleApprovalQuestion, RuntimePlanStep, RuntimeQuestionClosed, RuntimeQuestionTool, RuntimeTakeoverQuestion, RuntimeTodoItem } from '@gitspace/protocol-runtime';
 import { defineDoc, type CheckpointInfo } from '@earendil-works/pi-durable';
 import type { JsonValue } from '@earendil-works/chord/json';
 import type { RuntimeAttachment } from '@gitspace/protocol-runtime';
@@ -15,10 +15,13 @@ export const TodosDoc = defineDoc<{ items: RuntimeTodoItem[] }>({ kind: 'gitspac
  * they are the plan in effect, and `revision` counts approvals. While a later proposal waits or after it is rejected,
  * `approved` holds the plan in effect. Records from before plans had steps have no `steps`, `revision` or `approved`. */
 export const PlanDoc = defineDoc<{ text: string; status: 'draft' | 'proposed' | 'approved' | 'rejected'; questionId: string | null; steps?: RuntimePlanStep[]; revision?: number; approved?: { text: string; steps: RuntimePlanStep[] } | null }>({ kind: 'gitspace.plan', version: 1, scope: 'conversation', history: 'rewindable', fork: 'asOf', initial: () => ({ text: '', status: 'draft', questionId: null, steps: [], revision: 0, approved: null }), checkpointWhen: boundedReplay });
-/** Questions for the user: the agent's `ask`, plan and machine approvals, ask_takeover cards (`takeover`), and the
- * lifecycle approval cards an `environment` run waits on (`lifecycle-approval`). `answeredBy`: the project agent answered
- * a plain ask in the person's place; absent, a person answered. */
-export const QuestionsDoc = defineDoc<{ items: { id: string; conversationId: string; kind: 'ask' | 'approval' | 'takeover' | 'lifecycle-approval'; prompt: string; choices: string[]; answer: JsonValue | null; answeredBy?: AskAnswerer; tool?: RuntimeQuestionTool; takeover?: RuntimeTakeoverQuestion; lifecycle?: RuntimeLifecycleApprovalQuestion }[] }>({ kind: 'gitspace.questions', version: 1, scope: 'session', initial: () => ({ items: [] }), checkpointWhen: boundedReplay });
+/** Questions for the user: the agent's `ask`, plan and machine approvals, the project agent's batch of answers
+ * (`tool.name` `space_workspace`), ask_takeover cards (`takeover`), and the lifecycle approval cards an `environment`
+ * run posts (`lifecycle-approval`). No call waits on one: asking ends the agent's turn, and answering or closing it
+ * delivers the conversation's next input (`questions.ts`). `answeredBy`: the project agent answered a plain ask in the
+ * person's place; absent, a person answered. `closed`: it closed unanswered and takes no answer. */
+export type Question = { id: string; conversationId: string; kind: 'ask' | 'approval' | 'takeover' | 'lifecycle-approval'; prompt: string; choices: string[]; answer: JsonValue | null; askedAt?: string; answeredAt?: string; answeredBy?: AskAnswerer; closed?: RuntimeQuestionClosed; tool?: RuntimeQuestionTool; takeover?: RuntimeTakeoverQuestion; lifecycle?: RuntimeLifecycleApprovalQuestion };
+export const QuestionsDoc = defineDoc<{ items: Question[] }>({ kind: 'gitspace.questions', version: 1, scope: 'session', initial: () => ({ items: [] }), checkpointWhen: boundedReplay });
 export const EnvironmentDoc = defineDoc<{ profile: string | null; runs: JsonValue[] }>({ kind: 'gitspace.environment', version: 1, scope: 'session', initial: () => ({ profile: null, runs: [] }), checkpointWhen: boundedReplay });
 export const JobsDoc = defineDoc<{ jobs: JsonValue[]; processes: JsonValue[] }>({ kind: 'gitspace.jobs', version: 1, scope: 'session', initial: () => ({ jobs: [], processes: [] }), checkpointWhen: boundedReplay });
 export const QaDoc = defineDoc<{ items: JsonValue[] }>({ kind: 'gitspace.qa', version: 1, scope: 'session', initial: () => ({ items: [] }), checkpointWhen: boundedReplay });

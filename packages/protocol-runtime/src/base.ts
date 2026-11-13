@@ -5,6 +5,7 @@ import { GitLfsRestoredSchema } from '@gitspace/protocol-workspace';
 import { RuntimeGitCheckpointSchema } from './git-checkpoint.js';
 import { RuntimeTakeoverQuestionSchema } from './browser-takeover.js';
 import { RuntimeLifecycleApprovalQuestionSchema } from './lifecycle-approval.js';
+import { askAnswererSchema } from '@gitspace/blocks';
 
 export const RuntimeProjectIdSchema = z.string().min(1).brand<'ProjectId'>();
 export const RuntimeWorkspaceIdSchema = z.string().min(1).brand<'WorkspaceId'>();
@@ -41,12 +42,40 @@ export const RuntimeMessageSchema = z.object({ id: z.string(), role: z.enum(['us
  * `streamed`: characters of the reply the model is writing now, so a client reloads the transcript as it grows. */
 export const RuntimeConversationSchema = z.object({ id: z.string(), parentId: z.string().nullable(), title: z.string(), status: z.enum(['idle', 'running', 'waiting', 'failed']), error: z.string().optional(), retry: z.object({ at: z.iso.datetime(), error: z.string() }).optional(), streamed: z.number().int().nonnegative().optional(), messages: z.array(RuntimeMessageSchema) });
 export const RuntimeTaskSchema = z.object({ id: z.string(), kind: z.string(), conversationId: z.string().nullable(), parentId: z.string().nullable(), background: z.boolean(), state: z.enum(['pending', 'running', 'waiting', 'completed', 'failed', 'interrupted']), machineId: RuntimeMachineIdSchema.nullable(), result: RuntimeJsonSchema.nullable() });
-/** A machine-attach approval names the machine it attaches; a `takeover` question is an ask_takeover card; a
- * `lifecycle-approval` question is the card an agent's `environment` run waits on. */
+/** A machine-attach approval names the machine it attaches, and the project agent's batch of answers names
+ * `space_workspace`; a `takeover` question is an ask_takeover card; a `lifecycle-approval` question is the card an
+ * agent's `environment` run posts. */
 export const RuntimeQuestionToolSchema = z.object({ name: z.string(), args: RuntimeJsonSchema });
 export type RuntimeQuestionTool = z.infer<typeof RuntimeQuestionToolSchema>;
-export const RuntimeQuestionSchema = z.object({ id: z.string(), conversationId: z.string(), kind: z.enum(['ask', 'approval', 'takeover', 'lifecycle-approval']), prompt: z.string(), choices: z.array(z.string()), answer: RuntimeJsonSchema.nullable(), tool: RuntimeQuestionToolSchema.optional(), takeover: RuntimeTakeoverQuestionSchema.optional(), lifecycle: RuntimeLifecycleApprovalQuestionSchema.optional() });
+/** Why a question closed without an answer: the person dismissed it, a person stopped or reset its conversation, or it
+ * was left open by a call that no longer waits (`expired`). A closed question cannot be answered. */
+export const RuntimeQuestionClosedSchema = z.object({ reason: z.enum(['dismissed', 'stopped', 'expired']), at: z.iso.datetime() });
+export type RuntimeQuestionClosed = z.infer<typeof RuntimeQuestionClosedSchema>;
+/** A question for the person. Asking it ends the asking agent's turn; its answer, or its dismissal, is that
+ * conversation's next input. `askedAt` is absent on questions asked before it was recorded; `answeredAt` on ones
+ * answered before it was. `answeredBy`: the project agent answered in the person's place. */
+export const RuntimeQuestionSchema = z.object({ id: z.string(), conversationId: z.string(), kind: z.enum(['ask', 'approval', 'takeover', 'lifecycle-approval']), prompt: z.string(), choices: z.array(z.string()), answer: RuntimeJsonSchema.nullable(), askedAt: z.iso.datetime().optional(), answeredAt: z.iso.datetime().optional(), answeredBy: askAnswererSchema.optional(), closed: RuntimeQuestionClosedSchema.optional(), tool: RuntimeQuestionToolSchema.optional(), takeover: RuntimeTakeoverQuestionSchema.optional(), lifecycle: RuntimeLifecycleApprovalQuestionSchema.optional() });
 export type RuntimeQuestion = z.infer<typeof RuntimeQuestionSchema>;
+/** `open` until answered or closed; only an open question waits on a person, and only an open one takes an answer. */
+export function questionState(question: Pick<RuntimeQuestion, 'answer' | 'closed'>): 'open' | 'answered' | 'closed' {
+  return question.answer !== null ? 'answered' : question.closed ? 'closed' : 'open';
+}
+const AskAnswerPartSchema = z.object({ selectedOptions: z.array(z.unknown()).optional(), customInput: z.unknown() });
+/**
+ * A plain question's answer as its chosen choices and written text, one entry per question it asks (GitSpace asks one):
+ * a person answers with free text or the chosen choices; a session-control answer is a list of
+ * `{ selectedOptions, customInput }`.
+ */
+export function askAnswerParts(answer: unknown): { selectedOptions: string[]; customInput: string | null }[] {
+  if (typeof answer === 'string') return [{ selectedOptions: [], customInput: answer }];
+  if (!Array.isArray(answer)) return [];
+  const chosen = answer.filter(item => typeof item === 'string');
+  if (chosen.length === answer.length) return [{ selectedOptions: chosen, customInput: null }];
+  return answer.flatMap(item => {
+    const parsed = AskAnswerPartSchema.safeParse(item);
+    return parsed.success ? [{ selectedOptions: parsed.data.selectedOptions?.filter(option => typeof option === 'string') ?? [], customInput: typeof parsed.data.customInput === 'string' ? parsed.data.customInput : null }] : [];
+  });
+}
 export const RuntimeSnapshotSchema = z.object({ version: z.literal(1), ...identity, cursor: z.number().int().nonnegative(), conversations: z.array(RuntimeConversationSchema), tasks: z.array(RuntimeTaskSchema), attachments: z.array(RuntimeAttachmentSchema), questions: z.array(RuntimeQuestionSchema), documents: z.record(z.string(), RuntimeJsonSchema) });
 export const RuntimeSnapshotInputSchema = RuntimeIdentitySchema;
 /** `whenBusy` while a turn runs: `followUp` (the default) waits for it to end; `steer` joins it at its next tool boundary. */

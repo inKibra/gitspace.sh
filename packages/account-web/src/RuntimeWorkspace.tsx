@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { canonicalDriveResourceUrl, parseResourceUri, resourceMediaType } from '@gitspace/protocol/resource-uri';
 import type { ResourceFile } from './resource-files.js';
-import { APPROVAL_DECISION, APPROVAL_NOTE, APPROVE, REJECT, type TranscriptContentRequest, type TranscriptPageRequest } from '@gitspace/blocks';
+import { APPROVAL_DECISION, APPROVE, REJECT, type TranscriptContentRequest, type TranscriptPageRequest } from '@gitspace/blocks';
 import { useResultQuery } from 'result-rpc/react';
 import type { CloudProjectOperation, InspectorView, LaunchSourceView } from '@gitspace/protocol';
-import { RuntimeIdentitySchema, RuntimeMachineIdSchema, type RuntimeAnswerInput, type RuntimeApprovalAnswer, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
+import { questionState, RuntimeIdentitySchema, RuntimeMachineIdSchema, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
 import { Button, ThinkingIndicator } from '@gitspace/ui';
 import { EmptyState, GitSpaceShell, StatusDot, type GitSpaceShellProps, type SessionControlsProps } from './GitSpaceShell.js';
 import { useWorkspaceRuntime } from './useWorkspaceRuntime.js';
@@ -25,7 +25,7 @@ import { useRuntimeLaunch } from './useRuntimeLaunch.js';
 import type { ResourceRequest } from './ResourceNavigation.js';
 import type { WorkspaceTerminalMachine } from './WorkspaceTerminals.js';
 import type { RuntimeSessionCommand, SessionControlView } from '@gitspace/protocol-runtime/session-controls';
-import { TakeoverCardsContext, type TakeoverCards } from './TakeoverCard.js';
+import { QuestionCardsContext, type QuestionCards } from './QuestionCards.js';
 import { BrowserWatchDialog } from './BrowserWatchDialog.js';
 import { accountLiveKey } from '@gitspace/protocol/live-notice';
 import { useLiveChanges } from './live-notices.js';
@@ -158,14 +158,12 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
     },
   } : null, [identity, conversationId, snapshot.cursor]);
   const transcript = useTranscriptHistory(transcriptSource);
-  // ask_takeover and lifecycle approval cards answer in the transcript, never above the composer; so does a plan, on
-  // its propose_plan card. A machine-attach approval (it names the tool it gates) has no call there and answers above
-  // the composer.
-  const question = snapshot.questions.find(item => item.conversationId === conversationId && item.answer === null && item.kind !== 'takeover' && item.kind !== 'lifecycle-approval');
+  // Asks, plans, take-over requests and lifecycle approvals answer on their cards in the transcript, which also show
+  // how they ended. An open approval that gates a tool (a machine-attach request, the project agent's batch of
+  // answers) has no call there and answers above the composer, through the same questions.
+  const question = snapshot.questions.find(item => item.conversationId === conversationId && item.kind === 'approval' && item.tool !== undefined && questionState(item) === 'open');
   const controls: SessionControlsProps | undefined = value ? {
-    value: value.pendingAsk || !question ? value : { ...value, pendingAsk: { id: question.id, source: question.kind === 'approval' && !question.tool ? 'ask-tool' : 'gitspace', links: [], questions: [question.kind === 'approval'
-      ? { id: APPROVAL_DECISION, question: question.prompt, header: 'Approval required', multi: false, recommended: null, written: false, options: [APPROVE, REJECT].map(label => ({ label, description: null, preview: null })) }
-      : { id: question.id, question: question.prompt, header: null, multi: false, recommended: null, written: true, options: question.choices.map(label => ({ label, description: null, preview: null })) }] } },
+    value: question ? { ...value, pendingAsk: { id: question.id, source: 'gitspace', links: [], questions: [{ id: APPROVAL_DECISION, question: question.prompt, header: 'Approval required', multi: false, recommended: null, written: false, options: [APPROVE, REJECT].map(label => ({ label, description: null, preview: null })) }] } } : value,
     onCycleRole: async direction => { await run({ type: 'cycleRole', direction }); },
     onSetModel: async (provider, model) => { await run({ type: 'setModel', provider, model }); },
     onSetThinking: async thinking => { await run({ type: 'setThinking', thinking }); },
@@ -181,23 +179,7 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
       // The withdrawn message leaves the agent's queue without changing anything the controls reread on.
       await run({ type: 'control' });
     },
-    onAnswerAsk: async (id, answers) => {
-      if (value.pendingAsk?.id === id || question?.id !== id) { await run({ type: 'answerAsk', id, answers }); return; }
-      let answer: RuntimeAnswerInput['answer'];
-      if (question.kind === 'approval') {
-        const decision = answers.find(item => item.id === APPROVAL_DECISION)?.selectedOptions[0];
-        if (decision !== APPROVE && decision !== REJECT) throw new Error('Choose Approve or Reject.');
-        const approval: RuntimeApprovalAnswer = { approved: decision === APPROVE, note: answers.find(item => item.id === APPROVAL_NOTE)?.customInput?.trim() || null };
-        answer = approval;
-      } else {
-        const written = answers.find(item => item.id === id);
-        if (!written) throw new Error('An answer is required.');
-        answer = written.customInput || [...written.selectedOptions];
-      }
-      const response = await rpcClient.runtime.answer({ ...identity, questionId: id, answer });
-      if (response.status === 'error') throw response.error;
-      await run({ type: 'control' });
-    },
+    onAnswerAsk: async (id, answers) => { await run({ type: 'answerAsk', id, answers }); },
     onStop: async () => { await run({ type: 'stop' }); },
     onNavigateTree: async entryId => { await run({ type: 'navigateTree', entryId }); transcript.refresh(); },
     onReadHistory: async (request, signal) => { const result = await run({ type: 'historyPage', request }, signal); if (!result.historyPage) throw new Error('The runtime did not return a history page.'); return result.historyPage; },
@@ -252,7 +234,7 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
     if (response.status === 'error') throw response.error;
     return response.value;
   }, [identity, conversationId]);
-  const takeoverCards = useMemo<TakeoverCards>(() => ({ questions: snapshot.questions, request: sessionCommand,
+  const questionCards = useMemo<QuestionCards>(() => ({ questions: snapshot.questions, request: sessionCommand,
     answer: async (questionId, answer) => {
       const response = await rpcClient.runtime.answer({ ...identity, questionId, answer });
       if (response.status === 'error') throw response.error;
@@ -266,7 +248,7 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
     {launch.launch && !launch.open ? <Button variant="ghost" size="compact" onClick={() => launch.setOpen(true)}>Show launch progress</Button> : null}
     {relationQuery.state === 'failure' ? <div role="alert" className="flex items-center gap-2 px-4 py-2 text-caption text-destructive">{rpcErrorMessage(relationQuery.error, "Load this project's workspaces")}<Button variant="ghost" onClick={() => void relationQuery.refetch()}>Retry</Button></div> : null}
     {relationValue?.statusError ? <div role="status" className="flex items-center gap-2 px-4 py-2 text-caption text-muted-foreground">Workspace statuses are unavailable: {relationValue.statusError}<Button variant="ghost" onClick={() => void relationQuery.refetch()}>Retry</Button></div> : null}
-    <TakeoverCardsContext.Provider value={takeoverCards}>
+    <QuestionCardsContext.Provider value={questionCards}>
     <ComposerStagingProvider>
     <RequirementAcceptance.Provider value={acceptRequirement}>
     {/* No onSend, so a closed composer, until the draft binding exists: text typed before it would be replaced by the workspace draft. A session command in flight only holds the send (sendPending); the box stays editable. */}
@@ -314,7 +296,7 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
     />
     </RequirementAcceptance.Provider>
     </ComposerStagingProvider>
-    </TakeoverCardsContext.Provider>
+    </QuestionCardsContext.Provider>
     {launchRequest?.source.kind === 'workspace' ? <LaunchMachineDialog key={launchRequest.source.workspaceId} projectId={props.projectId} workspaceId={launchRequest.source.workspaceId} machines={inspection.machines} onClose={() => setLaunchRequest(null)} onLaunch={async machineId => { await launch.start(launchRequest.source, machineId, launchRequest.targets); setLaunchRequest(null); }} /> : null}
     {launchRequest?.source.kind === 'canonical' ? <CanonicalLaunchDialog canonical={launchRequest.source} machines={inspection.machines} onClose={() => setLaunchRequest(null)} onLaunch={async machineId => { await launch.start(launchRequest.source, machineId, launchRequest.targets); setLaunchRequest(null); }} /> : null}
     {launch.launch ? <LaunchSheet launch={launch.launch} open={launch.open && !launchRequest} onOpenChange={launch.setOpen} onRetry={() => launch.launch!.source.kind === 'release' ? perform(launch.backToDefault) : setLaunchRequest({ source: launch.launch!.source, targets: launch.launch!.targets })} onDiscard={() => launch.discard(launch.launch!.launchId)} /> : null}

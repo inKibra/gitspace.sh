@@ -294,7 +294,7 @@ try {
   console.log('PASS cold ask recovery, both answer surfaces, idle watch, approval authority and canonical phase');
   console.log('PASS bounded tasks and full receipts', await request('/burst'));
   const scope = z.object({ root: z.string(), child: z.string(), sibling: z.string(), grandchild: z.string() }).parse(await request('/scoped-stop-seed'));
-  await until(snapshot => Object.values(scope).every(id => snapshot.questions.some(question => question.conversationId === id && question.answer === null)));
+  await until(snapshot => Object.values(scope).every(id => snapshot.conversations.some(conversation => conversation.id === id && conversation.status === 'running')));
   const liveTasks = async () => z.array(z.object({ id: z.string(), conversationId: z.string(), kind: z.string(), state: z.string() })).parse(await request('/live-tasks'));
   const scopedTasks = await liveTasks();
   assert(Object.values(scope).every(id => scopedTasks.some(task => task.conversationId === id && task.state !== 'terminal')), 'Scoped Stop must start with real live tasks in all four conversations');
@@ -305,7 +305,6 @@ try {
   const afterChildStop = await liveTasks();
   for (const id of [scope.child, scope.grandchild]) assert(!afterChildStop.some(task => task.conversationId === id && task.state !== 'terminal'), 'Child Stop left a descendant task running');
   const stoppedSnapshot = RuntimeSnapshotSchema.parse(await request('/'));
-  assert(!stoppedSnapshot.questions.some(question => [scope.child, scope.grandchild].includes(question.conversationId) && question.answer === null), 'Stopped child retained an actionable question');
   assert(stoppedSnapshot.conversations.filter(conversation => [scope.child, scope.grandchild].includes(conversation.id)).every(conversation => conversation.status === 'idle'), 'Stopped child still appears active');
   for (const id of [scope.root, scope.sibling]) assert(afterChildStop.some(task => task.conversationId === id && task.state !== 'terminal'), 'Child Stop aborted main or sibling work');
   const backgroundDeadline = Date.now() + 5000;

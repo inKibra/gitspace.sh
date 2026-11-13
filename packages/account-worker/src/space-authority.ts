@@ -14,7 +14,9 @@ import { captureReplayAskedText, withCaptureSummaries } from './browser-capture-
 import { readCapture } from './browser-capture.js';
 import { workspaceDrive } from './workspace-drive.js';
 import { refreshCloudEnvironment } from './cloud-environment.js';
-import { ArtifactsCodeStore, artifactsProjectRepository, artifactsWorkspaceRepository, createToolResultStore, isAttachmentOnline, isAttachmentReady, isSupportedBranchName, CloudPublicationUncertain, readCurrentCheckpoint, readRuntimeLfsRoots, reconcileRuntimeLfsSources, type ProjectQuestion, type RuntimeAccepted, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
+import { ArtifactsCodeStore, artifactsProjectRepository, artifactsWorkspaceRepository, createToolResultStore, isAttachmentOnline, isAttachmentReady, isSupportedBranchName, CloudPublicationUncertain, readCurrentCheckpoint, readRuntimeLfsRoots, reconcileRuntimeLfsSources, type ProjectAnswerOutcome, type ProjectQuestion, type RuntimeAccepted, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
+import { settleProjectAnswers } from './project-answers.js';
+import { questionState } from '@gitspace/protocol-runtime';
 import { createAccountWorkspaceRuntime, ensureProjectCodeRepository } from './account-runtime-host.js';
 import { createRuntimeQaServices } from './runtime-services.js';
 import { RuntimeSessionInputSchema, type PendingAskAnswer } from '@gitspace/protocol-runtime/session-controls';
@@ -207,13 +209,14 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     return projectProgress(this.ctx.storage, () => this.getRuntime(identity));
   }
 
-  /** The questions this workspace's agents wait on, for the project agent. */
+  /** The questions open in this workspace, for the project agent. */
   async projectQuestions(raw: unknown): Promise<ProjectQuestion[]> {
     return (await this.getRuntime(RuntimeIdentitySchema.parse(raw))).projectQuestions();
   }
 
-  /** The project agent's answer to a plain ask here, recorded as its answer, not a person's. */
-  async projectAnswer(raw: unknown, input: { questionId: string; answers: PendingAskAnswer[] }): Promise<RuntimeAccepted> {
+  /** The project agent's answer to a plain ask here, which `for` (the person) approved: recorded as its answer, not a
+   * person's, and delivered only while the question is open. */
+  async projectAnswer(raw: unknown, input: { questionId: string; answers: PendingAskAnswer[]; for: string }): Promise<ProjectAnswerOutcome> {
     return (await this.getRuntime(RuntimeIdentitySchema.parse(raw))).projectAnswer(input);
   }
 
@@ -1027,15 +1030,27 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
   async runtimeCancel(raw: unknown) { const input = RuntimeCancelInputSchema.parse(raw); return (await this.getRuntime(input)).cancel(input); }
   /** Approving an agent's machine-attach question attaches that machine; the asking conversation hears when it is ready.
    * Approving a lifecycle approval card approves its scripts at the chosen scope as the answering person, who needs
-   * lifecycle control, before the card records the answer and the agent's run proceeds. */
+   * lifecycle control, before the card records the answer and the agent hears it. Approving the project agent's batch
+   * card (`project-answers.ts`) sends each of its answers, as the project agent's for this person, before the card
+   * records the decision; the project agent hears each answer's outcome. Only an open question takes an answer. */
   async runtimeAnswer(raw: unknown, actor: { deviceId: string; kind: LifecycleActor['kind']; canApprove: boolean; lifecycleControl: boolean }) {
     const input = RuntimeAnswerInputSchema.parse(raw);
     const runtime = await this.getRuntime(input);
-    const lifecycle = (await runtime.snapshot()).questions.find(item => item.id === input.questionId && item.kind === 'lifecycle-approval' && item.answer === null)?.lifecycle;
-    if (lifecycle) {
+    const asked = (await runtime.snapshot()).questions.find(item => item.id === input.questionId);
+    const open = asked !== undefined && questionState(asked) === 'open';
+    if (open && asked.kind === 'lifecycle-approval' && asked.lifecycle) {
       const choice = RuntimeLifecycleApprovalAnswerSchema.parse(input.answer);
-      if (choice !== 'not-now') await approveExecutionsAsPerson(this, input, { executionHashes: lifecycle.scripts.map(script => script.hash), scope: choice, person: { deviceId: actor.deviceId, kind: actor.kind, lifecycleControl: actor.lifecycleControl } });
+      if (choice !== 'not-now') await approveExecutionsAsPerson(this, input, { executionHashes: asked.lifecycle.scripts.map(script => script.hash), scope: choice, person: { deviceId: actor.deviceId, kind: actor.kind, lifecycleControl: actor.lifecycleControl } });
       return runtime.answer(input, { deviceId: actor.deviceId, canApprove: actor.lifecycleControl });
+    }
+    if (open && asked.tool?.name === 'space_workspace') {
+      if (!actor.canApprove) throw new Error('Human approval capability required');
+      const decision = RuntimeApprovalAnswerSchema.safeParse(input.answer);
+      if (!decision.success) throw new Error('An approval answer is { approved, note }');
+      const { profile } = await this.env.USER_SETTINGS.getByName(this.env.ACCOUNT_ID).get(actor.deviceId);
+      const text = await settleProjectAnswers({ questionId: asked.id, card: asked.tool.args, decision: decision.data, person: profile.displayName.trim() || profile.handle || 'the user',
+        deliver: (workspaceId, answer) => this.env.SPACE_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${workspaceId}`).projectAnswer({ projectId: input.projectId, workspaceId }, answer) });
+      return runtime.answer(input, { deviceId: actor.deviceId, canApprove: actor.canApprove }, text);
     }
     const result = await runtime.answer(input, { deviceId: actor.deviceId, canApprove: actor.canApprove });
     if (!input.questionId.startsWith('machine-attach:') || RuntimeApprovalAnswerSchema.safeParse(input.answer).data?.approved !== true) return result;

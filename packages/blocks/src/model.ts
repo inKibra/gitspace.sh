@@ -50,18 +50,21 @@ export const toolCallBlockSchema = base.extend({
   details: z.unknown().optional(),
 });
 
-/** Who answered a question in a person's place: the project agent, and when (ISO). A question without one was
- * answered by a person. */
-export const askAnswererSchema = z.object({ by: z.literal('project-agent'), at: z.string() });
+/** Who answered a question in a person's place: the project agent, when (ISO), and for whom: the person who approved its
+ * answer (absent on answers from before a person approved them). A question without one was answered by a person. */
+export const askAnswererSchema = z.object({ by: z.literal('project-agent'), at: z.string(), for: z.string().optional() });
 export type AskAnswerer = z.infer<typeof askAnswererSchema>;
 
 /** `kind: 'plan'` is a `propose_plan` call (`planQuestions`), with the `steps` it proposes. A question with
  * `written: false` is answered only by its options; an `optional` one may be skipped. `answeredBy`: the project agent
- * answered it, not the person. */
+ * answered it, not the person. `questionId`: the workspace question the call posted, which says whether it is open,
+ * answered or closed; a `pending` card with one stays pending here, since its answer arrives as a later message. Calls
+ * that held their answer (before questions outlived their call) have none, and their result settles the card. */
 export const askBlockSchema = base.extend({
   type: z.literal('ask'),
   kind: z.literal('plan').optional(),
   toolCallId: z.string(),
+  questionId: z.string().optional(),
   steps: z.array(z.object({ id: z.string(), title: z.string(), detail: z.string().optional(), where: z.array(z.string()).optional() })).optional(),
   status: z.enum(['pending', 'answered', 'dismissed']),
   answeredBy: askAnswererSchema.optional(),

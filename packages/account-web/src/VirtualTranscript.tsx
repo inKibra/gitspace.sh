@@ -5,7 +5,7 @@ import { ToolGroup, toolRuns, type GroupCall } from './chat/ToolGroup.js';
 import { TranscriptItemView, type TranscriptItemState, type TranscriptReadingPosition } from './chat/TranscriptItemView.js';
 import { TransportNotice, type TurnTranscriptProps } from './chat/TurnTranscript.js';
 import { dayBreaks, DayDivider, fullTime, itemAt } from './chat/time.js';
-import { TakeoverCardsContext } from './TakeoverCard.js';
+import { QuestionCardsContext } from './QuestionCards.js';
 import { useTranscriptHistory, type TranscriptHistory } from './useTranscriptHistory.js';
 import { TranscriptContentCache } from './transcriptContentCache.js';
 
@@ -18,6 +18,8 @@ export interface VirtualTranscriptProps {
   viewKey?: object;
   position?: TranscriptReadingPosition;
   onPositionChange?(position: TranscriptReadingPosition): void;
+  /** Shown after the last row: the person's messages still being sent. */
+  tail?: ReactNode;
 }
 
 const OVERSCAN_ROWS = 6;
@@ -103,7 +105,7 @@ export function VirtualTranscript(props: VirtualTranscriptProps) {
   return <TranscriptWindow key={identity.key} {...props} />;
 }
 
-function TranscriptWindow({ history, transport, onAnswer, inline = false, viewKey, position, onPositionChange }: VirtualTranscriptProps) {
+function TranscriptWindow({ history, transport, onAnswer, inline = false, viewKey, position, onPositionChange, tail }: VirtualTranscriptProps) {
   const root = useRef<HTMLDivElement | null>(null);
   const list = useRef<HTMLDivElement | null>(null);
   const viewport = useRef<HTMLElement | null>(null);
@@ -153,7 +155,7 @@ function TranscriptWindow({ history, transport, onAnswer, inline = false, viewKe
   const lastReported = useRef('');
   const lastBoundary = useRef('');
   const appliedNavigation = useRef<TranscriptHistory['navigation']>(null);
-  const cards = useContext(TakeoverCardsContext);
+  const cards = useContext(QuestionCardsContext);
   const displayRows = useMemo(() => {
     const runs = toolRuns(history.rows, cards);
     const turnAt = new Map<string, string | undefined>();
@@ -449,6 +451,7 @@ function TranscriptWindow({ history, transport, onAnswer, inline = false, viewKe
       {history.hasBefore ? <Button variant="ghost" className="min-h-10" disabled={history.loading} onClick={() => { setFollow(false); void history.loadOlder(); }}>{inline ? 'Load earlier calls' : 'Load earlier blocks'}</Button> : history.initialLoading ? <span role="status">Loading transcript…</span> : <span>{inline ? 'Beginning of execution history' : 'Beginning of transcript'}</span>}
     </div>
     <div ref={list} data-transcript-items className="relative min-w-0" style={{ height: layout.total }}>{content}</div>
+    {tail}
     <div className="flex h-12 items-center justify-center">
       {history.hasAfter ? <Button variant="ghost" className="min-h-10" disabled={history.loading} onClick={() => void history.loadNewer()}>{inline ? 'Load later calls' : 'Load later blocks'}</Button> : null}
     </div>

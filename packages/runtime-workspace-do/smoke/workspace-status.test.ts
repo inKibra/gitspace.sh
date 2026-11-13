@@ -40,6 +40,14 @@ test('a question or approval waiting on a person is orange even while its task r
   expect(answered.summary.primaryColor).toBe('green');
 });
 
+test('a closed question waits on no one: the workspace is not orange for it', () => {
+  for (const reason of ['dismissed', 'stopped', 'expired'] as const) {
+    const closed = summarize({ conversations: [main], tasks: [], questions: [{ conversationId: 'main', kind: 'ask', answer: null, closed: { reason, at: '2026-11-13T10:00:00.000Z' } }] });
+    expect(closed.summary.primaryColor).toBe('blue');
+    expect(closed.statuses).toEqual({ main: 'idle' });
+  }
+});
+
 test('a failed main conversation is red until a task runs again; a failed subagent reports to its parent', () => {
   const failed = { ...main, failure: 'The model request failed' };
   const red = summarize({ conversations: [failed], tasks: [], questions: [] });

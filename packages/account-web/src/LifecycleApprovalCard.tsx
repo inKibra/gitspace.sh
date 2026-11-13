@@ -1,9 +1,9 @@
 import { useState } from 'react';
-import { LIFECYCLE_APPROVAL_CHOICES, RuntimeLifecycleApprovalAnswerSchema, type RuntimeLifecycleApprovalAnswer, type RuntimeLifecycleApprovalQuestion, type RuntimeLifecycleApprovalScript, type RuntimeQuestion } from '@gitspace/protocol-runtime';
+import { LIFECYCLE_APPROVAL_CHOICES, questionState, RuntimeLifecycleApprovalAnswerSchema, type RuntimeLifecycleApprovalAnswer, type RuntimeLifecycleApprovalQuestion, type RuntimeLifecycleApprovalScript, type RuntimeQuestion } from '@gitspace/protocol-runtime';
 import { Badge, Button, useShape } from '@gitspace/ui';
 import { GitSpaceMarkdown } from './GitSpaceMarkdown.js';
+import { CLOSED_REASON, type QuestionCards } from './QuestionCards.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
-import type { TakeoverCards } from './TakeoverCard.js';
 
 /** What an answered card says was chosen. */
 const ANSWERED: Readonly<Record<RuntimeLifecycleApprovalAnswer, string>> = { project: 'Approved for the project', workspace: 'Approved for this workspace', 'not-now': 'Not now' };
@@ -59,27 +59,30 @@ function ScriptContent({ script }: { script: RuntimeLifecycleApprovalScript }) {
 
 /**
  * The card an agent's `environment` run waits on while its scripts need approval: each script's content, or its diff
- * against the last approved version of its file, and Approve for the project (the default), Only this workspace, or Not
- * now. Approving needs lifecycle control; a refusal says why on the card. An answered card is read-only and says what
- * was chosen.
+ * against the last approved version of its file, and Approve for the project (the default), Only this workspace, Not
+ * now, or Dismiss. Approving needs lifecycle control; a refusal says why on the card. An answered card is read-only and
+ * says what was chosen; one closed unanswered says why it closed.
  */
-export function LifecycleApprovalCard({ question, card, cards }: { question: RuntimeQuestion; card: RuntimeLifecycleApprovalQuestion; cards: TakeoverCards }) {
+export function LifecycleApprovalCard({ question, card, cards }: { question: RuntimeQuestion; card: RuntimeLifecycleApprovalQuestion; cards: QuestionCards }) {
   const shape = useShape();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const answered = RuntimeLifecycleApprovalAnswerSchema.safeParse(question.answer);
-  const open = question.answer === null;
-  async function choose(choice: RuntimeLifecycleApprovalAnswer) {
+  const state = questionState(question);
+  const open = state === 'open';
+  async function act(label: string, action: () => Promise<unknown>) {
     if (busy) return;
     setBusy(true); setError(null);
-    try { await cards.answer(question.id, choice); }
-    catch (failure) { setError(rpcErrorMessage(failure, LIFECYCLE_APPROVAL_CHOICES[choice])); }
+    try { await action(); }
+    catch (failure) { setError(rpcErrorMessage(failure, label)); }
     finally { setBusy(false); }
   }
+  const choose = (choice: RuntimeLifecycleApprovalAnswer) => act(LIFECYCLE_APPROVAL_CHOICES[choice], () => cards.answer(question.id, choice));
   return <section aria-label={`Lifecycle approval · ${card.phase}`} data-answer={answered.success ? answered.data : undefined} className={`relative w-full max-w-[640px] overflow-hidden border border-border bg-card ${shape.container}`}>
     <div className="flex items-center justify-between gap-2 px-4 pb-2 pt-3.5 text-[12px] text-muted-foreground sm:px-5 sm:pt-4">
       <span>The agent asks to run {card.phase === 'checks' ? 'the environment checks' : card.phase}</span>
-      {answered.success ? <Badge variant="dot" color={answered.data === 'not-now' ? 'gray' : 'green'}>{ANSWERED[answered.data]}</Badge> : null}
+      {answered.success ? <Badge variant="dot" color={answered.data === 'not-now' ? 'gray' : 'green'}>{ANSWERED[answered.data]}</Badge>
+        : state === 'closed' && question.closed ? <Badge variant="dot" color="gray">{CLOSED_REASON[question.closed.reason]}</Badge> : null}
     </div>
     <div className={`flex flex-col gap-3 px-4 sm:px-5 ${open ? 'pb-1' : 'pb-3'}`}>
       <div className="text-[14px] leading-relaxed text-foreground"><GitSpaceMarkdown>{question.prompt}</GitSpaceMarkdown></div>
@@ -88,6 +91,7 @@ export function LifecycleApprovalCard({ question, card, cards }: { question: Run
     </div>
     {open ? <div className="px-4 pb-2 pt-1 sm:px-5">
       <div className="-mx-2 flex flex-wrap items-center justify-end gap-2 sm:-mx-3">
+        <Button variant="ghost" size="sm" disabled={busy} onClick={() => void act('Dismiss', () => cards.request({ type: 'dismissQuestion', id: question.id }))}>Dismiss</Button>
         <Button variant="ghost" size="sm" disabled={busy} onClick={() => void choose('not-now')}>{LIFECYCLE_APPROVAL_CHOICES['not-now']}</Button>
         <Button variant="secondary" size="sm" disabled={busy} onClick={() => void choose('workspace')}>{LIFECYCLE_APPROVAL_CHOICES.workspace}</Button>
         <Button variant="primary" size="sm" disabled={busy} onClick={() => void choose('project')}>{LIFECYCLE_APPROVAL_CHOICES.project}</Button>

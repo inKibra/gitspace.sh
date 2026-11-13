@@ -8,7 +8,7 @@ import { Check, ChevronDown, ChevronRight, Clock, File02, Loading02, SlashCircle
 import { useEffect, useMemo, useState } from 'react';
 import { z } from 'zod';
 import { PierreViewer } from '../inspector/FilesSurface.js';
-import type { TakeoverCards } from '../TakeoverCard.js';
+import type { QuestionCards } from '../QuestionCards.js';
 import { JsonTree } from './JsonTree.js';
 import { LogView } from './LogView.js';
 import { RichContent } from './RichContent.js';
@@ -43,7 +43,7 @@ export type ToolRun<T> = { tools: false; entry: T } | { tools: true; entries: T[
 
 /** Custom messages the runtime records as calls, the legacy `todo` call, and calls whose takeover or lifecycle approval
  * card shows in their place stay rows of their own. */
-function groupable(item: TranscriptItem, cards: TakeoverCards | null): boolean {
+function groupable(item: TranscriptItem, cards: QuestionCards | null): boolean {
   if (item.type !== 'tool-call' || item.tool === 'todo' || item.id.includes(':custom:')) return false;
   if (item.tool === 'ask_takeover') return !cards?.questions.some((question) => question.kind === 'takeover' && question.takeover?.callId === item.toolCallId);
   if (item.tool === 'environment') return !cards?.questions.some((question) => question.kind === 'lifecycle-approval' && question.lifecycle?.callId === item.toolCallId);
@@ -51,7 +51,7 @@ function groupable(item: TranscriptItem, cards: TakeoverCards | null): boolean {
 }
 
 /** Consecutive groupable tool calls of one turn become one run; every other entry is a run of its own. */
-export function toolRuns<T extends { item: TranscriptItem; turnId: string }>(entries: readonly T[], cards: TakeoverCards | null): ToolRun<T>[] {
+export function toolRuns<T extends { item: TranscriptItem; turnId: string }>(entries: readonly T[], cards: QuestionCards | null): ToolRun<T>[] {
   const runs: ToolRun<T>[] = [];
   let open: T[] | null = null;
   for (const entry of entries) {

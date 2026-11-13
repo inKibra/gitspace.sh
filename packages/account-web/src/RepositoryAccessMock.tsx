@@ -13,7 +13,7 @@ import { StrictMode, useState, type ReactElement, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import '@gitspace/ui/fluid-theme.css';
 import './styles.css';
-import { Composer } from './Composer.js';
+import { StandaloneComposer } from './Composer.js';
 import { glyph } from './glyph.js';
 import { PageCanvas, PageHeader, StatusDot } from './GitSpaceShell.js';
 import { verticalSliceFixture } from './App.js';
@@ -174,7 +174,7 @@ function ProjectPage({ state }: { state: State }): ReactElement {
       <div className="pointer-events-none absolute inset-x-0 bottom-0 flex justify-center px-6 pb-4">
         <div className="w-full max-w-xl">
           {state === 'today' ? null : <div className={`pointer-events-auto mb-2 bg-surface-3 px-3 py-2 text-caption text-muted-foreground shadow-surface-1 ${shape.container}`}>The project agent starts once GitSpace can read {ORG}/{REPO}.</div>}
-          <div className={state === 'today' ? 'pointer-events-auto' : 'pointer-events-none opacity-50'}><Composer workspace={verticalSliceFixture.workspace} running={false} pending={false} /></div>
+          <div className={state === 'today' ? 'pointer-events-auto' : 'pointer-events-none opacity-50'}><StandaloneComposer workspace={verticalSliceFixture.workspace} running={false} pending={false} /></div>
         </div>
       </div>
     </div>

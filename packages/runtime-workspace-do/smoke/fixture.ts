@@ -67,6 +67,15 @@ const stream: StreamFunction = (_model, context, options) => {
     result.end();
     return result;
   }
+  if (last?.role === 'user' && text === 'hold until stopped') {
+    // A turn that keeps its conversation working until a Stop aborts its request; the request read its prompt, so it
+    // has usage, as the scoped usage report expects.
+    const message = (stopReason: 'stop' | 'aborted'): AssistantMessage => ({ role: 'assistant', api: 'fixture', provider: 'fixture', model: 'fixture', content: [], stopReason, timestamp: Date.now(), usage: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 1, cost: { input: 0.000001, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.000001 } } });
+    result.push({ type: 'start', partial: message('stop') });
+    const abort = () => { result.push({ type: 'error', reason: 'aborted', error: { ...message('aborted'), errorMessage: 'stopped' } }); result.end(); };
+    if (options?.signal?.aborted) abort(); else options?.signal?.addEventListener('abort', abort, { once: true });
+    return result;
+  }
   if (last?.role === 'user' && text === 'write slowly') {
     // Fifteen words, one every 200 ms, each delta carrying the reply so far, as a provider streams it.
     const words = Array.from({ length: 15 }, (_, index) => `word${index}`);
@@ -197,9 +206,11 @@ export class RuntimeSmoke extends DurableObject<unknown> {
           await target.commit(async tx => { (await tx.doc(AgentDefinitionContextDoc, target.id)).child = { parentId: String(parent.id), name, attemptId: `scope-${name}`, definition, selection: { kind: 'role', role: 'scout' }, role: 'scout', thinking: null, tools: definition.tools, model: modelRef }; }, BACKGROUND_CONTEXT);
         }
         for (const target of [root, child, sibling, grandchild]) {
-          const requestId = `scope-${target.id}`;
-          await this.ctx.storage.put(`admission:${requestId}`, String(target.id));
-          await target.submit({ type: 'input', requestId, content: 'ask for a color' }, BACKGROUND_CONTEXT);
+          // A first reply gives each conversation usage; the turn after it keeps working until a Stop.
+          for (const [requestId, content] of [[`scope-warm-${target.id}`, 'warm up'], [`scope-${target.id}`, 'hold until stopped']]) {
+            await this.ctx.storage.put(`admission:${requestId}`, String(target.id));
+            await target.submit({ type: 'input', requestId, content }, BACKGROUND_CONTEXT);
+          }
         }
         runtime.harness.resume();
         const operation = createOperationalTasks(this.operations).find(task => task.definition.name === 'gitspace.Checkpoint');

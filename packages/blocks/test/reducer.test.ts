@@ -181,6 +181,16 @@ describe('reduceTranscriptToTurns', () => {
     expect(byPerson).not.toHaveProperty('answeredBy');
   });
 
+  it('keeps an ask whose call posted its question pending with the question, and the turn that posted it ends', () => {
+    const turns = reduceTranscriptToTurns([
+      { sessionId: 's1', ordinal: 1, kind: 'turn_start', payload: {} },
+      { sessionId: 's1', ordinal: 2, kind: 'tool_execution_start', payload: { toolCallId: 'ask-1', toolName: 'ask', args: { prompt: 'Which bucket?', choices: ['assets', 'uploads'] } } },
+      { sessionId: 's1', ordinal: 3, kind: 'message_end', payload: { message: { role: 'toolResult', toolCallId: 'ask-1', details: { questionId: 'question:7' }, content: [{ type: 'text', text: 'Posted your question.' }] } } },
+    ]);
+    expect(turns[0]?.items[0]).toEqual(expect.objectContaining({ type: 'ask', status: 'pending', questionId: 'question:7' }));
+    expect(turns[0]?.status).toBe('done');
+  });
+
   it('projects a propose_plan call as a plan card: the plan decided by Approve or Reject, then an optional note', () => {
     const started = [
       { sessionId: 's1', ordinal: 1, kind: 'turn_start', payload: {} },

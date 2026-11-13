@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { RuntimeIdentitySchema, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
+import { questionState, RuntimeIdentitySchema, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
 import type { RuntimeSessionCommand, RuntimeSessionResult } from '@gitspace/protocol-runtime/session-controls';
 import { rpcClient } from './rpc-client.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
@@ -34,7 +34,8 @@ export function useCloudSessionControls(snapshot: RuntimeSnapshot, conversationI
     } finally { if (live.current && request === revision.current) setPending(false); }
   }, [projectId, workspaceId, conversationId, key]);
   const conversation = snapshot.conversations.find((item) => item.id === conversationId);
-  const questionRevision = snapshot.questions.filter((item) => item.conversationId === conversationId).map((item) => `${item.id}:${JSON.stringify(item.answer)}`).join('|');
+  // The controls' pending ask is the conversation's open plain question: they are reread when a question opens or ends.
+  const questionRevision = snapshot.questions.filter((item) => item.conversationId === conversationId).map((item) => `${item.id}:${questionState(item)}`).join('|');
   // A queued or steered message is taken while the conversation keeps running: its user message is the only sign.
   const newestInput = conversation?.messages.findLast((message) => message.role === 'user')?.id;
   useEffect(() => {

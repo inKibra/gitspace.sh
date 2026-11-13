@@ -52,6 +52,7 @@ import type { WorkspaceDraftBinding, WorkspaceDraftCapture } from './workspace-d
 import { PrChips, StatusBadge } from './sidebar/parts.js';
 import { ProjectGraphsContext } from './sidebar/project-graph.js';
 import { GuideSectionNavigation } from './chat/staging.js';
+import { OutgoingMessages, useOutbox, type OutboxArrivals, type SentMessage } from './chat/outbox.js';
 
 /**
  * Where a space lives right now. A cloud runtime workspace lives in the cloud and reports its own status (machines are
@@ -388,11 +389,22 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onR
 }) {
   const shape = useShape();
   const running = mainAgent ? mainAgent.state === 'running' || mainAgent.state === 'permission-needed' || mainAgent.state === 'retrying' : false;
+  // Where a message the person sent lands: the transcript's messages of the person, or the session's queue.
+  const outboxArrivals = useMemo((): OutboxArrivals => ({
+    sent: transcript
+      ? transcript.rows.flatMap((row): SentMessage[] => row.item.type === 'message' && row.item.role === 'user' ? [{ id: row.id, text: row.item.text, truncated: row.truncated }] : [])
+      : turns.flatMap((turn) => [...(turn.user ? [turn.user] : []), ...turn.items].flatMap((item): SentMessage[] => item.type === 'message' && item.role === 'user' ? [{ id: item.id, text: item.text, truncated: false }] : [])),
+    queue: [...(sessionControls?.value.queue.steering ?? []), ...(sessionControls?.value.queue.followUp ?? [])],
+    latest: !transcript?.hasAfter,
+  }), [transcript, turns, sessionControls]);
+  const outbox = useOutbox(outboxArrivals);
   const pendingAsk = sessionControls?.value.pendingAsk ?? null;
   const answerInline = pendingAsk?.source === 'ask-tool' && sessionControls ? (answers: PendingAskAnswer[]) => sessionControls.onAnswerAsk(pendingAsk.id, answers) : undefined;
-  // GitSpace's own questions (a machine-attach approval) have no ask call in the transcript to attach to.
+  // GitSpace's own questions (a machine-attach approval, the project agent's batch of answers) have no ask call in the
+  // transcript to attach to. Their prompts are plain text, one line per item. Inside a cloud workspace the card answers
+  // and is dismissed through its workspace question (`questionId`).
   const standaloneAsk: AskBlock | null = pendingAsk?.source === 'gitspace' ? {
-    id: pendingAsk.id, type: 'ask', toolCallId: pendingAsk.id, status: 'pending',
+    id: pendingAsk.id, type: 'ask', toolCallId: pendingAsk.id, questionId: pendingAsk.id, status: 'pending',
     questions: pendingAsk.questions.map((question) => ({
       id: question.id, prompt: question.question, multiple: question.multi, written: question.written,
       ...(question.header ? { header: question.header } : {}),
@@ -481,7 +493,7 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onR
   useLayoutEffect(() => {
     const element = viewport.current;
     if (!virtualTranscript && element && following.current && touchStartTop.current === null) element.scrollTop = element.scrollHeight;
-  }, [turns, transport, composerOverlayHeight, virtualTranscript]);
+  }, [turns, transport, outbox.messages, composerOverlayHeight, virtualTranscript]);
   return <div className="relative flex min-h-0 min-w-0 flex-1 flex-col" style={{ '--composer-overlay-height': `${composerOverlayHeight}px` } as CSSProperties}>
     {history ? <TranscriptHistoryNotice {...history} /> : null}
     {mainAgent?.errorMessage || mainAgent?.failed ? <div role="alert" className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2 text-caption text-destructive">
@@ -495,8 +507,8 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onR
       {access
         ? <div className="mx-auto flex w-full max-w-3xl flex-col items-center px-6 pb-[calc(var(--composer-overlay-height)+2rem)] pt-10">{access.card}</div>
         : transcript
-          ? <VirtualTranscript history={transcript} transport={transport} onAnswer={answerInline} />
-          : <TurnTranscript turns={turns} transport={transport} onAnswer={answerInline} />}
+          ? <VirtualTranscript history={transcript} transport={transport} onAnswer={answerInline} tail={<OutgoingMessages outbox={outbox} />} />
+          : <TurnTranscript turns={turns} transport={transport} onAnswer={answerInline} tail={<OutgoingMessages outbox={outbox} />} />}
     </ScrollArea>
     {banner ? <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex justify-center px-6 pt-3"><div className="pointer-events-auto">{banner}</div></div> : null}
     <div ref={composerOverlay} className="pointer-events-none absolute inset-x-0 bottom-0 z-20 flex justify-center px-6 pb-4">
@@ -508,13 +520,13 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onR
                     {pendingAsk.links.map((link) => <ResourceLink key={link.uri} href={link.uri} className="text-foreground underline underline-offset-2">{link.label}</ResourceLink>)}
                   </nav>
                 : null}
-              <AskBlockView key={standaloneAsk.id} item={standaloneAsk} onAnswer={(answers) => sessionControls.onAnswerAsk(pendingAsk.id, answers)} />
+              <AskBlockView key={standaloneAsk.id} item={standaloneAsk} plainPrompt onAnswer={(answers) => sessionControls.onAnswerAsk(pendingAsk.id, answers)} />
             </div>
           : null}
         {access
           ? <>
               <p role="status" className={`${shape.container} pointer-events-auto mb-2 bg-surface-3 px-3 py-2 text-caption text-muted-foreground shadow-surface-1`}>{access.notice}</p>
-              <div inert className="opacity-50"><Composer workspace={workspace} draft={draft} artifactUpload={artifactUpload} sessionCommand={sessionCommand} controls={sessionControls} providers={providers} skills={skills} running={running} onSend={onSend} pending={pending} recovering={mainAgent?.recovering} /></div>
+              <div inert className="opacity-50"><Composer workspace={workspace} draft={draft} artifactUpload={artifactUpload} sessionCommand={sessionCommand} controls={sessionControls} providers={providers} skills={skills} running={running} onSend={onSend} pending={pending} recovering={mainAgent?.recovering} outbox={outbox} /></div>
             </>
           : idle
             ? <div className={`${shape.container} pointer-events-auto flex items-center gap-3 bg-surface-3 p-3 shadow-surface-3`}>
@@ -526,7 +538,7 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onR
                 {!workspace.closedAt ? <Button variant="secondary" size="compact" className="min-h-10" loading={opening || mainAgent?.recovering === true} disabled={opening || mainAgent?.recovering === true || !onRetryAgent} onClick={() => void open()} leadingIcon={glyph(RefreshCcw01)}>{mainAgent?.recovering ? 'Recovering…' : opening ? 'Retrying agent…' : 'Retry agent'}</Button> : null}
                 {openError ? <p role="alert" className="text-caption text-destructive">{openError}</p> : null}
               </div>
-            : <Composer workspace={workspace} draft={draft} artifactUpload={artifactUpload} sessionCommand={sessionCommand} controlsError={onRetryControls ? controlsError : undefined} onRetryControls={onRetryControls} controls={sessionControls} providers={providers} skills={skills} running={running} onSend={onSend} pending={pending} recovering={mainAgent?.recovering} error={error} />}
+            : <Composer workspace={workspace} draft={draft} artifactUpload={artifactUpload} sessionCommand={sessionCommand} controlsError={onRetryControls ? controlsError : undefined} onRetryControls={onRetryControls} controls={sessionControls} providers={providers} skills={skills} running={running} onSend={onSend} pending={pending} recovering={mainAgent?.recovering} error={error} outbox={outbox} />}
       </div>
     </div>
   </div>;

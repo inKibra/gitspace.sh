@@ -32,3 +32,12 @@ export async function answerPlan(tx: Tx, conversationId: ConversationId, questio
   if (steps.length > 0) (await tx.doc(TodosDoc, conversationId)).items = planTodos(steps);
   return { conversationId: String(conversationId), title: `Approved plan revision ${plan.revision}`, body, decisions: steps.map(step => step.title) };
 }
+/** A proposal whose question closed unanswered (dismissed, its conversation stopped, expired) is withdrawn: the plan in
+ * effect before it is in effect again; with none, the conversation has no plan. */
+export async function withdrawPlan(tx: Tx, conversationId: ConversationId, questionId: string): Promise<void> {
+  const plan = await tx.doc(PlanDoc, conversationId);
+  if (plan.questionId !== questionId || plan.status !== 'proposed') return;
+  if (plan.approved) {
+    plan.text = plan.approved.text; plan.steps = plan.approved.steps; plan.status = 'approved'; plan.approved = null;
+  } else plan.status = 'draft';
+}

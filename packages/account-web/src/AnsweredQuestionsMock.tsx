@@ -15,7 +15,7 @@ import { Fragment, StrictMode, useState, type ReactElement } from 'react';
 import { createRoot } from 'react-dom/client';
 import '@gitspace/ui/fluid-theme.css';
 import './styles.css';
-import { Composer } from './Composer.js';
+import { StandaloneComposer } from './Composer.js';
 import { glyph } from './glyph.js';
 import { StatusDot } from './GitSpaceShell.js';
 import { AskBlockView } from './chat/AskCards.js';
@@ -223,7 +223,7 @@ function AnsweredQuestionsMock(): ReactElement {
               {mode === 'today' ? <div className={`${shape.container} pointer-events-auto mb-2 flex max-h-[50dvh] flex-col gap-2 overflow-y-auto bg-surface-3 p-3 shadow-surface-3`}>
                 <AskBlockView item={todayPlan} onAnswer={async () => { throw new Error('Choose Approve or Reject.'); }} />
               </div> : null}
-              <div className="pointer-events-auto"><Composer workspace={verticalSliceFixture.workspace} running={false} pending={false} /></div>
+              <div className="pointer-events-auto"><StandaloneComposer workspace={verticalSliceFixture.workspace} running={false} pending={false} /></div>
             </div>
           </div>
         </div>

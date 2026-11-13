@@ -3,7 +3,6 @@ import { z } from 'zod';
 import { cloudProjectSummarySchema, cloudWorkspaceDefinitionSchema } from './project-authority.js';
 import { WorkspacePhaseSchema } from '@gitspace/protocol-workspace';
 import { RuntimeDispatchSelectionSchema } from '@gitspace/protocol-runtime';
-import { PendingAskAnswerSchema } from '@gitspace/protocol-runtime/session-controls';
 import { AutomationDraftSchema, AutomationSubjectRefSchema } from './automations-contract.js';
 
 export const INSPECTOR_EVIDENCE_HISTORY_LIMIT = 20 as const;
@@ -889,11 +888,21 @@ export const RuntimeWorkspaceMutationArgumentsSchema = z.discriminatedUnion('met
 export const RuntimeWorkspaceStartArgumentsSchema = z.object({ method: z.literal('start').describe('Project agent only: send a workspace\'s agent an instruction.'), workspaceId: targetWorkspace, instruction: z.string().trim().min(1).max(32_768).describe('The instruction, complete in itself.'), when: z.enum(['queue', 'steer']).default('queue').describe('queue (the default): after a running turn ends; steer: into that turn at its next tool boundary.'), onDone: z.enum(['quiet', 'wake']).default('quiet').describe('quiet (the default): its report waits for your next turn; wake: its report starts your next turn.') }).strict();
 /** The turn the project agent started in a workspace, while it is watched: its state and its newest items. */
 export const RuntimeWorkspaceProgressArgumentsSchema = z.object({ method: z.literal('progress').describe('The turn you started in a workspace: its state and newest items.'), workspaceId: targetWorkspace }).strict();
-/** The project agent reads the questions a workspace's agents wait on, and answers a plain ask (`ask`) in the person's
- * place, with the answer shape a person's `answerAsk` carries. Approvals and take-over requests stay a person's. */
+/** What `space_workspace answer` takes, said whole when an answer or the list is not that shape. */
+const PROJECT_ANSWERS_SHAPE = 'answers is a list of { workspaceId, questionId, answer }, one per question: workspaceId and questionId as questions lists them, answer the chosen choice or your own words as a string (a list of strings picks several choices). Example: { method: "answer", answers: [{ workspaceId: "ws-1", questionId: "question:42", answer: "uploads" }] }';
+/** One answer the project agent proposes for a workspace's open plain question. */
+export const RuntimeProjectAnswerSchema = z.object({
+  workspaceId: z.string({ error: 'the workspace id, as a string, as questions lists it' }).min(1).describe('The workspace, as questions names it.'),
+  questionId: z.string({ error: 'the question id, as a string, as questions lists it' }).min(1).describe('The question, from questions.'),
+  answer: z.union([z.string().trim().min(1), z.array(z.string().trim().min(1)).min(1)], { error: 'the chosen choice or your own words, as a string (a list of strings picks several choices)' }).describe('The chosen choice or your own words, as a string; a list of strings picks several choices.'),
+}, { error: PROJECT_ANSWERS_SHAPE }).strict();
+export type RuntimeProjectAnswer = z.infer<typeof RuntimeProjectAnswerSchema>;
+/** The project agent reads the questions open in a workspace, and proposes answers to plain asks (`ask`) in the person's
+ * place: one approval card in its own conversation lists the batch, nothing is sent before the person approves it, and
+ * each answer's outcome is the project agent's next input. Approvals and take-over requests stay a person's. */
 export const RuntimeWorkspaceQuestionsArgumentsSchema = z.discriminatedUnion('method', [
-  z.object({ method: z.literal('questions').describe('The questions a workspace\'s agents wait on.'), workspaceId: targetWorkspace }).strict(),
-  z.object({ method: z.literal('answer').describe('Answer a plain question in the person\'s place; approvals and take-overs stay theirs.'), workspaceId: targetWorkspace, questionId: z.string().min(1).describe('The question, from questions.'), answers: z.array(PendingAskAnswerSchema).min(1).describe('One answer per question it asks.') }).strict(),
+  z.object({ method: z.literal('questions').describe('The questions open in a workspace.'), workspaceId: targetWorkspace }).strict(),
+  z.object({ method: z.literal('answer').describe('Propose answers to plain questions open in this project\'s workspaces, in the person\'s place; approvals and take-overs stay theirs. It posts one approval card listing every answer and your turn ends: nothing is sent until the person approves. Your next message says, per answer, whether it was delivered, its question had already closed, or it failed; if they reject the card, nothing was sent.'), answers: z.array(RuntimeProjectAnswerSchema, { error: PROJECT_ANSWERS_SHAPE }).min(1, PROJECT_ANSWERS_SHAPE).max(20, 'answers: at most 20 per card').describe('One per question.') }).strict(),
 ]);
 /** Subject links (docs/AUTOMATIONS-DESIGN.md §4): a pull request, issue or branch linked to this workspace, or to a named
  * one, gets the project's events about it through its automations; one subject has one workspace. */

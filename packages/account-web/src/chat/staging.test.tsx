@@ -4,7 +4,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { verticalSliceFixture } from '../App.js';
 import type { BlockState } from '../blocks/BlockActions.js';
-import { Composer } from '../Composer.js';
+import { StandaloneComposer as Composer } from '../Composer.js';
 import type { GitSpaceShellProps } from '../GitSpaceShell.js';
 import { ComposerStagingProvider, useComposerStaging, workspaceBlockActions, type ComposerStaging } from './staging.js';
 

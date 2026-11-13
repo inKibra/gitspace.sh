@@ -3,9 +3,9 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it } from 'vitest';
 import type { ToolCallBlock } from '@gitspace/blocks';
-import { SessionControlSchema } from '@gitspace/protocol-runtime/session-controls';
+import { SessionControlSchema, type RuntimeSessionCommand } from '@gitspace/protocol-runtime/session-controls';
 import { LIFECYCLE_APPROVAL_CHOICES, type RuntimeLifecycleApprovalAnswer, type RuntimeLifecycleApprovalQuestion, type RuntimeQuestion } from '@gitspace/protocol-runtime';
-import { TakeoverCardsContext, type TakeoverCards } from './TakeoverCard.js';
+import { QuestionCardsContext, type QuestionCards } from './QuestionCards.js';
 import { TranscriptItemView } from './chat/TranscriptItemView.js';
 
 const control = SessionControlSchema.parse({ sessionId: 'main', role: null, roleLabel: null, roles: [], provider: null, models: [], model: null, thinking: null, fastMode: false, planMode: false, context: null, cost: 0, todos: [], queue: { steering: [], followUp: [] }, historyAnchorId: null, history: [], goal: null, pendingAsk: null });
@@ -17,15 +17,16 @@ const card: RuntimeLifecycleApprovalQuestion = { phase: 'machine/prepare', callI
 const question = (answer: RuntimeQuestion['answer'] = null): RuntimeQuestion => ({ id: 'question:task-1', conversationId: 'main', kind: 'lifecycle-approval', prompt: 'The agent wants to run machine/prepare. 10-install.sh, 20-tools.sh need your approval first.', choices: Object.values(LIFECYCLE_APPROVAL_CHOICES), answer, lifecycle: card });
 let container: HTMLDivElement;
 let root: Root;
-let answered: Array<[string, RuntimeLifecycleApprovalAnswer]>;
-beforeEach(() => { container = document.createElement('div'); document.body.append(container); root = createRoot(container); answered = []; });
+let answered: Array<[string, unknown]>;
+let requested: RuntimeSessionCommand[];
+beforeEach(() => { container = document.createElement('div'); document.body.append(container); root = createRoot(container); answered = []; requested = []; });
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); });
 async function render(questions: RuntimeQuestion[], refusal?: string) {
-  const cards: TakeoverCards = {
-    questions, async request() { return { control }; }, watch: () => null,
+  const cards: QuestionCards = {
+    questions, async request(command) { if (refusal) throw new Error(refusal); requested.push(command); return { control }; }, watch: () => null,
     async answer(questionId, answer) { if (refusal) throw new Error(refusal); answered.push([questionId, answer]); },
   };
-  await act(async () => root.render(<TakeoverCardsContext.Provider value={cards}><TranscriptItemView item={block} active /></TakeoverCardsContext.Provider>));
+  await act(async () => root.render(<QuestionCardsContext.Provider value={cards}><TranscriptItemView item={block} active /></QuestionCardsContext.Provider>));
 }
 /** The card's buttons; the tool call below it has its own. */
 function buttons(): string[] { return [...container.querySelectorAll('section button')].map(button => button.textContent?.trim() ?? ''); }
@@ -43,7 +44,7 @@ it('shows each script on the environment call, a changed one as its diff against
   expect(diff).toEqual(['same:  #!/bin/sh', 'removed:- bun install', 'added:+ bun install --frozen-lockfile', 'same:  echo done']);
   expect(container.textContent).toContain('20-tools.sh· no approved version');
   expect(container.querySelector('pre[aria-label="Content of 20-tools.sh"]')?.textContent).toBe('brew install jq\n');
-  expect(buttons()).toEqual(['Not now', 'Only this workspace', 'Approve for the project']);
+  expect(buttons()).toEqual(['Dismiss', 'Not now', 'Only this workspace', 'Approve for the project']);
   // The call itself still shows below its card.
   expect(container.textContent).toContain('environment');
 });
@@ -58,7 +59,23 @@ it('a refused approval says why on the card and keeps its choices', async () => 
   await render([question()], 'Execution approval requires lifecycle control authorization');
   await click('Approve for the project');
   expect(container.querySelector('[role="alert"]')?.textContent).toContain('Execution approval requires lifecycle control authorization');
-  expect(buttons()).toEqual(['Not now', 'Only this workspace', 'Approve for the project']);
+  expect(buttons()).toEqual(['Dismiss', 'Not now', 'Only this workspace', 'Approve for the project']);
+});
+
+it('Dismiss closes the card unanswered, and a refused dismissal says why on the card', async () => {
+  await render([question()]);
+  await click('Dismiss');
+  expect(requested).toEqual([{ type: 'dismissQuestion', id: 'question:task-1' }]);
+  expect(answered).toEqual([]);
+  await render([question()], 'Question question:task-1 is closed (the person dismissed it), so it can no longer be answered.');
+  await click('Dismiss');
+  expect(container.querySelector('[role="alert"]')?.textContent).toContain('so it can no longer be answered');
+});
+
+it('a card closed unanswered says why and is read-only', async () => {
+  await render([{ ...question(), closed: { reason: 'expired', at: '2026-10-25T10:05:00.000Z' } }]);
+  expect(container.textContent).toContain('Expired');
+  expect(buttons()).toEqual([]);
 });
 
 it('an answered card is read-only and says what was chosen; a call without a card stays a tool call', async () => {

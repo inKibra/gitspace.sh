@@ -14,7 +14,7 @@ const operations: JobServices = { execute: unused, reconcile: unused, cancel: un
 const step = (id: string, title: string) => ({ id, title, detail: `Do ${title}.` });
 
 /** A conversation whose model makes the queued tool calls, one call per model turn, then replies; a person answers each
- * plan proposal with the next queued answer, as the workspace runtime's `answer` does. */
+ * plan proposal the call posted with the next queued answer, as the workspace runtime's `answer` records it. */
 async function fixture(storage = new MemoryStorage()) {
   const turns: (ToolCall | null)[] = [];
   const answers: { approved: boolean; note: string | null }[] = [];
@@ -23,13 +23,6 @@ async function fixture(storage = new MemoryStorage()) {
     invoke: unused, prepareBrowser: unused, takeoverTab: unused, lifecycleApproval: async () => null, instructions: async () => '', preflight: async () => {},
     images: { store: async image => image, load: async image => image },
     results: { put: unused, text: unused },
-    async question(id, api, context) {
-      const answer = answers.shift();
-      if (!answer) throw new Error('No answer queued');
-      const decision = await api.commit(tx => answerPlan(tx, api.conversationId, id, answer), context);
-      if (decision) decisions.push(decision);
-      return answer;
-    },
   };
   const tools = createRuntimeTools(services, operations, (id, context) => harness.abortTask(id, context));
   const registry = createRegistry(); registry.install(defineExtension({ name: 'plan-proof', tools }));
@@ -37,8 +30,17 @@ async function fixture(storage = new MemoryStorage()) {
   const harness = await Harness.open(storage, { registry, models, settings: { toolExecution: 'parallel', compaction: { enabled: false } } }, BACKGROUND_CONTEXT);
   const root = await harness.root(BACKGROUND_CONTEXT, { agent: { model: { provider: model.provider, modelId: model.id }, tools } });
   await harness.commit(async tx => { (await tx.doc(WorkspaceDoc)).phase = 'plan'; }, BACKGROUND_CONTEXT);
+  /** The person's answer to the open proposal `questionId` of `conversation`. */
+  async function answer(conversation: Conversation, questionId: string, decision: { approved: boolean; note: string | null }) {
+    const settled = await harness.commit(async tx => {
+      const question = (await tx.doc(QuestionsDoc)).items.find(item => item.id === questionId);
+      if (question) question.answer = decision;
+      return answerPlan(tx, conversation.id, questionId, decision);
+    }, BACKGROUND_CONTEXT);
+    if (settled) decisions.push(settled);
+  }
   let calls = 0;
-  /** Runs one tool call in `conversation` and returns its result. */
+  /** Runs one tool call in `conversation` and returns its result; a proposal it posted takes the next queued answer. */
   async function run(conversation: Conversation, name: string, args: ToolCall['arguments']) {
     const id = `call-${++calls}`;
     turns.push({ type: 'toolCall', id, name, arguments: args });
@@ -46,11 +48,15 @@ async function fixture(storage = new MemoryStorage()) {
     await conversation.waitForIdle(BACKGROUND_CONTEXT);
     const result = (await conversation.context(BACKGROUND_CONTEXT)).messages.find(message => message.role === 'toolResult' && message.toolCallId === id);
     if (result?.role !== 'toolResult') throw new Error(`No result for ${id}`);
+    const posted = Reflect.get(Object(result.details), 'questionId');
+    const queued = answers.shift();
+    if (typeof posted === 'string' && queued) await answer(conversation, posted, queued);
+    else if (queued) answers.unshift(queued);
     return { isError: result.isError, text: result.content.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n') };
   }
   const todos = async (conversation: Conversation) => (await harness.snapshot(TodosDoc, conversation.id, BACKGROUND_CONTEXT))?.items;
   const plan = () => harness.snapshot(PlanDoc, root.id, BACKGROUND_CONTEXT);
-  return { harness, root, answers, decisions, run, todos, plan, statuses, tools };
+  return { harness, root, answers, decisions, answer, run, todos, plan, statuses, tools };
   /** The plan in effect, as each step's status by id. */
   async function statuses() {
     const value = await plan();
@@ -158,7 +164,7 @@ test('a model must send steps: a proposal without them is refused and proposes n
   } finally { await f.harness.close(BACKGROUND_CONTEXT); }
 });
 
-test('a proposal recorded without steps and waiting at a deploy is approved after it as a Markdown-only plan', async () => {
+test('a proposal recorded without steps and waiting at a deploy is posted again after it and approved as a Markdown-only plan', async () => {
   // The storage outlives the Harness that closes for the deploy, as a database does.
   const storage = new Proxy(new MemoryStorage(), { get: (target, key) => key === 'close' ? async () => {} : Reflect.get(target, key) });
   const asked = Promise.withResolvers<void>();
@@ -183,10 +189,14 @@ test('a proposal recorded without steps and waiting at a deploy is approved afte
 
   const f = await fixture(storage);
   try {
-    f.answers.push({ approved: true, note: 'Go ahead.' });
+    // The call runs again under the release that posts questions: it finds its question and ends, leaving it open.
     await f.root.waitForIdle(BACKGROUND_CONTEXT);
     const result = (await f.root.context(BACKGROUND_CONTEXT)).messages.find(message => message.role === 'toolResult' && message.toolCallId === 'call-old');
     expect(result).toMatchObject({ isError: false });
+    const [question] = (await f.harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items ?? [];
+    if (!question) throw new Error('The proposal has no question');
+    expect(question).toMatchObject({ answer: null, askedAt: expect.any(String) });
+    await f.answer(f.root, question.id, { approved: true, note: 'Go ahead.' });
     expect(await f.plan()).toMatchObject({ status: 'approved', revision: 1, text: 'Add loyalty stamps', steps: [] });
     expect(f.decisions.map(decision => [decision.title, decision.body, decision.decisions])).toEqual([['Approved plan revision 1', 'Go ahead.', []]]);
     expect(await f.todos(f.root)).toBeUndefined();

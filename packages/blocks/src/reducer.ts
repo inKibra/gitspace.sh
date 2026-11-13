@@ -196,10 +196,11 @@ interface ProjectionMessage {
   at?: string;
 }
 
+/** An ask card that posted its question ends its call, so only a card still waiting in its call keeps the turn running. */
 function pendingItem(item: TranscriptItem | undefined): number {
   return Number(item?.type === 'message' && item.pending === true
     || item?.type === 'tool-call' && item.status === 'running'
-    || item?.type === 'ask' && item.status === 'pending');
+    || item?.type === 'ask' && item.status === 'pending' && item.questionId === undefined);
 }
 
 /**
@@ -346,6 +347,12 @@ export class TranscriptProjector {
   #answerAsk(toolCallId: string, isError: boolean, details: unknown): boolean {
     const previous = this.#findAsk(toolCallId);
     if (!previous) return false;
+    // A call that posted its question ends at once: the card stays pending, and its question says how it ends.
+    const questionId = record(details)?.questionId;
+    if (!isError && typeof questionId === 'string') {
+      if (previous.questionId !== questionId) this.#write({ ...previous, questionId }, previous);
+      return true;
+    }
     const answeredBy = askAnswererSchema.safeParse(record(details)?.answeredBy);
     const ask: AskBlock = {
       ...previous,

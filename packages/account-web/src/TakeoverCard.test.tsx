@@ -5,13 +5,13 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { ToolCallBlock } from '@gitspace/blocks';
 import { SessionControlSchema, type RuntimeSessionCommand } from '@gitspace/protocol-runtime/session-controls';
 import type { RuntimeQuestion, RuntimeTakeoverQuestion } from '@gitspace/protocol-runtime';
-import { TakeoverCardsContext, type TakeoverCards } from './TakeoverCard.js';
+import { QuestionCardsContext, type QuestionCards } from './QuestionCards.js';
 import { TranscriptItemView } from './chat/TranscriptItemView.js';
 
 const groupId = '00000000-0000-4000-8000-0000000000a1';
 const control = SessionControlSchema.parse({ sessionId: 'main', role: null, roleLabel: null, roles: [], provider: null, models: [], model: null, thinking: null, fastMode: false, planMode: false, context: null, cost: 0, todos: [], queue: { steering: [], followUp: [] }, historyAnchorId: null, history: [], goal: null, pendingAsk: null });
 const block: ToolCallBlock = { id: 'main:tool:call-1', type: 'tool-call', toolCallId: 'call-1', tool: 'ask_takeover', status: 'running', args: { source: 'relay', targetId: 'tab-a', reason: 'Sign in to GitHub' } };
-const chrome: RuntimeTakeoverQuestion = { source: 'chrome', pairingId: '00000000-0000-4000-8000-0000000000b2', browser: 'Studio desktop', groupId, targetId: 'tab-a', url: 'https://github.com/login', title: 'Sign in to GitHub', holder: 'agent', callId: 'call-1', askedAt: '2026-10-25T10:00:00.000Z', until: '2026-10-25T10:30:00.000Z', waiting: true };
+const chrome: RuntimeTakeoverQuestion = { source: 'chrome', pairingId: '00000000-0000-4000-8000-0000000000b2', browser: 'Studio desktop', groupId, targetId: 'tab-a', url: 'https://github.com/login', title: 'Sign in to GitHub', holder: 'agent', callId: 'call-1', askedAt: '2026-10-25T10:00:00.000Z' };
 const cloud: RuntimeTakeoverQuestion = { ...chrome, source: 'cloud', pairingId: null, browser: 'Cloud browser', url: 'https://shop.example/pay', title: 'Pay' };
 const question = (takeover: RuntimeTakeoverQuestion, answer: RuntimeQuestion['answer'] = null): RuntimeQuestion => ({ id: 'question:task-1', conversationId: 'main', kind: 'takeover', prompt: 'Sign in to **GitHub**; I cannot enter your password.', choices: ['Take over', 'Not now'], answer, takeover });
 let container: HTMLDivElement;
@@ -21,11 +21,11 @@ let watched: string[];
 beforeEach(() => { container = document.createElement('div'); document.body.append(container); root = createRoot(container); requested = []; watched = []; });
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); });
 async function render(questions: RuntimeQuestion[]) {
-  const cards: TakeoverCards = {
+  const cards: QuestionCards = {
     questions, async request(command) { requested.push(command); return { control }; }, async answer() { throw new Error('A take-over card has no lifecycle answer'); },
     watch: (card, onClose) => { watched.push(card.targetId); return <button type="button" onClick={onClose}>Watching {card.title}</button>; },
   };
-  await act(async () => root.render(<TakeoverCardsContext.Provider value={cards}><TranscriptItemView item={block} active /></TakeoverCardsContext.Provider>));
+  await act(async () => root.render(<QuestionCardsContext.Provider value={cards}><TranscriptItemView item={block} active /></QuestionCardsContext.Provider>));
 }
 function buttons(): string[] { return [...container.querySelectorAll('button')].map(button => button.textContent?.trim() ?? ''); }
 async function click(text: string) {
@@ -39,7 +39,7 @@ it('shows why the agent asks, the browser and the tab; Take over on Chrome takes
   expect(container.querySelector('section')?.getAttribute('aria-label')).toBe('Take over · Studio desktop');
   expect(container.textContent).toContain('Sign in to GitHub; I cannot enter your password.');
   expect(container.textContent).toContain('Studio desktop· github.com/login');
-  expect(buttons()).toEqual(['Not now', 'Take over']);
+  expect(buttons()).toEqual(['Dismiss', 'Not now', 'Take over']);
   await click('Take over');
   expect(requested).toEqual([{ type: 'browserTakeOver', groupId, targetId: 'tab-a' }, { type: 'browserFocusTab', groupId, targetId: 'tab-a' }]);
   expect(watched).toEqual([]);
@@ -72,10 +72,16 @@ it('while you hold the tab the card says so and Resume agent hands it back', asy
   expect(requested.at(-1)).toEqual({ type: 'browserFocusTab', groupId, targetId: 'tab-a' });
 });
 
-it('a card the agent stopped waiting for stays open and says so', async () => {
-  await render([question({ ...chrome, waiting: false })]);
-  expect(container.textContent).toContain('The agent stopped waiting. If you take the tab, it hears when you hand it back.');
-  expect(buttons()).toEqual(['Not now', 'Take over']);
+it('Dismiss closes the card unanswered through the conversation\'s session commands', async () => {
+  await render([question(chrome)]);
+  await click('Dismiss');
+  expect(requested).toEqual([{ type: 'dismissQuestion', id: 'question:task-1' }]);
+});
+
+it('a card closed unanswered says why and is read-only', async () => {
+  await render([{ ...question(chrome), closed: { reason: 'stopped', at: '2026-10-25T10:05:00.000Z' } }]);
+  expect(container.textContent).toContain('Closed: the conversation was stopped or reset');
+  expect(buttons()).toEqual([]);
 });
 
 it('an ended card is read-only: handed back, or Not now; a call without its question (a refusal) stays a tool call', async () => {
@@ -91,9 +97,9 @@ it('an ended card is read-only: handed back, or Not now; a call without its ques
 });
 
 it('an action that fails says why on the card', async () => {
-  const failing: TakeoverCards = { questions: [question(chrome)], request: vi.fn(async () => { throw new Error('This Chrome is offline'); }), answer: vi.fn(), watch: () => null };
-  await act(async () => root.render(<TakeoverCardsContext.Provider value={failing}><TranscriptItemView item={block} active /></TakeoverCardsContext.Provider>));
+  const failing: QuestionCards = { questions: [question(chrome)], request: vi.fn(async () => { throw new Error('This Chrome is offline'); }), answer: vi.fn(), watch: () => null };
+  await act(async () => root.render(<QuestionCardsContext.Provider value={failing}><TranscriptItemView item={block} active /></QuestionCardsContext.Provider>));
   await click('Take over');
   expect(container.querySelector('[role="alert"]')?.textContent).toContain('This Chrome is offline');
-  expect(buttons()).toEqual(['Not now', 'Take over']);
+  expect(buttons()).toEqual(['Dismiss', 'Not now', 'Take over']);
 });

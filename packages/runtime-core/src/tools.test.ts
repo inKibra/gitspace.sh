@@ -29,7 +29,7 @@ const services: ToolServices = {
   images: { async store(image) { storedImages.push(image.data); return { ...image, data: `stored:${image.data}` }; }, load: async image => ({ ...image, data: image.data.replace(/^stored:/u, '') }) },
   invoke: completed,
   async prepareBrowser() { return RuntimeBrowserApprovalCardSchema.parse({ id: 'browser', projectId: 'project', workspaceId: 'workspace', machineId: 'machine', attachmentId: 'attachment', generation: 1, groupId: '00000000-0000-4000-8000-000000000001', groupName: 'Workspace', origins: [], source: 'headless', expiresAt: new Date(Date.now() + 60000).toISOString(), action: 'tabs' }); },
-  question: async (_id, api) => api.callId === 'propose_plan' ? { approved: false, note: 'Split the backfill out.' } : 'answered', instructions: async () => '', preflight: async () => {}, lifecycleApproval: async () => null,
+  instructions: async () => '', preflight: async () => {}, lifecycleApproval: async () => null,
   async takeoverTab(input) { return { source: 'cloud', pairingId: null, browser: 'Cloud browser', groupId: '00000000-0000-4000-8000-000000000002', targetId: input.args.targetId, url: 'https://example.com/', title: 'Example', holder: 'agent' }; },
   results: {
     async put(input) { kept.set(keptReference(input), input.text); return keptReference(input); },
@@ -84,23 +84,17 @@ test('every registered tool advertises its real object contract and executes thr
   const { harness, root, tools } = fixture;
   try {
     expect(tools.map(tool => tool.name).sort()).toEqual(Object.keys(samples).sort());
-    // ask_takeover waits for its card: Not now ends it.
-    await harness.commit(async tx => { await tx.doc(QuestionsDoc); }, BACKGROUND_CONTEXT);
-    const watch = await harness.watchDoc(QuestionsDoc, BACKGROUND_CONTEXT);
-    if (!watch) throw new Error('Question document missing');
-    const opened = Promise.withResolvers<void>();
-    watch.start(async call => { if (call.kind === 'value' && call.value.items.some(item => item.kind === 'takeover')) opened.resolve(); });
     await root.submit({ type: 'input', content: 'Exercise all registered contracts.' }, BACKGROUND_CONTEXT);
-    await opened.promise;
-    await watch.stop();
-    await harness.commit(async tx => { for (const item of (await tx.doc(QuestionsDoc)).items) if (item.kind === 'takeover') item.answer = 'declined'; }, BACKGROUND_CONTEXT);
     await root.waitForIdle(BACKGROUND_CONTEXT);
     const results = (await root.context(BACKGROUND_CONTEXT)).messages.filter(message => message.role === 'toolResult');
     expect(results.map(result => result.toolCallId).sort()).toEqual(Object.keys(samples).sort());
     expect(results.filter(result => result.isError)).toEqual([]);
-    // The transcript shows the answer from the result's details, not from its text.
-    expect(results.find(result => result.toolCallId === 'ask')?.details).toEqual({ results: [{ selectedOptions: [], customInput: 'answered' }] });
-    expect(results.find(result => result.toolCallId === 'propose_plan')?.details).toEqual({ results: [{ id: 'decision', selectedOptions: ['Reject'], customInput: null }, { id: 'note', selectedOptions: [], customInput: 'Split the backfill out.' }] });
+    // The question tools post their questions and end: the transcript reads each card's question from its details.
+    const questions = (await harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items ?? [];
+    for (const [callId, kind] of [['ask', 'ask'], ['propose_plan', 'approval'], ['ask_takeover', 'takeover']]) {
+      const questionId = Reflect.get(Object(results.find(result => result.toolCallId === callId)?.details), 'questionId');
+      expect(questions.find(question => question.id === questionId)).toMatchObject({ kind, answer: null });
+    }
     // Models call web_browser (OpenAI reserves `browser`); dispatch keeps the signed protocol name.
     expect(routed.sort()).toEqual(Object.keys(samples).filter(name => !['todo', 'ask', 'propose_plan', 'ask_takeover'].includes(name)).map(name => name === 'web_browser' ? 'browser' : name).sort());
     expect((await harness.snapshot(TodosDoc, root.id, BACKGROUND_CONTEXT))?.items).toEqual(samples.todo?.items);

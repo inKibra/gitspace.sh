@@ -10,10 +10,11 @@ import type { TranscriptPageRequest, TranscriptPage, TranscriptContentRequest, T
 import type { SessionUsageReport } from '@gitspace/protocol-runtime/session-controls';
 import { RuntimeBrowserStatusSchema, RuntimeBrowserArtifactPageSchema, RuntimeBrowserOverviewSchema, RuntimeBrowserPreviewSchema, RuntimeBrowserCaptureViewSchema, RuntimeBrowserShareSchema, RuntimeBrowserConnectedTabSchema, type RuntimeBrowserManagement, type RuntimeBrowserStatus, type RuntimeBrowserArtifactPage, type RuntimeBrowserOverview, type RuntimeBrowserPreview, type RuntimeBrowserCaptureView, type RuntimeBrowserShare, type RuntimeBrowserConnectedTab } from '@gitspace/protocol-runtime';
 import { RuntimeBrowserCommentThreadSchema, RuntimeBrowserCommentThreadViewSchema, type RuntimeBrowserCommentThread, type RuntimeBrowserCommentThreadView, type RuntimeBrowserCommentWrite } from '@gitspace/protocol-runtime';
-import { isSubagentTool, TAKEOVER_ANSWERS, TAKEOVER_CHOICES } from '@gitspace/protocol-runtime';
+import { isSubagentTool, questionState, TAKEOVER_ANSWERS, TAKEOVER_CHOICES } from '@gitspace/protocol-runtime';
 import { RuntimeBrowserCaptureShareSchema, type RuntimeBrowserCaptureShare } from '@gitspace/protocol-runtime';
 import { BUILT_IN_AGENT_DEFINITIONS } from './builtin-agents.js';
 import type { ConversationLifecycle } from './conversation-lifecycle.js';
+import { closeConversationQuestions } from './questions.js';
 import { AgentDefinitionContextDoc } from './subagent-state.js';
 import { modelRoleThinkingSchema, parseModelRoleSelector } from '@gitspace/protocol/inference';
 
@@ -175,7 +176,7 @@ export function createSessionControls(services: SessionControlServices) {
     const child = (await harness.snapshot(AgentDefinitionContextDoc, target.id, ctx))?.child;
     const buckets = [...Object.values(usage?.models ?? {}), ...Object.values(usage?.tools ?? {})];
     const cost = buckets.reduce((sum, value) => sum + value.cost.total, 0);
-    const pending = questions?.items.find(item => item.kind === 'ask' && item.conversationId === String(target.id) && item.answer === null);
+    const pending = questions?.items.find(item => item.kind === 'ask' && item.conversationId === String(target.id) && questionState(item) === 'open');
     const queueText = (mode: 'steer' | 'followUp') => (inbox?.items ?? []).flatMap(item => item.mode === mode ? [typeof item.content === 'string' ? item.content : item.content.filter(part => part.type === 'text').map(part => part.text).join('\n')] : []);
     const currentModel = catalog.models.find(model => model.provider === agent.model?.provider && model.id === agent.model?.modelId);
     // A main conversation has no model before its first message is admitted, and its agent still carries the harness's
@@ -364,24 +365,28 @@ export function createSessionControls(services: SessionControlServices) {
         }, ctx));
         break;
       }
-      case 'answerAsk': await harness.commit(async tx => {
-        const questions = await tx.doc(QuestionsDoc);
-        const question = questions.items.find(item => item.id === command.id && item.conversationId === String(target.id));
-        if (!question || question.answer !== null) throw new Error('Pending question not found');
+      case 'answerAsk': await services.lifecycle.closeQuestion(command.id, async question => {
+        if (question.conversationId !== String(target.id)) throw new Error(`Question ${command.id} belongs to another conversation`);
         // An ask_takeover card is answered only by Not now: Take over is browserTakeOver, and a held tab's card ends at its handback.
         if (question.kind === 'takeover') {
           if (command.answers[0]?.selectedOptions[0] !== TAKEOVER_CHOICES.notNow) throw new Error('A take-over request is answered only by Not now');
           if (question.takeover?.holder === 'you') throw new Error('You hold this tab: hand it back with Resume agent');
-          question.answer = TAKEOVER_ANSWERS.declined;
-          return;
+          return { closure: { answer: TAKEOVER_ANSWERS.declined }, value: undefined };
         }
         if (question.kind !== 'ask') throw new Error('Approval requests require an explicit runtime approval answer');
         if (!command.answers.length) throw new Error('Question answer is required');
-        question.answer = command.answers.map(answer => ({ id: answer.id, selectedOptions: [...answer.selectedOptions], customInput: answer.customInput }));
-      }, ctx); break;
+        return { closure: { answer: command.answers.map(answer => ({ id: answer.id, selectedOptions: [...answer.selectedOptions], customInput: answer.customInput })) }, value: undefined };
+      }); break;
+      case 'dismissQuestion': await services.lifecycle.closeQuestion(command.id, async question => {
+        if (question.conversationId !== String(target.id)) throw new Error(`Question ${command.id} belongs to another conversation`);
+        if (question.takeover?.holder === 'you') throw new Error('You hold this tab: hand it back with Resume agent');
+        return { closure: { dismissed: true }, value: undefined };
+      }); break;
       case 'stop': await services.lifecycle.stop(String(target.id)); break;
       case 'navigateTree': {
         await target.abort(ctx);
+        // The conversation continues from a fork: questions it left open close as stopped.
+        await harness.commit(tx => closeConversationQuestions(tx, new Map([[String(target.id), target.id]])), ctx);
         const resolved = await services.history.resolve(target.id, command.entryId);
         const source = await harness.conversation(resolved.conversationId, ctx);
         if (!source) throw new Error('History conversation not found');

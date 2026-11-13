@@ -1,7 +1,7 @@
 import type { TranscriptItem, WorkspaceReportBlock } from '@gitspace/blocks';
 import { automationEventCount, type AutomationMessage, type AutomationMessageEvent } from '@gitspace/protocol/automations-contract';
 import { Button, badgeColors, useShape } from '@gitspace/ui';
-import { ArrowUpRight, ChevronDown, ChevronRight, Globe02, MessageChatCircle, Terminal, Users01, Zap } from '@untitledui/icons';
+import { ArrowUpRight, ChevronDown, ChevronRight, Globe02, MessageChatCircle, MessageQuestionCircle, Terminal, Users01, Zap } from '@untitledui/icons';
 import { useState, type CSSProperties, type ReactNode } from 'react';
 import { GitSpaceMarkdown } from '../GitSpaceMarkdown.js';
 import { automationsUrl, navigateProductUrl, setProductRoute } from '../routes.js';
@@ -147,6 +147,7 @@ const EVENT_KIND: Record<string, { tone: string; icon: ReactNode; kind: (source:
   'browser-handback': { tone: badgeColors.blue, icon: <Globe02 {...ICON} />, kind: (source) => source },
   'capture-replay': { tone: badgeColors.blue, icon: <Globe02 {...ICON} />, kind: (source) => source },
   'page-comment': { tone: badgeColors.blue, icon: <Globe02 {...ICON} />, kind: (source) => source },
+  question: { tone: badgeColors.orange, icon: <MessageQuestionCircle {...ICON} />, kind: (source) => <>Question · {source}</> },
 };
 
 /** What GitSpace delivered to the agent on someone else's behalf: a subagent's or workspace's message, a finished

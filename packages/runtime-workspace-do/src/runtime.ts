@@ -6,8 +6,8 @@ import { AssistantEntry, GenerationTask, LiveDoc } from '@earendil-works/pi-dura
 import { appendNotice, CacheNoticesDoc, noticeInvalidBlocks } from './notices.js';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { diffRevisions } from '@earendil-works/chord/delta';
-import { createRuntimeHarness, createConversationTools, AgentDefinitionContextDoc, SubagentRunQueueDoc, type SubagentMetadata, ProcessExitsDoc, QuestionsDoc, WorkspaceDoc, answerPlan, recordMachineReconnection, recordProcessExit, type PlanDecision, type ToolServices, type RuntimeHarnessOptions } from '@gitspace/runtime-core';
-import { RuntimeApprovalAnswerSchema, RuntimeLifecycleApprovalAnswerSchema, RuntimeSnapshotSchema, RuntimeWatchEventSchema, RuntimeToolResultSchema, WORKSPACE_TOOL_RESULTS_MAX_BYTES, receiptDigest, type RuntimeToolResult, type RuntimeSnapshot, type RuntimeWatchEvent, type RuntimeSubmitInput, type RuntimeCancelInput, type RuntimeAnswerInput, type RuntimeGitCheckpoint, type RuntimeWorkspaceStatus } from '@gitspace/protocol-runtime';
+import { createRuntimeHarness, createConversationTools, AgentDefinitionContextDoc, SubagentRunQueueDoc, type SubagentMetadata, ProcessExitsDoc, QuestionsDoc, WorkspaceDoc, answerPlan, questionRefusal, recordMachineReconnection, recordProcessExit, type PlanDecision, type QuestionClosure, type ToolServices, type RuntimeHarnessOptions } from '@gitspace/runtime-core';
+import { RuntimeApprovalAnswerSchema, RuntimeLifecycleApprovalAnswerSchema, RuntimeSnapshotSchema, RuntimeWatchEventSchema, RuntimeToolResultSchema, WORKSPACE_TOOL_RESULTS_MAX_BYTES, questionState, receiptDigest, type RuntimeToolResult, type RuntimeSnapshot, type RuntimeWatchEvent, type RuntimeSubmitInput, type RuntimeCancelInput, type RuntimeAnswerInput, type RuntimeGitCheckpoint, type RuntimeWorkspaceStatus } from '@gitspace/protocol-runtime';
 import { DurableObjectSqliteDatabase } from './sqlite.js';
 import { AttachmentStore, isAttachmentOnline, isAttachmentReady, type AttachmentServices } from './attachments.js';
 import { applyInferenceThinking, createSessionControls, SessionControlsDoc, type SessionControlServices } from '@gitspace/runtime-core/session-controls';
@@ -45,9 +45,11 @@ export type RuntimeTurn = { state: 'queued' } | { state: 'running' } | { state: 
 export type RuntimeTurnItem = { role: 'user' | 'assistant' | 'tool'; text: string };
 /** `historyFrom`: for a submission, the history ordinal from which its input and everything after it are read. */
 export type RuntimeAccepted = { accepted: true; cursor: number; conversationId?: string; historyFrom?: number };
-/** A pending question as the project agent sees it. `kind` tells a plan approval (`propose_plan`) from a tool action's
+/** An open question as the project agent sees it. `kind` tells a plan approval (`propose_plan`) from a tool action's
  * approval; `why` says why a person decides it, null for a plain ask the project agent may answer. */
 export type ProjectQuestion = { id: string; conversation: string; kind: ProjectQuestionKind; prompt: string; choices: string[]; answerable: boolean; why: string | null };
+/** What became of one answer the project agent delivered: the question took it, or it was no longer open (`reason`). */
+export type ProjectAnswerOutcome = { delivered: true } | { delivered: false; reason: string };
 type ProjectQuestionKind = 'ask' | 'plan-approval' | 'tool-approval' | 'lifecycle-approval' | 'takeover';
 const PERSON_DECIDES: Record<Exclude<ProjectQuestionKind, 'ask'>, string> = {
   'plan-approval': 'A person approves this: approving or rejecting a plan is their decision.',
@@ -78,7 +80,10 @@ export type WorkspaceRuntime = {
   submit(input: RuntimeSubmitInput, deviceId?: string): Promise<RuntimeAccepted>;
   saveDraft(input: WorkspaceDraftSave, deviceId: string): Promise<WorkspaceDraftSaveResult>;
   cancel(input: RuntimeCancelInput): Promise<RuntimeAccepted>;
-  answer(input: RuntimeAnswerInput, actor: { deviceId: string; canApprove: boolean }): Promise<RuntimeAccepted>;
+  /** A person's answer to an open question; the asking conversation hears it as its next input (`text`, when given, is
+   * what it hears instead of the answer's own description). A question that is not open refuses it, except a retry of
+   * the answer it already has. */
+  answer(input: RuntimeAnswerInput, actor: { deviceId: string; canApprove: boolean }, text?: string): Promise<RuntimeAccepted>;
   /** Runtime events newer than `after`, bounded: a snapshot for null, nothing when current, otherwise the retained
    * deltas after it, or a reset when it is ahead, expired or further behind than one read returns. */
   events(after: number | null): Promise<RuntimeWatchEvent[]>;
@@ -108,11 +113,12 @@ export type WorkspaceRuntime = {
   /** Project base workspace: a workspace's report of a turn the project agent started. Quiet, a line the agent reads on
    * its next turn; wake, an event that starts one (after the current one when it is busy). */
   workspaceReport(report: WorkspaceTurnReport, onDone: 'quiet' | 'wake'): Promise<void>;
-  /** The questions this workspace's agents wait on, main and subagents, as the project agent reads them. */
+  /** The questions open in this workspace, main and subagents, as the project agent reads them. */
   projectQuestions(): Promise<ProjectQuestion[]>;
-  /** The project agent answers a plain ask in the person's place: the answer records it, and the asking call resumes as
-   * it does for a person's answer. Approvals and take-over requests are refused. */
-  projectAnswer(input: { questionId: string; answers: readonly PendingAskAnswer[] }): Promise<RuntimeAccepted>;
+  /** The project agent answers a plain ask in the person's place, with that person's approval (`for`, their name): the
+   * question records it, and the asking conversation's next input says who answered. A question no longer open is not
+   * delivered (a retry of this same answer is); approvals, take-over requests and answers that do not fit are refused. */
+  projectAnswer(input: { questionId: string; answers: readonly PendingAskAnswer[]; for: string }): Promise<ProjectAnswerOutcome>;
   /** You took a tab the agent was using, or handed one back (docs/APERTURE-DESIGN.md §7.2), or asked for a capture's
    * steps to be replayed (§11); a person commented on a page or replied in a comment thread (§9): an event for the
    * main conversation, which starts a turn when it is idle (after the current one when it is busy). */
@@ -544,8 +550,7 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
     const rootId = String(runtime.root.id);
     const root = conversationViews.get(rootId);
     const [agent, controls] = await Promise.all([runtime.root.agent(BACKGROUND_CONTEXT), harness.snapshot(SessionControlsDoc, runtime.root.id, BACKGROUND_CONTEXT)]);
-    // An ask_takeover card left open after its call stopped waiting no longer holds the agent.
-    const waiting = (questions?.items ?? []).find(item => item.conversationId === rootId && item.answer === null && (item.kind !== 'takeover' || item.takeover?.waiting === true));
+    const waiting = (questions?.items ?? []).find(item => item.conversationId === rootId && questionState(item) === 'open');
     const replied = root?.messages.findLast(message => message.role === 'assistant' && message.content.length > 0);
     const reply = replied?.content.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n') ?? null;
     // A view message's id is `entryId:index`, the history ordinal `entryId * 1024 + index`.
@@ -763,31 +768,34 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
       await line;
       const rootId = String(runtime.root.id);
       const questions = (await harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items ?? [];
-      // An ask_takeover card left open after its call stopped waiting no longer holds the agent.
-      return questions.filter(item => item.answer === null && (item.kind !== 'takeover' || item.takeover?.waiting === true)).map((item): ProjectQuestion => {
+      return questions.filter(item => questionState(item) === 'open').map((item): ProjectQuestion => {
         const kind = projectQuestionKind(item);
         const conversation = item.conversationId === rootId ? 'main' : conversationViews.get(item.conversationId)?.subagent?.name ?? item.conversationId;
         return { id: item.id, conversation, kind, prompt: item.prompt, choices: item.choices, answerable: kind === 'ask', why: kind === 'ask' ? null : PERSON_DECIDES[kind] };
       });
     },
     async projectAnswer(input) {
+      const answer = input.answers.map(item => ({ id: item.id, selectedOptions: [...item.selectedOptions], customInput: item.customInput }));
+      const current = (await harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items.find(item => item.id === input.questionId);
+      if (!current) throw new Error(`Question ${input.questionId} is not one this workspace's agents asked`);
+      if (questionState(current) !== 'open') {
+        // A delivery retried after the first one landed finds its own answer.
+        if (current.answeredBy?.by === 'project-agent' && JSON.stringify(current.answer) === JSON.stringify(answer)) return { delivered: true };
+        return { delivered: false, reason: questionRefusal(current) };
+      }
       const at = new Date().toISOString();
-      await harness.commit(async tx => {
-        const question = (await tx.doc(QuestionsDoc)).items.find(item => item.id === input.questionId);
-        if (!question) throw new Error(`Question ${input.questionId} is not one this workspace's agents asked`);
-        if (question.answer !== null) throw new Error(`Question ${input.questionId} is already answered`);
+      await runtime.lifecycle.closeQuestion(input.questionId, async question => {
         const kind = projectQuestionKind(question);
         if (kind !== 'ask') throw new Error(`Question ${input.questionId} is a ${kind}, not a plain question. ${PERSON_DECIDES[kind]} The project agent answers only plain questions (ask).`);
-        const stray = input.answers.find(answer => answer.id !== question.id);
+        const stray = input.answers.find(item => item.id !== question.id);
         if (stray) throw new Error(`Each answer's id is the question's id, ${question.id}; ${stray.id} is not`);
-        const unknown = question.choices.length > 0 ? input.answers.flatMap(answer => answer.selectedOptions).filter(option => !question.choices.includes(option)) : [];
+        const unknown = question.choices.length > 0 ? input.answers.flatMap(item => item.selectedOptions).filter(option => !question.choices.includes(option)) : [];
         if (unknown.length > 0) throw new Error(`${unknown.join(', ')} ${unknown.length === 1 ? 'is not one of its choices' : 'are not its choices'}: ${question.choices.join(', ')}`);
-        if (input.answers.every(answer => answer.selectedOptions.length === 0 && !answer.customInput?.trim())) throw new Error('An answer selects a choice or writes customInput');
-        question.answer = input.answers.map(answer => ({ id: answer.id, selectedOptions: [...answer.selectedOptions], customInput: answer.customInput }));
-        question.answeredBy = { by: 'project-agent', at };
-      }, BACKGROUND_CONTEXT);
-      harness.resume();
-      await line; return { accepted: true, cursor: snapshot.cursor };
+        if (input.answers.every(item => item.selectedOptions.length === 0 && !item.customInput?.trim())) throw new Error('An answer selects a choice or writes customInput');
+        return { closure: { answer, answeredBy: { by: 'project-agent', at, for: input.for } }, value: undefined };
+      });
+      publish(); await line;
+      return { delivered: true };
     },
     noticeWhenReady(input) {
       options.storage.sql.exec('INSERT OR IGNORE INTO runtime_attach_notices(attachment_id,generation,conversation_id,label) VALUES(?,?,?,?)', input.attachmentId, input.generation, input.conversationId, input.label);
@@ -857,12 +865,11 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
       return { accepted: true as const, cursor: snapshot.cursor, conversationId: String(target.id), historyFrom };
     },
     async cancel(input: RuntimeCancelInput) { await runtime.lifecycle.stop(String((await conversation(input.conversationId)).id)); await line; return { accepted: true as const, cursor: snapshot.cursor }; },
-    async answer(input: RuntimeAnswerInput, actor: { deviceId: string; canApprove: boolean }) {
-      const decision = await harness.commit(async (tx): Promise<PlanDecision | null> => {
-        const questions = await tx.doc(QuestionsDoc);
-        const question = questions.items.find(item => item.id === input.questionId);
-        if (!question) throw new Error('Question not found');
-        if (question.answer !== null) { if (JSON.stringify(question.answer) !== JSON.stringify(input.answer)) throw new Error('Question already answered'); return null; }
+    async answer(input: RuntimeAnswerInput, actor: { deviceId: string; canApprove: boolean }, text?: string) {
+      const current = (await harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items.find(item => item.id === input.questionId);
+      // A retried answer the question already has is accepted again; any other answer to a closed question is refused.
+      if (current?.answer !== null && current?.answer !== undefined && JSON.stringify(current.answer) === JSON.stringify(input.answer)) { await line; return { accepted: true as const, cursor: snapshot.cursor }; }
+      const decision = await runtime.lifecycle.closeQuestion(input.questionId, async (question, tx, conversationId): Promise<{ closure: QuestionClosure; value: PlanDecision | null }> => {
         if (question.kind === 'takeover') throw new Error('A take-over request is answered on its card: Not now, or Take over and then Resume agent');
         if (question.kind === 'approval' && !actor.canApprove) throw new Error('Human approval capability required');
         // The account approves the card's scripts as the person before it records their answer here.
@@ -873,20 +880,18 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
         }
         const approval = question.kind === 'approval' ? RuntimeApprovalAnswerSchema.safeParse(input.answer) : null;
         if (approval && !approval.success) throw new Error('An approval answer is { approved, note }');
-        question.answer = input.answer;
-        if (!approval?.data) return null;
-        const id = conversationIds.get(question.conversationId); if (id === undefined) throw new Error('Approval conversation missing');
-        const settled = await answerPlan(tx, id, input.questionId, approval.data);
+        const closure = { answer: input.answer, ...(text === undefined ? {} : { text }) };
+        if (!approval?.data) return { closure, value: null };
+        const settled = await answerPlan(tx, conversationId, input.questionId, approval.data);
         if (settled && approval.data.approved) {
           await options.setWorkspacePhase?.('code');
           const workspace = await tx.doc(WorkspaceDoc);
           workspace.phase = 'code';
         }
-        return settled;
-      }, BACKGROUND_CONTEXT);
+        return { closure, value: settled };
+      });
       if (decision) await options.recordDecision?.({ ...decision, deviceId: actor.deviceId });
-      harness.resume();
-      await line; return { accepted: true as const, cursor: snapshot.cursor };
+      publish(); await line; return { accepted: true as const, cursor: snapshot.cursor };
     },
     async events(after: number | null): Promise<RuntimeWatchEvent[]> {
       await line;

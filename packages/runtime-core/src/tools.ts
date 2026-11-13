@@ -5,8 +5,7 @@ import { z } from 'zod';
 import type { JsonValue } from '@earendil-works/chord/json';
 import { BACKGROUND_CONTEXT, withAbortSignal, type Context } from '@earendil-works/chord/context';
 import * as Arguments from '@gitspace/protocol-runtime/tool-arguments';
-import { LIFECYCLE_APPROVAL_CHOICES, RuntimeApprovalAnswerSchema, RuntimeContentSchema, RuntimeJsonSchema, RuntimeLifecycleApprovalAnswerSchema, RuntimeToolResultSchema, RuntimeBrowserToolArgumentsSchema, RuntimeAskTakeoverArgumentsSchema, RuntimeFullOutputDetailsSchema, RuntimeProposePlanArgumentsSchema, RuntimeTodoArgumentsSchema, TAKEOVER_ANSWERS, TAKEOVER_CHOICES, TOOL_RESULT_MAX_BYTES, receiptDigest, type RuntimeAskTakeoverArguments, type RuntimeBrowserApprovalCard, type RuntimeLifecycleApprovalRequest, type RuntimePlanStep, type RuntimeTakeoverTab, type RuntimeToolResult, type WorkspaceBoardRow } from '@gitspace/protocol-runtime';
-import { APPROVAL_DECISION, APPROVAL_NOTE, APPROVE, REJECT, type AskAnswerer } from '@gitspace/blocks';
+import { LIFECYCLE_APPROVAL_CHOICES, RuntimeContentSchema, RuntimeJsonSchema, RuntimeToolResultSchema, RuntimeBrowserToolArgumentsSchema, RuntimeAskTakeoverArgumentsSchema, RuntimeFullOutputDetailsSchema, RuntimeProposePlanArgumentsSchema, RuntimeTodoArgumentsSchema, TAKEOVER_CHOICES, TOOL_RESULT_MAX_BYTES, receiptDigest, type RuntimeAskTakeoverArguments, type RuntimeBrowserApprovalCard, type RuntimeLifecycleApprovalRequest, type RuntimePlanStep, type RuntimeTakeoverTab, type RuntimeToolResult, type WorkspaceBoardRow } from '@gitspace/protocol-runtime';
 import { appendJournalEntryInputSchema, appendReviewMessageInputSchema, attachRequirementEvidenceInputSchema, changeGuideAgentDraftSchema, createReviewThreadInputSchema, endJournalPhaseInputSchema, goalAgentDraftSchema, markGuideSectionReadInputSchema, putChangeGuideInputSchema, putGoalInputSchema, putRubricInputSchema, putWorkflowInputSchema, resolveReviewThreadInputSchema, reviewAnchorContextSchema, reviewMessageViewSchema, rubricAgentDraftSchema, startJournalPhaseInputSchema, workflowAgentDraftSchema, RuntimeWorkspaceArgumentsSchema, RuntimeAutomationsArgumentsSchema } from '@gitspace/protocol/inspector-contract';
 import { validateMarkdownBlocks } from '@gitspace/protocol/gitspace-ui';
 import { PlanDoc, QuestionsDoc, TodosDoc } from './documents.js';
@@ -15,8 +14,7 @@ import { createJobTool, watchProcessExit, type JobServices } from './jobs.js';
 import { AgentDefinitionContextDoc, MAX_RUNNING_SUBAGENTS } from './subagent-state.js';
 import { isSubagentToolCallAllowed } from '@gitspace/protocol-runtime';
 import { admitToolImages, imageLimits } from './inference/image-limits.js';
-import { ConversationLifecycleDoc, handleEvents } from './conversation-lifecycle.js';
-import { isTakeoverEvent } from './takeover.js';
+import { postQuestion, questionPosted } from './questions.js';
 import { watchSteer } from './steer.js';
 import { CODEMODE_CHILD_OUTPUT_LIMITS, keepWholeOutput, TOOL_OUTPUT_LIMITS, type ToolResultStore } from './tool-results.js';
 import { declareTool, inputJsonSchema, toolCatalog, type ToolDeclarationSource } from './tool-declarations.js';
@@ -30,8 +28,8 @@ const codemodeExecutorStatus = z.object({ executorStatus: z.union(RuntimeToolRes
  * agents or starts another script. */
 export const MODEL_ONLY_TOOLS: readonly string[] = ['codemode', 'agents', 'checkpoint', 'rewind', 'wait', 'todo', 'ask', 'propose_plan', 'ask_takeover'];
 /** Tools a main conversation's model reaches only from codemode, as `tools.<name>(args)`; it is offered every other
- * tool. A subagent has no codemode and is offered every tool its definition lists. None waits on a person: a script
- * ends after 30 seconds, so `environment`, whose runs wait for a person to approve their scripts, is offered too. */
+ * tool. A subagent has no codemode and is offered every tool its definition lists. `environment`, whose runs may post a
+ * card for a person's approval that ends the agent's turn, is offered to the model too. */
 export const CODE_ONLY_TOOLS: readonly string[] = ['space_goal', 'space_phase', 'space_workspace', 'space_automations', 'space_artifacts', 'space_workflow', 'space_rubric', 'space_journal', 'space_guide', 'space_review', 'machines', 'workspace_status', 'sync', 'generate_image', 'ast_grep', 'ast_edit', 'ast_resolve', 'history_search', 'history_read', 'report_issue', 'mcp_discover', 'mcp_invoke'];
 /** Nested call errors the harness writes for a call that may have run: the script's call is uncertain, not failed. */
 const UNCERTAIN_NESTED_CODES: Readonly<Record<string, true>> = { interrupted: true, aborted: true, faulted: true, orphaned: true };
@@ -46,7 +44,6 @@ export type ToolServices = {
   /** `codemodeTools` runs a script's tool call; `codemodeDescribe` answers its `tools.describe(name, op)`. */
   invoke(input: { tool: string; args: JsonValue; conversationId: string; taskId: string; requestId: string; attemptId: string; replay: 'safe' | 'unsafe'; signal?: AbortSignal; codemodeTools?: (input: CodemodeToolCall) => Promise<CodemodeToolOutcome>; codemodeDescribe?: (name: string | null, op: string | null) => Promise<string> }): Promise<RuntimeToolResult>;
   prepareBrowser(input: Parameters<ToolServices['invoke']>[0]): Promise<RuntimeBrowserApprovalCard>;
-  question(id: string, api: ToolExecutionApi, context: Context): Promise<JsonValue>;
   instructions(conversationId: string, context: Context): Promise<string>;
   /** Throws before any approval question when an effect cannot run (e.g. a machine tool with no machine attached). */
   preflight(input: Parameters<ToolServices['invoke']>[0]): Promise<void>;
@@ -240,65 +237,13 @@ export function runtimeToolParameters(schema: z.ZodType) {
   return { ...object, type: 'object' as const, properties, required: [...required ?? []], additionalProperties: false };
 }
 
-/**
- * An answer as the transcript's ask block reads it (`details.results`; one result for GitSpace's one question): what was
- * chosen and what was written. A person answers with free text or the chosen choices; a session-control answer is a list
- * of `{ selectedOptions, customInput }`.
- */
-function askResults(answer: JsonValue): { selectedOptions: string[]; customInput: string | null }[] {
-  if (typeof answer === 'string') return [{ selectedOptions: [], customInput: answer }];
-  if (!Array.isArray(answer)) return [];
-  const chosen = answer.filter(item => typeof item === 'string');
-  if (chosen.length === answer.length) return [{ selectedOptions: chosen, customInput: null }];
-  return answer.flatMap(item => {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
-    const options = item.selectedOptions, written = item.customInput;
-    return [{ selectedOptions: Array.isArray(options) ? options.filter(option => typeof option === 'string') : [], customInput: typeof written === 'string' ? written : null }];
-  });
-}
-
-const ASK_TAKEOVER = 'Ask the user to take over one tab for a step only a person should do: a sign-in, a CAPTCHA, a two-factor code, a payment, or anything that needs their identity or judgment. source "relay" names a tab of the workspace\'s group on the user\'s Chrome (pairingId as for web_browser), source "headless" a tab of the cloud browser; targetId is the tab, as web_browser tabs lists it. reason tells the user, in a sentence or two, what to do there. It shows a card in the chat with your reason, the browser and the tab, and the buttons Take over and Not now; it changes nothing by itself. While the user holds the tab none of your browser commands reach it. The call waits, without polling, until the user hands the tab back (observe it again before acting: the page has changed and earlier refs are gone), chooses Not now, or timeoutMinutes pass (default 30, at most 120; the card stays open, and if the user takes the tab later you are told when they hand it back). You never get the tab back by yourself: only the user hands it back. Main agent only; a machine\'s headless browser cannot be taken over.';
+const ASK_TAKEOVER = 'Ask the user to take over one tab for a step only a person should do: a sign-in, a CAPTCHA, a two-factor code, a payment, or anything that needs their identity or judgment. source "relay" names a tab of the workspace\'s group on the user\'s Chrome (pairingId as for web_browser), source "headless" a tab of the cloud browser; targetId is the tab, as web_browser tabs lists it. reason tells the user, in a sentence or two, what to do there. It posts a card in the chat with your reason, the browser and the tab, and the buttons Take over and Not now; it changes nothing by itself. Your turn ends with the call: nothing waits for the user. When they take the tab you are told, and while they hold it none of your browser commands reach it; when they hand it back, that is your next message (observe the tab again before acting: the page has changed and earlier refs are gone). If they choose Not now or dismiss the card, your next message says so. You never get the tab back by yourself: only the user hands it back. Main agent only; a machine\'s headless browser cannot be taken over.';
 const TODO = 'Set your durable todo list. `items` replaces it with any list (a detour from the plan included). An item with `planStep` names a step of your approved plan, and the item\'s status (pending, active, completed) becomes the step\'s: that is the only way a plan step changes. `{ from: "plan" }` loads the approved plan\'s steps, to start it or resume it after a detour.';
-const PROPOSE_PLAN = 'Propose an implementation plan and wait for explicit human approval. `prompt` is the plan\'s summary, in Markdown, shown on the approval card. `steps` are its steps: `id` (unique, at most 64 characters), `title`, `detail` (Markdown; a gitspace-ui, svg or mermaid block in it must be valid, or the call fails with each issue), `where` (the files or areas it touches) and `requirementIds` (the goal requirements it advances). Once approved, your todo list is loaded from the steps, each item linked to its step by `planStep`. A revised proposal keeps the steps already completed, matched by id; until it is approved, and if it is rejected, the approved plan stays in effect. The answer is `{ approved, note }`: the note adds to an approved plan or says why it was rejected. Never required for conversational replies.';
+const PROPOSE_PLAN = 'Propose an implementation plan for explicit human approval. `prompt` is the plan\'s summary, in Markdown, shown on the approval card. `steps` are its steps: `id` (unique, at most 64 characters), `title`, `detail` (Markdown; a gitspace-ui, svg or mermaid block in it must be valid, or the call fails with each issue), `where` (the files or areas it touches) and `requirementIds` (the goal requirements it advances). The call posts the card and ends your turn; nothing waits for the user. Their decision is your next message: approved (your todo list is then loaded from the steps, each item linked to its step by `planStep`) or rejected, with their note, which adds to an approved plan or says why it was rejected; if they dismiss the card instead, the proposal is withdrawn. A revised proposal keeps the steps already completed, matched by id; until it is approved, and if it is rejected or withdrawn, the approved plan stays in effect. Never required for conversational replies.';
 /** The arguments a `propose_plan` call runs with: those recorded before plans had steps have no `steps`. */
 const RecordedProposePlanArgumentsSchema = RuntimeProposePlanArgumentsSchema.extend({ steps: RuntimeProposePlanArgumentsSchema.shape.steps.optional() });
-/** How an ask_takeover call ends: its card's answer (`TAKEOVER_ANSWERS`), or its wait ran out. */
-const TakeoverOutcomeSchema = z.enum([TAKEOVER_ANSWERS.handedBack, TAKEOVER_ANSWERS.declined, 'timeout']);
-/** What an ask_takeover call returns to the model for each way it ends. */
-const TAKEOVER_OUTCOME: Record<z.infer<typeof TakeoverOutcomeSchema>, string> = {
-  'handed-back': 'The user handed the tab back; observe it again before acting.',
-  declined: 'The user declined (Not now). Continue without that tab, or tell the user what still needs them.',
-  timeout: 'No answer yet (the wait ran out, or the user sent a message); the request stays open in the chat. If the user takes the tab later, you are told when they hand it back.',
-};
-/** Waits for an ask_takeover card's answer (`TAKEOVER_ANSWERS`), until `until`, or until a message waits to steer the
- * conversation, which ends it as unanswered: the card's question changes only by commits (Not now, a delivered
- * handback), so this watches it and never polls. The deadline is armed first: its timer ends the wait while the object
- * stays up, and the wake asked for at the deadline (`wakeAt`) ends it after it slept. */
-async function awaitTakeover(id: string, until: number, wakeAt: JobServices['wakeAt'], api: ToolExecutionApi, context: Context): Promise<JsonValue | 'timeout'> {
-  const result = Promise.withResolvers<JsonValue | 'timeout'>();
-  // An abort while the wake or the watch is still being set up rejects a wait that a failure of either then abandons.
-  result.promise.catch(() => {});
-  const timer = setTimeout(() => result.resolve('timeout'), Math.max(0, until - Date.now()));
-  const abort = () => { result.reject(context.abortSignal?.reason); };
-  context.abortSignal?.addEventListener('abort', abort, { once: true });
-  try {
-    context.abortSignal?.throwIfAborted();
-    await wakeAt(until);
-    const watch = await api.watchDoc(QuestionsDoc, context);
-    if (!watch) throw new Error('Question document missing');
-    const steer = await watchSteer(api, context);
-    void steer.steered.then(() => result.resolve('timeout'), (error: unknown) => result.reject(error));
-    const settle = (value: typeof watch.value) => {
-      const question = value?.items.find(item => item.id === id);
-      if (!question) result.reject(new Error('The take-over request was withdrawn: the conversation was stopped'));
-      else if (question.answer !== null) result.resolve(question.answer);
-    };
-    settle(watch.value);
-    watch.start(async call => { if (call.kind === 'value') settle(call.value); });
-    void watch.closed.then(end => { if (end.kind !== 'stopped') result.reject(new Error(`Take-over wait ended: ${end.kind}`)); });
-    try { return await result.promise; } finally { await watch.stop(); await steer.stop(); }
-  } finally { clearTimeout(timer); context.abortSignal?.removeEventListener('abort', abort); }
-}
+/** The arguments an `ask_takeover` call runs with: those recorded while the call waited for its card name how long. */
+const RecordedAskTakeoverArgumentsSchema = RuntimeAskTakeoverArgumentsSchema.extend({ timeoutMinutes: z.number().optional() });
 
 export function createRuntimeTools(services: ToolServices, operations: JobServices, abortTask: Harness['abortTask']): ToolRegistration[] {
   const jobs = createJobTool(operations, abortTask);
@@ -335,19 +280,16 @@ export function createRuntimeTools(services: ToolServices, operations: JobServic
         const invocation = { tool: name, args, conversationId: String(api.conversationId), taskId: String(api.taskId), requestId: api.callId, attemptId, replay: safe ? 'safe' as const : 'unsafe' as const, signal: context.abortSignal };
         if (name === 'browser' && !(args && typeof args === 'object' && !Array.isArray(args) && typeof args.action === 'string' && Object.hasOwn(BROWSERLESS_ACTIONS, args.action))) await services.prepareBrowser(invocation);
         await services.preflight(invocation);
-        // A run with unapproved content waits on the user's card; approved, it runs, otherwise it never starts.
+        // A run with unapproved content posts the user's card and does not start; once they approve, the agent calls
+        // environment again and it runs.
         const pending = name === 'environment' ? await services.lifecycleApproval(invocation) : null;
         if (pending) {
           const names = pending.scripts.map(script => script.fileName ?? script.label).join(', ');
           const phase = pending.phase === 'checks' ? 'the environment checks' : pending.phase;
           if (child) throw new Error(`Subagent ${child.name} cannot ask for lifecycle approval: ${names} in ${phase} await a person's approval. Tell your parent.`);
           const id = await api.memo('gitspace.question', `question:${api.taskId}`, context);
-          await api.commit(async tx => {
-            const doc = await tx.doc(QuestionsDoc);
-            if (!doc.items.some(item => item.id === id)) doc.items.push({ id, conversationId: String(api.conversationId), kind: 'lifecycle-approval', prompt: `The agent wants to run ${phase}. ${pending.scripts.length === 1 ? `${names} needs` : `${names} need`} your approval first.`, choices: Object.values(LIFECYCLE_APPROVAL_CHOICES), answer: null, lifecycle: { ...pending, callId: api.callId } });
-          }, context);
-          const answer = RuntimeLifecycleApprovalAnswerSchema.parse(await services.question(id, api, context));
-          if (answer === 'not-now') return { output: [{ type: 'text', text: `The user did not approve ${names} (Not now), so ${phase} did not run. Continue without it, or tell the user what still needs their approval.` }], isError: true, details: { lifecycleApproval: answer } };
+          await api.commit(tx => postQuestion(tx, { id, conversationId: String(api.conversationId), kind: 'lifecycle-approval', prompt: `The agent wants to run ${phase}. ${pending.scripts.length === 1 ? `${names} needs` : `${names} need`} your approval first.`, choices: Object.values(LIFECYCLE_APPROVAL_CHOICES), lifecycle: { ...pending, callId: api.callId } }), context);
+          return questionPosted(id, `the approval of ${names}, which ${phase} runs (it did not run)`);
         }
         if (name === 'bash' && args && typeof args === 'object' && !Array.isArray(args) && (args.background === true || typeof args.op === 'string')) {
           const value = await jobs.control(args, api, context);
@@ -465,26 +407,21 @@ export function createRuntimeTools(services: ToolServices, operations: JobServic
       return { output: [{ type: 'text', text: 'items' in args ? 'Checklist updated.' : `Checklist loaded from the plan: ${JSON.stringify(items)}` }], details: { items } };
     });
   } }));
-  /** Records a question for the person once per task, and for an approval the plan it proposes, then waits for the
-   * answer; `answeredBy` names the project agent when it answered in the person's place. */
-  async function askPerson(kind: 'ask' | 'approval', prompt: string, choices: string[], api: ToolExecutionApi, context: Context, steps: z.output<typeof RuntimeProposePlanArgumentsSchema>['steps'] = []): Promise<{ answer: JsonValue; answeredBy: AskAnswerer | undefined }> {
+  /** Records a question for the person once per task, and for an approval the plan it proposes. */
+  async function askPerson(kind: 'ask' | 'approval', prompt: string, choices: string[], api: ToolExecutionApi, context: Context, steps: z.output<typeof RuntimeProposePlanArgumentsSchema>['steps'] = []): Promise<string> {
     const id = await api.memo('gitspace.question', `question:${api.taskId}`, context);
     await api.commit(async tx => {
-      const doc = await tx.doc(QuestionsDoc);
-      if (!doc.items.some(item => item.id === id)) doc.items.push({ id, conversationId: String(api.conversationId), kind, prompt, choices, answer: null });
+      await postQuestion(tx, { id, conversationId: String(api.conversationId), kind, prompt, choices });
       if (kind !== 'approval') return;
       const plan = await tx.doc(PlanDoc, api.conversationId);
       if (plan.questionId === id) return;
       if (plan.status === 'approved') plan.approved = { text: plan.text, steps: (plan.steps ?? []).map(step => ({ ...step, where: [...step.where], requirementIds: [...step.requirementIds] })) };
       plan.text = prompt; plan.steps = steps.map((step): RuntimePlanStep => ({ ...step, status: 'pending' })); plan.status = 'proposed'; plan.questionId = id;
     }, context);
-    const answer = await services.question(id, api, context);
-    return { answer, answeredBy: (await api.snapshot(QuestionsDoc, context))?.items.find(item => item.id === id)?.answeredBy };
+    return id;
   }
-  tools.push(defineTool({ name: 'ask', callers: ['model'], description: 'Ask the user and durably wait for their answer.', parameters: Type.Object({ prompt: Type.String({ description: 'The question.' }), choices: Type.Array(Type.String(), { description: 'Answers to offer; the user may also write their own.' }) }), replay: 'safe', async execute(input, api, context): Promise<ToolExecutionResult> {
-    const { answer, answeredBy } = await askPerson('ask', input.prompt, input.choices, api, context);
-    if (!answeredBy) return { output: [{ type: 'text', text: JSON.stringify(answer) }], details: { results: askResults(answer) } };
-    return { output: [{ type: 'text', text: `The project agent answered this question, not the person: ${JSON.stringify(answer)}` }], details: { results: askResults(answer), answeredBy } };
+  tools.push(defineTool({ name: 'ask', callers: ['model'], description: 'Ask the user a question. It posts a card in the chat and ends your turn: nothing waits for the user. Their answer is your next message, an event naming the question and the answer; if they dismiss the card instead, that message says so.', parameters: Type.Object({ prompt: Type.String({ description: 'The question.' }), choices: Type.Array(Type.String(), { description: 'Answers to offer; the user may also write their own.' }) }), replay: 'safe', async execute(input, api, context): Promise<ToolExecutionResult> {
+    return questionPosted(await askPerson('ask', input.prompt, input.choices, api, context), 'your question');
   } }));
   tools.push(defineTool({ name: 'propose_plan', callers: ['model'], description: PROPOSE_PLAN, parameters: runtimeToolParameters(RuntimeProposePlanArgumentsSchema), prepareArguments: input => parseToolArguments('propose_plan', RuntimeProposePlanArgumentsSchema, input), replay: 'safe', async execute(input, api, context) {
     // A model's call is checked against the advertised schema (steps required) before it runs. A recovered call runs
@@ -492,43 +429,18 @@ export function createRuntimeTools(services: ToolServices, operations: JobServic
     const args = parseToolArguments('propose_plan', RecordedProposePlanArgumentsSchema, input);
     const issues = (args.steps ?? []).flatMap((step, index) => validateMarkdownBlocks(step.detail).map(issue => `steps/${index}/detail: ${issue.path}: ${issue.message}`));
     if (issues.length > 0) throw new Error(`The plan's steps hold invalid blocks:\n${issues.join('\n')}`);
-    const { answer } = await askPerson('approval', args.prompt, args.choices, api, context, args.steps);
-    const { approved, note } = RuntimeApprovalAnswerSchema.parse(answer);
-    // The card's answers, as the transcript's ask block reads them (`planQuestions`).
-    return { output: [{ type: 'text', text: JSON.stringify(answer) }], details: { results: [{ id: APPROVAL_DECISION, selectedOptions: [approved ? APPROVE : REJECT], customInput: null }, { id: APPROVAL_NOTE, selectedOptions: [], customInput: note }] } };
+    return questionPosted(await askPerson('approval', args.prompt, args.choices, api, context, args.steps), 'your plan for approval');
   } }));
   tools.push(defineTool({ name: 'ask_takeover', callers: ['model'], description: ASK_TAKEOVER, parameters: runtimeToolParameters(RuntimeAskTakeoverArgumentsSchema), prepareArguments: input => parseToolArguments('ask_takeover', RuntimeAskTakeoverArgumentsSchema, input), replay: 'safe', async execute(input, api, context) {
-    const args = parseToolArguments('ask_takeover', RuntimeAskTakeoverArgumentsSchema, input);
+    const args = parseToolArguments('ask_takeover', RecordedAskTakeoverArgumentsSchema, input);
     const child = (await api.snapshot(AgentDefinitionContextDoc, api.conversationId, context))?.child;
     if (child) throw new Error(`Subagent ${child.name} cannot use ask_takeover: only the main agent asks the user to take over a tab. Tell your parent what needs a person.`);
     const id = await api.memo('gitspace.question', `question:${api.taskId}`, context);
-    // A rerun after a reset finds its card and keeps its deadline; only the first run asks the account for the tab.
-    let card = (await api.snapshot(QuestionsDoc, context))?.items.find(item => item.id === id)?.takeover;
-    if (!card) {
-      const tab = await services.takeoverTab({ conversationId: String(api.conversationId), args });
-      const askedAt = Date.now();
-      const candidate = { ...tab, callId: api.callId, askedAt: new Date(askedAt).toISOString(), until: new Date(askedAt + args.timeoutMinutes * 60_000).toISOString(), waiting: true };
-      await api.commit(async tx => {
-        const doc = await tx.doc(QuestionsDoc);
-        if (!doc.items.some(item => item.id === id)) doc.items.push({ id, conversationId: String(api.conversationId), kind: 'takeover', prompt: args.reason, choices: [TAKEOVER_CHOICES.takeOver, TAKEOVER_CHOICES.notNow], answer: null, takeover: candidate });
-      }, context);
-      card = candidate;
-    }
-    const target = { groupId: card.groupId, targetId: card.targetId }, until = Date.parse(card.until);
-    const waited = await awaitTakeover(id, until, operations.wakeAt, api, context);
-    // A wait that ran out leaves the card open; an answer committed meanwhile still wins.
-    const outcome = TakeoverOutcomeSchema.parse(waited !== 'timeout' ? waited : await api.commit(async tx => {
-      const question = (await tx.doc(QuestionsDoc)).items.find(item => item.id === id);
-      if (question?.answer !== null && question?.answer !== undefined) return question.answer;
-      if (question?.takeover) question.takeover.waiting = false;
-      return 'timeout';
-    }, context));
-    // This call tells the agent of the take and handback: they never reach it again as messages.
-    if (outcome === TAKEOVER_ANSWERS.handedBack) await api.commit(async tx => {
-      const state = await tx.doc(ConversationLifecycleDoc, api.conversationId);
-      handleEvents(state, new Set(state.events.flatMap(item => isTakeoverEvent(item.event, target) ? [item.event.requestId] : [])));
-    }, context);
-    return { output: [{ type: 'text', text: TAKEOVER_OUTCOME[outcome] }], details: { takeover: outcome } };
+    // A rerun after a reset finds its card; only the first run asks the account for the tab.
+    const posted = (await api.snapshot(QuestionsDoc, context))?.items.some(item => item.id === id) ?? false;
+    const takeover = posted ? undefined : { ...await services.takeoverTab({ conversationId: String(api.conversationId), args }), callId: api.callId, askedAt: new Date().toISOString() };
+    await api.commit(tx => postQuestion(tx, { id, conversationId: String(api.conversationId), kind: 'takeover', prompt: args.reason, choices: [TAKEOVER_CHOICES.takeOver, TAKEOVER_CHOICES.notNow], ...(takeover ? { takeover } : {}) }), context);
+    return questionPosted(id, 'your take-over request');
   } }));
   return tools;
 }

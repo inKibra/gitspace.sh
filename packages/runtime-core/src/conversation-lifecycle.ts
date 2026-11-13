@@ -1,18 +1,20 @@
-import { defineDoc, InboxDoc, LiveDoc, type Harness, type Storage, type Cursor, type Conversation, type ConversationId, type ModelRef } from '@earendil-works/pi-durable';
+import { defineDoc, InboxDoc, LiveDoc, type Harness, type Storage, type Cursor, type Conversation, type ConversationId, type ModelRef, type Tx } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import type { RuntimeHarnessOptions } from './harness.js';
 import { applyInferenceThinking, SessionControlsDoc } from './session-controls.js';
 import { AgentDefinitionContextDoc, MAX_RUNNING_SUBAGENTS, SubagentRunQueueDoc, type QueuedSubagentRun } from './subagent-state.js';
 import { z } from 'zod';
-import { RuntimeJsonSchema, WAIT_MAX_MS } from '@gitspace/protocol-runtime';
-import { QuestionsDoc, boundedReplay } from './documents.js';
+import { RuntimeJsonSchema, WAIT_MAX_MS, questionState } from '@gitspace/protocol-runtime';
+import { QuestionsDoc, boundedReplay, type Question } from './documents.js';
 import { formatConversationEvents } from '@gitspace/blocks';
 import { noteTakeoverEvent } from './takeover.js';
+import { closeConversationQuestions, questionRefusal, settleQuestion, type QuestionClosure } from './questions.js';
 
 /** `browser-taken` and `browser-handback`: you took a tab the agent was using, or handed one back (docs/APERTURE-DESIGN.md §7.2).
  * `capture-replay`: you asked from your Chrome's saved-capture card for a capture's steps to be replayed (§11).
- * `page-comment`: a person commented on a page or replied in one of the workspace's comment threads (§9). */
-export const ConversationEventSchema = z.object({ conversationId: z.string(), requestId: z.string(), kind: z.enum(['agent-message', 'command-completed', 'process-exited', 'machine-ready', 'workspace', 'browser-taken', 'browser-handback', 'capture-replay', 'page-comment']), sender: z.object({ id: z.string(), name: z.string() }).optional(), text: z.string(), payload: RuntimeJsonSchema.optional() });
+ * `page-comment`: a person commented on a page or replied in one of the workspace's comment threads (§9).
+ * `question`: a question the conversation asked was answered or dismissed (`questions.ts`). */
+export const ConversationEventSchema = z.object({ conversationId: z.string(), requestId: z.string(), kind: z.enum(['agent-message', 'command-completed', 'process-exited', 'machine-ready', 'workspace', 'browser-taken', 'browser-handback', 'capture-replay', 'page-comment', 'question']), sender: z.object({ id: z.string(), name: z.string() }).optional(), text: z.string(), payload: RuntimeJsonSchema.optional() });
 export type ConversationEvent = z.infer<typeof ConversationEventSchema>;
 /** How the transcript labels each delivered event. */
 const EVENT_SOURCE: Record<ConversationEvent['kind'], (event: ConversationEvent) => string> = {
@@ -25,6 +27,7 @@ const EVENT_SOURCE: Record<ConversationEvent['kind'], (event: ConversationEvent)
   'browser-handback': event => event.sender?.name ?? 'Browser',
   'capture-replay': event => event.sender?.name ?? 'Browser',
   'page-comment': event => event.sender ? `Comment by ${event.sender.name}` : 'Page comment',
+  question: event => event.sender?.name ?? 'Question',
 };
 /** An event the conversation has not had yet: neither placed as its input nor returned by a wait. */
 type StoredEvent = {
@@ -81,6 +84,13 @@ export type ConversationLifecycle = {
    */
   startSubagent(conversationId: string, input: NonNullable<QueuedSubagentRun['input']>, prepare: () => Promise<void>): Promise<{ kind: 'submitted'; submissionId: string } | { kind: 'queued' }>;
   userInput<T>(conversationId: string, operation: () => Promise<T>): Promise<T>;
+  /**
+   * Closes the open question `questionId`: `settle` decides how (`QuestionClosure`) and may write more in the same commit
+   * (a plan's approval), which also records the event the asking conversation hears; then that event starts its next
+   * turn, or waits for the current one to end. A question that is not open is refused (`questionRefusal`), as is an
+   * unknown one.
+   */
+  closeQuestion<T>(questionId: string, settle: (question: Question, tx: Tx, conversationId: ConversationId) => Promise<{ closure: QuestionClosure; value: T }>): Promise<T>;
 };
 export type ConversationLifecycleOptions = {
   harness: Harness; storage: Storage; admitInference: RuntimeHarnessOptions['admitInference'];
@@ -223,17 +233,18 @@ export function createConversationLifecycle(options: ConversationLifecycleOption
     try { await flush(id); }
     catch (error) { options.report(new Error(`Conversation ${id} could not resume: ${error instanceof Error ? error.message : String(error)}`, { cause: error })); }
   }
-  /** Keeps `event` on its conversation once (a request id seen before is ignored) and shows it in the transcript. */
+  /** Keeps `event` on conversation `id` once (a request id seen before is ignored) and shows it in the transcript. */
+  async function recordEvent(tx: Tx, id: ConversationId, event: ConversationEvent) {
+    const state = await tx.doc(ConversationLifecycleDoc, id);
+    handleEvents(state, new Set());
+    if (state.events.some(item => item.event.requestId === event.requestId) || state.handled?.includes(event.requestId)) return;
+    state.events.push({ event });
+    await noteTakeoverEvent(tx, event);
+    await tx.appendEntry(id, { kind: `gitspace.${event.kind}`, data: { requestId: event.requestId, text: event.text, ...(event.sender ? { sender: event.sender } : {}), ...(event.payload === undefined ? {} : { payload: event.payload }) } });
+  }
   async function record(event: ConversationEvent) {
     const conversation = await resolve(event.conversationId);
-    await conversation.commit(async tx => {
-      const state = await tx.doc(ConversationLifecycleDoc, conversation.id);
-      handleEvents(state, new Set());
-      if (state.events.some(item => item.event.requestId === event.requestId) || state.handled?.includes(event.requestId)) return;
-      state.events.push({ event });
-      await noteTakeoverEvent(tx, event);
-      await tx.appendEntry(conversation.id, { kind: `gitspace.${event.kind}`, data: { requestId: event.requestId, text: event.text, ...(event.sender ? { sender: event.sender } : {}), ...(event.payload === undefined ? {} : { payload: event.payload }) } });
-    }, context);
+    await conversation.commit(tx => recordEvent(tx, conversation.id, event), context);
   }
   async function setStopped(id: string, stopped: boolean) {
     return harness.commit(async tx => {
@@ -357,12 +368,28 @@ export function createConversationLifecycle(options: ConversationLifecycleOption
         const stopped = new Set(records.map(record => String(record.id)));
         const { tasks } = await harness.inspect(context);
         await Promise.all(tasks.filter(({ record }) => record.background && record.owner === undefined && stopped.has(String(record.conversationId))).map(({ record }) => harness.abortTask(record.id, context)));
-        await harness.commit(async tx => {
-          const questions = await tx.doc(QuestionsDoc);
-          questions.items = questions.items.filter(question => question.answer !== null || !stopped.has(question.conversationId));
-        }, context);
+        await harness.commit(tx => closeConversationQuestions(tx, new Map(records.map(record => [String(record.id), record.id]))), context);
       } finally { pendingStops.delete(settled.promise); settled.resolve(); }
     },
     async resume(id) { await userInput(id, async () => {}); },
+    async closeQuestion(questionId, settle) {
+      return serialized(async () => {
+        const asked = (await harness.snapshot(QuestionsDoc, context))?.items.find(item => item.id === questionId);
+        if (!asked) throw new Error(`Question ${questionId} is not one this workspace's agents asked`);
+        const conversation = await resolve(asked.conversationId);
+        const value = await conversation.commit(async tx => {
+          const question = (await tx.doc(QuestionsDoc)).items.find(item => item.id === questionId);
+          if (!question) throw new Error(`Question ${questionId} is not one this workspace's agents asked`);
+          if (questionState(question) !== 'open') throw new Error(questionRefusal(question));
+          const settled = await settle(question, tx, conversation.id);
+          await recordEvent(tx, conversation.id, await settleQuestion(tx, conversation.id, question, settled.closure));
+          return settled.value;
+        }, context);
+        // The answer is recorded with its event: a turn that cannot start now (its admission fails) is reported, and
+        // the event waits for the next recovery.
+        await deliverPending(asked.conversationId);
+        return value;
+      });
+    },
   };
 }

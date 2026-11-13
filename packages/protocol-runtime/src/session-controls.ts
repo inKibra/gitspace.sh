@@ -117,6 +117,8 @@ export const RuntimeSessionCommandSchema = z.union([
   z.object({ type: z.literal('removeQueuedMessage'), kind: z.enum(['steering', 'followUp']), index: z.number().int().nonnegative() }),
   z.object({ type: z.literal('promoteQueuedMessage'), index: z.number().int().nonnegative() }),
   z.object({ type: z.literal('answerAsk'), id: z.string(), answers: z.array(PendingAskAnswerSchema).readonly() }),
+  /** Closes one of the conversation's open questions unanswered; the agent hears that it was dismissed. */
+  z.object({ type: z.literal('dismissQuestion'), id: z.string() }),
   z.object({ type: z.literal('navigateTree'), entryId: z.string() }),
   z.object({ type: z.literal('historyPage'), request: SessionHistoryPageRequestSchema }),
   z.object({ type: z.literal('transcriptPage'), request: transcriptPageRequestSchema }),

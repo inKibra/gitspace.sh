@@ -1,7 +1,7 @@
 import type { TransportBlock, TurnBlock } from '@gitspace/blocks';
 import type { PendingAskAnswer } from '@gitspace/protocol';
-import { Fragment, useContext } from 'react';
-import { TakeoverCardsContext } from '../TakeoverCard.js';
+import { Fragment, useContext, type ReactNode } from 'react';
+import { QuestionCardsContext } from '../QuestionCards.js';
 import { SideAgents } from './ExecutionCard.js';
 import { ToolGroup, toolRuns } from './ToolGroup.js';
 import { TranscriptItemView } from './TranscriptItemView.js';
@@ -10,8 +10,10 @@ import { dayBreaks, DayDivider, fullTime, itemAt } from './time.js';
 export interface TurnTranscriptProps {
   turns: TurnBlock[];
   transport: TransportBlock[];
-  /** Resolves the active ask tool dialog through the machine-owned UI bridge. */
+  /** Answers a pending ask card that posted no workspace question; a card with one answers through `QuestionCards`. */
   onAnswer?(answers: PendingAskAnswer[]): Promise<void>;
+  /** Shown after the last turn: the person's messages still being sent. */
+  tail?: ReactNode;
 }
 
 export function TransportNotice({ block }: { block: TransportBlock }) {
@@ -26,8 +28,8 @@ export function TransportNotice({ block }: { block: TransportBlock }) {
 /** The transcript reads like the registry's chat demo: one column, messages stacked with gap-2, reasoning and tools
  * inline between them; consecutive tool calls of a turn show as one group. A divider names the day above the first
  * turn with a time and wherever the day changes between turns. */
-export function TurnTranscript({ turns, transport, onAnswer }: TurnTranscriptProps) {
-  const cards = useContext(TakeoverCardsContext);
+export function TurnTranscript({ turns, transport, onAnswer, tail }: TurnTranscriptProps) {
+  const cards = useContext(QuestionCardsContext);
   const started = turns.map((turn) => ({ id: turn.id, at: turn.startedAt ?? turn.user?.at ?? turn.items.map(itemAt).find((at) => at !== undefined) }));
   const breaks = dayBreaks(started);
   return <div className="mx-auto flex min-w-0 w-full max-w-3xl flex-col gap-6 px-6 pb-[calc(var(--composer-overlay-height,0px)+1.5rem)] pt-6">
@@ -46,5 +48,6 @@ export function TurnTranscript({ turns, transport, onAnswer }: TurnTranscriptPro
         </article>
       </Fragment>;
     })}
+    {tail}
   </div>;
 }
