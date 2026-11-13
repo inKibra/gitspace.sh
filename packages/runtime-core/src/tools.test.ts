@@ -108,6 +108,15 @@ test('every registered tool advertises its real object contract and executes thr
     expect((await harness.snapshot(PlanDoc, root.id, BACKGROUND_CONTEXT))?.status).toBe('proposed');
   } finally { await harness.close(BACKGROUND_CONTEXT); }
 });
+test('a review thread opened with only its body is about the whole workspace and pending', async () => {
+  const dispatched: unknown[] = [];
+  const { harness, root } = await registered([[call('space_review', { method: 'create', message: { body: 'Check the parser.' } })]], async input => { dispatched.push(input.args); return completed(input); });
+  try {
+    await root.submit({ type: 'input', content: 'Review it.' }, BACKGROUND_CONTEXT);
+    await root.waitForIdle(withAbortSignal(AbortSignal.timeout(3000), BACKGROUND_CONTEXT));
+    expect(dispatched).toEqual([expect.objectContaining({ method: 'create', anchor: { kind: 'workspace' }, decision: 'pending', message: { body: 'Check the parser.' } })]);
+  } finally { await harness.close(BACKGROUND_CONTEXT); }
+});
 test('an image the conversation\'s model cannot take never enters history, and one it can enters as its stored bytes', async () => {
   const png = (width: number, height: number) => {
     const bytes = new Uint8Array(33);
