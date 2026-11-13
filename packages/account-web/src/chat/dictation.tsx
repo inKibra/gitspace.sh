@@ -35,13 +35,15 @@ const MIC_ERRORS: Record<string, string> = {
   AbortError: 'The microphone could not be started; another app may be using it.',
 };
 /** The worklet: the context's input, mono, averaged down to `rate` and written as PCM16 frames of `frame` samples to
- * its port; `flush` on the port sends the partial frame, then `flushed`. */
-const WORKLET = `class Pcm16 extends AudioWorkletProcessor {
+ * its port; `flush` on the port sends the partial frame, then `flushed`. A posted frame's buffer is transferred, which
+ * leaves that array empty, so each new frame takes its size from `size`. */
+export const DICTATION_WORKLET = `class Pcm16 extends AudioWorkletProcessor {
   constructor(options) {
     super();
     this.step = sampleRate / options.processorOptions.rate;
     this.position = 0; this.sum = 0; this.count = 0; this.length = 0;
-    this.frame = new Int16Array(options.processorOptions.frame);
+    this.size = options.processorOptions.frame;
+    this.frame = new Int16Array(this.size);
     this.port.onmessage = () => {
       if (this.length) this.port.postMessage(this.frame.slice(0, this.length).buffer);
       this.length = 0;
@@ -60,7 +62,7 @@ const WORKLET = `class Pcm16 extends AudioWorkletProcessor {
       this.sum = 0; this.count = 0;
       if (this.length === this.frame.length) {
         this.port.postMessage(this.frame.buffer, [this.frame.buffer]);
-        this.frame = new Int16Array(this.frame.length);
+        this.frame = new Int16Array(this.size);
         this.length = 0;
       }
     }
@@ -117,7 +119,7 @@ class Recording {
     } catch (error) { this.finish(microphoneError(error)); return; }
     if (this.finished) { this.release(); return; }
     try {
-      workletUrl ??= URL.createObjectURL(new Blob([WORKLET], { type: 'text/javascript' }));
+      workletUrl ??= URL.createObjectURL(new Blob([DICTATION_WORKLET], { type: 'text/javascript' }));
       await context.audioWorklet.addModule(workletUrl);
       const node = this.worklet = new AudioWorkletNode(context, PROCESSOR, { numberOfInputs: 1, numberOfOutputs: 0, channelCount: 1, channelCountMode: 'explicit', processorOptions: { rate: DICTATION_SAMPLE_RATE, frame: FRAME_SAMPLES } });
       node.port.onmessage = (event: MessageEvent<unknown>) => this.audio(event.data);
