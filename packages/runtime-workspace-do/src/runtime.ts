@@ -342,7 +342,7 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
   const messageDecisions = recordMessageDecisions ? createMessageDecisions(options.storage.sql, recordMessageDecisions) : undefined;
   /** A failed pass keeps its decisions for the next one; it is only logged. */
   const unrecordedDecisions = (error: unknown) => { console.error(JSON.stringify({ event: 'message_decisions_unrecorded', workspaceId: options.identity.workspaceId, error: error instanceof Error ? error.message : String(error) })); };
-  const controls = createSessionControls({ ...runtime, ...options.session, setWorkspacePhase: options.setWorkspacePhase, loadAgentDefinitions, browser: options.browser, history, admitInference: options.admitInference, images: options.tools.images, ...(messageDecisions ? { holdDecisions: messageDecisions.hold } : {}) });
+  const controls = createSessionControls({ ...runtime, ...options.session, setWorkspacePhase: options.setWorkspacePhase, loadAgentDefinitions, browser: options.browser, history, admitInference: options.admitInference, ...(messageDecisions ? { holdDecisions: messageDecisions.hold } : {}) });
   const invokeConversationTool = createConversationTools({ ...options, ...runtime, storage, catalog: options.session.catalog, refreshDefinitions: controls.loadDefinitions });
   const automations = createAutomationRequests({ ...options, harness, storage, configureModel: runtime.configureModel, stop: id => runtime.lifecycle.stop(id), async wake() { harness.resume(); options.waitUntil(harness.waitForIdle(BACKGROUND_CONTEXT)); } });
   const replica = createReplicaStore(options.storage);

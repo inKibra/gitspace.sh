@@ -18,7 +18,8 @@
     "./machine-controls": "./src/machine-controls.ts",
     "./browser-power-rules": "./src/browser-power-rules.ts",
     "./browser-capture-rules": "./src/browser-capture-rules.ts",
-    "./image-reference": "./src/image-reference.ts"
+    "./image-reference": "./src/image-reference.ts",
+    "./chat-attachments": "./src/chat-attachments.ts"
   },
   "scripts": {
     "typecheck": "tsgo --noEmit -p tsconfig.json && tsgo --noEmit -p tsconfig.test.json",

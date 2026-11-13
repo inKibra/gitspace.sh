@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { automationMessage, type AutomationMessageEvent } from '@gitspace/protocol/automations-contract';
 import type { RuntimeBrowserSharePreview, RuntimeDictationServerMessage } from '@gitspace/protocol-runtime';
+import { chatAttachments, withoutChatAttachments } from '@gitspace/protocol-runtime/chat-attachments';
 import type { SessionControlView } from '@gitspace/protocol-runtime/session-controls';
 import { verticalSliceFixture } from './App.js';
 import { Composer, type ComposerProps } from './Composer.js';
@@ -33,43 +34,67 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-function client(commit: ArtifactUploadClient['commit']) {
+/** An upload authority that files each upload at `<folder>/<name>` and commits it under the digest begin declared. */
+function client(commit?: ArtifactUploadClient['commit']) {
+  const uploads = new Map<string, { path: string; sha256: string; mediaType: string | null }>();
   return {
-    begin: vi.fn<ArtifactUploadClient['begin']>(async ({ fileName }) => ({ link: 'https://account.test/api/uploads/token-1', url: `drive://workspace/uploads/${fileName}`, partBytes: 256 * 1024 })),
+    begin: vi.fn<ArtifactUploadClient['begin']>(async ({ fileName, folder, sha256, mediaType }) => {
+      const link = `https://account.test/api/uploads/token-${uploads.size + 1}`;
+      const path = `${folder ?? 'uploads'}/${fileName}`;
+      uploads.set(link, { path, sha256, mediaType });
+      return { link, url: `drive://workspace/${path}`, partBytes: 256 * 1024 };
+    }),
     part: vi.fn<ArtifactUploadClient['part']>(async ({ partNumber, bytes }) => ({ received: (partNumber - 1) * 256 * 1024 + bytes.length })),
-    commit: vi.fn<ArtifactUploadClient['commit']>(commit),
+    commit: vi.fn<ArtifactUploadClient['commit']>(commit ?? (async (link) => {
+      const upload = uploads.get(link)!;
+      return { kind: 'artifact', url: `drive://workspace/${upload.path}`, hash: `sha256:${upload.sha256}`, label: upload.path, mediaType: upload.mediaType, generation: 1 };
+    })),
     abort: vi.fn<ArtifactUploadClient['abort']>(async () => undefined),
   };
 }
 
-async function draftWithAttachment(text: string, file: File) {
+async function attach(...files: File[]) {
+  const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+  Object.defineProperty(input, 'files', { configurable: true, value: files });
+  await act(async () => input.dispatchEvent(new Event('change', { bubbles: true })));
+}
+
+async function draftWithAttachment(text: string, ...files: File[]) {
   const textarea = container.querySelector('textarea')!;
   await act(() => {
     Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(textarea, text);
     textarea.dispatchEvent(new Event('input', { bubbles: true }));
   });
-  const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
-  Object.defineProperty(input, 'files', { configurable: true, value: [file] });
-  await act(async () => input.dispatchEvent(new Event('change', { bubbles: true })));
+  await attach(...files);
   await act(async () => { container.querySelector<HTMLButtonElement>('button[aria-label="Send"]')!.click(); });
   for (let turn = 0; turn < 20; turn += 1) await act(() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
   return textarea;
 }
 
-it('uploads attachments that are not sent inline and links them in the prompt', async () => {
+it('uploads an image and a PDF to the day\'s uploads folder and sends one message naming both', async () => {
+  vi.useFakeTimers({ toFake: ['Date'], now: new Date('2026-11-13T09:30:00Z') });
   const onSend = vi.fn<NonNullable<GitSpaceShellProps['onSend']>>(async () => undefined);
-  const uploads = client(async () => ({ kind: 'artifact', url: 'drive://workspace/uploads/report%20(1).pdf', hash: 'hash', label: 'uploads/report (1).pdf', mediaType: 'application/pdf', generation: 1 }));
+  const uploads = client();
   await act(() => root.render(<Composer workspace={verticalSliceFixture.workspace} artifactUpload={uploads} running={false} pending={false} onSend={onSend} />));
 
-  const textarea = await draftWithAttachment('Summarize this', new File([new Uint8Array(10)], 'report (1).pdf', { type: 'application/pdf' }));
+  const textarea = await draftWithAttachment('Compare these', new File([new Uint8Array(4)], 'shot.png', { type: 'image/png' }), new File([new Uint8Array(10)], 'report (1).pdf', { type: 'application/pdf' }));
 
-  expect(uploads.begin).toHaveBeenCalledWith({ fileName: 'report (1).pdf', size: 10, sha256: '01d448afd928065458cf670b60f5a594d735af0172c8d67f22a81680132681ca', mediaType: 'application/pdf' });
-  expect(uploads.commit).toHaveBeenCalledWith('https://account.test/api/uploads/token-1');
-  expect(onSend.mock.calls.map(([text]) => text)).toEqual(['Summarize this\n\n<attachment name="report (1).pdf" url="drive://workspace/uploads/report%20(1).pdf" type="application/pdf" size="10" />']);
+  expect(uploads.begin.mock.calls.map(([input]) => [input.fileName, input.folder])).toEqual([['shot.png', 'uploads/2026-11-13'], ['report (1).pdf', 'uploads/2026-11-13']]);
+  expect(onSend).toHaveBeenCalledOnce();
+  const [text, ...rest] = onSend.mock.calls[0]!;
+  expect(rest).toEqual(['followUp', undefined, undefined]);
+  expect(text.startsWith('Compare these\n\n')).toBe(true);
+  expect(chatAttachments(text)).toEqual([
+    { name: 'shot.png', url: 'drive://workspace/uploads/2026-11-13/shot.png', type: 'image/png', size: 4, hash: 'sha256:df3f619804a92fdb4057192dc43dd748ea778adc52bc498ce80524c014b81119' },
+    { name: 'report (1).pdf', url: 'drive://workspace/uploads/2026-11-13/report (1).pdf', type: 'application/pdf', size: 10, hash: 'sha256:01d448afd928065458cf670b60f5a594d735af0172c8d67f22a81680132681ca' },
+  ]);
+  expect(text).not.toMatch(/base64|data:image/u);
   expect(textarea.value).toBe('');
+  // A removed tile leaves once its exit animation ends.
+  await vi.waitFor(() => expect(container.querySelector('[aria-label^="Remove "]')).toBeNull());
 });
 
-it('keeps the draft and its attachment when the upload fails', async () => {
+it('keeps the draft and its attachments when an upload fails, and says which file failed', async () => {
   const onSend = vi.fn<NonNullable<GitSpaceShellProps['onSend']>>(async () => undefined);
   const uploads = client(async () => { throw new Error('The workspace is no longer open on a machine.'); });
   await act(() => root.render(<Composer workspace={verticalSliceFixture.workspace} artifactUpload={uploads} running={false} pending={false} onSend={onSend} />));
@@ -77,9 +102,38 @@ it('keeps the draft and its attachment when the upload fails', async () => {
   const textarea = await draftWithAttachment('Summarize this', new File([new Uint8Array(10)], 'report.pdf', { type: 'application/pdf' }));
 
   expect(onSend).not.toHaveBeenCalled();
-  expect(container.querySelector('[role=alert]')?.textContent).toBe('The workspace is no longer open on a machine.');
+  expect(container.querySelector('[role=alert]')?.textContent).toBe('report.pdf did not upload: The workspace is no longer open on a machine.');
   expect(textarea.value).toBe('Summarize this');
   expect(container.querySelector('[aria-label="Remove report.pdf"]')).not.toBeNull();
+});
+
+it('shows each attachment\'s remove button without hover, and it removes that file', async () => {
+  await act(() => root.render(<Composer workspace={verticalSliceFixture.workspace} artifactUpload={client()} running={false} pending={false} onSend={async () => undefined} />));
+  await attach(new File([new Uint8Array(4)], 'shot.png', { type: 'image/png' }), new File([new Uint8Array(10)], 'report.pdf', { type: 'application/pdf' }));
+
+  const remove = container.querySelector<HTMLButtonElement>('[aria-label="Remove shot.png"]')!;
+  expect(remove.className).not.toMatch(/(?:^|\s)opacity-0(?:\s|$)/u);
+  expect(remove.tabIndex).toBe(0);
+  await act(async () => remove.click());
+
+  await vi.waitFor(() => expect(container.querySelector('[aria-label="Remove shot.png"]')).toBeNull());
+  expect(container.querySelector('[aria-label="Remove report.pdf"]')).not.toBeNull();
+});
+
+it('removes the last attachment on Backspace in an empty message, and only then', async () => {
+  const uploads = client();
+  await act(() => root.render(<Composer workspace={verticalSliceFixture.workspace} artifactUpload={uploads} running={false} pending={false} onSend={async () => undefined} />));
+  await attach(new File([new Uint8Array(4)], 'shot.png', { type: 'image/png' }), new File([new Uint8Array(10)], 'report.pdf', { type: 'application/pdf' }));
+  const backspace = () => act(() => { container.querySelector('textarea')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true, cancelable: true })); });
+
+  await typeDraft('x');
+  await backspace();
+  await typeDraft('');
+  await backspace();
+  await typeDraft('Send what is left');
+  await send();
+
+  await vi.waitFor(() => expect(uploads.begin.mock.calls.map(([input]) => input.fileName)).toEqual(['shot.png']));
 });
 
 it('attaches an image pasted into the message', async () => {
@@ -99,7 +153,8 @@ it('attaches an image pasted into the message', async () => {
 it('takes a paste while a session command is in flight and sends it, with its image, once the command settles', async () => {
   const sending = Promise.withResolvers<void>();
   const onSend = vi.fn<NonNullable<GitSpaceShellProps['onSend']>>(() => sending.promise);
-  const render = (pending: boolean) => act(() => root.render(<Composer workspace={verticalSliceFixture.workspace} running={false} pending={pending} onSend={onSend} />));
+  const uploads = client();
+  const render = (pending: boolean) => act(() => root.render(<Composer workspace={verticalSliceFixture.workspace} artifactUpload={uploads} running={false} pending={pending} onSend={onSend} />));
   await render(false);
   const textarea = await typeDraft('First message');
   await send();
@@ -119,7 +174,7 @@ it('takes a paste while a session command is in flight and sends it, with its im
   await render(false);
   expect(textarea.value).toBe('Second message');
   await send();
-  await vi.waitFor(() => expect(onSend.mock.calls.map(([text, , images]) => [text, images?.map((image) => image.mimeType)])).toEqual([['First message', []], ['Second message', ['image/png']]]));
+  await vi.waitFor(() => expect(onSend.mock.calls.map(([text]) => [withoutChatAttachments(text), chatAttachments(text).map((attachment) => attachment.name)])).toEqual([['First message', []], ['Second message', ['image.png']]]));
 });
 
 const shareId = '00000000-0000-4000-8000-0000000000d1';

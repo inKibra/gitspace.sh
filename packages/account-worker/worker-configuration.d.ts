@@ -2,6 +2,7 @@ interface Env {
   CODEMODE_LOADER: WorkerLoader;
   BROWSER: Fetcher;
   AI: Ai;
+  IMAGES: ImagesBinding;
   RELAY: DurableObjectNamespace<import('./src/index').UserRelayDO>;
   CREDENTIALS: DurableObjectNamespace<import('./src/index').CredentialVaultDO>;
   USER_STORAGE: DurableObjectNamespace<import('./src/index').UserStorageDO>;

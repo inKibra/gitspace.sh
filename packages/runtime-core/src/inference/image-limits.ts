@@ -6,8 +6,9 @@ import { imageDataBytes } from './image-requests.js';
 /**
  * What a model accepts of images, from pi-ai's per-model `inputLimits` (Opus 5.5: 2000x2000 px, 4.5 MB of base64, 600
  * per request, 32 MiB per request), else pi's defaults, and what GitSpace sends of images held in the request itself.
- * Nothing resizes images yet: one over the size limits is replaced by a note saying why, so a single oversized screenshot
- * cannot fail every later turn of a conversation.
+ * A chat attachment's image is resized to 2000 px and 4.5 MB when it is attached (`account-worker` chat-attachments.ts),
+ * the limits every model pi-ai lists states; nothing else is resized: an image over the size limits is replaced by a
+ * note saying why, so a single oversized screenshot cannot fail every later turn of a conversation.
  */
 export interface ImageLimits {
   maxWidth: number; maxHeight: number; maxBytes: number;

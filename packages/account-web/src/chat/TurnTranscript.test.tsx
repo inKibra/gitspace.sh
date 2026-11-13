@@ -1,4 +1,5 @@
 import type { ToolCallBlock, TurnBlock } from '@gitspace/blocks';
+import { chatAttachmentTag } from '@gitspace/protocol-runtime/chat-attachments';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { ToolGroup } from './ToolGroup.js';
@@ -90,5 +91,19 @@ describe('TurnTranscript', () => {
     expect(html).toContain('Make a skill of it');
     expect(html).not.toContain('getByLabel');
     expect(html).not.toContain('capture://');
+  });
+  it('shows a sent message\'s attachments as chips that open their drive files, not as their tags', () => {
+    const hash = `sha256:${'a'.repeat(64)}`;
+    const text = ['Compare these', chatAttachmentTag({ name: 'shot.png', url: 'drive://workspace/uploads/2026-11-13/shot.png', type: 'image/png', size: 2048, hash }), chatAttachmentTag({ name: 'report.pdf', url: 'drive://workspace/uploads/2026-11-13/report.pdf', type: 'application/pdf', size: 10, hash })].join('\n\n');
+    const turns: TurnBlock[] = [{ id: 'turn-files', type: 'turn', status: 'done', sideAgents: [], items: [], user: { id: 'turn-files:user', type: 'message', role: 'user', text } }];
+    const html = renderToStaticMarkup(<TurnTranscript turns={turns} transport={[]} />);
+    expect(html).toContain('Compare these');
+    // One link to the PDF: its chip, not the tag's text turned into a link as well.
+    expect(html.split(`href="#gitspace-resource=${encodeURIComponent('drive://workspace/uploads/2026-11-13/report.pdf')}"`)).toHaveLength(2);
+    expect(html).toContain('report.pdf</span>');
+    expect(html).toContain('application/pdf · 10 B');
+    expect(html).toContain(`href="#gitspace-resource=${encodeURIComponent('drive://workspace/uploads/2026-11-13/shot.png')}"`);
+    expect(html).not.toContain('attachment name');
+    expect(html).not.toContain(hash);
   });
 });

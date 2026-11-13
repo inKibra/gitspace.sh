@@ -3,10 +3,11 @@
  * image block by a reference (`gs-image:v1:…`, `@gitspace/runtime-core/image-requests`). Content-addressed: the same
  * image stored twice is one object. They are never collected while the workspace lives and are shredded with it.
  *
- * - Clients store images before naming them (`@gitspace/protocol-runtime/image-reference`): the browser through an image
- *   upload link (`upload`), a machine through its blob store, a browser session as it saves a capture. `store` admits a
- *   reference only once it found the bytes in this workspace's scope, and measures its width and height from its header;
- *   it stores an inline image (an older client's, a cloud file read here) and returns its reference.
+ * - Clients store images before naming them (`@gitspace/protocol-runtime/image-reference`): a machine through its blob
+ *   store, a browser session as it saves a capture. `store` admits a reference only once it found the bytes in this
+ *   workspace's scope, and measures its width and height from its header; it stores an inline image (an older
+ *   client's, a cloud file read here) and returns its reference. `put` stores an image made here (a chat attachment's
+ *   rendition, `chat-attachments.ts`).
  * - `load` returns a stored image's block with its bytes again, for `generate_image`.
  * - Model requests and codemode scripts read images through `ImageReader` (`image-reader.ts`), never here.
  * - `url` resolves a transcript row's stored image to `/images/…`, a URL signed for a window of whole hours: the same
@@ -35,8 +36,8 @@ function measured(workspaceId: string, stored: { sha256: string; size: number },
 }
 
 export interface StoredImages {
-  /** Stores an image a client declared (`runtime.imageUpload`) and answers its reference. */
-  upload(declared: { sha256: string; size: number; mimeType: string }, bytes: Uint8Array): Promise<string>;
+  /** Stores image bytes and returns the block naming them. */
+  put(mimeType: string, bytes: Uint8Array): Promise<ImageContent>;
   store(image: ImageContent): Promise<ImageContent>;
   load(image: ImageContent): Promise<ImageContent>;
 }
@@ -45,14 +46,12 @@ export interface StoredImages {
 export function storedImages(env: Env, workspaceId: string): StoredImages {
   const files = new DriveFiles(tenantStore(env), env.ACCOUNT_ID);
   const scopeId = `space:${workspaceId}`;
+  const put = async (mimeType: string, bytes: Uint8Array): Promise<ImageContent> => {
+    const stored = await files.put(scopeId, bytes);
+    return { type: 'image', mimeType, data: measured(workspaceId, { sha256: stored.blobHash.slice('sha256:'.length), size: stored.size }, mimeType, bytes.subarray(0, HEADER_BYTES)) };
+  };
   return {
-    async upload(declared, bytes) {
-      if (bytes.byteLength !== declared.size) throw new Error(`The image is ${bytes.byteLength} bytes, not the ${declared.size} declared`);
-      const stored = await files.put(scopeId, bytes);
-      const sha256 = stored.blobHash.slice('sha256:'.length);
-      if (sha256 !== declared.sha256) throw new Error('The image does not match its declared SHA-256');
-      return measured(workspaceId, { sha256, size: stored.size }, declared.mimeType, bytes.subarray(0, HEADER_BYTES));
-    },
+    put,
     async store(image) {
       const named = parseImageReference(image.data);
       if (named) {
@@ -64,9 +63,7 @@ export function storedImages(env: Env, workspaceId: string): StoredImages {
         }
         return { ...image, data: measured(workspaceId, named, image.mimeType, await new Response(header.body).bytes()) };
       }
-      const bytes = Buffer.from(image.data, 'base64');
-      const stored = await files.put(scopeId, bytes);
-      return { ...image, data: measured(workspaceId, { sha256: stored.blobHash.slice('sha256:'.length), size: stored.size }, image.mimeType, bytes.subarray(0, HEADER_BYTES)) };
+      return put(image.mimeType, Buffer.from(image.data, 'base64'));
     },
     async load(image) {
       const stored = parseImageReference(image.data);

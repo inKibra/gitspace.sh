@@ -24,7 +24,7 @@ async function sessionFixture(runtime: Pick<SessionControlServices, 'admitInfere
   const lifecycle = createConversationLifecycle({ harness, storage, configureModel, admitInference: runtime.admitInference });
   const unavailable = async (): Promise<never> => { throw new Error('Unused history operation'); };
   const controls = createSessionControls({
-    harness, root, lifecycle, configureModel, admitInference: runtime.admitInference, ...runtime.session, images: { store: async image => image, load: async image => image },
+    harness, root, lifecycle, configureModel, admitInference: runtime.admitInference, ...runtime.session,
     history: {
       conversation: unavailable, resolve: unavailable, usage: unavailable,
       recent: async () => ({ anchorId: null, prompts: [], tokens: null }),

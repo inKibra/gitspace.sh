@@ -89,7 +89,7 @@ Built (2026-10-29). A client stores an image itself and hands the workspace its 
 
 | Path | How it arrives |
 | --- | --- |
-| Images attached to a message | `runtime.imageUpload` returns an upload link for the declared SHA-256, size and type; the browser `PUT`s the bytes to `<link>/parts/1`, the account stores them and answers the reference; the prompt carries references (`account-web/src/prompt-images.ts`) |
+| Images attached to a message (2026-11-13) | Uploaded to the drive like every attachment and named by an `<attachment … hash="sha256:…" />` tag (`@gitspace/protocol-runtime/chat-attachments`); before the turn's first request the workspace stores one rendition, resized to 2000 px and 4.5 MB by the Images binding, and each request adds its reference after the tag (`account-worker/src/chat-attachments.ts`) |
 | Machine tool results (screenshots, image files read) | `MachineExecutor` stores each image of a result in the attached workspace's drive scope through the machine's blob store and returns references (`account-machine/src/machine-images.ts`) |
 | Browser captures (cloud browser and your Chrome) | The browser session object already writes the capture to the workspace drive; the run's result names it by reference |
 | Drive images read by `read` or `space_artifacts` | Named by reference without being read; an image in the project's drive or streamed before its digest was known is copied into the workspace's scope first |

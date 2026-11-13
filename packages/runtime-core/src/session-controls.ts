@@ -6,7 +6,6 @@ import { AgentDefinitionSchema, SessionControlSchema, ModelSelectionIntentSchema
 import { PlanDoc, QuestionsDoc, TodosDoc, WorkspaceDoc, boundedReplay } from './documents.js';
 import { boundSessionControl, type SessionHistoryPage, type SessionHistoryPageRequest } from '@gitspace/protocol-agent';
 import type { InferenceModelAdmission, RuntimeHarnessOptions } from './harness.js';
-import type { ToolServices } from './tools.js';
 import type { TranscriptPageRequest, TranscriptPage, TranscriptContentRequest, TranscriptContentPage } from '@gitspace/blocks';
 import type { SessionUsageReport } from '@gitspace/protocol-runtime/session-controls';
 import { RuntimeBrowserStatusSchema, RuntimeBrowserArtifactPageSchema, RuntimeBrowserOverviewSchema, RuntimeBrowserPreviewSchema, RuntimeBrowserCaptureViewSchema, RuntimeBrowserShareSchema, RuntimeBrowserConnectedTabSchema, type RuntimeBrowserManagement, type RuntimeBrowserStatus, type RuntimeBrowserArtifactPage, type RuntimeBrowserOverview, type RuntimeBrowserPreview, type RuntimeBrowserCaptureView, type RuntimeBrowserShare, type RuntimeBrowserConnectedTab } from '@gitspace/protocol-runtime';
@@ -106,8 +105,6 @@ export type SessionControlServices = Pick<RuntimeHarnessOptions, 'admitInference
   catalog(): Promise<SessionCatalog>;
   reload(kind: 'settings' | 'instructions' | 'inference'): Promise<void>;
   loadAgentDefinitions?(): Promise<Array<{ path: string; content: string }>>;
-  /** Stores a person's attached image and returns the block naming it, as tool images are (`ToolServices['images']`). */
-  images: ToolServices['images'];
   /** Keeps the decisions a person's prompt carries under the prompt's request id; called before the prompt is submitted. */
   holdDecisions?(conversationId: string, requestId: string, held: HeldDecisions): void;
   /** Answers each management command with what it returns; `stop`, `closeTab` and `focusTab` return nothing (null);
@@ -306,9 +303,8 @@ export function createSessionControls(services: SessionControlServices) {
         await services.lifecycle.userInput(String(target.id), async () => {
           const requestId = crypto.randomUUID();
           await applyInferenceThinking(target, await admitted(requestId));
-          const images = command.images?.length ? await Promise.all(command.images.map(image => services.images.store(image))) : [];
           if (deviceId !== undefined && command.decisions?.length) services.holdDecisions?.(String(target.id), requestId, { deviceId, text: command.text, decisions: command.decisions });
-          await target.submit({ type: 'input', requestId, content: images.length ? [{ type: 'text', text: command.text }, ...images] : command.text, whenBusy: command.streamingBehavior ?? 'followUp' }, ctx);
+          await target.submit({ type: 'input', requestId, content: command.text, whenBusy: command.streamingBehavior ?? 'followUp' }, ctx);
         });
         break;
       }

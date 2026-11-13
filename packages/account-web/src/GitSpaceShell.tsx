@@ -160,10 +160,11 @@ export interface GitSpaceShellProps {
   /** Cloud runtime status is independent of the directory's machine placement projection. */
   runtimeSummary?: SidebarSpaceSummary;
   machines?: Array<{ id: string; label: string }>;
-  /** `decisions`: the decisions staged in the composer that go with the message. */
-  onSend?: (text: string, behavior?: SendBehavior, images?: Array<{ data: string; mimeType: string }>, draft?: Pick<WorkspaceDraftCapture, 'draftRevision' | 'text'>, decisions?: RuntimeMessageDecision[]) => void | Promise<void>;
+  /** `text` names each attachment with an `<attachment … />` tag (`chatAttachmentTag`); the files are already in the
+   * drive. `decisions`: the decisions staged in the composer that go with the message. */
+  onSend?: (text: string, behavior?: SendBehavior, draft?: Pick<WorkspaceDraftCapture, 'draftRevision' | 'text'>, decisions?: RuntimeMessageDecision[]) => void | Promise<void>;
   draft?: WorkspaceDraftBinding;
-  /** Present when composer attachments may be uploaded into the session's `uploads/` artifact folder. */
+  /** Present when composer attachments may be uploaded into the session's drive under `uploads/<date>/`. */
   artifactUpload?: ArtifactUploadClient;
   /** Runs a command of the workspace's session: the composer connects a pasted share link's tab with it. */
   sessionCommand?: ComposerProps['sessionCommand'];

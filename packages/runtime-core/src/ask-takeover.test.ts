@@ -53,7 +53,7 @@ async function open(storage: Storage, args: object = asked) {
     onReport: error => { reports.push(error); }, admitInference: async () => ({ provider: 'test', modelId: model.id }), bindInferenceConversation: async () => {},
     refuseRequest: unused, unfinished: { begin: () => 0, end: () => {} },
   });
-  const controls = createSessionControls({ ...runtime, images: { store: async image => image, load: async image => image }, admitInference: unused, reload: async () => {}, catalog: async () => ({ models: [], roles: [] }),
+  const controls = createSessionControls({ ...runtime, admitInference: unused, reload: async () => {}, catalog: async () => ({ models: [], roles: [] }),
     history: { conversation: unused, recent: async () => ({ anchorId: null, prompts: [], tokens: null }), page: unused, resolve: unused, transcriptPage: unused, transcriptContent: unused, usage: unused } });
   /** The takeover card once it is open, with its call's deadline and when it was asked. */
   async function card() {

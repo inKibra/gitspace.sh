@@ -1,10 +1,11 @@
 import type { SkillView } from '@gitspace/protocol';
 import { automationEventCount, parseAutomationMessage, type AutomationMessage } from '@gitspace/protocol/automations-contract';
 import { captureMention, captureMentionIds, parseBrowserShareLink, withoutCaptureSummaries, type RuntimeBrowserCaptureView, type RuntimeBrowserConnectedTab, type RuntimeBrowserSharePreview } from '@gitspace/protocol-runtime';
+import { CHAT_ATTACHMENT_ACCEPT, chatAttachmentTag } from '@gitspace/protocol-runtime/chat-attachments';
 import type { RuntimeMessageDecision, RuntimeSessionCommand, RuntimeSessionResult } from '@gitspace/protocol-runtime/session-controls';
 import { Button, Dropdown, DropdownContent, DropdownMenu, DropdownTrigger, InputMessage, MenuItem, Select, SelectContent, SelectItem, SelectTrigger, ThinkingStep, ThinkingSteps, ThinkingStepsContent, ThinkingStepsHeader, badgeColors, useIcons, useShape, type IconName, type QueuedMessage } from '@gitspace/ui';
 import { Attachment01, CpuChip01, DotsHorizontal, XClose, Zap } from '@untitledui/icons';
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { connectedTabText, TabChip } from './connected-tab.js';
 import { CaptureChip } from './capture-chip.js';
 import { glyph } from './glyph.js';
@@ -24,13 +25,6 @@ export type SendBehavior = 'steer' | 'followUp';
 
 function options(items: readonly { value: string; label: ReactNode }[]): ReactNode {
   return <SelectContent>{items.map((item, index) => <SelectItem value={item.value} index={index} key={item.value}>{item.label}</SelectItem>)}</SelectContent>;
-}
-
-async function imageAttachment(file: File): Promise<{ data: string; mimeType: string }> {
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  let binary = '';
-  for (let offset = 0; offset < bytes.length; offset += 32 * 1024) binary += String.fromCharCode(...bytes.subarray(offset, offset + 32 * 1024));
-  return { data: btoa(binary), mimeType: file.type };
 }
 
 type ShareLink = { text: string; shareId: string; secret: string };
@@ -137,7 +131,7 @@ export interface ComposerProps {
   running: boolean;
   onSend?: GitSpaceShellProps['onSend'];
   draft?: WorkspaceDraftBinding;
-  /** Stores attachments that are not sent inline in the session's `uploads/` artifact folder. */
+  /** Stores every attachment in the session's drive under `uploads/<date>/` before the message naming it is sent. */
   artifactUpload?: ArtifactUploadClient;
   pending: boolean;
   recovering?: boolean;
@@ -163,7 +157,10 @@ export function Composer({ workspace, controls, providers, skills = [], running,
   const [attachments, setAttachments] = useState<File[]>([]);
   const [showHistory, setShowHistory] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
-  const [uploading, setUploading] = useState<string | null>(null);
+  // Bytes stored so far of each file of the message being sent; null while nothing uploads.
+  const [progress, setProgress] = useState<ReadonlyMap<File, number> | null>(null);
+  // Files already stored by an earlier attempt to send them, so sending again does not store them twice.
+  const stored = useRef(new WeakMap<File, { url: string; hash: string }>());
   const [connecting, setConnecting] = useState(false);
   const sharing = sessionCommand !== undefined;
   // Share links pasted into the draft, swapped out of its text into tab chips.
@@ -206,7 +203,7 @@ export function Composer({ workspace, controls, providers, skills = [], running,
   }, [captures]);
   const submit = async (draft: string, draftAttachments: File[], behavior: SendBehavior = 'followUp'): Promise<boolean> => {
     const text = draft.trim();
-    if ((!text && !staging?.chips.length) || !onSend || pending || recovering || inferenceUnavailable || uploading !== null || connecting) return false;
+    if ((!text && !staging?.chips.length) || !onSend || pending || recovering || inferenceUnavailable || progress !== null || connecting) return false;
     setSubmitError(null);
     setJoined([]);
     const sentDraft = workspaceDraft?.capture();
@@ -227,29 +224,30 @@ export function Composer({ workspace, controls, providers, skills = [], running,
       // What the agent reads in place of the links and chips: the tabs, the captures (the workspace adds each one's
       // summary), then the message with the staged choices' lines.
       const lead = [...connected.map(connectedTabText), ...(captures.length ? [captures.map(captureMention).join(' ')] : [])];
-      const files = draftAttachments.filter((file) => !file.type.startsWith('image/'));
-      const uploads = files.filter((file) => !file.type.startsWith('text/') || file.size > 256 * 1024);
-      const uploaded = new Map<File, string>();
-      if (uploads.length) {
-        if (!artifactUpload) throw new Error('Files other than images and small text files can only be attached in an open workspace.');
-        for (const file of uploads) {
+      const attached: string[] = [];
+      if (draftAttachments.length) {
+        if (!artifactUpload) throw new Error('Files can only be attached in an open workspace.');
+        for (const file of draftAttachments) {
           const rejection = uploadRejection(file);
           if (rejection) throw new Error(`${file.name}: ${rejection}`);
         }
+        const folder = `uploads/${new Date().toISOString().slice(0, 10)}`;
+        setProgress(new Map(draftAttachments.map((file): [File, number] => [file, stored.current.has(file) ? file.size : 0])));
         // Sequential, like the Inspector's uploads: one chunk body in flight keeps requests under the Worker's size cap.
-        for (const file of uploads) {
-          setUploading(file.name);
-          const artifact = await uploadArtifactFile(artifactUpload, file, { signal: new AbortController().signal, onSession: () => undefined });
-          uploaded.set(file, artifact.url);
+        for (const file of draftAttachments) {
+          let artifact = stored.current.get(file);
+          if (!artifact) {
+            try {
+              artifact = await uploadArtifactFile(artifactUpload, file, { signal: new AbortController().signal, folder, onSession: (session) => setProgress((current) => current && new Map(current).set(file, session.received)) });
+            } catch (failure) {
+              throw new Error(`${file.name} did not upload: ${rpcErrorMessage(failure, 'Upload')}`);
+            }
+            stored.current.set(file, artifact);
+          }
+          attached.push(chatAttachmentTag({ name: file.name, url: artifact.url, type: file.type, size: file.size, hash: artifact.hash }));
         }
       }
-      const images = await Promise.all(draftAttachments.filter((file) => file.type.startsWith('image/')).map(imageAttachment));
-      const attached = await Promise.all(files.map(async (file) => {
-        const url = uploaded.get(file);
-        if (url === undefined) return `<attachment name="${file.name}">\n${await file.text()}\n</attachment>`;
-        return `<attachment name="${file.name}" url="${url}" type="${file.type || 'application/octet-stream'}" size="${file.size}" />`;
-      }));
-      const send = async (body: string, decisions?: RuntimeMessageDecision[]) => { await onSend([[...lead, body].join('\n'), ...attached].join('\n\n'), behavior, images, sentDraft, decisions); };
+      const send = async (body: string, decisions?: RuntimeMessageDecision[]) => { await onSend([[...lead, body].join('\n'), ...attached].join('\n\n'), behavior, sentDraft, decisions); };
       if (staging) await staging.deliver(text, send);
       else await send(text);
       if (workspaceDraft && sentDraft !== undefined) workspaceDraft.accepted(sentDraft);
@@ -265,7 +263,7 @@ export function Composer({ workspace, controls, providers, skills = [], running,
       setSubmitError(rpcErrorMessage(failure, 'Send message'));
       return false;
     } finally {
-      setUploading(null);
+      setProgress(null);
     }
   };
   const runControl = (operation: Promise<void>): void => {
@@ -384,7 +382,7 @@ export function Composer({ workspace, controls, providers, skills = [], running,
         <Button variant="ghost" size="icon-compact" aria-label="Remove capture" onClick={() => setCaptures((current) => current.filter((item) => item !== id))}><XClose width={14} height={14} /></Button>
       </li>;
     })}</ul> : null}
-    {staging ? <StagedChips staging={staging} disabled={pending || uploading !== null || connecting} /> : null}
+    {staging ? <StagedChips staging={staging} disabled={pending || progress !== null || connecting} /> : null}
     {controls && automationRuns.length ? <ul aria-label="Automation runs waiting" className="flex flex-col gap-1.5">{automationRuns.map(({ index, message: run }) => <AutomationQueueRow key={run.run ?? `followUp:${index}`} message={run} dismissing={run.run !== null && dismissing === run.run}
       onDeliver={() => runControl(controls.onPromoteQueuedMessage(index))}
       onDismiss={() => { if (run.run === null) runControl(controls.onRemoveQueuedMessage('followUp', index)); else dismissRun(run.run); }}
@@ -398,10 +396,10 @@ export function Composer({ workspace, controls, providers, skills = [], running,
       placeholder={recovering ? 'Recovering agent…' : staging?.chips.length ? 'Say why, or add context; your choices go with it…' : `Ask the ${workspace.kind === 'project' ? 'project' : 'workspace'} agent…`}
       sendable={!!staging?.chips.length}
       disabled={!onSend || recovering || inferenceUnavailable}
-      busy={pending || uploading !== null || connecting}
+      busy={pending || progress !== null || connecting}
       files={attachments}
       onFilesChange={setAttachments}
-      accept="image/png,image/jpeg,image/webp,text/*,application/pdf"
+      accept={CHAT_ATTACHMENT_ACCEPT}
       maxFiles={8}
       history={controls?.value.history.map((entry) => withoutCaptureSummaries(entry.text)) ?? []}
       status={streaming ? 'streaming' : 'idle'}
@@ -438,7 +436,10 @@ export function Composer({ workspace, controls, providers, skills = [], running,
         </DropdownMenu>
       </> : null}
     />
-    {uploading !== null ? <p role="status" className="text-caption text-muted-foreground">Uploading {uploading}…</p> : null}
+    {progress !== null ? <ul aria-label="Uploads" className="flex flex-col gap-0.5 text-caption text-muted-foreground">{[...progress].map(([file, received]) => <li key={`${file.name}:${file.size}:${file.lastModified}`} role="status" className="flex min-w-0 items-center gap-2">
+      <span className="min-w-0 truncate">{received >= file.size ? 'Uploaded' : 'Uploading'} {file.name}</span>
+      <span className="shrink-0 tabular-nums">{Math.floor((received / file.size) * 100)}%</span>
+    </li>)}</ul> : null}
     {connecting ? <p role="status" className="text-caption text-muted-foreground">Connecting the shared tab…</p> : null}
     {error || submitError ? <p role="alert" className="text-caption text-destructive">{error ?? submitError}</p> : null}
   </div>;

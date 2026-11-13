@@ -1,6 +1,7 @@
 import type { ExecutionBlock, TranscriptItem } from '@gitspace/blocks';
 import { parseAutomationMessage } from '@gitspace/protocol/automations-contract';
 import { captureMention, captureSummariesIn } from '@gitspace/protocol-runtime';
+import { chatAttachments, withoutChatAttachments } from '@gitspace/protocol-runtime/chat-attachments';
 import { Badge, Button, ChatMessage, ThinkingIndicator, ThinkingStep, ThinkingSteps, ThinkingStepsContent, ThinkingStepsHeader, type AskUserAnswer } from '@gitspace/ui';
 import { AlertCircle, GitBranch01, Link03, ShieldTick } from '@untitledui/icons';
 import type { ReactNode } from 'react';
@@ -11,7 +12,7 @@ import { glyph } from '../glyph.js';
 import { AskBlockView, AskTakeoverCall, EnvironmentCall } from './AskCards.js';
 import { AutomationCard, EventCard, Notice, NoticeRow, PERMISSION_BADGE, WorkspaceReportRow } from './EventCards.js';
 import { Execution, SideAgents } from './ExecutionCard.js';
-import { MessageAttachments, RichContent, userMessageMarkdown } from './RichContent.js';
+import { MessageAttachments, MessageFiles, RichContent, userMessageMarkdown } from './RichContent.js';
 import { ToolCall } from './ToolCall.js';
 import { ToolGroup } from './ToolGroup.js';
 import { AgentMessageActions } from './staging.js';
@@ -77,12 +78,13 @@ export function TranscriptItemView({ item, active, onAnswer, state, onStateChang
     case 'message': {
       const automation = item.role === 'user' ? parseAutomationMessage(item.text) : null;
       if (automation) return <AutomationCard message={automation} delivery="turn" at={item.at} />;
-      // A sent message names the tabs its pasted share links connected and the captures it mentions (the summaries the
-      // workspace appended for the agent); they show as chips above its text.
-      const mentioned = item.role === 'user' ? captureSummariesIn(item.text) : null;
+      // A sent message names the tabs its pasted share links connected, the captures it mentions (the summaries the
+      // workspace appended for the agent) and the files attached to it; they show as chips above its text.
+      const files = item.role === 'user' ? chatAttachments(item.text) : [];
+      const mentioned = item.role === 'user' ? captureSummariesIn(files.length ? withoutChatAttachments(item.text) : item.text) : null;
       const sent = mentioned === null ? null : connectedTabsIn(mentioned.captures.reduce((text, { captureId }) => text.replaceAll(captureMention(captureId), ''), mentioned.text));
       const message = <ChatMessage
-        attachments={item.images?.length ? <MessageAttachments images={item.images} /> : undefined}
+        attachments={item.images?.length || files.length ? <>{item.images?.length ? <MessageAttachments images={item.images} /> : null}{files.length ? <MessageFiles attachments={files} /> : null}</> : undefined}
         from={item.role}
         title={item.role === 'assistant' ? fullTime(item.at) : undefined}
         data-pending={item.pending || undefined}

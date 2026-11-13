@@ -15,6 +15,7 @@
   // The browser runner module is generated, not committed (packages/browser-runner).
   "build": { "command": "bun ../browser-runner/src/write.ts src/generated/browser-runner.js && bun ../inference-worker/src/write.ts src/generated/inference-worker.js" },
   "browser": { "binding": "BROWSER" },
+  "images": { "binding": "IMAGES" },
   "durable_objects": {
     "bindings": [
       {

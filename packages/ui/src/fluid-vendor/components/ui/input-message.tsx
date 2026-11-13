@@ -217,8 +217,8 @@ interface InputMessageProps
 }
 
 // ─── File preview tile ────────────────────────────────────────────────────
-// Composer-row tile: a FileThumbnail wrapped with enter/exit motion and a
-// hover-revealed remove (×) button.
+// Composer-row tile: a FileThumbnail wrapped with enter/exit motion and an
+// always-visible remove (×) button, reachable with Tab.
 interface FilePreviewTileProps {
   file: File;
   onRemove: () => void;
@@ -256,7 +256,7 @@ function FilePreviewTile({ file, onRemove, size }: FilePreviewTileProps) {
           // of theme — the close badge needs to read as a "delete affordance"
           // over arbitrary image/PDF content, so it sits at a fixed contrast
           // instead of flipping with the surrounding surface.
-          className="absolute top-1 right-1 w-5 h-5 rounded-full bg-neutral-900 text-white opacity-0 group-hover/tile:opacity-100 transition-opacity duration-80 flex items-center justify-center cursor-pointer outline-none focus-visible:opacity-100 focus-visible:ring-1 focus-visible:ring-[color:var(--focus-ring,#6B97FF)]"
+          className="absolute top-1 right-1 w-5 h-5 rounded-full bg-neutral-900 text-white flex items-center justify-center cursor-pointer outline-none focus-visible:ring-1 focus-visible:ring-[color:var(--focus-ring,#6B97FF)]"
         >
           <XIcon size={12} strokeWidth={2.5} />
         </button>
@@ -907,6 +907,23 @@ const InputMessage = forwardRef<HTMLDivElement, InputMessageProps>(
           return;
         }
 
+        // Backspace in an empty draft removes the last attachment.
+        if (
+          e.key === "Backspace" &&
+          value === "" &&
+          filesArr.length > 0 &&
+          onFilesChange &&
+          !disabled &&
+          !e.shiftKey &&
+          !e.altKey &&
+          !e.metaKey &&
+          !e.ctrlKey
+        ) {
+          e.preventDefault();
+          onFilesChange(filesArr.slice(0, -1));
+          return;
+        }
+
         // Let native caret movement resolve soft wraps before consulting history.
         // Only a key that leaves the selection unchanged is a history boundary.
         if (
@@ -965,6 +982,9 @@ const InputMessage = forwardRef<HTMLDivElement, InputMessageProps>(
         setActiveSuggestion,
         acceptSuggestion,
         placeholderSuggestion,
+        filesArr,
+        onFilesChange,
+        disabled,
       ]
     );
 

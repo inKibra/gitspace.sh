@@ -4,7 +4,7 @@ import {
   RuntimeCancelInputSchema, RuntimeAnswerInputSchema, RuntimeWatchInputSchema,
   RuntimeWatchEventsSchema, RuntimeActionResultSchema,
 } from '@gitspace/protocol-runtime';
-import { RuntimeSessionInputSchema, RuntimeSessionResultSchema, RuntimeImageUploadInputSchema, RuntimeImageUploadResultSchema, AgentDefinitionDiagnosticSchema } from '@gitspace/protocol-runtime/session-controls';
+import { RuntimeSessionInputSchema, RuntimeSessionResultSchema, AgentDefinitionDiagnosticSchema } from '@gitspace/protocol-runtime/session-controls';
 import { RuntimeQaActionInputSchema, RuntimeQaActionResultSchema } from '@gitspace/protocol-runtime/workspace-controls';
 import { RuntimeAttachmentReadyResultSchema, RuntimeCacheAttachmentRequestInputSchema, RuntimeAttachmentDetachRequestInputSchema } from '@gitspace/protocol-runtime/attachment-controls';
 import { RuntimeDraftSaveInputSchema, WorkspaceDraftSaveResultSchema } from '@gitspace/protocol-runtime/draft';
@@ -584,11 +584,6 @@ export const runtimeWatchContract = gitspaceRpc.procedure()
 export const runtimeSessionContract = gitspaceRpc.procedure()
   .input(runtimeWire(RuntimeSessionInputSchema, 'gitspace/runtime-session-input/v1'))
   .output(runtimeWire(RuntimeSessionResultSchema, 'gitspace/runtime-session-result/v1'))
-  .errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
-/** An upload link for one image a prompt will name (`RuntimeImageUploadResultSchema`). */
-export const runtimeImageUploadContract = gitspaceRpc.procedure()
-  .input(runtimeWire(RuntimeImageUploadInputSchema, 'gitspace/runtime-image-upload-input/v1'))
-  .output(runtimeWire(RuntimeImageUploadResultSchema, 'gitspace/runtime-image-upload-result/v1'))
   .errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
 export const runtimeServicesContract = gitspaceRpc.procedure()
   .input(runtimeWire(RuntimeServiceInputSchema, 'gitspace/runtime-services-input/v1'))
@@ -2509,7 +2504,6 @@ export const gitspaceContract = gitspaceRpc.contract({
     browserTrust: runtimeBrowserTrustContract,
     watch: runtimeWatchContract,
     session: runtimeSessionContract,
-    imageUpload: runtimeImageUploadContract,
     services: runtimeServicesContract,
     sync: runtimeSyncContract,
     qa: runtimeQaContract,

@@ -20,6 +20,8 @@ import type { WorkspacePhase } from '@gitspace/protocol-runtime/session-controls
 import { MODEL_ROLE_LABELS, type ModelRoleSelector } from '@gitspace/protocol/inference';
 import { fitRequestImages, imageLimits, SUBAGENT_REQUEST_IMAGE_BYTES, SUBAGENT_REQUEST_IMAGES } from './inference/image-limits.js';
 import { boardAfterCompaction, boardForTurn, PROJECT_BOARD_INSTRUCTION } from './project-board.js';
+import { messageAttachments, withAttachmentRenditions, type AttachmentRendition } from './inference/attachments.js';
+import type { ChatAttachment } from '@gitspace/protocol-runtime/chat-attachments';
 /** `role` is the profile role the model came from, when it came from one. */
 export type InferenceModelAdmission = ModelRef & { thinking?: ModelRoleSelector['thinking']; role?: string };
 export type RuntimeHarnessOptions = {
@@ -49,6 +51,12 @@ export type RuntimeHarnessOptions = {
   refuseRequest(signal: AbortSignal, reason: string): void;
   /** After binding: images rewritten as Vision fallback descriptions when the bound model cannot read them. */
   describeImages?(signal: AbortSignal, messages: readonly Message[]): Promise<Message[] | undefined>;
+  /**
+   * The renditions of chat attachments (`inference/attachments.ts`) by the original's hash. Each one not yet made is
+   * made and kept first, so a request carrying an attachment is sent only once it is ready; a request a reset cut off
+   * is made again (`unfinished`) and finds the renditions already made.
+   */
+  attachmentRenditions?(attachments: readonly ChatAttachment[], signal: AbortSignal): Promise<ReadonlyMap<string, AttachmentRendition>>;
   /** The messages a conversation's model request is built from, as pi read them, before any hook rewrites them. */
   contextRead?(conversationId: string, messages: readonly Message[]): void;
   /**
@@ -195,15 +203,21 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
     };
     const fixed = input.messages.map(fix);
     const repaired = fixed.some((message, index) => message !== input.messages[index]) ? fixed : undefined;
+    // The person's attachments follow their messages, their text within a share of the bound model's context window.
+    const agent = await runtime.snapshot(AgentDoc, runtime.conversationId, context);
+    const reference = agent?.model ?? options.model;
+    const bound = reference ? options.models.getModel(reference.provider, reference.modelId) : undefined;
+    const attachments = messageAttachments(repaired ?? input.messages);
+    const renditions = options.attachmentRenditions;
+    const attached = renditions && attachments.length ? withAttachmentRenditions(repaired ?? input.messages, await renditions(attachments, signal), bound?.contextWindow ?? 0) : undefined;
     // Resets cut off earlier attempts of this request: the lean form sends older tool output cut down (the transcript keeps it).
-    const lean = form === 'lean' ? (repaired ?? input.messages).map(cutForSummary) : undefined;
-    const described = await options.describeImages?.(signal, lean ?? repaired ?? input.messages);
-    const outgoing = described ?? lean ?? repaired ?? input.messages;
+    const lean = form === 'lean' ? (attached ?? repaired ?? input.messages).map(cutForSummary) : undefined;
+    const described = await options.describeImages?.(signal, lean ?? attached ?? repaired ?? input.messages);
+    const outgoing = described ?? lean ?? attached ?? repaired ?? input.messages;
     // A subagent does one task and rarely needs old screenshots: it sends fewer images than a main conversation.
     const child = (await runtime.snapshot(AgentDefinitionContextDoc, runtime.conversationId, context))?.child;
     if (child) {
-      const agent = await runtime.snapshot(AgentDoc, runtime.conversationId, context);
-      const limits = imageLimits(agent?.model ? options.models.getModel(agent.model.provider, agent.model.modelId) : undefined);
+      const limits = imageLimits(bound);
       const request = { messages: [...outgoing] };
       const fitted = fitRequestImages(request, { ...limits, maxInlinePerRequest: Math.min(limits.maxInlinePerRequest, SUBAGENT_REQUEST_IMAGES), maxInlineBytes: Math.min(limits.maxInlineBytes, SUBAGENT_REQUEST_IMAGE_BYTES) });
       if (fitted !== request) return { messages: fitted.messages };
@@ -211,7 +225,7 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
     // The project agent's turn starts with its workspace board, appended after everything earlier requests sent.
     const board = !child && options.tools.projectBoard && live?.run ? await boardForTurn(harness, runtime.conversationId, String(live.run.taskId), input.messages, options.tools.projectBoard, context) : null;
     if (board) return { messages: [...outgoing, board] };
-    return described || lean || repaired ? { messages: outgoing } : undefined;
+    return described || lean || attached || repaired ? { messages: outgoing } : undefined;
   }, afterResponse(_message, runtime) { options.unfinished.end(`turn:${String(runtime.conversationId)}`); } }), hook(CompactionTask, { async beforeCompact(input, api, context) {
     const signal = context.abortSignal;
     if (!signal) throw new Error('Compaction requires an invocation abort signal');

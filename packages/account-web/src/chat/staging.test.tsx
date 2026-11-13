@@ -119,7 +119,7 @@ it('hands the staged decisions to the send with the message, and none for answer
   });
   await type('It already runs in production');
   await send();
-  expect(onSend.mock.calls[0]?.[4]).toEqual([
+  expect(onSend.mock.calls[0]?.[3]).toEqual([
     { title: 'Storage engine', choice: 'Postgres', sectionId: 'storage', payload: { sectionId: 'storage' } },
     { title: 'No cache' },
   ]);
@@ -130,7 +130,7 @@ it('hands the staged decisions to the send with the message, and none for answer
   });
   await send();
   expect(onSend.mock.calls[1]?.[0]).toBe('Answered: Weekly\nReview batch: 2 comments');
-  expect(onSend.mock.calls[1]?.[4]).toEqual([]);
+  expect(onSend.mock.calls[1]?.[3]).toEqual([]);
 });
 
 it('stages a block\'s choices under keys of their own block, and a failed sign-off unticks its row', async () => {

@@ -50,6 +50,7 @@ export interface ScriptUploadMetadata {
     | { type: 'worker_loader'; name: string }
     | { type: 'browser'; name: string }
     | { type: 'ai'; name: string }
+    | { type: 'images'; name: string }
     | { type: 'plain_text'; name: string; text: string }
     | { type: 'secret_text'; name: string; text: string }
     | { type: 'service'; name: string; service: string }
@@ -114,6 +115,7 @@ export function scriptUploadMetadata(
     if (resource.source === 'worker-loader') { bindings.push({ type: 'worker_loader', name: resource.name }); continue; }
     if (resource.source === 'browser-rendering') { bindings.push({ type: 'browser', name: resource.name }); continue; }
     if (resource.source === 'workers-ai') { bindings.push({ type: 'ai', name: resource.name }); continue; }
+    if (resource.source === 'images') { bindings.push({ type: 'images', name: resource.name }); continue; }
     if (resource.source === 'public-assets') { bindings.push({ type: 'service', name: resource.name, service: tenant.publicAssetsService }); continue; }
     // Read only by construction: an account may run a Worker it built, so it never gets the channel bucket itself.
     if (resource.source === 'release-channel') { bindings.push({ type: 'service', name: resource.name, service: tenant.releaseChannelService }); continue; }

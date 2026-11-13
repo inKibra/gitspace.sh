@@ -29,6 +29,7 @@ export * from './web-search.js';
 export * from './account-models.js';
 export { claudeCode, XxHash64, type ClaudeCodeTransport } from './claude-code-request.js';
 export { imageDimensions } from './image-limits.js';
+export type { AttachmentRendition } from './attachments.js';
 
 export type VaultModelsOptions = {
   profileId: string;

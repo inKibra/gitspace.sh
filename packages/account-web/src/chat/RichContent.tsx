@@ -1,10 +1,12 @@
 import type { MessageImage, RichContentBlock } from '@gitspace/blocks';
+import type { ChatAttachment } from '@gitspace/protocol-runtime/chat-attachments';
 import { STAGED_CHOICE_DATA } from '@gitspace/protocol-runtime/session-controls';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@gitspace/ui';
-import { Link03 } from '@untitledui/icons';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow, useShape } from '@gitspace/ui';
+import { File06, Link03 } from '@untitledui/icons';
 import { GitSpaceMarkdown } from '../GitSpaceMarkdown.js';
+import { formatBytes } from '../inspector/artifact-upload.js';
 import { ResourceLink } from '../ResourceNavigation.js';
-import { TranscriptImage } from '../resource-media.js';
+import { ResourceMedia, TranscriptImage } from '../resource-media.js';
 
 export function RichContent({ block }: { block: RichContentBlock }) {
   switch (block.type) {
@@ -31,8 +33,22 @@ export function MessageAttachments({ images }: { images: MessageImage[] }) {
   />)}</>;
 }
 
-/** A user message as Markdown: a staged choice shows as its line only (its data is for the agent), an uploaded
- * attachment becomes a link to its drive file, an inline text attachment a titled block of its text. */
+/** A message's attached files: an image as its thumbnail from the drive, any other file as a chip with its name, type
+ * and size that opens the drive file. */
+export function MessageFiles({ attachments }: { attachments: readonly ChatAttachment[] }) {
+  const shape = useShape();
+  return <span role="group" aria-label="Attachments" className="flex min-w-0 flex-wrap justify-end gap-1.5">{attachments.map((attachment, index) => attachment.type.startsWith('image/')
+    ? <ResourceMedia key={`${attachment.url}:${index}`} uri={attachment.url} alt={attachment.name} />
+    : <ResourceLink key={`${attachment.url}:${index}`} href={attachment.url} className={`${shape.container} inline-flex min-w-0 max-w-full items-center gap-2 bg-surface-2 px-3 py-2 text-foreground shadow-surface-1 hover:bg-surface-3`}>
+      <File06 width={16} height={16} strokeWidth={1.5} className="shrink-0 text-muted-foreground" />
+      <span className="min-w-0 text-body [overflow-wrap:anywhere]">{attachment.name}</span>
+      <span className="shrink-0 text-caption tabular-nums text-muted-foreground">{attachment.type} · {formatBytes(attachment.size)}</span>
+    </ResourceLink>)}</span>;
+}
+
+/** A user message as Markdown: a staged choice shows as its line only (its data is for the agent). Messages sent before
+ * attachments carried their hash name an uploaded file by a tag without one, shown as a link to its drive file, and a
+ * small text file as a tag around its text, shown as a titled block. */
 export function userMessageMarkdown(text: string): string {
   return text
     .replace(STAGED_CHOICE_DATA, '$1')
