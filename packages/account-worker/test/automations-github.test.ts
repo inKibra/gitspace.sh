@@ -131,7 +131,7 @@ async function linkedBeforeDefaults(): Promise<string> {
   return projectId;
 }
 
-const DEFAULT_NAMES = ['Failed checks to its workspace', 'Mentions of @gitspace-test', 'Merged or closed', 'Review feedback to its workspace'];
+const DEFAULT_NAMES = ['Bot review feedback to its workspace', 'Failed checks to its workspace', 'Mentions of @gitspace-test', 'Merged or closed', 'Review feedback to its workspace'];
 const defaultsOf = async (projectId: string) => (await env.PROJECT_AUTOMATIONS.getByName(`${env.ACCOUNT_ID}:${projectId}`).list(projectId)).automations.filter(automation => automation.isDefault).map(automation => automation.name);
 
 const pull = (number: number, change: { author: string; base?: string; head: string; draft?: boolean; body?: string }) => ({
@@ -164,8 +164,8 @@ const startFromLabels: AutomationDraft = {
 describe('automations on GitHub events', () => {
   it('starts a Review workspace for a trusted pull request into main, skips an outsider\'s, and lets a review comment reach the workspace a pull request was opened from', async () => {
     const { projectId, searchId, authority, automations, send, work, runs, submitted } = await installed(['bradleat', 'dana']);
-    // Installing the App added the four default automations.
-    await vi.waitFor(async () => expect((await automations.list(projectId)).automations.filter(automation => automation.isDefault).map(automation => automation.name)).toEqual(['Failed checks to its workspace', 'Mentions of @gitspace-test', 'Merged or closed', 'Review feedback to its workspace']));
+    // Installing the App added the default automations.
+    await vi.waitFor(async () => expect((await automations.list(projectId)).automations.filter(automation => automation.isDefault).map(automation => automation.name)).toEqual(DEFAULT_NAMES));
     automationValue(await automations.create({ projectId, draft: reviewPullRequests }));
 
     await send('pull_request', { action: 'opened', sender: { login: 'bradleat' }, pull_request: pull(12, { author: 'bradleat', head: 'fix-pantry' }) });
@@ -247,7 +247,7 @@ describe('automations on GitHub events', () => {
 
   it('runs an outsider\'s events once they are on the trust list, sends a mention without a linked workspace to the project agent, and closes with a notice that wakes no agent', async () => {
     const { projectId, searchId, automations, send, work, runs, submitted, noticed } = await installed(['bradleat']);
-    await vi.waitFor(async () => expect((await automations.list(projectId)).automations).toHaveLength(4));
+    await vi.waitFor(async () => expect((await automations.list(projectId)).automations).toHaveLength(DEFAULT_NAMES.length));
     const comment = (body: string, login: string) => ({ action: 'created', sender: { login }, issue: { number: 30, title: 'Question', html_url: 'https://github.com/inKibra/pantry/issues/30', user: { login }, labels: [] }, comment: { html_url: 'https://github.com/inKibra/pantry/issues/30#issuecomment-1', body, user: { login } } });
 
     await send('issue_comment', comment('@gitspace-test can you look?', 'mira'));
@@ -274,7 +274,7 @@ describe('automations on GitHub events', () => {
 
   it('sends one delivery to a linked workspace once, however many automations match it', async () => {
     const { projectId, searchId, automations, send, runs } = await installed(['bradleat', 'dana']);
-    await vi.waitFor(async () => expect((await automations.list(projectId)).automations).toHaveLength(4));
+    await vi.waitFor(async () => expect((await automations.list(projectId)).automations).toHaveLength(DEFAULT_NAMES.length));
     await send('pull_request', { action: 'opened', sender: { login: 'bradleat' }, pull_request: pull(14, { author: 'bradleat', head: 'feature/search' }) });
     await send('pull_request_review_comment', { action: 'created', sender: { login: 'dana' }, pull_request: pull(14, { author: 'bradleat', head: 'feature/search' }), comment: { html_url: 'https://github.com/inKibra/pantry/pull/14#discussion_r2', body: '@gitspace-test this breaks paging.', user: { login: 'dana' } } });
     const [later, first] = await runs();
@@ -284,7 +284,7 @@ describe('automations on GitHub events', () => {
 
   it('never delivers what the person\'s own GitHub login posted, whichever automation would send it to a workspace', async () => {
     const { projectId, searchId, automations, send, runs } = await installed(['jules', 'dana']);
-    await vi.waitFor(async () => expect((await automations.list(projectId)).automations).toHaveLength(4));
+    await vi.waitFor(async () => expect((await automations.list(projectId)).automations).toHaveLength(DEFAULT_NAMES.length));
     expect((await env.GITHUB_APP.getByName(env.ACCOUNT_ID).setPerson('@jules')).person).toEqual({ login: 'jules', source: 'settings' });
     automationValue(await automations.create({ projectId, draft: { name: 'Comments to search', enabled: true, trigger: { kind: 'github', events: [{ event: 'issue_comment', actions: ['created'] }] }, conditions: [], action: { kind: 'messageWorkspace', workspaceId: searchId, instruction: 'Read it.' } } }));
     await send('pull_request', { action: 'opened', sender: { login: 'jules' }, pull_request: pull(14, { author: 'jules', head: 'feature/search' }) });
@@ -309,7 +309,7 @@ describe('automations on GitHub events', () => {
 
   it('collects a review\'s comments into one run and one message once the pull request goes quiet, folding the empty review that wraps them', async () => {
     const { projectId, searchId, automations, send, work, runs, submitted } = await installed(['jules', 'dana']);
-    await vi.waitFor(async () => expect((await automations.list(projectId)).automations).toHaveLength(4));
+    await vi.waitFor(async () => expect((await automations.list(projectId)).automations).toHaveLength(DEFAULT_NAMES.length));
     await send('pull_request', { action: 'opened', sender: { login: 'jules' }, pull_request: pull(14, { author: 'jules', head: 'feature/search' }) });
     await send('pull_request_review_comment', lineComment(701, 'Handle empty queries.', 'dana', 700));
     await send('pull_request_review_comment', lineComment(702, 'Name this searchTerm.', 'dana', 700));
@@ -349,7 +349,7 @@ describe('automations on GitHub events', () => {
 
   it('adds events that arrive while the workspace\'s turn runs to its waiting message, and opens a new batch once that message was placed', async () => {
     const { projectId, searchId, automations, send, work, runs, submitted, updated } = await installed(['jules', 'dana']);
-    await vi.waitFor(async () => expect((await automations.list(projectId)).automations).toHaveLength(4));
+    await vi.waitFor(async () => expect((await automations.list(projectId)).automations).toHaveLength(DEFAULT_NAMES.length));
     await send('pull_request', { action: 'opened', sender: { login: 'jules' }, pull_request: pull(14, { author: 'jules', head: 'feature/search' }) });
     const feedback = async () => (await runs()).filter(run => run.automationName === 'Review feedback to its workspace');
     await send('pull_request_review_comment', lineComment(801, 'Handle empty queries.', 'dana', 800));
@@ -404,7 +404,7 @@ describe('automations on GitHub events', () => {
 
   it('reopens a closed linked workspace before sending to it, and keeps a person\'s link over one found by branch', async () => {
     const { projectId, searchId, authority, automations, send, work, runs, submitted } = await installed(['bradleat', 'dana']);
-    await vi.waitFor(async () => expect((await automations.list(projectId)).automations).toHaveLength(4));
+    await vi.waitFor(async () => expect((await automations.list(projectId)).automations).toHaveLength(DEFAULT_NAMES.length));
     automationValue(await automations.create({ projectId, draft: reviewPullRequests }));
     await send('pull_request', { action: 'opened', sender: { login: 'bradleat' }, pull_request: pull(12, { author: 'bradleat', head: 'fix-pantry' }) });
     await work();
@@ -474,7 +474,7 @@ describe('automations on GitHub events', () => {
     const added = vi.spyOn(ProjectAutomationsDO.prototype, 'addDefaults');
     const client = await signedClient();
     const overview = await client.automations.overview({});
-    expect(overview).toMatchObject({ status: 'ok', value: { projects: expect.arrayContaining([expect.objectContaining({ projectId: earlier, total: 4, on: 4 })]) } });
+    expect(overview).toMatchObject({ status: 'ok', value: { projects: expect.arrayContaining([expect.objectContaining({ projectId: earlier, total: 5, on: 5 })]) } });
     expect(await defaultsOf(earlier)).toEqual(DEFAULT_NAMES);
     // Later overviews open no project's automations for it again.
     expect(await client.automations.overview({})).toMatchObject({ status: 'ok' });
@@ -492,6 +492,44 @@ describe('automations on GitHub events', () => {
     automationValue(await automations.delete({ projectId: earlier, automationId: closed?.id ?? '' }));
     expect(await (await signedClient()).automations.overview({})).toMatchObject({ status: 'ok' });
     expect(await defaultsOf(earlier)).toEqual(DEFAULT_NAMES.filter(name => name !== 'Merged or closed'));
+  });
+
+  it('offers a default added later to a project that had the earlier ones, once, without bringing back one a person deleted', async () => {
+    const { projectId, automations } = await installed([]);
+    await vi.waitFor(async () => expect(await defaultsOf(projectId)).toEqual(DEFAULT_NAMES));
+    for (const name of ['Merged or closed', 'Bot review feedback to its workspace']) {
+      const automation = (await automations.list(projectId)).automations.find(entry => entry.name === name);
+      automationValue(await automations.delete({ projectId, automationId: automation?.id ?? '' }));
+    }
+    // As before defaults were offered by key and by revision: the project had the first defaults, the App revision 1.
+    await runInDurableObject(automations, (_instance, state) => { state.storage.sql.exec('DELETE FROM automation_defaults_offered'); });
+    await runInDurableObject(env.GITHUB_APP.getByName(env.ACCOUNT_ID), (_instance, state) => { state.storage.sql.exec('UPDATE automation_defaults SET revision=1'); });
+    const added = vi.spyOn(ProjectAutomationsDO.prototype, 'addDefaults');
+    const client = await signedClient();
+    expect(await client.automations.overview({})).toMatchObject({ status: 'ok' });
+    expect(await defaultsOf(projectId)).toEqual(DEFAULT_NAMES.filter(name => name !== 'Merged or closed'));
+    expect(await client.automations.overview({})).toMatchObject({ status: 'ok' });
+    expect(added.mock.calls.filter(([input]) => input.projectId === projectId)).toHaveLength(1);
+  });
+
+  it('sends a review bot\'s feedback to its workspace in Review, not in Code, and a person\'s in both', async () => {
+    const { projectId, searchId, authority, send, work, runs, submitted } = await installed(['bradleat', 'dana', 'coderabbitai[bot]']);
+    await send('pull_request', { action: 'opened', sender: { login: 'bradleat' }, pull_request: pull(14, { author: 'bradleat', head: 'feature/search' }) });
+    const sent = async (automationName: string) => (await runs()).filter(run => run.automationName === automationName && run.subject?.number === 14);
+    await send('pull_request_review_comment', lineComment(1, 'Empty queries throw.', 'coderabbitai[bot]', 100));
+    expect(await sent('Bot review feedback to its workspace')).toEqual([expect.objectContaining({ state: 'skipped', skipReason: 'phase', outcome: 'Skipped: search-work is in Code; it runs in Review, Ship' })]);
+    expect(await sent('Review feedback to its workspace')).toEqual([expect.objectContaining({ state: 'skipped' })]);
+
+    await authority.commitWorkspacePhase(searchId, 'review');
+    await send('pull_request_review_comment', lineComment(2, 'The cache never expires.', 'coderabbitai[bot]', 101));
+    const [bot] = await sent('Bot review feedback to its workspace');
+    expect(bot).toMatchObject({ state: 'queued', workspaceId: searchId, phase: 'review', outcome: null });
+    await work();
+    await vi.waitFor(() => expect(submitted).toHaveBeenCalledWith({ projectId, workspaceId: searchId, requestId: `automation:${bot?.id}`, text: expect.stringContaining('The cache never expires.') }));
+    expect(submitted.mock.calls.some(([input]) => input.text.includes('Empty queries throw.'))).toBe(false);
+    // A person's review reaches it in Review as in Code.
+    await send('pull_request_review_comment', lineComment(3, 'Name the cache size.', 'dana', 102));
+    expect((await sent('Review feedback to its workspace'))[0]).toMatchObject({ state: 'queued', workspaceId: searchId });
   });
 
   it('gives a project created under an existing installation its defaults', async () => {

@@ -299,6 +299,11 @@ export const GITSPACE_RELEASES_AUTOMATION: AutomationDraft = {
   },
 };
 
+/** Raised when `defaultAutomations` gains an entry, so the GitHub App offers it to the projects it already gave defaults. */
+export const AUTOMATION_DEFAULTS_REVISION = 2;
+/** The defaults every project received at once, before each default's offer was recorded by key. */
+const FIRST_DEFAULT_KEYS = ['review-feedback', 'failed-checks', 'mentions', 'closed'];
+
 /** The default automations installing the GitHub App adds (docs/AUTOMATIONS-DESIGN.md §4), by key. */
 function defaultAutomations(bot: string): Array<{ key: string; draft: AutomationDraft }> {
   return [
@@ -307,6 +312,12 @@ function defaultAutomations(bot: string): Array<{ key: string; draft: Automation
       trigger: { kind: 'github', events: [{ event: 'pull_request_review', actions: ['submitted'] }, { event: 'pull_request_review_comment', actions: ['created'] }] },
       conditions: [{ kind: 'linked', linked: true }, { kind: 'author', mode: 'noneOf', values: ['*[bot]'] }],
       action: { kind: 'sendToLinked', wake: true, orProjectAgent: false, instruction: 'New review feedback on this workspace\'s pull request: the reviews and comments below. Read each one and address it.' },
+    } },
+    { key: 'bot-review-feedback', draft: {
+      name: 'Bot review feedback to its workspace', enabled: true, phases: ['review', 'ship'],
+      trigger: { kind: 'github', events: [{ event: 'pull_request_review', actions: ['submitted'] }, { event: 'pull_request_review_comment', actions: ['created'] }] },
+      conditions: [{ kind: 'linked', linked: true }, { kind: 'author', mode: 'oneOf', values: ['*[bot]'] }],
+      action: { kind: 'sendToLinked', wake: true, orProjectAgent: false, instruction: 'Review bots commented on this workspace\'s pull request: the reviews and comments below. Check each against the code; fix what holds, and say why for what does not.' },
     } },
     { key: 'failed-checks', draft: {
       name: 'Failed checks to its workspace', enabled: true,
@@ -864,7 +875,7 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
     return current.id;
   }
 
-  /** The four default automations, added once per project (a person may delete or change them afterwards). */
+  /** The default automations, each offered once per project (a person may delete or change them afterwards). */
   async addDefaults(input: { projectId: string; bot: string }): Promise<void> {
     const projectId = this.ensureProject(input.projectId);
     if (this.addDefaultAutomations(input.bot)) await this.changed(projectId);
@@ -1494,16 +1505,23 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
     this.ctx.storage.sql.exec('UPDATE automation_runs SET state=?, outcome=?, finished_at=?, retry_at=NULL, timeline_json=? WHERE id=?', state, outcome, now, timelineWith(run, now, label), run.id);
   }
 
-  /** Adds the default automations unless this project already had them; true when it added them now. */
+  /** Adds each default automation this project was not yet offered; true when it offered one now. */
   private addDefaultAutomations(bot: string): boolean {
-    if (this.rows<{ defaults_added: number }>('SELECT defaults_added FROM automation_settings WHERE id=1')[0]?.defaults_added === 1) return false;
-    const settings = this.settings();
-    this.ctx.storage.sql.exec('INSERT INTO automation_settings(id, concurrency, daily_run_cap, defaults_added) VALUES(1, ?, ?, 1) ON CONFLICT(id) DO UPDATE SET defaults_added=1', settings.concurrency, settings.dailyRunCap);
+    const sql = this.ctx.storage.sql;
+    if (this.rows<{ defaults_added: number }>('SELECT defaults_added FROM automation_settings WHERE id=1')[0]?.defaults_added === 1) {
+      for (const key of FIRST_DEFAULT_KEYS) sql.exec('INSERT OR IGNORE INTO automation_defaults_offered(key) VALUES(?)', key);
+    } else {
+      const settings = this.settings();
+      sql.exec('INSERT INTO automation_settings(id, concurrency, daily_run_cap, defaults_added) VALUES(1, ?, ?, 1) ON CONFLICT(id) DO UPDATE SET defaults_added=1', settings.concurrency, settings.dailyRunCap);
+    }
+    let offered = false;
     for (const entry of defaultAutomations(bot)) {
+      if (sql.exec('INSERT OR IGNORE INTO automation_defaults_offered(key) VALUES(?)', entry.key).rowsWritten === 0) continue;
+      offered = true;
       if (this.rows('SELECT id FROM automations WHERE name=? OR default_key=?', entry.draft.name, entry.key).length > 0) continue;
       this.save({ id: null, draft: checkDraft(entry.draft), targetName: 'the linked workspace', proposal: null, createdBy: 'person', defaultKey: entry.key });
     }
-    return true;
+    return offered;
   }
 
   /** Writes a checked draft over automation `id`, or as a new automation; returns its id. */

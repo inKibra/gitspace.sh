@@ -13,6 +13,7 @@ import { GitHubApiError, base64url, githubRequest } from './github-api.js';
 import { completeGuideReaderSignIn } from './guide-shares.js';
 import { notifyBrowsers } from './live-notices.js';
 import { notifyMachines } from './machine-notices.js';
+import { AUTOMATION_DEFAULTS_REVISION } from './project-automations.js';
 import { BudgetedDurableObject } from './storage-quarantine.js';
 
 const STATE_TTL_MS = 15 * 60_000;
@@ -324,6 +325,8 @@ export class GitHubAppDO extends BudgetedDurableObject {
       ['unclaimed_installations', 'account_kind', 'TEXT'], ['unclaimed_installations', 'installed_by', 'TEXT'],
       ['unclaimed_installations', 'installed_at', 'INTEGER'], ['unclaimed_installations', 'repository_selection', 'TEXT'],
       ['unclaimed_installations', 'repositories_json', 'TEXT'],
+      // Projects given defaults before revisions were recorded received the first revision.
+      ['automation_defaults', 'revision', 'INTEGER NOT NULL DEFAULT 1'],
     ];
     for (const [table, column, type] of added) {
       if (!ctx.storage.sql.exec<{ name: string }>(`PRAGMA table_info(${table})`).toArray().some(existing => existing.name === column)) ctx.storage.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
@@ -660,18 +663,19 @@ export class GitHubAppDO extends BudgetedDurableObject {
     return false;
   }
 
-  /** Every project the App covers gets the default automations once (docs/AUTOMATIONS-DESIGN.md §4), whenever its
-   * coverage began: projects linked before the defaults existed, and projects created under an existing installation.
-   * A project that received them is recorded here, so later calls open no project's automations; its automations object
-   * adds them at most once, so a default a person deleted does not come back. */
+  /** Every project the App covers gets the default automations (docs/AUTOMATIONS-DESIGN.md §4), whenever its coverage
+   * began: projects linked before the defaults existed, and projects created under an existing installation. The
+   * revision of the defaults a project received is recorded here, so later calls open no project's automations until
+   * the defaults gain one; its automations object offers each default at most once, so one a person deleted does not
+   * come back. */
   async provideAutomationDefaults(): Promise<void> {
     const bot = this.botHandle();
     if (bot === null) return;
-    const provided = new Set(this.ctx.storage.sql.exec<{ project_id: string }>('SELECT project_id FROM automation_defaults').toArray().map(row => row.project_id));
+    const provided = new Set(this.ctx.storage.sql.exec<{ project_id: string }>('SELECT project_id FROM automation_defaults WHERE revision >= ?', AUTOMATION_DEFAULTS_REVISION).toArray().map(row => row.project_id));
     const due = [...this.links(await this.repositoryProjects()).keys()].filter(projectId => !provided.has(projectId));
     const results = await Promise.allSettled(due.map(async projectId => {
       await this.env.PROJECT_AUTOMATIONS.getByName(`${this.env.ACCOUNT_ID}:${projectId}`).addDefaults({ projectId, bot });
-      this.ctx.storage.sql.exec('INSERT OR IGNORE INTO automation_defaults(project_id) VALUES (?)', projectId);
+      this.ctx.storage.sql.exec('INSERT INTO automation_defaults(project_id, revision) VALUES (?, ?) ON CONFLICT(project_id) DO UPDATE SET revision=excluded.revision', projectId, AUTOMATION_DEFAULTS_REVISION);
     }));
     for (const [index, result] of results.entries()) {
       if (result.status === 'rejected') console.error('Default automations were not added', { projectId: due[index], error: result.reason });
