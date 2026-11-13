@@ -513,8 +513,8 @@ describe('automations on GitHub events', () => {
   });
 
   it('sends a review bot\'s feedback to its workspace in Review, not in Code, and a person\'s in both', async () => {
-    const { projectId, searchId, authority, send, work, runs, submitted } = await installed(['bradleat', 'dana', 'coderabbitai[bot]']);
-    await send('pull_request', { action: 'opened', sender: { login: 'bradleat' }, pull_request: pull(14, { author: 'bradleat', head: 'feature/search' }) });
+    const { projectId, searchId, authority, send, work, runs, submitted } = await installed(['jules', 'dana', 'coderabbitai[bot]']);
+    await send('pull_request', { action: 'opened', sender: { login: 'jules' }, pull_request: pull(14, { author: 'jules', head: 'feature/search' }) });
     const sent = async (automationName: string) => (await runs()).filter(run => run.automationName === automationName && run.subject?.number === 14);
     await send('pull_request_review_comment', lineComment(1, 'Empty queries throw.', 'coderabbitai[bot]', 100));
     expect(await sent('Bot review feedback to its workspace')).toEqual([expect.objectContaining({ state: 'skipped', skipReason: 'phase', outcome: 'Skipped: search-work is in Code; it runs in Review, Ship' })]);
