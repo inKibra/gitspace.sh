@@ -571,12 +571,12 @@ Phase 3 built 2026-10-25 (extension 5.10.0; APERTURE-DESIGN §7.2): one holder p
 
 **Later.** What pi-durable 1.4–1.5 opens up (we are on 1.5.2 since `3d9239da`, #160; recorded 2026-11-12 from the 10-25 to 11-11 notes). Open:
 1. **Crash-loop guard:** compare pi's `restartLimit` (default 5; since 1.5.0 it ends the task with `restart_limit`, it no longer parks it) with our `RESET_ATTEMPTS` full/full/lean retries (`runtime-core/src/harness.ts:67`), which still run beside pi's rule that a model request a crash cut off is not resent. Ours also covers runtime open failures (218), so probably both stay.
-2. **Run failure reasons in the chat:** nothing reads pi's `runFailure` (`restart_limit`, `interrupted`, `turn_limit`, `nothing_to_answer`); an interrupted run can end with no reason shown.
-3. **"Retrying in N s"** from `pi.live.generation.retry`.
-4. **Streaming replies (#214)** from `pi.live.generation.message` and `ConversationTranscript`.
-5. **Continue submissions** (`submit({ type: 'continue' })`): a scheduled retry ("wait for credit", "retry at 9:00") starts a run with no made-up user message.
-6. **The wait tool (#162)** on durable sleeps; the job abort handlers (`jobs.ts`) and the takeover wait (`awaitTakeover`) still hold an invocation through `services.wakeAt`.
-7. **The 30 s heartbeat** (`HEARTBEAT_MS`, `runtime-workspace-do/src/runtime.ts`) replaced by exact wake times through `onWake`.
+2. **Run failure reasons in the chat:** done, entry 251.
+3. **"Retrying in N s":** done, entry 251.
+4. **Streaming replies (#214):** done, entry 252 (text and thinking; tool-call arguments do not stream yet).
+5. **Continue submissions:** done, entry 253 (Continue after a failed run). Scheduled retries ("wait for credit", "retry at 9:00") are not built; they would submit the same `continue`.
+6. **Durable sleeps:** checked 2026-11-13, nothing to change. Task phases already sleep with `sleepUntil` (job polling). An abort handler "runs in a fresh invocation and must commit a terminal outcome", and a tool's `execute` (the `ask_takeover` wait) runs inside its call's invocation, so neither can sleep durably: they keep `wakeAt` plus a timer, the wake rerunning them if the object stopped.
+7. **Exact wake times:** checked 2026-11-13, nothing to change. `onWake` already arms the object's alarm at the earliest sleep (`runtime-workspace-do/src/runtime.ts`). The 30 s heartbeat stays: it covers work outside pi's tasks (sync merges, cloud writes a machine starts, dispatches), which `Wake.active` does not see.
 8. **Compaction per model and per conversation** (1.4, 1.5.1): decide pi's `compaction.modelOverrides` against our per-role context limits (`inference/admission.ts`) so only one decides; then compact subagents sooner and set `documentRetentionMs` so finished subagents free their documents.
 9. **`afterFailedRun`** (we get `keep`), **`afterRun`** run-end tasks (refreshing the guide, notifying), **`maxTurns`** as a cap on runaway agents.
 10. **A read-only harness (#175)** to ask an archived workspace.
@@ -584,7 +584,7 @@ Phase 3 built 2026-10-25 (extension 5.10.0; APERTURE-DESIGN §7.2): one holder p
 12. **Content-free telemetry spans** (`HarnessOptions.telemetry`; we strip pi's option before the inference worker).
 13. **`beforeProviderRequest`:** added with the upgrade but never runs behind the inference worker (229); the Bedrock tool-streaming beta is set in `inference/attempts.ts`. Drop the hook or route it.
 14. **Upstream:** ask pi to drop document revisions older than the newest base; the ChatGPT email hunk is our last pi-ai patch.
-15. **An "Upgrade pi" automation** following `earendil-works/pi` releases (`docs/AUTOMATIONS-DESIGN.md`; mock only).
+15. **An "Upgrade pi" automation:** an automation we build like an app and activate in GitSpace, following `earendil-works/pi` releases (`docs/AUTOMATIONS-DESIGN.md`).
 16. **Not in our notes, maybe useful:** `HarnessOptions.identity` (User-Agent per request), `whenIdle: 'reject'` and `Conversation.submit(tx, …)` for admission inside our own commit, `Tx.submission` and `HookApi.entries()` for history reads that survive compaction (#210).
 Came with the upgrade, nothing to do: the idle-eviction timer fix, fewer storage writes (`persistWithinMs`, cheaper commits), the scheduler fix for turns stuck after parallel tool calls, the memory fixes for long streamed answers, and job polling and scheduled operations sleeping durably.
 
