@@ -1069,7 +1069,7 @@ function GitSpaceProduct() {
     onSetApiKey: saveProviderApiKey,
     login: { flow: loginFlow?.profileId === profileId ? loginFlow : null, respond: respondLogin, cancel: dismissLogin, reconnect: () => { if (loginFlow) connectProviderLogin(loginFlow); } },
   };
-  const profileModels = { models: modelsValue?.models ?? [], modelsReady: modelsValue !== undefined, modelsError: modelsQuery.state === 'failure' ? rpcErrorMessage(modelsQuery.error, 'providers.models') : null };
+  const profileModels = { models: modelsValue?.models ?? [], imageModels: modelsValue?.imageModels ?? [], modelsReady: modelsValue !== undefined, modelsError: modelsQuery.state === 'failure' ? rpcErrorMessage(modelsQuery.error, 'providers.models') : null };
   const inferencePage = (onboarding = false) => <InferencePage
     inference={inference} selectedProfileId={profileId} onSelectProfile={(id) => {
       const url = setProductRoute(new URL(window.location.href), 'inference');

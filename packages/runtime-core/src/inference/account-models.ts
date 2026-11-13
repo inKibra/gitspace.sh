@@ -59,16 +59,29 @@ export function withCatalogRows(provider: Provider, read: () => readonly AnyMode
   return { ...provider, getModels: () => all().filter(model => isModelType(model, 'chat')), getAllModels: all };
 }
 
-/** The chat models a profile offers, for a picker: each one an account of the profile offers, from the vault's
- * `catalog`; for one no account can serve now, when the soonest can again and why. */
-export function listCloudModels(settings: InferenceProfile['settings'], catalog: ProfileCatalog, accounts: readonly CredentialAccount[], now: number) {
+/** The models `list` gives of each provider an account of the profile has, from the vault's `catalog`: each one an
+ * account offers, and for one no account can serve now, when the soonest can again and why. */
+function offeredModels<T extends AnyModel>(settings: InferenceProfile['settings'], catalog: ProfileCatalog, accounts: readonly CredentialAccount[], now: number, list: (provider: Provider) => readonly T[]) {
   const providers = profileProviders(settings, inferenceProviderSource().map(provider => withCatalogRows(provider, () => catalog[provider.id])));
-  return providers.filter(provider => accounts.some(account => account.provider === provider.id)).flatMap(provider => {
+  return providers.filter(provider => accounts.some(account => account.provider === provider.id)).flatMap(provider => list(provider).flatMap(model => {
+    const { listed, out } = modelAvailability(accounts, provider.id, model.id, now);
+    return listed ? [{ model, unavailable: out && { until: new Date(out.until).toISOString(), reason: out.reason } }] : [];
+  }));
+}
+
+/** The chat models a profile offers, for a picker (`offeredModels`). */
+export function listCloudModels(settings: InferenceProfile['settings'], catalog: ProfileCatalog, accounts: readonly CredentialAccount[], now: number) {
+  return offeredModels(settings, catalog, accounts, now, provider => {
     const models = provider.getModels();
-    return (provider.filterModels?.(models, undefined) ?? models).flatMap(model => {
-      const { listed, out } = modelAvailability(accounts, provider.id, model.id, now);
-      if (!listed) return [];
-      return [{ provider: model.provider, id: model.id, name: model.name, contextWindow: model.contextWindow, images: model.input.includes('image'), unavailable: out && { until: new Date(out.until).toISOString(), reason: out.reason } }];
-    });
-  });
+    return provider.filterModels?.(models, undefined) ?? models;
+  }).map(({ model, unavailable }) => ({ provider: model.provider, id: model.id, name: model.name, contextWindow: model.contextWindow, images: model.input.includes('image'), unavailable }));
+}
+
+/** The image models a profile offers, for the Images service's picker (`offeredModels`); `images` says whether a model
+ * takes input images. */
+export function listCloudImageModels(settings: InferenceProfile['settings'], catalog: ProfileCatalog, accounts: readonly CredentialAccount[], now: number) {
+  return offeredModels(settings, catalog, accounts, now, provider => {
+    const models = (provider.getAllModels?.() ?? []).filter(model => isModelType(model, 'image'));
+    return provider.filterAllModels?.(models, undefined).filter(model => isModelType(model, 'image')) ?? models;
+  }).map(({ model, unavailable }) => ({ provider: model.provider, id: model.id, name: model.name, contextWindow: null, images: model.input.includes('image'), unavailable }));
 }

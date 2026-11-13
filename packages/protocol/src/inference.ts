@@ -37,9 +37,9 @@ const namedEntryMaps: Record<string, true> = {
 
 const inferenceRootSections: Record<string, InferenceSettingSection> = {
   modelRoles: 'Models', contextLimits: 'Models', enabledModels: 'Models', visionFallback: 'Models', providers: 'Providers',
-  search: 'Services', dictation: 'Services',
+  search: 'Services', dictation: 'Services', images: 'Services',
 };
-/** A service selector (`search`, `dictation`): `cloudflare/<option>` runs on the platform's Cloudflare account,
+/** A service selector (`search`, `dictation`, `images`): `cloudflare/<option>` runs on the platform's Cloudflare account,
  * `<provider>/<modelId>` on one of the profile's own credentials for that pi-ai provider. */
 export function parseServiceSelector(value: string): { provider: string; id: string } | null {
   const slash = value.indexOf('/');
@@ -62,7 +62,15 @@ export const dictationSelectorSchema = z.string().refine(value => {
   const selector = parseServiceSelector(value);
   return selector !== null && (selector.provider === 'cloudflare' ? Object.hasOwn(CLOUDFLARE_DICTATION_MODELS, selector.id) : selector.provider === 'openai');
 }, 'Dictation is cloudflare/nova-3, cloudflare/whisper, or an openai transcription model');
-const serviceSelectors: Readonly<Record<string, z.ZodType<string>>> = { search: searchSelectorSchema, dictation: dictationSelectorSchema };
+/** Image generation on Cloudflare Workers AI: Black Forest Labs' FLUX models (`@cf/black-forest-labs/<model>`). */
+export const CLOUDFLARE_IMAGE_MODELS: Readonly<Record<string, true>> = { 'flux-2-klein-9b': true, 'flux-2-klein-4b': true, 'flux-2-dev': true, 'flux-1-schnell': true };
+/** The image service when `images` is unset and the profile has no image model of its own. */
+export const DEFAULT_IMAGES_SELECTOR = 'cloudflare/flux-2-klein-9b';
+export const imagesSelectorSchema = z.string().refine(value => {
+  const selector = parseServiceSelector(value);
+  return selector !== null && (selector.provider !== 'cloudflare' || Object.hasOwn(CLOUDFLARE_IMAGE_MODELS, selector.id));
+}, 'Images is cloudflare/flux-2-klein-9b, cloudflare/flux-2-klein-4b, cloudflare/flux-2-dev, cloudflare/flux-1-schnell, or a provider/model image model of the profile');
+const serviceSelectors: Readonly<Record<string, z.ZodType<string>>> = { search: searchSelectorSchema, dictation: dictationSelectorSchema, images: imagesSelectorSchema };
 /** One ownership map shared by migration, editors and isolated runtime composition. */
 export function inferenceSettingSection(path: string): InferenceSettingSection | null {
   const dot = path.indexOf('.');
@@ -163,6 +171,7 @@ export const inferenceSettingMetadata: readonly RuntimeSettingSchemaItem[] = [
   { path: 'providers.models', tab: 'Providers', label: 'Custom provider models', kind: 'record', value: {}, defaultJson: '{}', credential: false, description: 'Non-secret provider endpoints and model definitions. Store credentials through the profile credential vault.' },
   { path: 'search', tab: 'Services', label: 'Web search', kind: 'string', value: DEFAULT_SEARCH_SELECTOR, defaultJson: JSON.stringify(DEFAULT_SEARCH_SELECTOR), credential: false, description: 'Runs the agents\' web_search tool.' },
   { path: 'dictation', tab: 'Services', label: 'Dictation', kind: 'string', value: DEFAULT_DICTATION_SELECTOR, defaultJson: JSON.stringify(DEFAULT_DICTATION_SELECTOR), credential: false, description: 'Transcribes the composer\'s microphone.' },
+  { path: 'images', tab: 'Services', label: 'Images', kind: 'string', value: '', defaultJson: '""', credential: false, description: `Runs the agents' generate_image tool. Unset: the profile's first image model, else ${DEFAULT_IMAGES_SELECTOR}.` },
 ];
 
 const profileIdSchema = z.string().min(1).max(160).regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/u);

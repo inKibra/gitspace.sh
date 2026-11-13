@@ -243,7 +243,7 @@ describe('Cloud inference credential authority', () => {
         : { five_hour: { utilization: 10, resets_at: reset } })),
     );
     await vault.cloudUsage('default', 'anthropic', true);
-    const models = await vault.cloudModels('default');
+    const { models } = await vault.cloudModels('default');
     expect(models.find(entry => entry.id === 'claude-mythos-5-2')).toMatchObject({ provider: 'anthropic', contextWindow: 1_000_000, unavailable: { until: reset, reason: 'Fable limit used up' } });
     expect(models.find(entry => entry.id === 'claude-fable-5-2')).toMatchObject({ unavailable: null });
     expect(models.find(entry => entry.id === 'claude-opus-5-5')).toMatchObject({ unavailable: null });

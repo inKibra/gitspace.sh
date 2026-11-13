@@ -29,7 +29,7 @@ function Onboarding({ providers, models, modelsReady, defaultModel }: Scenario) 
   const gate = onboardingInferenceGate({ profile: current, models, modelsReady, modelsError: null, providers: section });
   return <SettingsPage
     mode="onboarding" settings={settings} machines={[]} runtimeSettings={[]} runtimeGeneration={1}
-    inferenceSetup={<InferencePage onboarding initialTab="Providers" inference={inference} selectedProfileId={DEFAULT_INFERENCE_PROFILE_ID} onSelectProfile={() => undefined} projects={[]} schema={schema} schemaLoading={false} schemaError={null} onRefreshSchema={() => undefined} models={models} modelsReady={modelsReady} modelsLoading={!modelsReady} modelsError={null} providers={section} />}
+    inferenceSetup={<InferencePage onboarding initialTab="Providers" inference={inference} selectedProfileId={DEFAULT_INFERENCE_PROFILE_ID} onSelectProfile={() => undefined} projects={[]} schema={schema} schemaLoading={false} schemaError={null} onRefreshSchema={() => undefined} models={models} imageModels={[]} modelsReady={modelsReady} modelsLoading={!modelsReady} modelsError={null} providers={section} />}
     inferenceReady={gate === 'ready'}
     gitIdentity={null} onChange={() => undefined} onSave={noop} onSetRuntimeSetting={noop} onUpdateMachine={noop} onSetMachineAgentAttach={noop} onCreateSandbox={noop}
     cloudImages={[]} cloudImageDefault={null} cloudImageError={null} onChangeCloudImage={noop} onRecoverCloudImage={noop} onSetCloudImageDefault={noop}

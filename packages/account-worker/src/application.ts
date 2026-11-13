@@ -12,7 +12,7 @@ import { FiledIssueListInputSchema, FiledIssueResolveInputSchema } from '@gitspa
 import { beginLogin, respondLogin, pollLogin, publicLogin, loginStateSchema, workerOAuthProviderSchema, gitspaceOAuthProviderSchema, type LoginState, type UpstreamOAuthProvider } from '@gitspace/provider-auth';
 import { isUpstreamOAuthProvider, tokenEmail, loopbackCallback, refreshUpstreamCredential, storedUpstreamCredential, upstreamLoginEvent, upstreamOAuth, upstreamPromptText, upstreamRequestAuth } from './upstream-oauth.js';
 import { collectUsage, ProviderUsageError, providerUsageReportSchema, usageObservation, type UsageObservation } from '@gitspace/provider-auth';
-import { describeCloudProviders, listCloudModels, publishedProviderSource, withListedModels, createDurableModelsStore, noAmbientAuth } from '@gitspace/runtime-core/inference';
+import { describeCloudProviders, listCloudImageModels, listCloudModels, publishedProviderSource, withListedModels, createDurableModelsStore, noAmbientAuth } from '@gitspace/runtime-core/inference';
 import type { AccountFailure, CredentialAccount, ProfileCatalog, ResolvedCredential } from '@gitspace/runtime-core/inference';
 import { createModels, type AnyModel } from '@earendil-works/pi-ai';
 import { listAccountModels, accountModelSchema, ACCOUNT_MODEL_PROVIDERS, type AccountModel } from '@gitspace/provider-auth';
@@ -607,7 +607,8 @@ export class CredentialVaultDO extends BudgetedDurableObject {
         profile.settings = Object.fromEntries(Object.entries(profile.settings).filter(([path]) => path !== 'approval' && !path.startsWith('approval.')));
         this.ctx.storage.sql.exec('UPDATE inference_profiles SET profile_json = ? WHERE profile_id = ?', JSON.stringify(profile), row.profile_id);
       }
-      // OMP-era settings no profile reads were removed and Thinking/Fast became Deep/Fast; profiles are rewritten once.
+      // OMP-era settings no profile reads were removed, Thinking/Fast became Deep/Fast and the `image` role became the
+      // Images service (`images`); profiles are rewritten once.
       for (const row of this.ctx.storage.sql.exec<InferenceProfileRow>('SELECT * FROM inference_profiles').toArray()) {
         const profile = z.looseObject({ revision: z.number(), settings: z.record(z.string(), runtimeSettingValueSchema) }).parse(JSON.parse(row.profile_json));
         const settings = migratedRoleSettings(profile.settings);
@@ -1758,11 +1759,13 @@ export class CredentialVaultDO extends BudgetedDurableObject {
     await this.putBrowserApiKey(input.profileId, descriptor.credentialProvider, input.key);
   }
 
-  /** The profile's models for a picker: those its accounts offer, each with when it is unavailable and why. */
+  /** The profile's chat and image models for pickers: those its accounts offer, each with when it is unavailable and why. */
   async cloudModels(profileId: string) {
     const catalog = await this.profileCatalog(profileId);
     const accounts = await this.cloudCredentialAccounts(profileId);
-    return listCloudModels(this.requireInferenceProfile(profileId).settings, catalog, accounts, Date.now());
+    const settings = this.requireInferenceProfile(profileId).settings;
+    const now = Date.now();
+    return { models: listCloudModels(settings, catalog, accounts, now), imageModels: listCloudImageModels(settings, catalog, accounts, now) };
   }
 
   /** pi.dev's published rows, by provider shard, shared by every profile of the account (pi keeps their 4-hour TTL). */

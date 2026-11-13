@@ -41,7 +41,9 @@ flowchart LR
 - **What stays in the workspace object:** `generate_image` and `classify` (`generateImages`, `classify`). One call
   sends a prompt and at most a few images and gets one image or a short answer back, unlike a chat request carrying a
   whole context's images. `generate_image` loads stored input images (`images.load`) and stores its output as a
-  reference.
+  reference. The profile's Images service (`images`) picks who draws: `cloudflare/<model>` runs a FLUX model on the
+  worker's AI binding (`workers-ai-images.ts`), `<provider>/<model>` one of the profile's image models; unset, the
+  profile's first image model, else `cloudflare/flux-2-klein-9b`.
 
 ## The attempt boundary
 

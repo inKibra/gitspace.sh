@@ -101,5 +101,7 @@ describe('inference profile configuration boundaries', () => {
     expect(accepts({ 'search.provider': 'cloudflare/ceramic' })).toBe(false);
     for (const dictation of ['cloudflare/nova-3', 'cloudflare/whisper', 'openai/gpt-4o-transcribe']) expect(accepts({ dictation })).toBe(true);
     for (const dictation of ['cloudflare/flux', 'cloudflare/ceramic', 'anthropic/claude-haiku-4-5', 'whisper']) expect(accepts({ dictation })).toBe(false);
+    for (const images of ['cloudflare/flux-2-klein-9b', 'cloudflare/flux-2-klein-4b', 'cloudflare/flux-2-dev', 'cloudflare/flux-1-schnell', 'openrouter/google/gemini-2.5-flash-image', 'openai/gpt-image-1']) expect(accepts({ images })).toBe(true);
+    for (const images of ['cloudflare/stable-diffusion-xl', 'cloudflare/', 'flux-2-klein-9b', '/gpt-image-1', '']) expect(accepts({ images })).toBe(false);
   });
 });

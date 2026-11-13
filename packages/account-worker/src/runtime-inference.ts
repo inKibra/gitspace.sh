@@ -1,15 +1,16 @@
 import { z } from 'zod';
 import type { Message, Models } from '@earendil-works/pi-ai';
 import { DEFAULT_WEB_SEARCH_DESCRIPTION_CHARS, DEFAULT_WEB_SEARCH_LIMIT, createAIWebSearch, type WebSearchProvider } from 'agents/websearch';
-import { DEFAULT_SEARCH_SELECTOR, MODEL_ROLE_LABELS, applyInferenceSettings, inferenceProfileSchema, modelRoleThinkingSchema, parseServiceSelector, type InferenceProfile } from '@gitspace/protocol/inference';
+import { DEFAULT_IMAGES_SELECTOR, DEFAULT_SEARCH_SELECTOR, MODEL_ROLE_LABELS, applyInferenceSettings, inferenceProfileSchema, modelRoleThinkingSchema, parseServiceSelector, type InferenceProfile } from '@gitspace/protocol/inference';
 import { RuntimeGenerateImageArgumentsSchema, RuntimeJsonSchema, RuntimeWebSearchArgumentsSchema, type RuntimeSnapshot, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import { ModelSelectionIntentSchema, type ModelSelectionIntent, type SessionControlView } from '@gitspace/protocol-runtime/session-controls';
 import {
   createVaultModels, createRunModelsRouter, createRequestGate,
-  resolveModelSelection, resolveProfileModel, resolveAvailableProfileModel, StoredPiModelSchema, ProfileCatalogSchema, modelAvailability, modelEditTool, generateProfileImage, runProfileModelHelper, describeImagesForModel,
+  resolveModelSelection, resolveProfileModel, resolveAvailableProfileModel, StoredPiModelSchema, ProfileCatalogSchema, modelAvailability, modelEditTool, chooseProfileImageModel, generateProfileImage, runProfileModelHelper, describeImagesForModel,
   type AttemptRunner, type CredentialPins, type ProfileModels, type VaultModels, type WebSearchAnswer, type WebSearchHit,
 } from '@gitspace/runtime-core/inference';
 import { InMemoryModelsStore } from '@earendil-works/pi-ai';
+import { workersAiImage } from './workers-ai-images.js';
 
 export type RuntimeModelHelperInput = { operation: 'completion' | 'judge'; args: z.infer<typeof RuntimeJsonSchema>; conversationId: string; signal?: AbortSignal };
 export type RuntimeModelHelper = (input: RuntimeModelHelperInput) => Promise<z.infer<typeof RuntimeJsonSchema>>;
@@ -191,10 +192,32 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
         write: (hash, description) => ctx.storage.put(key('image-description', hash), description),
       } });
     },
+    /** Runs generate_image with the profile's Images service: `cloudflare/<model>` on Workers AI, `<provider>/<model>`
+     * an image model of the profile; unset, the profile's first image model, else `DEFAULT_IMAGES_SELECTOR`. A `model`
+     * argument takes the service's place. A failure names the selector and where to change it. */
     async generateImage(input: { args: z.infer<typeof RuntimeGenerateImageArgumentsSchema>; conversationId: string; signal?: AbortSignal }): Promise<RuntimeToolResult['content']> {
       const admission = input.signal ? scopes.get(input.signal)?.admission ?? await active(input.conversationId) : await active(input.conversationId);
-      const models = await admittedView(input.conversationId, admission, false).models;
-      return generateProfileImage(models, input.args, input.signal, admission.profile.settings);
+      const configured = admission.profile.settings.images;
+      const selected = input.args.model ?? (typeof configured === 'string' ? configured : undefined);
+      const target = selected === undefined ? null : parseServiceSelector(selected);
+      let selector = selected ?? DEFAULT_IMAGES_SELECTOR;
+      try {
+        if (target?.provider !== 'cloudflare') {
+          const models = await admittedView(input.conversationId, admission, false).models;
+          const model = await chooseProfileImageModel(models, admission.profile.settings, selected, input.signal);
+          if (model) {
+            selector = `${model.provider}/${model.id}`;
+            return await generateProfileImage(models, model, input.args, input.signal);
+          }
+          if (selected !== undefined) throw new Error('no credential of this profile can use that model');
+        }
+        // `selector` is `cloudflare/<model>` here. Billed to the platform account's Workers AI usage.
+        return [await workersAiImage(env.AI, selector.slice('cloudflare/'.length), input.args, input.signal)];
+      } catch (error) {
+        if (input.signal?.aborted) throw error;
+        const where = input.args.model === undefined ? 'Change it in Inference → Services.' : 'Name another model, or leave model out to use Inference → Services.';
+        throw new Error(`Image generation uses ${selector}: ${error instanceof Error ? error.message : String(error)}. ${where}`);
+      }
     },
     async modelHelper(input: RuntimeModelHelperInput) {
       const admission = input.signal ? scopes.get(input.signal)?.admission ?? await active(input.conversationId) : await active(input.conversationId);

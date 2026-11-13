@@ -44,6 +44,8 @@ export interface InferencePageProps {
   schemaError: string | null;
   onRefreshSchema(): void;
   models: readonly AvailableModel[];
+  /** The profile's image models, for the Images service. */
+  imageModels: readonly AvailableModel[];
   modelsReady: boolean;
   modelsLoading: boolean;
   modelsError: string | null;
@@ -73,7 +75,7 @@ export function onboardingInferenceGate({ profile, models, modelsReady, modelsEr
   return defaultModel && parseRoleModel(defaultModel, models).known ? 'ready' : 'choose-default';
 }
 
-export function InferencePage({ inference, selectedProfileId, onSelectProfile, projects, schema, schemaLoading, schemaError, onRefreshSchema, models, modelsReady, modelsLoading, modelsError, providers, onboarding = false, initialTab }: InferencePageProps) {
+export function InferencePage({ inference, selectedProfileId, onSelectProfile, projects, schema, schemaLoading, schemaError, onRefreshSchema, models, imageModels, modelsReady, modelsLoading, modelsError, providers, onboarding = false, initialTab }: InferencePageProps) {
   const [dialog, setDialog] = useState<{ action: 'create' | 'rename' | 'duplicate' | 'delete'; profile: InferenceProfile | null } | null>(null);
   const [name, setName] = useState('');
   const [actionError, setActionError] = useState<string | null>(null);
@@ -138,7 +140,7 @@ export function InferencePage({ inference, selectedProfileId, onSelectProfile, p
         {schemaError ? <div role="alert" className="text-caption text-destructive">{schemaError}<Button variant="ghost" onClick={onRefreshSchema}>Retry editor metadata</Button></div> : null}
         {modelsError ? <p role="alert" className="text-caption text-destructive">Models: {modelsError}. Connect this profile’s providers or refresh. Existing selections are preserved.</p> : !modelsReady ? <p role="status" className="text-caption text-muted-foreground">{modelsLoading ? 'Loading this profile’s models…' : 'This profile’s model catalog is not ready yet.'}</p> : !models.length ? <p className="text-caption text-muted-foreground">No runnable models in this profile. Connect a provider on the Providers tab.</p> : null}
         {editor?.missingDefaults.length ? <p role="alert" className="text-caption text-destructive">Editor defaults are unavailable for {editor.missingDefaults.join(', ')}. Refresh cloud metadata. Account values are not substituted.</p> : null}
-        {schemaLoading && !schema.length ? <p role="status" className="text-caption text-muted-foreground">Loading editor metadata…</p> : <RuntimeSettingsEditor key={profile.id} sections={['Models', 'Providers', 'Services']} tab={tab} onTabChange={setTab} runtimeSettings={editor?.items ?? []} runtimeGeneration={profile.revision} models={models} modelsReady={modelsReady} providers={providers} saving={inference.pending || !!schemaError} onSetRuntimeSetting={async (path, value) => { await inference.update(profile, profile.name, updatedProfileSettings(profile, path, value)); }} />}
+        {schemaLoading && !schema.length ? <p role="status" className="text-caption text-muted-foreground">Loading editor metadata…</p> : <RuntimeSettingsEditor key={profile.id} sections={['Models', 'Providers', 'Services']} tab={tab} onTabChange={setTab} runtimeSettings={editor?.items ?? []} runtimeGeneration={profile.revision} models={models} imageModels={imageModels} modelsReady={modelsReady} providers={providers} saving={inference.pending || !!schemaError} onSetRuntimeSetting={async (path, value) => { await inference.update(profile, profile.name, updatedProfileSettings(profile, path, value)); }} />}
         <section aria-label="Project assignments" className="flex flex-col gap-3">
           <h3 className="text-subtitle font-semibold">Affected projects <span className="tabular-nums">({affected.length})</span></h3>
           {affected.length ? affected.map((project) => <div key={project.id} className="flex flex-wrap items-center justify-between gap-3"><span className="text-body">{project.name}</span><ProjectInferenceSelector projectId={project.id} projectName={project.name} /></div>) : <p className="text-caption text-muted-foreground">No projects use this profile yet.</p>}

@@ -74,7 +74,7 @@ export function providerCloudProcedures(env: Env, userId: string, requireAdminis
     catch (error) { return err(errors.OperationFailed({ operation: 'read provider usage', message: message(error) })); }
   });
   const models = server.implement(listAvailableModelsContract).handler(async ({ input, errors }) => {
-    try { return ok({ models: await vault.cloudModels(input.profileId) }); }
+    try { return ok(await vault.cloudModels(input.profileId)); }
     catch (error) { return err(errors.OperationFailed({ operation: 'list available models', message: message(error) })); }
   });
   return { list, apiKey: { set }, logout, account: { disable, enable, remove }, login: { start, events, respond, cancel }, usage, models };

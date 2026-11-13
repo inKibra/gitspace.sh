@@ -1,4 +1,4 @@
-import type { ClassifierQuestion, Models, ModelTypeMap, JsonObject } from '@earendil-works/pi-ai';
+import type { ClassifierQuestion, ImageApi, ImageModel, Models, ModelTypeMap, JsonObject } from '@earendil-works/pi-ai';
 import { BUILT_IN_MODEL_ROLES, applyInferenceSettings, parseModelRoleSelector, type ModelRoleSelector, type InferenceProfile } from '@gitspace/protocol/inference';
 import { RuntimeGenerateImageArgumentsSchema, RuntimeJsonSchema, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import { Check } from 'typebox/schema';
@@ -17,7 +17,7 @@ const questionSchema = z.discriminatedUnion('type', [
 ]);
 const judgeArgs = z.object({ state: RuntimeJsonSchema, questions: z.record(z.string(), questionSchema).refine(value => Object.keys(value).length > 0, 'At least one question is required'), model: modelSelection }).strict();
 const selectionSettings = z.object({ modelRoles: z.record(z.string(), z.union([z.string(), z.array(z.string())])).optional(), enabledModels: z.array(z.string()).optional() });
-function chooseModel<T extends ModelTypeMap[keyof ModelTypeMap]>(candidates: readonly T[], settings: InferenceProfile['settings'], selection: string | undefined, role: string): { model: T; thinking: ModelRoleSelector['thinking'] } | undefined {
+function chooseModel<T extends ModelTypeMap[keyof ModelTypeMap]>(candidates: readonly T[], settings: InferenceProfile['settings'], selection: string | undefined, role: string | undefined): { model: T; thinking: ModelRoleSelector['thinking'] } | undefined {
   const config = selectionSettings.parse(applyInferenceSettings({}, settings));
   const matches = (pattern: string, model: T) => {
     const expression = new RegExp(`^${pattern.replace(/[.+?^${}()|[\]\\]/gu, '\\$&').replace(/\*/gu, '.*')}$`, 'iu');
@@ -43,7 +43,7 @@ function chooseModel<T extends ModelTypeMap[keyof ModelTypeMap]>(candidates: rea
     }
     return undefined;
   };
-  const configured = selection ?? config.modelRoles?.[role];
+  const configured = selection ?? (role === undefined ? undefined : config.modelRoles?.[role]);
   return configured === undefined ? admitted[0] ? { model: admitted[0], thinking: null } : undefined : resolve(configured);
 }
 
@@ -86,12 +86,16 @@ function validateJudgments(value: RuntimeJson, questions: z.infer<typeof judgeAr
   return value;
 }
 
+/** The profile's image model `selection` names (a `provider/model` or a pattern), or its first admitted one when
+ * `selection` is undefined; undefined when none matches. */
+export async function chooseProfileImageModel(models: Models, settings: InferenceProfile['settings'], selection: string | undefined, signal?: AbortSignal): Promise<ImageModel<ImageApi> | undefined> {
+  return chooseModel(await models.getAvailableOfType('image', undefined, { signal }), settings, selection, undefined)?.model;
+}
+
 /** Only the caller's admitted registry supplies authentication and transport. */
-export async function generateProfileImage(models: Models, args: unknown, signal?: AbortSignal, settings: InferenceProfile['settings'] = {}): Promise<RuntimeToolResult['content']> {
+export async function generateProfileImage(models: Models, model: ImageModel<ImageApi>, args: unknown, signal?: AbortSignal): Promise<RuntimeToolResult['content']> {
   const input = RuntimeGenerateImageArgumentsSchema.parse(args);
-  const model = chooseModel(await models.getAvailableOfType('image', undefined, { signal }), settings, input.model, 'image');
-  if (!model) throw new Error('No authenticated admitted image model matches the image role or requested model');
-  const result = await models.generateImages(model.model, { input: [{ type: 'text', text: input.prompt }, ...(input.images ?? [])] }, { signal });
+  const result = await models.generateImages(model, { input: [{ type: 'text', text: input.prompt }, ...(input.images ?? [])] }, { signal });
   if (result.stopReason !== 'stop') throw new Error(result.errorMessage ?? `Image generation ${result.stopReason}`);
   if (!result.output.some(part => part.type === 'image')) throw new Error('Image provider returned no image');
   return result.output;
