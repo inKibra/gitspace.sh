@@ -54,38 +54,47 @@ function audio(): Uint8Array<ArrayBuffer>[] {
   return [Uint8Array.from({ length: 8000 }, (_, index) => index % 251), Uint8Array.from({ length: 8000 }, (_, index) => (index * 7) % 253)];
 }
 
-test('relays a live recording to Flux and returns its turns as interim and final text, the last on stop', async () => {
-  const query = await workspace('cloudflare/flux');
-  const flux = new WebSocketPair();
-  const provider = flux[1];
-  const heard: Uint8Array[] = [], closing = Promise.withResolvers<void>();
+/** A Nova `Results` message for `transcript`. */
+function results(transcript: string, final: boolean) {
+  return JSON.stringify({ type: 'Results', channel_index: [0, 1], is_final: final, speech_final: final, channel: { alternatives: [{ transcript, confidence: 0.9, words: [] }] } });
+}
+
+test('relays a live recording to Nova-3 and returns its results as interim and final text, the unfinalized rest on stop', async () => {
+  const query = await workspace('cloudflare/nova-3');
+  const nova = new WebSocketPair();
+  const provider = nova[1];
+  const heard: Uint8Array[] = [], controls: unknown[] = [], closing = Promise.withResolvers<void>();
   provider.binaryType = 'arraybuffer';
   provider.accept();
   provider.addEventListener('message', event => {
     if (typeof event.data !== 'string') { heard.push(new Uint8Array(event.data)); if (heard.length === 2) closing.resolve(); return; }
-    // CloseStream: Flux decodes what it has, sends an Update and closes without an EndOfTurn.
-    expect(JSON.parse(event.data)).toEqual({ type: 'CloseStream' });
-    provider.send(JSON.stringify({ type: 'TurnInfo', event: 'Update', turn_index: 1, transcript: 'And this.' }));
+    const control: unknown = JSON.parse(event.data);
+    controls.push(control);
+    // CloseStream: Nova sends its summary metadata and closes.
+    if (JSON.stringify(control) !== JSON.stringify({ type: 'CloseStream' })) return;
+    provider.send(JSON.stringify({ type: 'Metadata', request_id: 'request', duration: 0.5, channels: 1 }));
     provider.close(1000);
   });
-  const browser = await dictate(query, { flux: async () => flux[0], whisper: async () => { throw new Error('Whisper is not this profile\'s dictation'); } });
+  const browser = await dictate(query, { live: async () => nova[0], whisper: async () => { throw new Error('Whisper is not this profile\'s dictation'); } });
   await browser.ready;
   const frames = audio();
   for (const frame of frames) browser.socket.send(frame);
   await closing.promise;
   expect(heard).toEqual(frames);
-  provider.send(JSON.stringify({ type: 'TurnInfo', event: 'Update', turn_index: 0, transcript: 'Hello wor' }));
-  provider.send(JSON.stringify({ type: 'TurnInfo', event: 'EndOfTurn', turn_index: 0, transcript: 'Hello world.' }));
+  provider.send(results('Hello wor', false));
+  provider.send(results('Hello world.', true));
+  provider.send(results('And this', false));
   browser.socket.send(JSON.stringify({ type: 'stop' }));
   expect(await browser.done).toEqual([
     { type: 'ready', mode: 'live' },
     { type: 'interim', text: 'Hello wor' },
     { type: 'final', text: 'Hello world.' },
     { type: 'interim', text: '' },
-    { type: 'interim', text: 'And this.' },
-    { type: 'final', text: 'And this.' },
+    { type: 'interim', text: 'And this' },
+    { type: 'final', text: 'And this' },
     { type: 'done' },
   ]);
+  expect(controls).toEqual([{ type: 'Finalize' }, { type: 'CloseStream' }]);
 });
 
 test('uploads a finished recording as WAV to OpenAI with the profile\'s API key and returns the transcription', async () => {
@@ -99,7 +108,7 @@ test('uploads a finished recording as WAV to OpenAI with the profile\'s API key 
     requests.push({ url: request.url, authorization: request.headers.get('authorization'), model: form.get('model'), file: form.get('file') });
     return Response.json({ text: ' Fix the login page. ' });
   });
-  const browser = await dictate(query, { flux: async () => { throw new Error('Flux is not this profile\'s dictation'); }, whisper: async () => { throw new Error('Whisper is not this profile\'s dictation'); } });
+  const browser = await dictate(query, { live: async () => { throw new Error('Nova-3 is not this profile\'s dictation'); }, whisper: async () => { throw new Error('Whisper is not this profile\'s dictation'); } });
   await browser.ready;
   for (const frame of audio()) browser.socket.send(frame);
   browser.socket.send(JSON.stringify({ type: 'stop' }));

@@ -55,13 +55,13 @@ export const searchSelectorSchema = z.string().refine(value => {
   const selector = parseServiceSelector(value);
   return selector !== null && (selector.provider === 'cloudflare' ? Object.hasOwn(CLOUDFLARE_SEARCH_PROVIDERS, selector.id) : Object.hasOwn(SEARCH_MODEL_PROVIDERS, selector.provider));
 }, 'Web search is cloudflare/ceramic, cloudflare/linkup, cloudflare/exa, or an anthropic, openai or google model');
-/** Dictation on Cloudflare Workers AI: `flux` transcribes live, `whisper` after recording stops. */
-export const CLOUDFLARE_DICTATION_MODELS: Readonly<Record<string, true>> = { flux: true, whisper: true };
-export const DEFAULT_DICTATION_SELECTOR = 'cloudflare/flux';
+/** Dictation on Cloudflare Workers AI: `nova-3` transcribes live, `whisper` after recording stops. */
+export const CLOUDFLARE_DICTATION_MODELS: Readonly<Record<string, true>> = { 'nova-3': true, whisper: true };
+export const DEFAULT_DICTATION_SELECTOR = 'cloudflare/nova-3';
 export const dictationSelectorSchema = z.string().refine(value => {
   const selector = parseServiceSelector(value);
   return selector !== null && (selector.provider === 'cloudflare' ? Object.hasOwn(CLOUDFLARE_DICTATION_MODELS, selector.id) : selector.provider === 'openai');
-}, 'Dictation is cloudflare/flux, cloudflare/whisper, or an openai transcription model');
+}, 'Dictation is cloudflare/nova-3, cloudflare/whisper, or an openai transcription model');
 const serviceSelectors: Readonly<Record<string, z.ZodType<string>>> = { search: searchSelectorSchema, dictation: dictationSelectorSchema };
 /** One ownership map shared by migration, editors and isolated runtime composition. */
 export function inferenceSettingSection(path: string): InferenceSettingSection | null {

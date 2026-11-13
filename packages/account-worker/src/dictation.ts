@@ -13,8 +13,8 @@ import { requireWorkspaceAccess } from './runtime-access.js';
  * The composer's dictation socket (`DICTATION_PATH`, protocol in `@gitspace/protocol-runtime` dictation.ts): one of the
  * account's signed-in browsers, allowed to prompt, records into one socket per recording. The project's inference
  * profile picks the provider (`dictation`, `DEFAULT_DICTATION_SELECTOR` when unset):
- * - `cloudflare/flux`: Workers AI's `@cf/deepgram/flux`, over a WebSocket the binding opens; the audio is relayed as it
- *   arrives and Flux's turns come back as interim and final text.
+ * - `cloudflare/nova-3`: Workers AI's `@cf/deepgram/nova-3`, over a WebSocket the binding opens; the audio is relayed as
+ *   it arrives and Nova's results come back as interim text, and as final text once Nova finalizes a stretch of speech.
  * - `cloudflare/whisper`: Workers AI's `@cf/openai/whisper-large-v3-turbo`, given the whole recording as WAV after it stops.
  * - `openai/<model>`: OpenAI's `POST /v1/audio/transcriptions` with an API key of the profile, read from the vault here;
  *   no key reaches the browser.
@@ -23,8 +23,8 @@ import { requireWorkspaceAccess } from './runtime-access.js';
 
 /** The Workers AI models dictation uses. */
 export type DictationModels = {
-  /** A Flux stream for 16 kHz linear16 audio, not yet accepted. */
-  flux(): Promise<WebSocket>;
+  /** A Nova-3 stream for 16 kHz linear16 audio with interim results, not yet accepted. */
+  live(): Promise<WebSocket>;
   /** The text of a WAV recording. */
   whisper(wav: Uint8Array<ArrayBuffer>): Promise<string>;
 };
@@ -33,8 +33,8 @@ export type DictationModels = {
  * `close` when the browser left. `failed` settles with why the provider broke off mid-recording. */
 type Transcriber = { mode: 'live' | 'batch'; audio(frame: ArrayBuffer): void; stop(): Promise<void>; close(): void; failed: Promise<string> };
 
-/** How long Flux may take to finish what it heard after `CloseStream`. */
-const FLUX_DRAIN_MS = 10_000;
+/** How long Nova may take to finish what it heard after `Finalize` and `CloseStream`. */
+const LIVE_DRAIN_MS = 10_000;
 /** Time past `DICTATION_MAX_MS` a recording's audio may take to arrive before the server stops it. */
 const LATE_AUDIO_MS = 30_000;
 /** Base64 is written in slices of this many bytes, a multiple of 3 so the slices join. */
@@ -42,7 +42,19 @@ const BASE64_SLICE = 3 * 8192;
 const OPENAI_TRANSCRIPTIONS_URL = 'https://api.openai.com/v1/audio/transcriptions';
 const OpenAiTranscription = z.object({ text: z.string() });
 const OpenAiError = z.object({ error: z.object({ message: z.string() }) });
-const FluxMessage = z.object({ type: z.string(), event: z.string().optional(), transcript: z.string().optional(), description: z.string().optional(), code: z.string().optional() });
+/** What dictation reads of Nova's messages: `Results` carry the transcript of the stretch of speech in progress, final
+ * once `is_final`; `Metadata` closes the stream and carries no text. */
+const NovaMessage = z.object({
+  type: z.string(),
+  is_final: z.boolean().optional(),
+  channel: z.object({ alternatives: z.array(z.object({ transcript: z.string() })) }).optional(),
+  description: z.string().optional(),
+  message: z.string().optional(),
+});
+/** Nova's streaming parameters through the binding, which passes them on as the stream's query. The binding's model
+ * types describe Nova's batch input (an `audio` body, no `sample_rate`); this view of the binding takes the stream's. */
+type NovaStream = { encoding?: string; sample_rate?: string; channels?: number; interim_results?: boolean; punctuate?: boolean; smart_format?: boolean };
+type LiveModels = { '@cf/deepgram/nova-3': { inputs: NovaStream; postProcessedOutputs: unknown } };
 
 function described(error: unknown) { return error instanceof Error ? error.message : String(error); }
 function fail(status: number, code: string, message: string) { return Response.json({ status: 'error', error: { code, message } }, { status, headers: { 'cache-control': 'private, no-store' } }); }
@@ -50,10 +62,11 @@ function send(socket: WebSocket, message: RuntimeDictationServerMessage): void {
 
 /** Workers AI's dictation models on the worker's `AI` binding. */
 export function workersAiDictation(ai: Ai): DictationModels {
+  const streaming: Ai<LiveModels> = ai;
   return {
-    async flux() {
-      const response = await ai.run('@cf/deepgram/flux', { encoding: 'linear16', sample_rate: String(DICTATION_SAMPLE_RATE) }, { websocket: true });
-      if (!response.webSocket) throw new Error('Workers AI did not open a Flux stream');
+    async live() {
+      const response = await streaming.run('@cf/deepgram/nova-3', { encoding: 'linear16', sample_rate: String(DICTATION_SAMPLE_RATE), channels: 1, interim_results: true, punctuate: true, smart_format: true }, { websocket: true });
+      if (!response.webSocket) throw new Error('Workers AI did not open a Nova-3 stream');
       return response.webSocket;
     },
     async whisper(wav) {
@@ -79,38 +92,39 @@ export function dictationWav(frames: readonly Uint8Array[]): Uint8Array<ArrayBuf
   return wav;
 }
 
-/** Flux relayed: audio goes to the stream as it arrives; each turn's text comes back as interim text while it is spoken
- * and final text when Flux ends the turn. `CloseStream` ends no turn, so on stop the last interim text is final. */
-function fluxTranscriber(socket: WebSocket, upstream: WebSocket): Transcriber {
+/** Nova relayed: audio goes to the stream as it arrives; the stretch of speech in progress comes back as interim text and
+ * as final text once Nova finalizes it. On stop, `Finalize` flushes what Nova still holds and `CloseStream` ends the
+ * stream; interim text left unfinalized when it closes is final. */
+function novaTranscriber(socket: WebSocket, upstream: WebSocket): Transcriber {
   upstream.accept();
   const failed = Promise.withResolvers<string>(), drained = Promise.withResolvers<void>();
   let open = '', stopping = false;
   upstream.addEventListener('message', event => {
     if (typeof event.data !== 'string') return;
-    const parsed = FluxMessage.safeParse(JSON.parse(event.data));
+    const parsed = NovaMessage.safeParse(JSON.parse(event.data));
     if (!parsed.success) return;
     const message = parsed.data;
-    if (message.type === 'Error') { failed.resolve(`Flux: ${message.description ?? message.code ?? 'stream error'}`); upstream.close(); return; }
-    if (message.type !== 'TurnInfo' || message.transcript === undefined) return;
-    if (message.event === 'EndOfTurn') {
+    if (message.type === 'Error') { failed.resolve(`Nova-3: ${message.description ?? message.message ?? 'stream error'}`); upstream.close(); return; }
+    const transcript = message.type === 'Results' ? message.channel?.alternatives[0]?.transcript : undefined;
+    if (transcript === undefined) return;
+    if (message.is_final) {
       open = '';
-      if (message.transcript.trim()) send(socket, { type: 'final', text: message.transcript.trim() });
+      if (transcript.trim()) send(socket, { type: 'final', text: transcript.trim() });
       send(socket, { type: 'interim', text: '' });
       return;
     }
-    open = message.transcript;
+    open = transcript;
     send(socket, { type: 'interim', text: open });
   });
-  const ended = () => { drained.resolve(); if (!stopping) failed.resolve('Flux ended the stream'); };
-  upstream.addEventListener('close', ended);
-  upstream.addEventListener('error', ended);
+  upstream.addEventListener('close', event => { drained.resolve(); if (!stopping) failed.resolve(`Nova-3 ended the stream${event.reason ? `: ${event.reason}` : ''}`); });
+  upstream.addEventListener('error', () => { drained.resolve(); if (!stopping) failed.resolve('Nova-3 ended the stream'); });
   return {
     mode: 'live',
     audio(frame) { if (upstream.readyState === 1) upstream.send(frame); },
     async stop() {
       stopping = true;
-      if (upstream.readyState === 1) upstream.send(JSON.stringify({ type: 'CloseStream' }));
-      const timer = setTimeout(() => drained.resolve(), FLUX_DRAIN_MS);
+      if (upstream.readyState === 1) { upstream.send(JSON.stringify({ type: 'Finalize' })); upstream.send(JSON.stringify({ type: 'CloseStream' })); }
+      const timer = setTimeout(() => drained.resolve(), LIVE_DRAIN_MS);
       await drained.promise;
       clearTimeout(timer);
       if (upstream.readyState === 1) upstream.close();
@@ -170,7 +184,7 @@ async function transcriber(socket: WebSocket, env: Env, models: DictationModels,
   const { profile } = await vault.resolveCloudInference(projectId);
   const value = profile.settings.dictation ?? DEFAULT_DICTATION_SELECTOR;
   const selector = typeof value === 'string' ? parseServiceSelector(value) : null;
-  if (selector?.provider === 'cloudflare' && selector.id === 'flux') return fluxTranscriber(socket, await models.flux());
+  if (selector?.provider === 'cloudflare' && selector.id === 'nova-3') return novaTranscriber(socket, await models.live());
   if (selector?.provider === 'cloudflare' && selector.id === 'whisper') return batchTranscriber(socket, wav => models.whisper(wav));
   if (selector?.provider === 'openai') return batchTranscriber(socket, wav => openAiTranscription(vault, profile.id, selector.id, wav));
   throw new Error(`This inference profile's dictation provider (${JSON.stringify(value)}) is not supported`);

@@ -248,9 +248,9 @@ const CLOUDFLARE_SEARCH_OPTIONS: readonly ModelOption[] = [
   { value: 'cloudflare/linkup', label: 'Cloudflare · Linkup' },
   { value: 'cloudflare/exa', label: 'Cloudflare · Exa · not zero-retention' },
 ];
-/** Dictation on Cloudflare Workers AI, run on GitSpace's account: Flux transcribes while you speak, Whisper after you stop. */
+/** Dictation on Cloudflare Workers AI, run on GitSpace's account: Nova-3 transcribes while you speak, Whisper after you stop. */
 const CLOUDFLARE_DICTATION_OPTIONS: readonly ModelOption[] = [
-  { value: 'cloudflare/flux', label: 'Cloudflare · Flux · live' },
+  { value: 'cloudflare/nova-3', label: 'Cloudflare · Nova-3 · live' },
   { value: 'cloudflare/whisper', label: 'Cloudflare · Whisper · after you stop' },
 ];
 /** OpenAI's transcription models, run with an OpenAI API key of the profile after you stop. */
