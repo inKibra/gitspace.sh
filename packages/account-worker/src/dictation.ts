@@ -51,9 +51,10 @@ const NovaMessage = z.object({
   description: z.string().optional(),
   message: z.string().optional(),
 });
-/** Nova's streaming parameters through the binding, which passes them on as the stream's query. The binding's model
- * types describe Nova's batch input (an `audio` body, no `sample_rate`); this view of the binding takes the stream's. */
-type NovaStream = { encoding?: string; sample_rate?: string; interim_results?: boolean; punctuate?: boolean; smart_format?: boolean };
+/** Nova's streaming parameters through the binding, which passes them on as the stream's query: the stream refuses a
+ * boolean, so flags go as `'true'`. The binding's model types describe Nova's batch input (an `audio` body, booleans, no
+ * `sample_rate`); this view of the binding also takes the stream's. */
+type NovaStream = { encoding?: string; sample_rate?: string; interim_results?: boolean | string; punctuate?: boolean | string; smart_format?: boolean | string };
 type LiveModels = { '@cf/deepgram/nova-3': { inputs: NovaStream; postProcessedOutputs: unknown } };
 
 function described(error: unknown) { return error instanceof Error ? error.message : String(error); }
@@ -65,7 +66,7 @@ export function workersAiDictation(ai: Ai): DictationModels {
   const streaming: Ai<LiveModels> = ai;
   return {
     async live() {
-      const response = await streaming.run('@cf/deepgram/nova-3', { encoding: 'linear16', sample_rate: String(DICTATION_SAMPLE_RATE), interim_results: true, punctuate: true, smart_format: true }, { websocket: true });
+      const response = await streaming.run('@cf/deepgram/nova-3', { encoding: 'linear16', sample_rate: String(DICTATION_SAMPLE_RATE), interim_results: 'true', punctuate: 'true', smart_format: 'true' }, { websocket: true });
       if (!response.webSocket) throw new Error(`Workers AI did not open a Nova-3 stream (${response.status}: ${(await response.text()).slice(0, 300)})`);
       return response.webSocket;
     },
