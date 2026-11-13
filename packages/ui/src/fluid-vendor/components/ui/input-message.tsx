@@ -141,6 +141,11 @@ interface InputMessageProps
   rightSlot?: InputMessageSlot;
   /** Disables the textarea, send button, and drag-and-drop. */
   disabled?: boolean;
+  /** A send or another operation is in flight: Enter, the send button and
+   *  Stop wait, while the textarea stays editable. A disabled textarea loses
+   *  the browser's focus and refuses typing and pasting, so a brief operation
+   *  uses this rather than `disabled`. */
+  busy?: boolean;
   /** Minimum visible rows before the textarea grows. */
   minRows?: number;
   /** Maximum visible rows before the textarea starts to scroll. */
@@ -504,6 +509,7 @@ const InputMessage = forwardRef<HTMLDivElement, InputMessageProps>(
       leftSlot,
       rightSlot,
       disabled,
+      busy = false,
       minRows = 1,
       maxRows = 8,
       clickToFocus = true,
@@ -681,7 +687,8 @@ const InputMessage = forwardRef<HTMLDivElement, InputMessageProps>(
     }, [resizeTextarea]);
 
     const trimmed = value.trim();
-    const canSend = !disabled && (trimmed.length > 0 || filesArr.length > 0 || sendable);
+    const hasContent = trimmed.length > 0 || filesArr.length > 0 || sendable;
+    const canSend = !disabled && !busy && hasContent;
 
     // Edge = the box-shadow's 1px ring, recoloured in place per state so the
     // stroke gains contrast without ever appearing to thicken (no second
@@ -811,7 +818,7 @@ const InputMessage = forwardRef<HTMLDivElement, InputMessageProps>(
     // Stop⇄arrow swap animates.
     const buttonMode: "send" | "queue" | "stop" = !streaming
       ? "send"
-      : canSend
+      : !disabled && hasContent
         ? supportsQueue && streamingSubmitBehavior === "queue" ? "queue" : "send"
         : onStop
           ? "stop"
@@ -1338,7 +1345,7 @@ const InputMessage = forwardRef<HTMLDivElement, InputMessageProps>(
                 variant="primary"
                 size="icon-sm"
                 onClick={buttonMode === "stop" ? handleStop : handleSend}
-                disabled={buttonMode === "stop" ? disabled : !canSend}
+                disabled={buttonMode === "stop" ? disabled || busy : !canSend}
                 aria-label={buttonLabel}
               >
                 <AnimatePresence mode="wait" initial={false}>

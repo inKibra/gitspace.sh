@@ -141,6 +141,7 @@ export const ACCOUNT_RPC_AUTHORITY = {
   'automations.runs': 'cloud',
   'automations.test': 'cloud',
   'automations.events': 'cloud',
+  'automations.authors': 'cloud',
   'automations.runOnEvent': 'cloud',
   'automations.link': 'cloud',
   'automations.unlink': 'cloud',

@@ -58,8 +58,8 @@ describe('automation instructions', () => {
     const feedback: AutomationTrigger = { kind: 'github', events: [{ event: 'pull_request_review', actions: ['submitted'] }, { event: 'pull_request_review_comment', actions: ['created'] }] };
     expect(unknownAutomationPlaceholders('{{review.state}} on {{pull_request.html_url}} by {{sender.login}}', review)).toEqual([]);
     expect(unknownAutomationPlaceholders('{{review.state}} on {{pull_request.html_url}} by {{sender.login}}', feedback)).toEqual(['review.state']);
-    expect(automationConditionKinds(review)).toEqual(['linked', 'mentionsBot', 'baseBranch', 'author', 'reviewState']);
-    expect(automationConditionKinds(feedback)).toEqual(['linked', 'mentionsBot', 'baseBranch', 'author']);
+    expect(automationConditionKinds(review)).toEqual(['linked', 'pullRequest', 'mentionsBot', 'baseBranch', 'people', 'bots', 'reviewState']);
+    expect(automationConditionKinds(feedback)).toEqual(['linked', 'pullRequest', 'mentionsBot', 'baseBranch', 'people', 'bots']);
     expect(automationConditionKinds({ kind: 'label' })).toEqual([]);
   });
 

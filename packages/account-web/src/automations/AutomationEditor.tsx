@@ -2,16 +2,16 @@ import { Button, DialogDescription, DialogFooter, DialogHeader, DialogTitle, Dro
 import { Trash01 } from '@untitledui/icons';
 import { useEffect, useRef, useState, type ReactElement } from 'react';
 import { useResultQuery } from 'result-rpc/react';
-import { AUTOMATION_EVENT_ACTIONS, AUTOMATION_EVENT_LABEL, AUTOMATION_GITHUB_EVENTS, AUTOMATION_MODES, AUTOMATION_START_LABELS, AUTOMATION_WATCH_EVERY_LABEL, AUTOMATION_WATCH_LABEL, automationConditionKinds, automationErrors, automationFields, describeAutomationSchedule, nextAutomationRunAt, parseAutomationSchedule, unknownAutomationPlaceholders, type AutomationAction, type AutomationCondition, type AutomationDraft, type AutomationGitHub, type AutomationMode, type AutomationRunView, type AutomationTest, type AutomationTrigger, type AutomationTriggerKind, type AutomationWatchEvery, type AutomationWatchOn, type AutomationView } from '@gitspace/protocol/automations-contract';
+import { AUTOMATION_EVENT_ACTIONS, AUTOMATION_EVENT_LABEL, AUTOMATION_GITHUB_EVENTS, AUTOMATION_MODES, AUTOMATION_START_LABELS, AUTOMATION_WATCH_EVERY_LABEL, AUTOMATION_WATCH_LABEL, automationAuthorEvents, automationConditionKinds, automationErrors, automationFields, describeAutomationSchedule, nextAutomationRunAt, parseAutomationSchedule, unknownAutomationPlaceholders, type AutomationAction, type AutomationCondition, type AutomationDraft, type AutomationGitHub, type AutomationMode, type AutomationRunView, type AutomationTest, type AutomationTrigger, type AutomationTriggerKind, type AutomationWatchEvery, type AutomationWatchOn, type AutomationView } from '@gitspace/protocol/automations-contract';
 import { MODEL_ROLE_LABELS } from '@gitspace/protocol/inference';
 import { formatRelativeTime } from '../relative-time.js';
 import { rpcClient } from '../rpc-client.js';
 import { rpcErrorMessage } from '../rpc-error-message.js';
-import { Code, ConditionRow } from './AutomationConditions.js';
+import { AuthorSection, Code, ConditionRow } from './AutomationConditions.js';
 import { CheckList, TestResults } from './AutomationRuns.js';
 import { type AutomationWorkspace } from './AutomationsPage.js';
 import { Field, TextInput, options } from './automation-fields.js';
-import { ACTION_LABEL, type ActionKind, CONDITION_LABEL, DEFAULT_ROLE, DELIVERY_OPTIONS, EVENT_NOUN, type EventChoice, LABEL_MODE, MINUTES, MODE_LABEL, NEW_AUTOMATION_CRON, NEW_EVENT, PHASE_ACTIONS, PRESET_LABEL, PlayGlyph, PlusGlyph, RECENT_EVENTS, RECORDED_EVENT_LIMIT, SCHEDULE_PRESETS, type ScheduleChoice, TRIGGER_ACTIONS, TRIGGER_KINDS, TRIGGER_NOUN, TRIGGER_OPTION_LABEL, TestGlyph, WATCH_EVERY, WATCH_NOUN, WATCH_ONS, WEEKDAYS, conditionPhrase, formatUtc, newCondition, phasesLabel, scheduleChoice, scheduleCron, settle, subjectNoun, twoDigits } from './automation-formatters.js';
+import { ACTION_LABEL, type ActionKind, type AuthorCondition, CONDITION_LABEL, DEFAULT_ROLE, DELIVERY_OPTIONS, EVENT_NOUN, type EventChoice, type FilterCondition, LABEL_MODE, MINUTES, MODE_LABEL, NEW_AUTOMATION_CRON, NEW_EVENT, PHASE_ACTIONS, PRESET_LABEL, PlayGlyph, PlusGlyph, RECENT_EVENTS, RECORDED_EVENT_LIMIT, SCHEDULE_PRESETS, type ScheduleChoice, TRIGGER_ACTIONS, TRIGGER_KINDS, TRIGGER_NOUN, TRIGGER_OPTION_LABEL, TestGlyph, WATCH_EVERY, WATCH_NOUN, WATCH_ONS, WEEKDAYS, conditionPhrase, formatUtc, missingValues, newCondition, phasesLabel, scheduleChoice, scheduleCron, settle, subjectNoun, twoDigits } from './automation-formatters.js';
 
 type EditorField = 'name' | 'cron' | 'events' | 'conditions' | 'action' | 'mode' | 'role' | 'workspace' | 'instruction';
 /** The `field` an `automationInvalid` error names, mapped to the editor control that shows it. */
@@ -89,6 +89,10 @@ export function AutomationEditor({ projectId, workspaces, github, modelRoles, so
   const offered = automationConditionKinds(trigger);
   // Conditions the chosen events do not offer stay out of the draft.
   const shownConditions = conditions.filter(condition => offered.includes(condition.kind));
+  const filters = shownConditions.filter((condition): condition is FilterCondition => condition.kind !== 'people' && condition.kind !== 'bots');
+  const authorEvents = automationAuthorEvents(trigger);
+  const authorsQuery = useResultQuery(rpcClient.automations.authors, { projectId, events: [...authorEvents] }, { enabled: offered.includes('people') && authorEvents.length > 0 });
+  const authors = offered.includes('people') && authorsQuery.state === 'success' ? authorsQuery.value : { people: [], bots: [] };
   const action: AutomationAction = actionKind === 'messageWorkspace' ? { kind: 'messageWorkspace', workspaceId, instruction }
     : actionKind === 'startWorkspace' ? { kind: 'startWorkspace', mode, ...(role === DEFAULT_ROLE ? {} : { role }), instruction }
       : actionKind === 'sendToLinked' ? { kind: 'sendToLinked', wake, orProjectAgent, instruction }
@@ -100,7 +104,7 @@ export function AutomationEditor({ projectId, workspaces, github, modelRoles, so
   const savedKey = useRef(key).current;
   const unknown = unknownAutomationPlaceholders(instruction, trigger);
   const missingActions = triggerKind === 'github' ? events.filter(entry => AUTOMATION_EVENT_ACTIONS[entry.event].length > 0 && entry.actions.length === 0) : [];
-  const emptyConditions = shownConditions.filter(condition => 'values' in condition && condition.values.length === 0);
+  const emptyConditions = shownConditions.filter(missingValues);
   const incomplete = !draft.name || cronError !== null || missingActions.length > 0 || emptyConditions.length > 0 || (actionKind === 'messageWorkspace' && !workspaceId) || !instruction.trim() || unknown.length > 0;
   const errors: Partial<Record<EditorField, string>> = {};
   if (attempted && !draft.name) errors.name = 'Name the automation.';
@@ -114,8 +118,8 @@ export function AutomationEditor({ projectId, workspaces, github, modelRoles, so
 
   const choices = workspaces.filter(workspace => workspace.active || workspace.id === workspaceId);
   const nextRun = triggerKind === 'schedule' && cronError === null ? new Date(nextAutomationRunAt(cron, now)) : null;
-  const unusedConditions = offered.filter(kind => !shownConditions.some(condition => condition.kind === kind));
-  const completeConditions = shownConditions.filter(condition => !('values' in condition) || condition.values.length > 0);
+  const unusedConditions = offered.filter(kind => kind !== 'people' && kind !== 'bots' && !shownConditions.some(condition => condition.kind === kind));
+  const completeConditions = shownConditions.filter(condition => !missingValues(condition));
   const [onlyEvent] = events;
   const conditionsReadback = `Runs for ${triggerKind === 'watch' ? WATCH_NOUN[watchOn] : events.length === 1 && onlyEvent ? EVENT_NOUN[onlyEvent.event] : 'events'}${completeConditions.length ? ` ${completeConditions.map(condition => conditionPhrase(condition, bot)).join(', ')}` : ' of every kind'}.`;
   const modeChoices = [...(triggerKind === 'label' ? [{ value: LABEL_MODE, label: 'The label\'s mode' }] : []), ...AUTOMATION_MODES.map(entry => ({ value: entry, label: MODE_LABEL[entry] }))];
@@ -296,8 +300,8 @@ export function AutomationEditor({ projectId, workspaces, github, modelRoles, so
       {triggerKind === 'github' || triggerKind === 'watch' ? <section aria-label="Only if" className="flex min-w-0 flex-col gap-3">
         <strong className="text-body font-semibold">Only if</strong>
         <p aria-label="Conditions readback" className="text-body [overflow-wrap:anywhere]">{conditionsReadback}</p>
-        {shownConditions.length ? <ul aria-label="Filters" className="flex flex-col divide-y divide-border border-y border-border">
-          {shownConditions.map(condition => <ConditionRow key={condition.kind} condition={condition} bot={bot} missing={attempted && 'values' in condition && condition.values.length === 0}
+        {filters.length ? <ul aria-label="Filters" className="flex flex-col divide-y divide-border border-y border-border">
+          {filters.map(condition => <ConditionRow key={condition.kind} condition={condition} bot={bot} missing={attempted && missingValues(condition)}
             onChange={next => setConditions(current => current.map(entry => entry.kind === next.kind ? next : entry))}
             onRemove={() => setConditions(current => current.filter(entry => entry.kind !== condition.kind))} />)}
         </ul> : null}
@@ -307,6 +311,13 @@ export function AutomationEditor({ projectId, workspaces, github, modelRoles, so
             {unusedConditions.map((kind, index) => <MenuItem key={kind} index={index} label={CONDITION_LABEL[kind]} onSelect={() => setConditions(current => [...current.filter(entry => entry.kind !== kind), newCondition(kind)])} />)}
           </DropdownContent>
         </DropdownMenu></div> : null}
+        {offered.includes('people') ? <div className="flex flex-col divide-y divide-border border-y border-border">
+          {(['people', 'bots'] satisfies AuthorCondition['kind'][]).map(kind => {
+            const condition = shownConditions.find((entry): entry is AuthorCondition => entry.kind === kind);
+            return <AuthorSection key={kind} kind={kind} condition={condition} authors={authors[kind]} now={now} missing={attempted && condition !== undefined && missingValues(condition)}
+              onChange={next => setConditions(current => [...current.filter(entry => entry.kind !== kind), ...(next ? [next] : [])])} />;
+          })}
+        </div> : null}
         {errors.conditions ? <p role="alert" className="text-caption text-destructive [overflow-wrap:anywhere]">{errors.conditions}</p> : null}
         <p className="text-caption text-muted-foreground">Values can be patterns: <span className="font-mono">{triggerKind === 'watch' ? 'v*' : 'release/*'}</span>, <span className="font-mono">docs/**</span>.{triggerKind === 'watch' ? '' : ' Events from authors without write access who are not on the trust list never match.'}</p>
       </section> : null}

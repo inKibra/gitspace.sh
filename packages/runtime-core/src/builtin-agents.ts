@@ -30,7 +30,7 @@ End with a one-line verdict: ready, or what must change first. No findings is a 
 name: tester
 description: "Independent product tester. Uses the product the way a person would (browser, commands on an attached machine, project MCP tools) and reports what broke with evidence. Pass role taste for visual, layout, wording and UX judgment; role fast for functional checks (click-through, stored results, regressions). Without a role: taste, then fast, then default."
 model: pi/taste, pi/fast, pi/default
-tools: read, grep, find, code_search, web_search, todo, browser, agents, workspace_status, history_search, history_read, bash, proc, mcp_discover, mcp_invoke
+tools: read, grep, find, code_search, web_search, web_fetch, todo, browser, agents, workspace_status, history_search, history_read, bash, proc, mcp_discover, mcp_invoke
 ---
 You test a change by using the product, independently of the author. Do not read the implementation to decide what works; exercise it.
 

@@ -254,9 +254,10 @@ export function Composer({ workspace, controls, providers, skills = [], running,
       if (workspaceDraft && sentDraft !== undefined) workspaceDraft.accepted(sentDraft);
       // The input sends its text trimmed; a link swapped out of the draft can leave a space behind.
       else setLocalMessage(current => current.trim() === text ? '' : current);
-      setAttachments([]);
-      setTabs([]);
-      setCaptures([]);
+      // What was attached or mentioned while the message was sending stays for the next one.
+      setAttachments((current) => current.filter((file) => !draftAttachments.includes(file)));
+      setTabs((current) => current.filter((link) => !tabs.includes(link)));
+      setCaptures((current) => current.filter((id) => !captures.includes(id)));
       setJoined(connected);
       return true;
     } catch (failure) {
@@ -395,7 +396,8 @@ export function Composer({ workspace, controls, providers, skills = [], running,
       onSend={(text, files, meta) => { if (meta?.queuedId) return; void submit(text, files); }}
       placeholder={recovering ? 'Recovering agent…' : staging?.chips.length ? 'Say why, or add context; your choices go with it…' : `Ask the ${workspace.kind === 'project' ? 'project' : 'workspace'} agent…`}
       sendable={!!staging?.chips.length}
-      disabled={!onSend || pending || recovering || inferenceUnavailable || uploading !== null || connecting}
+      disabled={!onSend || recovering || inferenceUnavailable}
+      busy={pending || uploading !== null || connecting}
       files={attachments}
       onFilesChange={setAttachments}
       accept="image/png,image/jpeg,image/webp,text/*,application/pdf"

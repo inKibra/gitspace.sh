@@ -94,6 +94,34 @@ it('attaches an image pasted into the message', async () => {
   expect(paste.defaultPrevented).toBe(true);
 });
 
+// A session command in flight (the send itself, or the read of the agent's controls when a turn starts or ends) holds
+// the send. A disabled box would drop the browser's focus and refuse the paste.
+it('takes a paste while a session command is in flight and sends it, with its image, once the command settles', async () => {
+  const sending = Promise.withResolvers<void>();
+  const onSend = vi.fn<NonNullable<GitSpaceShellProps['onSend']>>(() => sending.promise);
+  const render = (pending: boolean) => act(() => root.render(<Composer workspace={verticalSliceFixture.workspace} running={false} pending={pending} onSend={onSend} />));
+  await render(false);
+  const textarea = await typeDraft('First message');
+  await send();
+  await render(true);
+
+  expect(textarea.disabled).toBe(false);
+  const paste = new Event('paste', { bubbles: true, cancelable: true });
+  Object.defineProperty(paste, 'clipboardData', { value: { files: [new File([new Uint8Array(10)], 'image.png', { type: 'image/png' })], types: ['Files', 'text/plain'] } });
+  await act(async () => textarea.dispatchEvent(paste));
+  // DOM emulation does not insert the text a paste carries.
+  await typeDraft('Second message');
+  await act(() => { textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })); });
+  expect(onSend).toHaveBeenCalledOnce();
+  expect(container.querySelector<HTMLButtonElement>('button[aria-label="Send"]')!.disabled).toBe(true);
+
+  await act(async () => { sending.resolve(); await sending.promise; });
+  await render(false);
+  expect(textarea.value).toBe('Second message');
+  await send();
+  await vi.waitFor(() => expect(onSend.mock.calls.map(([text, , images]) => [text, images?.map((image) => image.mimeType)])).toEqual([['First message', []], ['Second message', ['image/png']]]));
+});
+
 const shareId = '00000000-0000-4000-8000-0000000000d1';
 const secret = 'test-share-secret'.padEnd(43, 'x');
 const control: SessionControlView = { sessionId: 'session-a', role: null, roleLabel: null, roles: [], provider: null, models: [], model: null, thinking: null, fastMode: false, planMode: false, context: null, cost: 0, todos: [], queue: { steering: [], followUp: [] }, pendingAsk: null, goal: null, history: [], historyAnchorId: null };

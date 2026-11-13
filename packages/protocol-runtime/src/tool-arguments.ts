@@ -35,7 +35,7 @@ export const RuntimeGrepArgumentsSchema = RuntimeCodeSearchArgumentsSchema.exten
 export const RuntimeAstGrepArgumentsSchema = RuntimeDispatchSelectionSchema.extend({ pattern: z.string().min(1).describe('ast-grep pattern: $NAME captures one node, $_ ignores one, $$$NAME any number; it must parse as one node.'), path: z.string().default('.').describe('File or directory to search; the workspace root by default.'), language: z.string().optional().describe('Language to parse as (typescript, tsx, python, rust, …); from file extensions when omitted.') });
 export const RuntimeAstEditArgumentsSchema = RuntimeDispatchSelectionSchema.extend({ ops: z.array(z.object({ pat: z.string().min(1).describe('ast-grep pattern to match.'), out: z.string().describe('Replacement; the pattern\'s metavariables are substituted.') })).min(1).describe('Rewrites, applied in order.'), paths: z.array(path).min(1).describe('Files to rewrite.'), language: z.string().regex(/^[a-zA-Z][a-zA-Z0-9_-]*$/u).describe('Language of the files (typescript, tsx, python, …).') });
 export const RuntimeAstResolveArgumentsSchema = RuntimeDispatchSelectionSchema.extend({ proposalId: path.describe('The proposal ast_edit staged.'), action: z.enum(['apply', 'reject']).describe('apply writes the proposal\'s changes; reject discards them.') });
-export const RuntimeCodemodeArgumentsSchema = z.object({ code: z.string().max(262144).describe('JavaScript run as the body of an async function: await tool calls, return the value to report.'), timeoutMs: z.number().int().positive().max(30000).default(30000).describe('Stop the script after this many milliseconds, at most 30000 (the default).') }).strict();
+export const RuntimeCodemodeArgumentsSchema = z.object({ code: z.string().max(262144).describe('JavaScript run as the body of an async function: await tool calls, return the value to report.'), timeoutMs: z.number().int().positive().max(1_800_000).default(1_800_000).describe('Stop the script after this many milliseconds, at most 1800000 (30 minutes, the default).') }).strict();
 /** Characters of a script call's arguments and error a codemode result keeps for display. */
 export const CODEMODE_CALL_TEXT = 500;
 /** One call a codemode script made, as its result's `details.calls` lists it for the transcript: the call ran as a nested
@@ -87,7 +87,7 @@ export const RuntimeAgentsArgumentsSchema = z.union([
   RuntimeChildAgentsArgumentsSchema,
 ]);
 export function runtimeOperationIsReadOnly(name: string, args: z.infer<typeof RuntimeJsonSchema>): boolean {
-  if (['read', 'grep', 'code_search', 'find', 'web_search', 'history_search', 'history_read', 'ast_grep', 'mcp_discover', 'workspace_status', 'wait'].includes(name)) return true;
+  if (['read', 'grep', 'code_search', 'find', 'web_search', 'web_fetch', 'history_search', 'history_read', 'ast_grep', 'mcp_discover', 'workspace_status', 'wait'].includes(name)) return true;
   if (!args || typeof args !== 'object' || Array.isArray(args)) return false;
   if (['machines', 'agents', 'bash', 'proc', 'sync_machine'].includes(name)) return ['list', 'status', 'describe', 'logs', 'wait', 'diff'].includes(String(args.op));
   if (name === 'sync') return ['status', 'diff', 'backups'].includes(String(args.method));
@@ -168,7 +168,12 @@ export type RuntimeHistoryReadArguments = z.infer<typeof RuntimeHistoryReadArgum
 /** `query`: words, all of which rank a match higher, and "quoted phrases", each of which a match must contain exactly.
  * `workspaceId` searches that one workspace of the project; `scope: 'project'` every workspace. */
 export const RuntimeHistorySearchArgumentsSchema = z.object({ query: path.describe('Words, each ranking a match higher, and "quoted phrases", each of which a match must contain exactly.'), scope: z.enum(['workspace', 'project']).default('workspace').describe('workspace (the default) or project: every workspace of the project.'), workspaceId: path.optional().describe('One other workspace of this project to search.'), cursor: z.string().max(512).optional().describe('The previous call\'s cursor, to search older history.') });
-export const RuntimeWebSearchArgumentsSchema = z.object({ query: z.string().min(1).max(2048).describe('What to search for.') });
+export const RuntimeWebSearchArgumentsSchema = z.object({ query: z.string().min(1).max(1024).describe('What to search for.'), limit: z.number().int().min(1).max(10).optional().describe('How many results, 1 to 10 (default 5).') });
+export const RuntimeWebFetchArgumentsSchema = z.object({
+  url: z.string().min(1).max(2000).describe('The http(s) URL to read.'),
+  offset: z.number().int().nonnegative().optional().describe('Character offset to continue a long page from, as the previous result\'s header gives it.'),
+  format: z.enum(['auto', 'raw']).optional().describe('auto (default) converts HTML, PDF and Office documents to Markdown and pretty-prints JSON; raw returns a text body as served.'),
+});
 export const RuntimeReportIssueArgumentsSchema = z.object({ message: z.string().min(1).max(16384).describe('What failed: the call, what happened and what was expected.'), tool: z.string().max(160).optional().describe('The tool that failed.'), model: z.string().max(256).optional().describe('The model in use when it failed.'), reference: z.string().max(2048).optional().describe('Where to look: a result:// reference, URL or file path.') });
 export const RuntimeCheckpointArgumentsSchema = z.object({ goal: z.string().describe('What the exploration is for.') });
 export const RuntimeRewindArgumentsSchema = z.object({ checkpoint: z.string().describe('The checkpoint id checkpoint returned.'), report: z.string().describe('What the exploration found; it replaces the exploration in context.') });

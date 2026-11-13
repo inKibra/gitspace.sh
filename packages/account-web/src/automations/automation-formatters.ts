@@ -51,17 +51,23 @@ const EVENT_SUBJECT: Record<AutomationGitHubEvent, string> = {
 
 type ListConditionKind = Extract<AutomationCondition, { mode: 'oneOf' | 'noneOf' }>['kind'];
 export type ValuesConditionKind = Extract<AutomationCondition, { values: string[] }>['kind'];
+/** The People and Bots conditions, each edited in a section of its own; every other condition is a filter. */
+export type AuthorCondition = Extract<AutomationCondition, { kind: 'people' | 'bots' }>;
+export type FilterCondition = Exclude<AutomationCondition, AuthorCondition>;
 type ListMode = 'oneOf' | 'noneOf';
 export const LIST_MODES: readonly ListMode[] = ['oneOf', 'noneOf'];
 export const CONDITION_LABEL: Record<AutomationConditionKind, string> = {
-  linked: 'Linked', mentionsBot: 'Mentions', baseBranch: 'Base branch', headBranch: 'Head branch', branch: 'Branch', author: 'Author', draft: 'Draft', pullRequest: 'On', labels: 'Labels', changedFiles: 'Changed files', conclusion: 'Conclusion', reviewState: 'Review state',
+  linked: 'Linked', mentionsBot: 'Mentions', baseBranch: 'Base branch', headBranch: 'Head branch', branch: 'Branch', people: 'People', bots: 'Bots', draft: 'Draft', pullRequest: 'On', labels: 'Labels', changedFiles: 'Changed files', conclusion: 'Conclusion', reviewState: 'Review state',
   tag: 'Tag', prerelease: 'Prerelease', environment: 'Environment', deploymentState: 'State',
 };
+/** A People or Bots section's choice: `all` is no condition. */
+export const AUTHOR_RULES: readonly { value: 'all' | AuthorCondition['mode']; label: string }[] = [
+  { value: 'all', label: 'All' }, { value: 'none', label: 'None' }, { value: 'oneOf', label: 'Only these' }, { value: 'noneOf', label: 'All except these' },
+];
 export const LIST_RULE: Record<ListConditionKind, Record<ListMode, string>> = {
   baseBranch: { oneOf: 'is one of', noneOf: 'is not one of' },
   headBranch: { oneOf: 'is one of', noneOf: 'is not one of' },
   branch: { oneOf: 'is one of', noneOf: 'is not one of' },
-  author: { oneOf: 'is one of', noneOf: 'is not one of' },
   labels: { oneOf: 'has any of', noneOf: 'has none of' },
   changedFiles: { oneOf: 'touch any of', noneOf: 'touch none of' },
   tag: { oneOf: 'is one of', noneOf: 'is not one of' },
@@ -72,10 +78,10 @@ export const DRAFT_RULES: readonly { value: string; label: string }[] = [{ value
 export const PULL_REQUEST_RULES: readonly { value: string; label: string }[] = [{ value: 'pullRequest', label: 'A pull request' }, { value: 'issue', label: 'An issue' }];
 export const PRERELEASE_RULES: readonly { value: string; label: string }[] = [{ value: 'stable', label: 'Not a prerelease' }, { value: 'prerelease', label: 'Only prereleases' }];
 export const VALUE_PLACEHOLDER: Record<ValuesConditionKind, string> = {
-  baseBranch: 'main', headBranch: 'dependabot/*', branch: 'main', author: 'dependabot[bot]', labels: 'wontfix', changedFiles: 'docs/**', conclusion: 'failure', reviewState: 'approved',
+  baseBranch: 'main', headBranch: 'dependabot/*', branch: 'main', people: 'dana', bots: 'dependabot[bot]', labels: 'wontfix', changedFiles: 'docs/**', conclusion: 'failure', reviewState: 'approved',
   tag: 'v*', environment: 'preview', deploymentState: 'failure',
 };
-/** GitHub's own values; branches, authors, labels and paths are typed. */
+/** GitHub's own values; branches, labels and paths are typed, and people and bots suggested from recorded events. */
 export const VALUE_SUGGESTIONS: Partial<Record<ValuesConditionKind, readonly string[]>> = {
   conclusion: ['success', 'failure', 'neutral', 'cancelled', 'timed_out', 'action_required', 'stale', 'startup_failure'],
   reviewState: ['approved', 'changes_requested', 'commented', 'dismissed'],
@@ -202,7 +208,12 @@ export function newCondition(kind: AutomationConditionKind): AutomationCondition
   }
 }
 
-/** The editor's readback ("into main", "not by dependabot[bot]"), one phrase per condition. */
+/** Whether a condition still needs a value: one that lists values has none, unless it passes no author (`none`). */
+export function missingValues(condition: AutomationCondition): boolean {
+  return 'values' in condition && condition.values.length === 0 && !('mode' in condition && condition.mode === 'none');
+}
+
+/** The editor's readback ("into main", "from bots except dependabot[bot]"), one phrase per condition. */
 export function conditionPhrase(condition: AutomationCondition, bot: string): string {
   if (condition.kind === 'linked') return condition.linked ? 'on a linked pull request or issue' : 'with no linked workspace';
   if (condition.kind === 'mentionsBot') return `mentioning ${bot}`;
@@ -219,7 +230,8 @@ export function conditionPhrase(condition: AutomationCondition, bot: string): st
     case 'baseBranch': return condition.mode === 'noneOf' ? `not into ${values}` : `into ${values}`;
     case 'headBranch': return condition.mode === 'noneOf' ? `not from ${values}` : `from ${values}`;
     case 'branch': return condition.mode === 'noneOf' ? `not on ${values}` : `on ${values}`;
-    case 'author': return condition.mode === 'noneOf' ? `not by ${values}` : `by ${values}`;
+    case 'people':
+    case 'bots': return condition.mode === 'none' ? `from no ${condition.kind}` : `from ${condition.kind} ${condition.mode === 'oneOf' ? 'only' : 'except'} ${values}`;
     case 'labels': return condition.mode === 'noneOf' ? `without the label ${values}` : `labeled ${values}`;
     case 'changedFiles': return condition.mode === 'noneOf' ? `not touching ${values}` : `touching ${values}`;
   }

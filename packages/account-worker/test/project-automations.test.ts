@@ -167,6 +167,29 @@ describe('ProjectAutomationsDO', () => {
     expect((await automations.list(projectId)).automations).toEqual([]);
   });
 
+  it('turns a stored author condition into People and Bots conditions when the object starts', async () => {
+    const { projectId, automations } = await project();
+    const legacy: Array<[mode: string, values: string[]]> = [
+      ['oneOf', ['dana', 'sam']], ['oneOf', ['coderabbitai[bot]']], ['noneOf', ['*[bot]']], ['oneOf', ['*[bot]']], ['noneOf', ['dana', 'github-actions[bot]']],
+    ];
+    for (const [index] of legacy.entries()) automationValue(await automations.create({ projectId, draft: manual(`Legacy ${index}`) }));
+    await runInDurableObject(automations, (_instance, state) => {
+      for (const [index, [mode, values]] of legacy.entries()) {
+        state.storage.sql.exec('UPDATE automations SET trigger_json=?, conditions_json=? WHERE name=?', JSON.stringify({ kind: 'github', events: [{ event: 'issue_comment', actions: ['created'] }] }),
+          JSON.stringify([{ kind: 'linked', linked: true }, { kind: 'author', mode, values }]), `Legacy ${index}`);
+      }
+    });
+    await runInDurableObject(automations, (_instance, state) => { state.abort('restart'); }).catch(() => undefined);
+    const listed = (await env.PROJECT_AUTOMATIONS.get(automations.id).list(projectId)).automations.sort((left, right) => left.name.localeCompare(right.name));
+    expect(listed.map(automation => automation.conditions)).toEqual([
+      [{ kind: 'linked', linked: true }, { kind: 'people', mode: 'oneOf', values: ['dana', 'sam'] }, { kind: 'bots', mode: 'none', values: [] }],
+      [{ kind: 'linked', linked: true }, { kind: 'people', mode: 'none', values: [] }, { kind: 'bots', mode: 'oneOf', values: ['coderabbitai[bot]'] }],
+      [{ kind: 'linked', linked: true }, { kind: 'bots', mode: 'none', values: [] }],
+      [{ kind: 'linked', linked: true }, { kind: 'people', mode: 'none', values: [] }],
+      [{ kind: 'linked', linked: true }, { kind: 'people', mode: 'noneOf', values: ['dana'] }, { kind: 'bots', mode: 'noneOf', values: ['github-actions[bot]'] }],
+    ]);
+  });
+
   it('tests a schedule as its next three UTC run times and renders its instruction', async () => {
     const { projectId, workspaceId, automations } = await project();
     expect(automationValue(await automations.testDraft({ projectId, draft: { name: 'Nightly', trigger: { kind: 'schedule', cron: '0 6 * * *' }, conditions: [], action: { kind: 'messageWorkspace', workspaceId, instruction: '{{automation.name}} for {{scheduled_for}}' }, enabled: true }, requestedBy: 'Brad' }))).toEqual({

@@ -124,7 +124,7 @@ export default class Sandbox extends WorkerEntrypoint { async execute(capability
   try { const value = await Promise.race([run(tools, args => unwrap(capability.model('completion', args)), args => unwrap(capability.model('judge', args)), mcp, display, images), cancelled]); const body = JSON.stringify({ ok: true, value: value ?? null, output }); if (new TextEncoder().encode(body).length > ${MAX_BYTES}) throw new Error('Codemode output limit exceeded'); return body; }
   catch (error) { const text = String(error instanceof Error ? error.message : error); return JSON.stringify({ ok: false, error: (error instanceof ReferenceError ? text + '. Codemode globals are tools, mcp, completion, judge, display and images; call any tool as tools.<name>(args), for example await tools.space_workspace({ method: "create", ... }), and await tools.describe(name) for its declaration.' : text).slice(0, 4096) }); }
 } }`,
-        }, globalOutbound: null, limits: { cpuMs: 1000, subRequests: MAX_CALLS } });
+        }, globalOutbound: null, limits: { cpuMs: 10_000, subRequests: MAX_CALLS } });
         // The reader reaches the script only through images.read: the isolate's env stays empty.
         type SandboxEntrypoint = WorkerEntrypoint & { execute(capability: Capabilities, reader: Fetcher<ImageReader>): Promise<string> };
         const body = await Promise.race([worker.getEntrypoint<SandboxEntrypoint>().execute(capabilities, options.images), cancelled.promise]);

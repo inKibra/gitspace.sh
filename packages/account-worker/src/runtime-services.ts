@@ -9,7 +9,9 @@ import type { DocumentMarkdown } from './document-markdown.js';
 import { GITSPACE_SOURCE_REPOSITORY } from '@gitspace/protocol/project-authority';
 import { RuntimeQaItemSchema, type RuntimeQaActionInput, type RuntimeQaItem } from '@gitspace/protocol-runtime/workspace-controls';
 import { ArtifactsCodeStore, artifactsWorkspaceRepository, textPage, snapshotEntries, hasSnapshotConflictMarkers, readSnapshotText, resolveSnapshotConflictText, CloudPublicationUncertain, isAttachmentOnline, isAttachmentReady, type WorkspaceRuntime, type WorkspaceRuntimeOptions } from '@gitspace/runtime-workspace-do';
-import { RuntimeAgentLifecycleRunArgumentsSchema, RuntimeGenerateImageArgumentsSchema, RuntimeLifecycleDispatchArgumentsSchema, RuntimeEnvironmentArgumentsSchema, RuntimeMachinesArgumentsSchema, RuntimeSpaceArtifactsArgumentsSchema, RuntimeDriveTransferStoredSchema, RuntimeSpacePhaseArgumentsSchema, RuntimeReadArgumentsSchema, RuntimeWriteArgumentsSchema, RuntimeEditArgumentsSchema, RuntimeReportIssueArgumentsSchema, RuntimeHistoryReadArgumentsSchema, RuntimeHistorySearchArgumentsSchema, RuntimeWebSearchArgumentsSchema } from '@gitspace/protocol-runtime';
+import { RuntimeAgentLifecycleRunArgumentsSchema, RuntimeGenerateImageArgumentsSchema, RuntimeLifecycleDispatchArgumentsSchema, RuntimeEnvironmentArgumentsSchema, RuntimeMachinesArgumentsSchema, RuntimeSpaceArtifactsArgumentsSchema, RuntimeDriveTransferStoredSchema, RuntimeSpacePhaseArgumentsSchema, RuntimeReadArgumentsSchema, RuntimeWriteArgumentsSchema, RuntimeEditArgumentsSchema, RuntimeReportIssueArgumentsSchema, RuntimeHistoryReadArgumentsSchema, RuntimeHistorySearchArgumentsSchema, RuntimeWebFetchArgumentsSchema, RuntimeWebSearchArgumentsSchema } from '@gitspace/protocol-runtime';
+import { fetchWeb, renderWebFetchPage, windowWebFetchPage } from 'agents/webfetch';
+import { DEFAULT_WEB_SEARCH_DESCRIPTION_CHARS, createAIWebSearch } from 'agents/websearch';
 import { isSubagentToolCallAllowed, runtimeOperationIsReadOnly, workspaceActivity, workspaceBoard, RuntimeBashCommandArgumentsSchema, RuntimeSyncArgumentsSchema, RuntimeSyncMachineArgumentsSchema, RuntimeSyncMachineCaptureSchema, RuntimeSyncMachineDiffSchema, RuntimeSyncMachineDiscardSchema, RuntimeSyncMachineRestoreSchema, RuntimeSyncMachineStatusSchema } from '@gitspace/protocol-runtime';
 import { RuntimeAutomationsArgumentsSchema, RuntimeWorkspaceArgumentsSchema } from '@gitspace/protocol/inspector-contract';
 import { automationValue } from './project-automations.js';
@@ -886,16 +888,17 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
         }, (state, questions) => options.judge(input.conversationId, state, questions), request.cursor));
       }
       if (input.tool === 'web_search') {
-        const query = RuntimeWebSearchArgumentsSchema.parse(input.args).query;
-        const url = new URL('https://www.bing.com/search');
-        url.searchParams.set('q', query); url.searchParams.set('format', 'rss');
-        const response = await fetch(url, { signal: input.signal ? AbortSignal.any([input.signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000) });
-        if (!response.ok) throw new Error(`Search service returned ${response.status}`);
-        const xml = await response.text();
-        const decode = (value: string) => value.replace(/&amp;/gu, '&').replace(/&lt;/gu, '<').replace(/&gt;/gu, '>').replace(/&quot;/gu, '"').replace(/&apos;/gu, "'");
-        const results = [...xml.matchAll(/<item>([\s\S]*?)<\/item>/gu)].map(match => { const field = (name: string) => decode(new RegExp(`<${name}>([\\s\\S]*?)<\\/${name}>`, 'u').exec(match[1]!)?.[1] ?? ''); return { title: field('title'), url: field('link'), snippet: field('description') }; });
-        if (!xml.includes('<rss')) throw new Error('Search service did not return a result feed');
-        return completed(input, { query, results });
+        const { query, limit } = RuntimeWebSearchArgumentsSchema.parse(input.args);
+        // Cloudflare's Web Search API (Ceramic.ai by default), billed to the account's AI Gateway credits.
+        const deadline = AbortSignal.timeout(30_000);
+        const response = await createAIWebSearch({ binding: env.AI }).search({ query, ...(limit === undefined ? {} : { limit }) }, { signal: input.signal ? AbortSignal.any([input.signal, deadline]) : deadline });
+        return completed(input, { query, results: response.items.map(item => ({ title: item.title, url: item.url, description: item.description?.slice(0, DEFAULT_WEB_SEARCH_DESCRIPTION_CHARS) ?? null, ...(item.lastModifiedDate ? { lastModified: item.lastModifiedDate } : {}) })) });
+      }
+      if (input.tool === 'web_fetch') {
+        const request = RuntimeWebFetchArgumentsSchema.parse(input.args);
+        const page = await fetchWeb({ url: request.url, ...(request.format ? { format: request.format } : {}) }, { binding: env.AI, ...(input.signal ? { signal: input.signal } : {}) });
+        // One window of the page, inside <untrusted_web_content>, under a header naming the offset to continue from.
+        return { requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: renderWebFetchPage(windowWebFetchPage(page, request.offset === undefined ? {} : { offset: request.offset })) }] };
       }
       // The attached machine's /tmp is scratch space beside the checkout, never synced: its files live only there.
       if ((input.tool === 'read' || input.tool === 'write' || input.tool === 'edit') && typeof input.args === 'object' && input.args !== null && !Array.isArray(input.args)

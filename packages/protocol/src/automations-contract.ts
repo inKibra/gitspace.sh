@@ -306,6 +306,20 @@ export const AutomationTriggerCodec = wire.serializable((value): value is Automa
 
 const conditionValues = z.array(z.string().min(1).max(200)).min(1).max(50).describe('Values, or patterns: * within a path segment, ** across segments.');
 const listCondition = <K extends string>(kind: K, what: string) => z.object({ kind: z.literal(kind).describe(what), mode: z.enum(['oneOf', 'noneOf']).describe('oneOf: passes when any value matches; noneOf: when none does.'), values: conditionValues }).strict();
+/** Who wrote the event, one condition per kind of author: `people` reads logins that do not end in `[bot]`, `bots` those
+ * that do. An author of the other kind, or an event without one (a check suite), passes. Absent, every author of its
+ * kind passes. */
+const authorCondition = <K extends 'people' | 'bots'>(kind: K, what: string) => z.object({
+  kind: z.literal(kind).describe(what),
+  mode: z.enum(['none', 'oneOf', 'noneOf']).describe(`none: no ${kind === 'people' ? 'person' : 'bot'} passes (values empty); oneOf: only those matching a value; noneOf: all but those.`),
+  values: z.array(z.string().min(1).max(200)).max(50).describe(`GitHub logins${kind === 'bots' ? ' ending in [bot]' : ''}, or patterns with *; empty for none.`),
+}).strict();
+
+/** A GitHub login that is an app or a workflow rather than a person: `coderabbitai[bot]`, `github-actions[bot]`. */
+export function isBotLogin(login: string): boolean {
+  return login.toLowerCase().endsWith('[bot]');
+}
+
 /** Filters on the event, at most one of each; all must pass. Values may be patterns: `*` within a path segment, `**`
  * across segments. */
 export const AutomationConditionSchema = z.discriminatedUnion('kind', [
@@ -316,7 +330,8 @@ export const AutomationConditionSchema = z.discriminatedUnion('kind', [
   listCondition('baseBranch', 'The pull request\'s base branch.'),
   listCondition('headBranch', 'The pull request\'s head branch.'),
   listCondition('branch', 'The pushed or checked branch.'),
-  listCondition('author', 'The event\'s author.'),
+  authorCondition('people', 'Which people (authors whose login does not end in [bot]) the event may come from.'),
+  authorCondition('bots', 'Which bots (authors whose login ends in [bot]) the event may come from.'),
   /** `oneOf`: has any of the labels; `noneOf`: has none of them. */
   listCondition('labels', 'The issue\'s or pull request\'s labels.'),
   /** `oneOf`: touches any of the paths; `noneOf`: touches none of them. */
@@ -342,20 +357,20 @@ export const AutomationConditionCodec = wire.serializable((value): value is Auto
 
 /** The conditions each event offers. */
 export const AUTOMATION_EVENT_CONDITIONS: Record<AutomationGitHubEvent, readonly AutomationConditionKind[]> = {
-  pull_request: ['linked', 'baseBranch', 'headBranch', 'author', 'draft', 'labels', 'changedFiles'],
-  pull_request_review: ['linked', 'pullRequest', 'mentionsBot', 'baseBranch', 'author', 'reviewState'],
-  pull_request_review_comment: ['linked', 'pullRequest', 'mentionsBot', 'baseBranch', 'author'],
-  issues: ['linked', 'author', 'labels'],
-  issue_comment: ['linked', 'pullRequest', 'mentionsBot', 'author', 'labels'],
-  push: ['linked', 'branch', 'author', 'changedFiles'],
+  pull_request: ['linked', 'baseBranch', 'headBranch', 'people', 'bots', 'draft', 'labels', 'changedFiles'],
+  pull_request_review: ['linked', 'pullRequest', 'mentionsBot', 'baseBranch', 'people', 'bots', 'reviewState'],
+  pull_request_review_comment: ['linked', 'pullRequest', 'mentionsBot', 'baseBranch', 'people', 'bots'],
+  issues: ['linked', 'people', 'bots', 'labels'],
+  issue_comment: ['linked', 'pullRequest', 'mentionsBot', 'people', 'bots', 'labels'],
+  push: ['linked', 'branch', 'people', 'bots', 'changedFiles'],
   check_suite: ['linked', 'branch', 'conclusion'],
 };
 
 /** The conditions each watched kind offers. */
 export const AUTOMATION_WATCH_CONDITIONS: Record<AutomationWatchOn, readonly AutomationConditionKind[]> = {
-  release: ['tag', 'prerelease', 'author'],
+  release: ['tag', 'prerelease', 'people', 'bots'],
   tag: ['tag'],
-  deployment: ['environment', 'deploymentState', 'author'],
+  deployment: ['environment', 'deploymentState', 'people', 'bots'],
 };
 
 /** The conditions a trigger offers: those every one of its events offers, or its watched kind's. Schedules, manual runs
@@ -366,6 +381,20 @@ export function automationConditionKinds(trigger: AutomationTrigger): readonly A
   const [first, ...rest] = trigger.events;
   if (!first) return [];
   return AUTOMATION_EVENT_CONDITIONS[first.event].filter(kind => rest.every(entry => AUTOMATION_EVENT_CONDITIONS[entry.event].includes(kind)));
+}
+
+/** Recorded deliveries whose authors the People and Bots conditions suggest: the GitHub events, and the release and
+ * deployment status webhooks a watch reads. */
+export const AUTOMATION_AUTHOR_EVENTS = [...AUTOMATION_GITHUB_EVENTS, 'release', 'deployment_status'] as const;
+export type AutomationAuthorEvent = (typeof AUTOMATION_AUTHOR_EVENTS)[number];
+const WATCH_AUTHOR_EVENTS: Record<AutomationWatchOn, readonly AutomationAuthorEvent[]> = { release: ['release'], tag: [], deployment: ['deployment_status'] };
+
+/** The recorded events whose authors a trigger's People and Bots conditions read: its events, the issues and pull
+ * requests a label is added to, or a watch's releases or deployment statuses. */
+export function automationAuthorEvents(trigger: AutomationTrigger): readonly AutomationAuthorEvent[] {
+  if (trigger.kind === 'github') return trigger.events.map(entry => entry.event);
+  if (trigger.kind === 'label') return ['pull_request', 'issues'];
+  return trigger.kind === 'watch' ? WATCH_AUTHOR_EVENTS[trigger.on] : [];
 }
 
 /** The project agent's workspace id is its project's id. */
@@ -509,6 +538,13 @@ export const AutomationRecordedEventCodec = wire.object({
   receivedAt: wire.date,
 });
 export type AutomationRecordedEvent = InputOf<typeof AutomationRecordedEventCodec>;
+
+/** A GitHub login seen as the author of recent recorded events: of how many, and the newest one's arrival. */
+export const AutomationAuthorCodec = wire.object({ login: wire.string, count: wire.integer({ min: 1 }), lastSeenAt: wire.date });
+export type AutomationAuthor = InputOf<typeof AutomationAuthorCodec>;
+/** The authors of a project's recent recorded events, people apart from bots, each newest first. */
+export const AutomationAuthorsCodec = wire.object({ people: wire.array(AutomationAuthorCodec), bots: wire.array(AutomationAuthorCodec) });
+export type AutomationAuthors = InputOf<typeof AutomationAuthorsCodec>;
 
 // Automations, proposals and runs.
 

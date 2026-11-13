@@ -13,6 +13,7 @@ import {
   AutomationSubjectSchema,
   AutomationTriggerSchema,
   automationConditionKinds,
+  isBotLogin,
   automationEventCount,
   automationFields,
   automationSubjectKey,
@@ -22,6 +23,9 @@ import {
   renderAutomationInstruction,
   unknownAutomationPlaceholders,
   type AutomationAction,
+  type AutomationAuthor,
+  type AutomationAuthorEvent,
+  type AutomationAuthors,
   type AutomationCheck,
   type AutomationCondition,
   type AutomationDraft,
@@ -77,6 +81,8 @@ const MAX_INSTRUCTION = 16_000;
 /** Recorded deliveries a test without a chosen one reads, and the matching ones it shows. */
 const TESTED_DELIVERIES = 50;
 const TESTED_EVENTS = 5;
+/** Recorded deliveries whose authors the People and Bots conditions suggest. */
+const SUGGESTED_AUTHOR_EVENTS = 100;
 const MAX_TRUSTED = 200;
 /** Seen releases, tags and deployments a watch keeps; tag lists are not ordered by time, so a bounded set is kept. */
 const WATCH_SEEN_KEPT = 500;
@@ -260,10 +266,13 @@ function checkDraft(draft: AutomationDraft): AutomationDraft {
     trigger = { kind: 'github', events };
   }
   const offered = automationConditionKinds(trigger);
-  const conditions = draft.conditions.map((condition): AutomationCondition => 'values' in condition ? { ...condition, values: [...new Set(condition.values.map(value => value.trim()).filter(Boolean))] } : condition);
+  const conditions = draft.conditions.map((condition): AutomationCondition => {
+    if ('mode' in condition && condition.mode === 'none') return { ...condition, values: [] };
+    return 'values' in condition ? { ...condition, values: [...new Set(condition.values.map(value => value.trim()).filter(Boolean))] } : condition;
+  });
   for (const condition of conditions) {
     if (!offered.includes(condition.kind)) refuse('conditions', offered.length === 0 ? 'Conditions apply only to GitHub events' : `${condition.kind} is not a condition of these events; they offer ${offered.join(', ')}`);
-    if ('values' in condition && condition.values.length === 0) refuse('conditions', `Give ${condition.kind} at least one value`);
+    if ('values' in condition && condition.values.length === 0 && !('mode' in condition && condition.mode === 'none')) refuse('conditions', `Give ${condition.kind} at least one value`);
   }
   if (new Set(conditions.map(condition => condition.kind)).size !== conditions.length) refuse('conditions', 'Use each condition once');
   const { action } = draft;
@@ -280,6 +289,28 @@ function checkDraft(draft: AutomationDraft): AutomationDraft {
   const phases = draft.phases === undefined ? undefined : AutomationPhasesSchema.safeParse(draft.phases);
   if (phases?.success === false) refuse('phases', phases.error.issues[0]?.message ?? 'Choose 1 to 4 phases, each once');
   return { name, trigger, conditions, action, enabled: draft.enabled, ...(phases === undefined ? {} : { phases: phases.data }) };
+}
+
+/** The `author` condition automations held before People and Bots: one list of logins and patterns. */
+const LegacyAuthorConditionSchema = z.object({ kind: z.literal('author'), mode: z.enum(['oneOf', 'noneOf']), values: z.array(z.string()) });
+/** Values that match every person's login, or every bot's. */
+const EVERY_PERSON: Readonly<Record<string, true>> = { '*': true, '**': true };
+const EVERY_BOT: Readonly<Record<string, true>> = { '*': true, '**': true, '*[bot]': true };
+
+/** A stored `author` condition as People and Bots conditions. Its values split by the logins they can match: one ending
+ * in `[bot]` matches bots, one ending in `*` both, any other people. A side with a value matching all of it passes
+ * every author of it for `oneOf` (no condition) and none for `noneOf`; a side without values passes none for `oneOf`
+ * and all for `noneOf`. */
+function peopleAndBots(legacy: z.infer<typeof LegacyAuthorConditionSchema>): AutomationCondition[] {
+  const sides: Array<{ kind: 'people' | 'bots'; values: string[]; every: Readonly<Record<string, true>> }> = [
+    { kind: 'people', values: legacy.values.filter(value => !isBotLogin(value)), every: EVERY_PERSON },
+    { kind: 'bots', values: legacy.values.filter(value => isBotLogin(value) || value.endsWith('*')), every: EVERY_BOT },
+  ];
+  return sides.flatMap(({ kind, values, every }): AutomationCondition[] => {
+    if (values.some(value => every[value.toLowerCase()])) return legacy.mode === 'oneOf' ? [] : [{ kind, mode: 'none', values: [] }];
+    if (values.length === 0) return legacy.mode === 'oneOf' ? [{ kind, mode: 'none', values: [] }] : [];
+    return [{ kind, mode: legacy.mode, values }];
+  });
 }
 
 /** The GitSpace project's release automation (docs/TENANT-RELEASES-DESIGN.md §5): GitSpace's releases go to its project
@@ -594,7 +625,8 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
 
   /** Objects written before GitHub events: their automations kept a schedule and a message target in columns, and their
    * runs table refused event triggers. Objects written before phases lack the automations' phases and the runs' phase;
-   * those written before batches lack the runs' batch key, events and delivery time. */
+   * those written before batches lack the runs' batch key, events and delivery time. Automations written before the
+   * People and Bots conditions hold one `author` condition, which becomes them. */
   private migrate(): void {
     const sql = this.ctx.storage.sql;
     const columns = (table: string) => sql.exec<{ name: string }>(`PRAGMA table_info(${table})`).toArray().map(column => column.name);
@@ -642,6 +674,14 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
     if (recorded.length > 0 && !recorded.includes('skip_reason')) sql.exec('ALTER TABLE automation_runs ADD COLUMN skip_reason TEXT');
     for (const [column, type] of [['batch_key', 'TEXT'], ['events_json', 'TEXT'], ['deliver_at', 'INTEGER']]) {
       if (recorded.length > 0 && !recorded.includes(column)) sql.exec(`ALTER TABLE automation_runs ADD COLUMN ${column} ${type}`);
+    }
+    if (automations.length > 0) {
+      for (const row of sql.exec<{ id: string; conditions_json: string }>(`SELECT id, conditions_json FROM automations WHERE conditions_json LIKE '%"kind":"author"%'`).toArray()) {
+        sql.exec('UPDATE automations SET conditions_json=? WHERE id=?', JSON.stringify(z.array(z.unknown()).parse(JSON.parse(row.conditions_json)).flatMap(entry => {
+          const legacy = LegacyAuthorConditionSchema.safeParse(entry);
+          return legacy.success ? peopleAndBots(legacy.data) : [entry];
+        })), row.id);
+      }
     }
     const links = columns('automation_links');
     if (links.length > 0 && !links.includes('pull_request_json')) sql.exec('ALTER TABLE automation_links ADD COLUMN pull_request_json TEXT');
@@ -959,6 +999,23 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
     if (repository === null) return [];
     const events = await this.env.GITHUB_APP.getByName(this.env.ACCOUNT_ID).recordedEvents(repository, input.limit);
     return events.map(event => ({ deliveryId: event.deliveryId, event: automationEventName(event), label: describeAutomationEvent(event), receivedAt: new Date(event.receivedAt) }));
+  }
+
+  /** The distinct authors of the repository's latest recorded deliveries of `events`, people apart from bots, each
+   * newest first: the People and Bots conditions suggest them. */
+  async recordedAuthors(input: { projectId: string; events: readonly AutomationAuthorEvent[] }): Promise<AutomationAuthors> {
+    const projectId = this.ensureProject(input.projectId);
+    const repository = await this.repository(projectId);
+    if (repository === null) return { people: [], bots: [] };
+    const recorded = await this.env.GITHUB_APP.getByName(this.env.ACCOUNT_ID).recordedAuthors(repository, [...new Set(input.events)], SUGGESTED_AUTHOR_EVENTS);
+    const seen = new Map<string, { login: string; count: number; lastSeenAt: Date }>();
+    for (const { login, receivedAt } of recorded) {
+      const known = seen.get(login.toLowerCase());
+      if (known) known.count += 1;
+      else seen.set(login.toLowerCase(), { login, count: 1, lastSeenAt: new Date(receivedAt) });
+    }
+    const authors: AutomationAuthor[] = [...seen.values()];
+    return { people: authors.filter(author => !isBotLogin(author.login)), bots: authors.filter(author => isBotLogin(author.login)) };
   }
 
   /** A person or an agent links a pull request, issue or branch to a workspace, replacing any link it had. A link to a
@@ -1847,9 +1904,14 @@ function checkCondition(condition: AutomationCondition, event: AutomationEvent, 
       const matched = value !== null && values.some(pattern => globMatches(pattern, value, false));
       return { label, passed: condition.mode === 'oneOf' ? matched : !matched, reason: `${BRANCH_NAME[condition.kind]} is ${value ?? 'unknown'}` };
     }
-    case 'author': {
-      const matched = event.author !== null && values.some(pattern => globMatches(pattern, event.author ?? '', true));
-      return { label, passed: condition.mode === 'oneOf' ? matched : !matched, reason: `the author is ${event.author ?? 'unknown'}` };
+    case 'people':
+    case 'bots': {
+      const author = event.author;
+      if (author === null || isBotLogin(author) !== (condition.kind === 'bots')) return { label, passed: true, reason: '' };
+      const matched = values.some(pattern => globMatches(pattern, author, true));
+      return condition.mode === 'none'
+        ? { label, passed: false, reason: `${author} is ${condition.kind === 'bots' ? 'a bot' : 'a person'}` }
+        : { label, passed: condition.mode === 'oneOf' ? matched : !matched, reason: `the author is ${author}` };
     }
     case 'labels': {
       const matched = (event.labels ?? []).find(name => values.some(pattern => globMatches(pattern, name, true)));
@@ -1901,7 +1963,8 @@ function conditionLabel(condition: AutomationCondition, bot: string | null): str
     case 'baseBranch': return `base branch is ${not}${values}`;
     case 'headBranch': return `head branch is ${not}${values}`;
     case 'branch': return `branch is ${not}${values}`;
-    case 'author': return `author is ${not}${values}`;
+    case 'people':
+    case 'bots': return condition.mode === 'none' ? `no ${condition.kind}` : `${condition.kind}: ${condition.mode === 'oneOf' ? 'only' : 'not'} ${values}`;
     case 'labels': return condition.mode === 'oneOf' ? `has the label ${values}` : `has no label ${values}`;
     case 'changedFiles': return condition.mode === 'oneOf' ? `changes files matching ${values}` : `changes no file matching ${values}`;
     case 'draft': return condition.draft ? 'a draft' : 'not a draft';

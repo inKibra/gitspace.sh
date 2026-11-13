@@ -7,7 +7,7 @@ import { AutomationsPage, type AutomationWorkspace } from './AutomationsPage.js'
 
 const rpc = vi.hoisted(() => ({ approve: vi.fn(), create: vi.fn(), update: vi.fn(), test: vi.fn(), runOnEvent: vi.fn(), link: vi.fn(), updateSettings: vi.fn(), setException: vi.fn(), retryRun: vi.fn() }));
 const queries = vi.hoisted(() => new Map<string, unknown>());
-vi.mock('../rpc-client.js', () => ({ rpcClient: { automations: { list: 'list', runs: 'runs', overview: 'overview', events: 'events', exceptions: { list: 'exceptions', set: rpc.setException }, ...rpc } } }));
+vi.mock('../rpc-client.js', () => ({ rpcClient: { automations: { list: 'list', runs: 'runs', overview: 'overview', events: 'events', authors: 'authors', exceptions: { list: 'exceptions', set: rpc.setException }, ...rpc } } }));
 vi.mock('result-rpc/react', async () => ({
   ...await vi.importActual<object>('result-rpc/react'),
   useResultQuery: (procedure: string) => ({ state: 'success', value: queries.get(procedure), fetch: 'idle', refetch: async () => {} }),
@@ -58,6 +58,7 @@ beforeEach(() => {
   queries.set('overview', { projects: [], runs: [] });
   queries.set('runs', []);
   queries.set('events', []);
+  queries.set('authors', { people: [], bots: [] });
   for (const procedure of Object.values(rpc)) procedure.mockReset();
   container = document.createElement('div');
   document.body.append(container);
@@ -111,7 +112,8 @@ async function choose(trigger: string, option: string): Promise<void> {
   const select = document.body.querySelector<HTMLElement>(`[aria-label="${trigger}"]`);
   if (!select) throw new Error(`No select ${trigger}`);
   await act(() => select.click());
-  const item = [...document.body.querySelectorAll<HTMLElement>('[role="option"]')].find(element => element.textContent === option);
+  // The newest listbox is last; one still closing may offer the same option.
+  const item = [...document.body.querySelectorAll<HTMLElement>('[role="option"]')].findLast(element => element.textContent === option);
   if (!item) throw new Error(`No option ${option}`);
   await act(() => item.click());
 }
@@ -212,6 +214,32 @@ it('saves the chosen events, actions and filters, without a filter the events no
     action: { kind: 'startWorkspace', mode: 'review', instruction: 'Review {{pull_request.html_url}}.' },
     enabled: true,
   } });
+});
+
+it('edits people and bots in sections of their own, suggesting the bots that wrote recent events', async () => {
+  rpc.create.mockResolvedValue({ status: 'ok', value: review });
+  queries.set('authors', {
+    people: [{ login: 'dana', count: 4, lastSeenAt: new Date('2026-10-27T11:00:00Z') }],
+    bots: [{ login: 'coderabbitai[bot]', count: 3, lastSeenAt: new Date('2026-10-27T10:00:00Z') }, { login: 'github-actions[bot]', count: 9, lastSeenAt: new Date('2026-10-26T12:00:00Z') }],
+  });
+  await renderProject([]);
+  await act(() => button('New automation').click());
+  await type(field('input[aria-label="Name"]'), 'Review pull requests');
+  await type(field<HTMLTextAreaElement>('textarea[aria-label="Instruction"]'), 'Review {{pull_request.html_url}}.');
+  expect([...document.body.querySelectorAll('[aria-label="Only if"] section')].map(section => section.getAttribute('aria-label'))).toEqual(['People', 'Bots']);
+
+  await choose('Bots rule', 'All except these');
+  const suggested = [...field('section[aria-label="Bots"]').querySelectorAll('datalist option')].map(option => [option.getAttribute('value'), option.getAttribute('label')]);
+  expect(suggested).toEqual([['coderabbitai[bot]', '3 recent · 2h ago'], ['github-actions[bot]', '9 recent · 1d ago']]);
+  const bots = field('input[aria-label="Add to Bots"]');
+  await type(bots, 'github-actions[bot]');
+  await enter(bots);
+  await choose('People rule', 'None');
+  expect(field('[aria-label="Conditions readback"]').textContent).toBe('Runs for pull requests from bots except github-actions[bot], from no people.');
+  await act(async () => button('Create automation').click());
+  expect(rpc.create).toHaveBeenCalledExactlyOnceWith({ projectId: 'project', draft: expect.objectContaining({
+    conditions: [{ kind: 'bots', mode: 'noneOf', values: ['github-actions[bot]'] }, { kind: 'people', mode: 'none', values: [] }],
+  }) });
 });
 
 it('starts a workspace in the chosen mode and model role, offering the roles of the project\'s inference profile', async () => {

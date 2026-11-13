@@ -40,6 +40,7 @@ import {
   automationRunsContract,
   testAutomationContract,
   automationEventsContract,
+  automationAuthorsContract,
   runAutomationOnEventContract,
   linkAutomationSubjectContract,
   unlinkAutomationSubjectContract,
@@ -496,6 +497,13 @@ export function configurationCloudProcedures(env: Env, userId: string, deviceId:
       return err(errors.OperationFailed({ operation: 'automationEvents', message: failure(error) }));
     }
   });
+  const automationAuthors = server.implement(automationAuthorsContract).handler(async ({ input, errors }) => {
+    try {
+      await project(input.projectId); return ok(await automations(input.projectId).recordedAuthors(input));
+    } catch (error) {
+      return err(errors.OperationFailed({ operation: 'automationAuthors', message: failure(error) }));
+    }
+  });
   const runAutomationOnEvent = server.implement(runAutomationOnEventContract).handler(async ({ input, errors }) => {
     try {
       await project(input.projectId);
@@ -568,7 +576,7 @@ export function configurationCloudProcedures(env: Env, userId: string, deviceId:
     secrets: { list: listSecrets, put: putSecret, delete: deleteSecret, account: { list: listAccountSecrets, put: putAccountSecret, delete: deleteAccountSecret, grant: grantAccountSecret, revoke: revokeAccountSecret } },
     configuration: { values: { get: getValues, put: putValue, delete: deleteValue } },
     skills: { list: listSkills, update: updateSkill },
-    automations: { list: listAutomations, create: createAutomation, update: updateAutomation, delete: deleteAutomation, approve: approveAutomation, runNow: runAutomationNow, cancelRun: cancelAutomationRun, retryRun: retryAutomationRun, runs: automationRuns, test: testAutomation, events: automationEvents, runOnEvent: runAutomationOnEvent, link: linkAutomationSubject, unlink: unlinkAutomationSubject, updateSettings: updateAutomationSettings, overview: automationsOverview, exceptions: { list: listAutomationExceptions, set: setAutomationException } },
+    automations: { list: listAutomations, create: createAutomation, update: updateAutomation, delete: deleteAutomation, approve: approveAutomation, runNow: runAutomationNow, cancelRun: cancelAutomationRun, retryRun: retryAutomationRun, runs: automationRuns, test: testAutomation, events: automationEvents, authors: automationAuthors, runOnEvent: runAutomationOnEvent, link: linkAutomationSubject, unlink: unlinkAutomationSubject, updateSettings: updateAutomationSettings, overview: automationsOverview, exceptions: { list: listAutomationExceptions, set: setAutomationException } },
     mcp: { discover, connections: { list: listConnections, create: createConnection, update: updateConnection, delete: deleteConnection, status: connectionStatus, signIn }, grants: { list: listGrants, put: putGrant, delete: deleteGrant }, composio: { catalog, authorize, refresh, tools, updateTools, disconnect } },
   };
 }

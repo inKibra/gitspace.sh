@@ -502,12 +502,12 @@ describe('automations on GitHub events', () => {
     const closed = await named('Merged or closed');
     automationValue(await automations.update({ projectId, automationId: closed?.id ?? '', draft: { name: 'Merged or closed', enabled: true, trigger: closed?.trigger ?? { kind: 'manual' }, conditions: closed?.conditions ?? [], action: { kind: 'sendToLinked', wake: false, orProjectAgent: false, instruction: 'Close the workspace too.' } } }));
     // As the defaults were at revision 2: review feedback left out bots and comments, and bots had their own default.
-    automationValue(await automations.create({ projectId, draft: { name: 'Bot review feedback to its workspace', enabled: true, trigger: { kind: 'github', events: [{ event: 'pull_request_review', actions: ['submitted'] }] }, conditions: [{ kind: 'author', mode: 'oneOf', values: ['*[bot]'] }], action: { kind: 'sendToLinked', wake: true, orProjectAgent: false, instruction: 'Read the bots.' } } }));
+    automationValue(await automations.create({ projectId, draft: { name: 'Bot review feedback to its workspace', enabled: true, trigger: { kind: 'github', events: [{ event: 'pull_request_review', actions: ['submitted'] }] }, conditions: [{ kind: 'people', mode: 'none', values: [] }], action: { kind: 'sendToLinked', wake: true, orProjectAgent: false, instruction: 'Read the bots.' } } }));
     await runInDurableObject(automations, (_instance, state) => {
       state.storage.sql.exec("UPDATE automations SET default_key='bot-review-feedback' WHERE name='Bot review feedback to its workspace'");
       state.storage.sql.exec("UPDATE automations SET trigger_json=?, conditions_json=? WHERE default_key='review-feedback'",
         JSON.stringify({ kind: 'github', events: [{ event: 'pull_request_review', actions: ['submitted'] }, { event: 'pull_request_review_comment', actions: ['created'] }] }),
-        JSON.stringify([{ kind: 'linked', linked: true }, { kind: 'author', mode: 'noneOf', values: ['*[bot]'] }]));
+        JSON.stringify([{ kind: 'linked', linked: true }, { kind: 'bots', mode: 'none', values: [] }]));
     });
     await runInDurableObject(env.GITHUB_APP.getByName(env.ACCOUNT_ID), (_instance, state) => { state.storage.sql.exec('UPDATE automation_defaults SET revision=2'); });
     const added = vi.spyOn(ProjectAutomationsDO.prototype, 'addDefaults');
@@ -548,6 +548,47 @@ describe('automations on GitHub events', () => {
     expect(text).toContain('Codex: the cache never expires.');
     expect(text).not.toContain('Fixed in 9bd59bf.');
     expect(text).not.toContain('Still seeing this on 2.1.');
+  });
+
+  it('checks people and bots apart: a bot left out is skipped while people pass, and naming one bot passes it and every person', async () => {
+    const { projectId, automations, send, runs } = await installed(['dana']);
+    const comment = (number: number, login: string) => ({
+      action: 'created', sender: { login },
+      issue: { number, title: `Item ${number}`, html_url: `${REPOSITORY.html_url}/issues/${number}`, user: { login: 'dana' }, labels: [] },
+      comment: { html_url: `${REPOSITORY.html_url}/issues/${number}#issuecomment-${number}`, body: `From ${login}.`, user: { login } },
+    });
+    const trigger: AutomationDraft['trigger'] = { kind: 'github', events: [{ event: 'issue_comment', actions: ['created'] }] };
+    const action: AutomationDraft['action'] = { kind: 'messageProjectAgent', instruction: 'Read {{comment.html_url}}.' };
+    automationValue(await automations.create({ projectId, draft: { name: 'Not GitHub Actions', enabled: true, trigger, conditions: [{ kind: 'bots', mode: 'noneOf', values: ['github-actions[bot]'] }], action } }));
+    automationValue(await automations.create({ projectId, draft: { name: 'Only CodeRabbit', enabled: true, trigger, conditions: [{ kind: 'bots', mode: 'oneOf', values: ['coderabbitai[bot]'] }], action } }));
+    await send('issue_comment', comment(1, 'github-actions[bot]'));
+    await send('issue_comment', comment(2, 'coderabbitai[bot]'));
+    await send('issue_comment', comment(3, 'dana'));
+    const recorded = await runs();
+    expect(['Not GitHub Actions', 'Only CodeRabbit'].map(name => recorded.filter(run => run.automationName === name).map(run => [run.subject?.number, run.state === 'skipped' ? run.outcome : 'runs']).sort())).toEqual([
+      [[1, 'Skipped: the author is github-actions[bot]'], [2, 'runs'], [3, 'runs']],
+      [[1, 'Skipped: the author is github-actions[bot]'], [2, 'runs'], [3, 'runs']],
+    ]);
+    expect(recorded.find(run => run.automationName === 'Not GitHub Actions' && run.subject?.number === 1)?.checks.at(-1)).toEqual({ label: 'bots: not github-actions[bot]', passed: false });
+  });
+
+  it('suggests the people and bots who wrote the recorded events of the chosen kinds, newest first, with how many each wrote', async () => {
+    const { projectId, send } = await installed(['dana', 'jules']);
+    const comment = (login: string) => ({
+      action: 'created', sender: { login },
+      issue: { number: 7, title: 'Item 7', html_url: `${REPOSITORY.html_url}/issues/7`, user: { login: 'dana' }, labels: [] },
+      comment: { html_url: `${REPOSITORY.html_url}/issues/7#issuecomment-${login.length}`, body: 'Noted.', user: { login } },
+    });
+    await send('issue_comment', comment('coderabbitai[bot]'));
+    await send('issue_comment', comment('dana'));
+    await send('pull_request', { action: 'opened', sender: { login: 'jules' }, pull_request: pull(12, { author: 'jules', head: 'fix-pantry' }) });
+    await send('issue_comment', comment('coderabbitai[bot]'));
+    await send('pull_request_review', submittedReview(5, 'Looks fine.', 'chatgpt-codex-connector[bot]', 'commented'));
+    const authors = await (await signedClient()).automations.authors({ projectId, events: ['issue_comment', 'pull_request_review'] });
+    expect(authors).toEqual({ status: 'ok', value: {
+      people: [{ login: 'dana', count: 1, lastSeenAt: expect.any(Date) }],
+      bots: [{ login: 'chatgpt-codex-connector[bot]', count: 1, lastSeenAt: expect.any(Date) }, { login: 'coderabbitai[bot]', count: 2, lastSeenAt: expect.any(Date) }],
+    } });
   });
 
   it('gives a project created under an existing installation its defaults', async () => {

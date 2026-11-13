@@ -2,7 +2,7 @@ import { RuntimeChildAgentsArgumentsSchema } from './tool-arguments.js';
 import { RuntimeBrowserToolArgumentsSchema } from './browser.js';
 
 /** A subagent's tools when its definition lists none. */
-export const SUBAGENT_READONLY_TOOLS = ['read', 'grep', 'code_search', 'find', 'web_search', 'ast_grep', 'history_search', 'history_read', 'todo', 'browser', 'agents', 'workspace_status', 'wait'] as const;
+export const SUBAGENT_READONLY_TOOLS = ['read', 'grep', 'code_search', 'find', 'web_search', 'web_fetch', 'ast_grep', 'history_search', 'history_read', 'todo', 'browser', 'agents', 'workspace_status', 'wait'] as const;
 /** Every tool a definition may list: the read-only set plus commands and MCP tools, for agents that use the product. */
 export const SUBAGENT_TOOLS = [...SUBAGENT_READONLY_TOOLS, 'bash', 'proc', 'mcp_discover', 'mcp_invoke'] as const;
 export function isSubagentTool(name: string): boolean { return SUBAGENT_TOOLS.some(tool => tool === name); }

@@ -533,6 +533,10 @@ export const reviewedAnnotations: Record<string, ToolAnnotation> = {
     "readOnlyHint": true,
     "openWorldHint": false
   },
+  "automations.authors": {
+    "readOnlyHint": true,
+    "openWorldHint": false
+  },
   "automations.runOnEvent": {
     "readOnlyHint": false,
     "destructiveHint": true,

@@ -1,9 +1,10 @@
 import { Button, Select, SelectTrigger, useShape } from '@gitspace/ui';
 import { Trash01, XCircle } from '@untitledui/icons';
 import { useId, useState, type ReactElement, type ReactNode } from 'react';
-import { type AutomationCondition } from '@gitspace/protocol/automations-contract';
+import { type AutomationAuthor, type AutomationCondition } from '@gitspace/protocol/automations-contract';
+import { formatRelativeTime } from '../relative-time.js';
 import { options } from './automation-fields.js';
-import { CONDITION_LABEL, DRAFT_RULES, LINKED_RULES, LIST_MODES, LIST_RULE, PRERELEASE_RULES, PULL_REQUEST_RULES, VALUE_PLACEHOLDER, VALUE_SUGGESTIONS, type ValuesConditionKind } from './automation-formatters.js';
+import { AUTHOR_RULES, CONDITION_LABEL, DRAFT_RULES, LINKED_RULES, LIST_MODES, LIST_RULE, PRERELEASE_RULES, PULL_REQUEST_RULES, VALUE_PLACEHOLDER, VALUE_SUGGESTIONS, type AuthorCondition, type FilterCondition, type ValuesConditionKind } from './automation-formatters.js';
 
 export function Code({ children }: { children: ReactNode }): ReactElement {
   return <code className="font-mono text-caption">{children}</code>;
@@ -28,7 +29,8 @@ export function ConditionReadback({ condition, bot }: { condition: AutomationCon
     case 'baseBranch': return <>base branch is {condition.mode === 'oneOf' ? '' : 'not '}<CodeList values={condition.values} last=" or " /></>;
     case 'headBranch': return <>head branch is {condition.mode === 'oneOf' ? '' : 'not '}<CodeList values={condition.values} last=" or " /></>;
     case 'branch': return <>branch is {condition.mode === 'oneOf' ? '' : 'not '}<CodeList values={condition.values} last=" or " /></>;
-    case 'author': return <>author is {condition.mode === 'oneOf' ? '' : 'not '}<CodeList values={condition.values} last=" or " /></>;
+    case 'people':
+    case 'bots': return condition.mode === 'none' ? `no ${condition.kind}` : <>{condition.kind}: {condition.mode === 'oneOf' ? 'only' : 'not'} <CodeList values={condition.values} last=" or " /></>;
     case 'tag': return <>tag is {condition.mode === 'oneOf' ? '' : 'not '}<CodeList values={condition.values} last=" or " /></>;
     case 'prerelease': return condition.prerelease ? 'a prerelease' : 'not a prerelease';
     case 'environment': return <>environment is {condition.mode === 'oneOf' ? '' : 'not '}<CodeList values={condition.values} last=" or " /></>;
@@ -40,7 +42,7 @@ function RuleSelect({ label, value, choices, onChange }: { label: string; value:
   return <div className="w-44 max-w-full"><Select value={value} onValueChange={onChange}><SelectTrigger aria-label={label} />{options(choices)}</Select></div>;
 }
 
-function ConditionRule({ condition, bot, onChange }: { condition: AutomationCondition; bot: string; onChange(condition: AutomationCondition): void }): ReactElement {
+function ConditionRule({ condition, bot, onChange }: { condition: FilterCondition; bot: string; onChange(condition: AutomationCondition): void }): ReactElement {
   const label = `${CONDITION_LABEL[condition.kind]} rule`;
   switch (condition.kind) {
     case 'linked': return <RuleSelect label={label} value={condition.linked ? 'linked' : 'unlinked'} choices={LINKED_RULES} onChange={value => onChange({ kind: 'linked', linked: value === 'linked' })} />;
@@ -56,11 +58,14 @@ function ConditionRule({ condition, bot, onChange }: { condition: AutomationCond
   }
 }
 
-function ChipsInput({ kind, values, invalid, onChange }: { kind: ValuesConditionKind; values: readonly string[]; invalid: boolean; onChange(values: string[]): void }): ReactElement {
+/** A value offered as the chips input is typed in, with what is known of it ("3 recent · 2h ago"). */
+interface Suggestion { value: string; detail?: string }
+
+function ChipsInput({ kind, values, invalid, suggestions: offered, onChange }: { kind: ValuesConditionKind; values: readonly string[]; invalid: boolean; suggestions: readonly Suggestion[]; onChange(values: string[]): void }): ReactElement {
   const shape = useShape();
   const listId = useId();
   const [draft, setDraft] = useState('');
-  const suggestions = (VALUE_SUGGESTIONS[kind] ?? []).filter(value => !values.includes(value));
+  const suggestions = offered.filter(suggestion => !values.includes(suggestion.value));
   const add = (): void => {
     const value = draft.trim();
     if (value && !values.includes(value)) onChange([...values, value]);
@@ -74,19 +79,42 @@ function ChipsInput({ kind, values, invalid, onChange }: { kind: ValuesCondition
     <input list={suggestions.length ? listId : undefined} value={draft} placeholder={values.length ? 'Add…' : VALUE_PLACEHOLDER[kind]} aria-label={`Add to ${CONDITION_LABEL[kind]}`} aria-invalid={invalid || undefined}
       onChange={event => setDraft(event.currentTarget.value)} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); add(); } }} onBlur={add}
       className="min-w-[6rem] flex-1 bg-transparent px-1 py-0.5 font-mono text-caption text-foreground outline-none" />
-    {suggestions.length ? <datalist id={listId}>{suggestions.map(value => <option key={value} value={value} />)}</datalist> : null}
+    {suggestions.length ? <datalist id={listId}>{suggestions.map(suggestion => <option key={suggestion.value} value={suggestion.value} label={suggestion.detail} />)}</datalist> : null}
   </div>;
 }
 
-export function ConditionRow({ condition, bot, missing, onChange, onRemove }: { condition: AutomationCondition; bot: string; missing: boolean; onChange(condition: AutomationCondition): void; onRemove(): void }): ReactElement {
+export function ConditionRow({ condition, bot, missing, onChange, onRemove }: { condition: FilterCondition; bot: string; missing: boolean; onChange(condition: AutomationCondition): void; onRemove(): void }): ReactElement {
   const label = CONDITION_LABEL[condition.kind];
   return <li className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-1.5 py-2.5 sm:grid-cols-[7.5rem_minmax(0,1fr)_auto]">
     <span className="pt-1.5 text-caption font-medium text-muted-foreground">{label}</span>
     <div className="col-span-2 row-start-2 flex min-w-0 flex-col items-stretch gap-2 sm:col-span-1 sm:col-start-2 sm:row-start-1">
       <ConditionRule condition={condition} bot={bot} onChange={onChange} />
-      {'values' in condition ? <ChipsInput kind={condition.kind} values={condition.values} invalid={missing} onChange={values => onChange({ ...condition, values })} /> : null}
+      {'values' in condition ? <ChipsInput kind={condition.kind} values={condition.values} invalid={missing} suggestions={(VALUE_SUGGESTIONS[condition.kind] ?? []).map(value => ({ value }))} onChange={values => onChange({ ...condition, values })} /> : null}
       {missing ? <p role="alert" className="text-caption text-destructive">Add at least one value, or remove this filter.</p> : null}
     </div>
     <Button variant="ghost" size="icon" type="button" className="col-start-2 row-start-1 sm:col-start-3" aria-label={`Remove the ${label} filter`} onClick={onRemove}><Trash01 width={14} height={14} strokeWidth={1.5} /></Button>
   </li>;
+}
+
+/** The People or Bots section: all of them (no condition), none, only those listed, or all but those, the logins
+ * suggested from who wrote the trigger's recent recorded events. */
+export function AuthorSection({ kind, condition, authors, now, missing, onChange }: {
+  kind: AuthorCondition['kind']; condition: AuthorCondition | undefined; authors: readonly AutomationAuthor[]; now: number; missing: boolean; onChange(condition: AuthorCondition | null): void;
+}): ReactElement {
+  const label = CONDITION_LABEL[kind];
+  const choose = (value: string): void => {
+    if (value === 'all') onChange(null);
+    else if (value === 'none') onChange({ kind, mode: 'none', values: [] });
+    else if (value === 'oneOf' || value === 'noneOf') onChange({ kind, mode: value, values: condition?.values ?? [] });
+  };
+  return <section aria-label={label} className="grid grid-cols-1 items-start gap-x-2 gap-y-1.5 py-2.5 sm:grid-cols-[7.5rem_minmax(0,1fr)]">
+    <span className="pt-1.5 text-caption font-medium text-muted-foreground">{label}</span>
+    <div className="flex min-w-0 flex-col items-stretch gap-2">
+      <RuleSelect label={`${label} rule`} value={condition?.mode ?? 'all'} choices={AUTHOR_RULES} onChange={choose} />
+      {condition && condition.mode !== 'none' ? <ChipsInput kind={kind} values={condition.values} invalid={missing}
+        suggestions={authors.map(author => ({ value: author.login, detail: `${author.count} recent · ${formatRelativeTime(author.lastSeenAt, now)}` }))}
+        onChange={values => onChange({ ...condition, values })} /> : null}
+      {missing ? <p role="alert" className="text-caption text-destructive">Add at least one login, or choose All or None.</p> : null}
+    </div>
+  </section>;
 }

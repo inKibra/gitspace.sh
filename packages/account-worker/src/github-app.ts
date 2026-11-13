@@ -792,6 +792,16 @@ export class GitHubAppDO extends BudgetedDurableObject {
       .map(row => AutomationEventSchema.parse(JSON.parse(row.event_json ?? 'null')));
   }
 
+  /** Who wrote the repository's latest `limit` recorded deliveries of `events`, newest first; one without an author (a
+   * check suite) is left out. */
+  recordedAuthors(repository: string, events: readonly string[], limit: number): Array<{ login: string; receivedAt: number }> {
+    if (events.length === 0) return [];
+    return this.ctx.storage.sql.exec<{ login: string | null; received_at: number }>(
+      `SELECT json_extract(event_json, '$.author') AS login, received_at FROM deliveries WHERE event_json IS NOT NULL AND lower(repository) = lower(?) AND event IN (${events.map(() => '?').join(', ')}) ORDER BY received_at DESC, rowid DESC LIMIT ?`,
+      repository, ...events, limit,
+    ).toArray().flatMap(row => row.login === null ? [] : [{ login: row.login, receivedAt: row.received_at }]);
+  }
+
   /** One recorded delivery as automations read it, if it belongs to `repository`. */
   recordedEvent(repository: string, deliveryId: string): AutomationEvent | null {
     const row = this.ctx.storage.sql.exec<DeliveryRow>('SELECT * FROM deliveries WHERE id = ? AND event_json IS NOT NULL AND lower(repository) = lower(?)', deliveryId, repository).toArray()[0];

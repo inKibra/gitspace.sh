@@ -34,7 +34,7 @@ export const AutomationEventSchema = z.object({
   actor: z.string().nullable(),
   /** This account's GitHub App sent it: GitSpace acted. */
   fromApp: z.boolean(),
-  /** The author conditions read: of the pull request or issue, the comment or review, or the push. */
+  /** What the People and Bots conditions read: the author of the pull request or issue, the comment or review, or the push. */
   author: z.string().nullable(),
   /** What it is about, first the subject; a check suite names its pull requests, then its branch. */
   subjects: z.array(AutomationSubjectSchema),

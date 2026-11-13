@@ -23,7 +23,9 @@ import { StreamCursorCodec, streamCodec } from './stream-codec.js';
 import { TranscriptChunkCodec, TranscriptPageCodec, TranscriptContentPageCodec, TranscriptPageRequestFields, TranscriptContentRequestFields } from './transcript.js';
 import { DRIVE_FILE_MAX_BYTES } from './artifact-storage.js';
 import {
+  AUTOMATION_AUTHOR_EVENTS,
   AUTOMATION_MODES,
+  AutomationAuthorsCodec,
   AutomationDraftCodec,
   AutomationExceptionCodec,
   AutomationGitHubCodec,
@@ -1763,6 +1765,16 @@ export const automationEventsContract = gitspaceRpc
   .errors({ ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed })
   .query();
 
+/** The distinct authors of the project's repository's latest recorded deliveries of `events`, people apart from bots,
+ * each with how many of those deliveries they wrote and the newest one's arrival, newest first: the People and Bots
+ * conditions suggest them. */
+export const automationAuthorsContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ ...automationProject, events: wire.array(wire.enum(AUTOMATION_AUTHOR_EVENTS)) }))
+  .output(AutomationAuthorsCodec)
+  .errors({ ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed })
+  .query();
+
 /** Run it: a saved automation acts once on a recorded delivery, with its trust and conditions checked as when it arrived. */
 export const runAutomationOnEventContract = gitspaceRpc
   .procedure()
@@ -2611,6 +2623,7 @@ export const gitspaceContract = gitspaceRpc.contract({
     runs: automationRunsContract,
     test: testAutomationContract,
     events: automationEventsContract,
+    authors: automationAuthorsContract,
     runOnEvent: runAutomationOnEventContract,
     link: linkAutomationSubjectContract,
     unlink: unlinkAutomationSubjectContract,

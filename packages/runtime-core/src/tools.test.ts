@@ -43,7 +43,7 @@ const samples: Record<string, ToolCall['arguments']> = {
   agents: { op: 'list' }, proc: { op: 'list' }, machines: { op: 'list' }, environment: { method: 'get' }, sync: { method: 'status' }, workspace_status: {},
   space_goal: { method: 'get' }, space_phase: { phase: 'code' }, space_workspace: { method: 'current' }, space_automations: { method: 'list' }, space_artifacts: { method: 'list' },
   space_workflow: { method: 'get' }, space_rubric: { method: 'get' }, space_journal: { method: 'list' }, space_guide: { method: 'get' }, space_review: { method: 'list' },
-  web_search: { query: 'TypeScript documentation' }, generate_image: { prompt: 'A blue square' }, ast_grep: { pattern: 'foo($A)', path: 'src', language: 'typescript' },
+  web_search: { query: 'TypeScript documentation' }, web_fetch: { url: 'https://www.typescriptlang.org/docs/' }, generate_image: { prompt: 'A blue square' }, ast_grep: { pattern: 'foo($A)', path: 'src', language: 'typescript' },
   ast_edit: { ops: [{ pat: 'foo($A)', out: 'bar($A)' }], paths: ['src/main.ts'], language: 'typescript' }, ast_resolve: { proposalId: 'proposal', action: 'reject' },
   history_search: { query: 'decision' }, history_read: { conversationId: 'conversation' }, report_issue: { message: 'Observed concrete failure' },
   checkpoint: { goal: 'Inspect implementation' }, rewind: { checkpoint: 'checkpoint', report: 'Findings' }, wait: { timeoutMs: 1000 },
