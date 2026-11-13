@@ -185,6 +185,18 @@ try {
   const root = answered.conversations.find(item => item.parentId === null);
   assert(root && root.retry === undefined && root.status !== 'failed', 'A retried request that answered still shows its retry or a failure');
   console.log('PASS an overloaded model request shows when it is retried and why, until the retry answers');
+  // A reply being written shows as it grows: the snapshot carries its size, the newest transcript page a pending row.
+  await request('/submit?text=write%20slowly');
+  const writing = await until(snapshot => (snapshot.conversations.find(item => item.parentId === null)?.streamed ?? 0) > 0);
+  const writingRoot = writing.conversations.find(item => item.parentId === null)!;
+  const writingPage = (await session({ type: 'transcriptPage', request: { generation: null, before: null, after: null, around: null } }, writingRoot.id)).transcriptPage!;
+  const pending = writingPage.rows.find(row => row.item.type === 'message' && row.item.pending === true);
+  assert(pending?.item.type === 'message' && pending.item.text.startsWith('word0'), 'The reply being written is not in the transcript');
+  const written = await until(snapshot => snapshot.conversations.some(item => item.messages.some(message => message.content.some(part => part.type === 'text' && part.text.includes('word14')))));
+  assert.equal(written.conversations.find(item => item.parentId === null)?.streamed, undefined, 'A stored reply still shows as being written');
+  const writtenPage = (await session({ type: 'transcriptPage', request: { generation: null, before: null, after: null, around: null } }, writingRoot.id)).transcriptPage!;
+  assert(!writtenPage.rows.some(row => row.item.type === 'message' && row.item.pending === true), 'A stored reply left a pending row');
+  console.log('PASS a reply being written shows in the snapshot and the transcript as it grows, and as stored once written');
   await request('/submit?text=fail%20the%20model');
   const failed = await until(snapshot => snapshot.conversations.some(item => item.status === 'failed'));
   assert.match(failed.conversations.find(item => item.status === 'failed')?.error ?? '', /fixture provider rejected the request/);

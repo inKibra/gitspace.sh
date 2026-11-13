@@ -58,6 +58,27 @@ const stream: StreamFunction = (_model, context, options) => {
     result.end();
     return result;
   }
+  if (last?.role === 'user' && text === 'write slowly') {
+    // Fifteen words, one every 200 ms, each delta carrying the reply so far, as a provider streams it.
+    const words = Array.from({ length: 15 }, (_, index) => `word${index}`);
+    const message = (written: string): AssistantMessage => ({ role: 'assistant', api: 'fixture', provider: 'fixture', model: 'fixture', content: [{ type: 'text', text: written }], stopReason: 'stop', timestamp: Date.now(), usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } });
+    result.push({ type: 'start', partial: message('') });
+    result.push({ type: 'text_start', contentIndex: 0, partial: message('') });
+    void (async () => {
+      let written = '';
+      for (const word of words) {
+        const paused = Promise.withResolvers<void>();
+        setTimeout(paused.resolve, 200);
+        await paused.promise;
+        written += `${word} `;
+        result.push({ type: 'text_delta', contentIndex: 0, delta: `${word} `, partial: message(written) });
+      }
+      result.push({ type: 'text_end', contentIndex: 0, content: written, partial: message(written) });
+      result.push({ type: 'done', reason: 'stop', message: message(written) });
+      result.end();
+    })();
+    return result;
+  }
   const plan = last?.role === 'user' && text === 'propose a plan';
   const output: AssistantMessage = { role: 'assistant', api: 'fixture', provider: 'fixture', model: 'fixture', content: ask || plan ? [{ type: 'toolCall', id: crypto.randomUUID(), name: plan ? 'propose_plan' : 'ask', arguments: plan ? { prompt: 'Approve this deterministic smoke plan?', choices: ['Misleading model choice', 'Another model choice'], steps: [{ id: 'smoke', title: 'Run the smoke step', detail: 'One deterministic step.' }] } : { prompt: 'Choose a color', choices: ['blue', 'green'] } }] : [{ type: 'text', text: `fixture reply: ${text}` }], stopReason: ask || plan ? 'toolUse' : 'stop', timestamp: Date.now(), usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0.000001, output: 0.000002, cacheRead: 0, cacheWrite: 0, total: 0.000003 } } };
   result.push({ type: 'start', partial: output });
