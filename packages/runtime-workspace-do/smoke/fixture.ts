@@ -340,10 +340,10 @@ export class MemorySmoke extends DurableObject {
     const models = createModels();
     models.setProvider({ id: 'fixture', name: 'Smoke fixture', auth: { apiKey: { name: 'Fixture only', async resolve() { return { auth: { apiKey: 'not-a-real-key' } }; } } }, getModels: () => [{ ...model, contextWindow: 10_000_000 }], stream, streamSimple: stream });
     const runtime = await openSmokeRuntime(this.ctx, this.ctx.storage, operations, { models });
-    /** Runs `step`, then waits for one more `phase` line. */
-    const logged = async (phase: string, step: () => Promise<unknown>) => {
+    /** Runs `step`, then waits for one more `phase` line; returns what `step` returned. */
+    const logged = async <T>(phase: string, step: () => Promise<T>): Promise<T> => {
       const before = memoryLines.filter(line => line.phase === phase).length;
-      await step();
+      const result = await step();
       const deadline = Date.now() + 30_000;
       while (memoryLines.filter(line => line.phase === phase).length === before) {
         check(Date.now() < deadline, `No ${phase} memory estimate line`);
@@ -351,6 +351,7 @@ export class MemorySmoke extends DurableObject {
         setTimeout(waited.resolve, 20);
         await waited.promise;
       }
+      return result;
     };
     const root = await runtime.harness.root(BACKGROUND_CONTEXT);
     await root.commit(async tx => {
@@ -367,7 +368,15 @@ export class MemorySmoke extends DurableObject {
     runtime.harness.resume();
     await Promise.all(ids.map(id => runtime.harness.waitForTask(id, BACKGROUND_CONTEXT)));
     await logged('turn-end', () => runtime.submit({ ...identity, requestId: 'tasks-turn', text: 'tasks-turn' }));
-    await logged('wake', () => openSmokeRuntime(this.ctx, this.ctx.storage, operations, { models }));
+    // A subagent forked from the main conversation, its 200 entries of 10,000 characters after the inherited history.
+    const anchor = await root.commit(tx => tx.appendEntry(root.id, { kind: 'smoke.scope' }), BACKGROUND_CONTEXT);
+    const subagent = await root.fork(anchor.id, { ownership: { kind: 'ownerless' } }, BACKGROUND_CONTEXT);
+    await subagent.commit(async tx => {
+      for (let i = 0; i < 200; i++) await tx.appendEntry(subagent.id, { kind: 'smoke.history', model: [{ role: 'user', content: `subagent-${i} ${'s'.repeat(10_000)}`, timestamp: Date.now() }] });
+    }, BACKGROUND_CONTEXT);
+    const second = await logged('wake', () => openSmokeRuntime(this.ctx, this.ctx.storage, operations, { models }));
+    const listed = (await second.snapshot()).conversations.find(item => item.id === String(subagent.id));
+    check(listed?.parentId === String(root.id) && listed.messages.length === 0, `The reopened runtime listed the subagent as ${JSON.stringify(listed && { ...listed, messages: listed.messages.length })}`);
     // The first runtime closes; a third opens beside the second.
     await runtime.harness.close(BACKGROUND_CONTEXT);
     await logged('wake', () => openSmokeRuntime(this.ctx, this.ctx.storage, operations, { models }));

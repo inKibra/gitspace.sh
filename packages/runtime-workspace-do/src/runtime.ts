@@ -386,14 +386,15 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
   let agents: WorkspaceStatusSummary['agents'] = { green: 0, blue: 0, orange: 0, red: 0 };
   const TASK_ORDER: Record<StoredTask['state']['status'], number> = { pending: 0, running: 1, waiting: 2, sleeping: 2, completing: 3, terminal: 4 };
   const TERMINAL_TASK_WINDOW = 128;
-  async function conversationView(record: ConversationRecord, read?: { entries: number }): Promise<ConversationView | undefined> {
+  /** A conversation's view; without `history` it reads no entries or live state, so it lists no messages. */
+  async function conversationView(record: ConversationRecord, read?: { entries: number }, history = true): Promise<ConversationView | undefined> {
     const conversation = await harness.conversation(record.id, BACKGROUND_CONTEXT);
     if (!conversation) return undefined;
     // Pi scans fork-aware entries newest-first; one bounded page includes inherited history.
     // Withdrawn notices take no place in the window: it pages back past them to the newest 256 visible entries.
     const newest: EntryRecord[] = [];
     let cursor: Cursor | undefined;
-    do {
+    if (history) do {
       const page = await conversation.entries({}, 256, cursor, BACKGROUND_CONTEXT);
       for (const entry of page.items) if (newest.length < 256 && !withdrawn.has(String(entry.id))) newest.push(entry);
       cursor = page.next;
@@ -404,7 +405,7 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
     const child = (await harness.snapshot(AgentDefinitionContextDoc, record.id, BACKGROUND_CONTEXT))?.child;
     // A rejected model request leaves an empty assistant message; its error is the user's only explanation.
     const latest = entries.flatMap(entry => entry.model ?? []).findLast(message => message.role === 'assistant');
-    const live = await harness.snapshot(LiveDoc, record.id, BACKGROUND_CONTEXT);
+    const live = history ? await harness.snapshot(LiveDoc, record.id, BACKGROUND_CONTEXT) : undefined;
     const retry = live?.generation?.retry;
     const ended: RunFailure | undefined = live?.runFailure;
     // Its size changes as pi stores more of it, which republishes the snapshot, so a client reloads the transcript.
@@ -425,7 +426,8 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
   async function refreshConversations(): Promise<void> {
     if (!conversationsLoaded) {
       conversationViews.clear();
-      // The first load, while the runtime opens, reads every conversation's newest entries whole: its mark counts them.
+      // The first load, while the runtime opens, reads the main conversation's newest entries whole (its mark counts
+      // them) and lists each subagent from its record alone; a subagent's messages load when it next changes.
       const read = { conversations: 0, entries: 0, views: 0 };
       let cursor: Cursor | undefined;
       do {
@@ -433,7 +435,7 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
         for (const record of page.items) {
           conversationIds.set(String(record.id), record.id);
           opening.update(`rebuilding the snapshot: reading conversation ${String(record.id)} after ${read.conversations} (${megabytes(read.entries)} of entries read, ${megabytes(read.views)} of views)`);
-          const view = await conversationView(record, read);
+          const view = await conversationView(record, read, record.id === runtime.root.id);
           read.conversations++;
           if (!view) continue;
           conversationViews.set(view.id, view);

@@ -100,10 +100,11 @@ try {
     assert(Math.abs(reopened.holders.conversationViews! - conversation.holders.conversationViews!) < 100_000, 'Task results were counted in the conversation views');
     // Storage reads by what asked: each rebuild during the turn reads the conversation's newest 256 entries again, and
     // pi reads all 300 (3 million characters) to build the turn's context. Opening again reads them, and the 128 task
-    // results, only for the first rebuild.
+    // results, only for the first rebuild; a subagent's 2.5 million characters are not read until it changes.
     assert(conversation.reads.rebuild.bytes >= 2_560_000, `The turn's rebuilds read ${conversation.reads.rebuild.bytes} bytes`);
     assert(conversation.reads.other.bytes >= 3_000_000, `The turn's context assembly read ${conversation.reads.other.bytes} bytes`);
     assert(reopened.reads.rebuild.bytes >= 2_560_000 + 128 * RECEIPT_CHARACTERS, `The reopened runtime's rebuild read ${reopened.reads.rebuild.bytes} bytes`);
+    assert(reopened.reads.rebuild.bytes < 2_560_000 + 128 * RECEIPT_CHARACTERS + 1_000_000, `The reopened runtime's rebuild read ${reopened.reads.rebuild.bytes} bytes, its subagent's entries included`);
     assert(reopened.reads.other.bytes < 100_000, `Opening read ${reopened.reads.other.bytes} bytes outside the rebuild`);
     assert.deepEqual(reopened.reads.transcript, { queries: 0, rows: 0, bytes: 0 });
     // Why each runtime opened: the first had no previous open; the second follows it on the same code with nothing running.
