@@ -222,9 +222,11 @@ function withImageUrls<T>(item: T, imageUrl: TranscriptImageUrl | undefined): T 
   return JSON.parse(text, (key, value: unknown) => key === 'url' && typeof value === 'string' && value.startsWith('gs-image:v1:') ? imageUrl(value) : value);
 }
 
+/** The reply the model is writing now in a conversation (pi's live generation message), if any. */
+export type InProgressReply = (conversationId: ConversationId) => Promise<unknown>;
 /** Transcript pages are projected per request from small windows of Pi entries, each told the name of the turn it
  * starts in. Nothing is persisted: Pi's entries and submissions are the only transcript storage. */
-export function createTranscriptReader(storage: Storage, withdrawn: WithdrawnNotices, executorResult?: ExecutorResultReader, imageUrl?: TranscriptImageUrl) {
+export function createTranscriptReader(storage: Storage, withdrawn: WithdrawnNotices, executorResult?: ExecutorResultReader, imageUrl?: TranscriptImageUrl, inProgress?: InProgressReply) {
   async function live(conversationId: ConversationId): Promise<boolean> {
     for (const status of LIVE_STATUSES) {
       const query: TaskQuery = { conversationId, status, background: false };
@@ -383,6 +385,12 @@ export function createTranscriptReader(storage: Storage, withdrawn: WithdrawnNot
       if (notice) projector.apply({ ...notice, sessionId });
     }
     if (!view.newer) for (const event of await executing(conversationId, sessionId, view.entries)) projector.apply(event);
+    // The reply the model is writing now, stored by pi as it arrives: its text and thinking show as pending rows, which
+    // the next page drops once the stored reply replaces them.
+    if (!view.newer && running && inProgress) {
+      const message = await inProgress(conversationId);
+      if (message !== undefined) projector.apply({ sessionId, ordinal: (view.last + 1) * ENTRY_ORDINALS, kind: 'message_update', payload: { message } });
+    }
     projector.flush();
     // Only the newest input's turn can be running; a turn a later input followed is done.
     const lastTurn = [...projection.turns.keys()].at(-1);

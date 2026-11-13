@@ -337,7 +337,7 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
       return files;
     } finally { await reader.close(); }
   };
-  const history = createSessionHistory(options.storage, storage, withdrawn, undefined, options.imageUrl);
+  const history = createSessionHistory(options.storage, storage, withdrawn, undefined, options.imageUrl, async id => (await harness.snapshot(LiveDoc, id, BACKGROUND_CONTEXT))?.generation?.message);
   const recordMessageDecisions = options.recordMessageDecisions;
   const messageDecisions = recordMessageDecisions ? createMessageDecisions(options.storage.sql, recordMessageDecisions) : undefined;
   /** A failed pass keeps its decisions for the next one; it is only logged. */
@@ -407,12 +407,15 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
     const live = await harness.snapshot(LiveDoc, record.id, BACKGROUND_CONTEXT);
     const retry = live?.generation?.retry;
     const ended: RunFailure | undefined = live?.runFailure;
+    // Its size changes as pi stores more of it, which republishes the snapshot, so a client reloads the transcript.
+    const streamed = live?.generation?.message?.content.reduce((sum, part) => sum + (part.type === 'text' ? part.text.length : part.type === 'thinking' ? part.thinking.length : 0), 0);
     return {
       id: String(record.id), parentId: parentId === undefined ? null : String(parentId),
       title: child ? child.name : record.id === runtime.root.id ? 'Workspace' : `Agent ${record.id}`,
       failure: latest?.role === 'assistant' && latest.stopReason === 'error' ? providerErrorText(latest.errorMessage ?? 'The model request failed') : null,
       runFailure: ended ? RUN_FAILURE[ended.reason]?.(ended.detail) ?? null : null,
       ...(retry ? { retry: { at: new Date(retry.at).toISOString(), error: providerErrorText(retry.error) } } : {}),
+      ...(streamed ? { streamed } : {}),
       subagent: child ? { conversationId: String(record.id), ...child } : null,
       // The snapshot paints the conversation until its transcript page loads, which draws tool results from stored rows.
       // Carrying them here made a busy workspace's snapshot pass the 1 MB response limit, failing every watch.

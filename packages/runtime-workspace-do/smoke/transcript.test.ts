@@ -259,3 +259,39 @@ test('a call shows when it started executing while it runs, and once finished sp
     await harness.close(context);
   }
 });
+
+test('the reply the model is writing shows as pending text and thinking while its turn runs, and none is left once it ends', async () => {
+  const storage = new MemoryStorage();
+  const started = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const wait = defineTool({ name: 'wait', description: 'Wait until released', parameters: { type: 'object', properties: {} }, async execute() {
+    started.resolve();
+    await release.promise;
+    return { output: [{ type: 'text', text: 'released' }] };
+  } });
+  const registry = createRegistry();
+  registry.install(defineExtension({ name: 'waiting', tools: [wait] }));
+  const harness = await Harness.open(storage, { registry, models: createModels() }, context);
+  try {
+    const root = await harness.root(context, { agent: { model: { provider: 'openai', modelId: 'fixture' }, tools: [wait] } });
+    await root.commit(async tx => {
+      await input(tx, root, [{ role: 'user', content: 'think it over', timestamp: Date.now() }]);
+      const call = await tx.appendEntry(root.id, { kind: 'pi.assistant', model: [assistant([{ type: 'toolCall', id: 'slow', name: 'wait', arguments: {} }], Date.now())] });
+      await tx.createTask(ToolTask, { kind: 'model', assistant: call.id, callId: 'slow' }, { conversationId: root.id, ownership: { kind: 'conversation' } });
+    }, context);
+    harness.resume();
+    await started.promise;
+    const partial = { role: 'assistant', content: [{ type: 'thinking', thinking: 'Weighing the options' }, { type: 'text', text: 'The first half of' }] };
+    const reader = createTranscriptReader(storage, none, undefined, undefined, async () => partial);
+    const items = async () => (await reader.page(root.id, { generation: null, before: null, after: null, around: null })).rows.map(row => row.item);
+    const streaming = await items();
+    expect(streaming).toContainEqual(expect.objectContaining({ type: 'message', role: 'assistant', text: 'The first half of', pending: true }));
+    expect(streaming).toContainEqual(expect.objectContaining({ type: 'thinking', text: 'Weighing the options' }));
+    release.resolve();
+    await root.waitForIdle(context);
+    expect((await items()).some(item => item.type === 'message' && item.pending === true)).toBe(false);
+  } finally {
+    release.resolve();
+    await harness.close(context);
+  }
+});
