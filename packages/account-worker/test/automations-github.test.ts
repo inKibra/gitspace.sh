@@ -131,7 +131,7 @@ async function linkedBeforeDefaults(): Promise<string> {
   return projectId;
 }
 
-const DEFAULT_NAMES = ['Bot review feedback to its workspace', 'Failed checks to its workspace', 'Mentions of @gitspace-test', 'Merged or closed', 'Review feedback to its workspace'];
+const DEFAULT_NAMES = ['Failed checks to its workspace', 'Mentions of @gitspace-test', 'Merged or closed', 'Review feedback to its workspace'];
 const defaultsOf = async (projectId: string) => (await env.PROJECT_AUTOMATIONS.getByName(`${env.ACCOUNT_ID}:${projectId}`).list(projectId)).automations.filter(automation => automation.isDefault).map(automation => automation.name);
 
 const pull = (number: number, change: { author: string; base?: string; head: string; draft?: boolean; body?: string }) => ({
@@ -249,18 +249,19 @@ describe('automations on GitHub events', () => {
     const { projectId, searchId, automations, send, work, runs, submitted, noticed } = await installed(['bradleat']);
     await vi.waitFor(async () => expect((await automations.list(projectId)).automations).toHaveLength(DEFAULT_NAMES.length));
     const comment = (body: string, login: string) => ({ action: 'created', sender: { login }, issue: { number: 30, title: 'Question', html_url: 'https://github.com/inKibra/pantry/issues/30', user: { login }, labels: [] }, comment: { html_url: 'https://github.com/inKibra/pantry/issues/30#issuecomment-1', body, user: { login } } });
+    const mentions = async () => (await runs()).filter(run => run.automationName === 'Mentions of @gitspace-test');
 
     await send('issue_comment', comment('@gitspace-test can you look?', 'mira'));
-    expect((await runs())[0]).toMatchObject({ automationName: 'Mentions of @gitspace-test', outcome: 'Skipped: author not trusted (@mira)' });
+    expect((await mentions())[0]).toMatchObject({ outcome: 'Skipped: author not trusted (@mira)' });
     await automations.updateSettings({ projectId, settings: { concurrency: 2, dailyRunCap: 50, trusted: ['@mira'] } });
     await send('issue_comment', comment('@gitspace-test can you look?', 'mira'));
-    const [mention] = await runs();
+    const [mention] = await mentions();
     expect(mention).toMatchObject({ outcome: null, workspaceId: projectId, checks: [{ label: '@mira is on the trust list', passed: true }, { label: 'it mentions @gitspace-test', passed: true }] });
     await work();
     await vi.waitFor(() => expect(submitted).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: projectId, text: expect.stringContaining('@gitspace-test can you look?') })));
     // A comment that does not mention the bot is skipped by its condition.
     await send('issue_comment', comment('Thanks!', 'mira'));
-    expect((await runs())[0]).toMatchObject({ state: 'skipped', outcome: 'Skipped: it does not mention @gitspace-test' });
+    expect((await mentions())[0]).toMatchObject({ state: 'skipped', outcome: 'Skipped: it does not mention @gitspace-test' });
 
     await send('pull_request', { action: 'opened', sender: { login: 'bradleat' }, pull_request: pull(14, { author: 'bradleat', head: 'feature/search' }) });
     await send('pull_request', { action: 'closed', sender: { login: 'bradleat' }, pull_request: { ...pull(14, { author: 'bradleat', head: 'feature/search' }), merged: true } });
@@ -474,7 +475,7 @@ describe('automations on GitHub events', () => {
     const added = vi.spyOn(ProjectAutomationsDO.prototype, 'addDefaults');
     const client = await signedClient();
     const overview = await client.automations.overview({});
-    expect(overview).toMatchObject({ status: 'ok', value: { projects: expect.arrayContaining([expect.objectContaining({ projectId: earlier, total: 5, on: 5 })]) } });
+    expect(overview).toMatchObject({ status: 'ok', value: { projects: expect.arrayContaining([expect.objectContaining({ projectId: earlier, total: 4, on: 4 })]) } });
     expect(await defaultsOf(earlier)).toEqual(DEFAULT_NAMES);
     // Later overviews open no project's automations for it again.
     expect(await client.automations.overview({})).toMatchObject({ status: 'ok' });
@@ -494,42 +495,59 @@ describe('automations on GitHub events', () => {
     expect(await defaultsOf(earlier)).toEqual(DEFAULT_NAMES.filter(name => name !== 'Merged or closed'));
   });
 
-  it('offers a default added later to a project that had the earlier ones, once, without bringing back one a person deleted', async () => {
+  it('brings each default no person changed to its current definition and deletes a retired one, leaving a changed default as the person left it', async () => {
     const { projectId, automations } = await installed([]);
     await vi.waitFor(async () => expect(await defaultsOf(projectId)).toEqual(DEFAULT_NAMES));
-    for (const name of ['Merged or closed', 'Bot review feedback to its workspace']) {
-      const automation = (await automations.list(projectId)).automations.find(entry => entry.name === name);
-      automationValue(await automations.delete({ projectId, automationId: automation?.id ?? '' }));
-    }
-    // As before defaults were offered by key and by revision: the project had the first defaults, the App revision 1.
-    await runInDurableObject(automations, (_instance, state) => { state.storage.sql.exec('DELETE FROM automation_defaults_offered'); });
-    await runInDurableObject(env.GITHUB_APP.getByName(env.ACCOUNT_ID), (_instance, state) => { state.storage.sql.exec('UPDATE automation_defaults SET revision=1'); });
+    const named = async (name: string) => (await automations.list(projectId)).automations.find(entry => entry.name === name);
+    const closed = await named('Merged or closed');
+    automationValue(await automations.update({ projectId, automationId: closed?.id ?? '', draft: { name: 'Merged or closed', enabled: true, trigger: closed?.trigger ?? { kind: 'manual' }, conditions: closed?.conditions ?? [], action: { kind: 'sendToLinked', wake: false, orProjectAgent: false, instruction: 'Close the workspace too.' } } }));
+    // As the defaults were at revision 2: review feedback left out bots and comments, and bots had their own default.
+    automationValue(await automations.create({ projectId, draft: { name: 'Bot review feedback to its workspace', enabled: true, trigger: { kind: 'github', events: [{ event: 'pull_request_review', actions: ['submitted'] }] }, conditions: [{ kind: 'author', mode: 'oneOf', values: ['*[bot]'] }], action: { kind: 'sendToLinked', wake: true, orProjectAgent: false, instruction: 'Read the bots.' } } }));
+    await runInDurableObject(automations, (_instance, state) => {
+      state.storage.sql.exec("UPDATE automations SET default_key='bot-review-feedback' WHERE name='Bot review feedback to its workspace'");
+      state.storage.sql.exec("UPDATE automations SET trigger_json=?, conditions_json=? WHERE default_key='review-feedback'",
+        JSON.stringify({ kind: 'github', events: [{ event: 'pull_request_review', actions: ['submitted'] }, { event: 'pull_request_review_comment', actions: ['created'] }] }),
+        JSON.stringify([{ kind: 'linked', linked: true }, { kind: 'author', mode: 'noneOf', values: ['*[bot]'] }]));
+    });
+    await runInDurableObject(env.GITHUB_APP.getByName(env.ACCOUNT_ID), (_instance, state) => { state.storage.sql.exec('UPDATE automation_defaults SET revision=2'); });
     const added = vi.spyOn(ProjectAutomationsDO.prototype, 'addDefaults');
     const client = await signedClient();
     expect(await client.automations.overview({})).toMatchObject({ status: 'ok' });
-    expect(await defaultsOf(projectId)).toEqual(DEFAULT_NAMES.filter(name => name !== 'Merged or closed'));
+    expect(await defaultsOf(projectId)).toEqual(DEFAULT_NAMES);
+    expect(await named('Review feedback to its workspace')).toMatchObject({
+      revision: 1, conditions: [{ kind: 'linked', linked: true }, { kind: 'pullRequest', pullRequest: true }],
+      trigger: { kind: 'github', events: [{ event: 'pull_request_review' }, { event: 'pull_request_review_comment' }, { event: 'issue_comment', actions: ['created'] }] },
+    });
+    expect((await named('Merged or closed'))?.action).toMatchObject({ instruction: 'Close the workspace too.' });
     expect(await client.automations.overview({})).toMatchObject({ status: 'ok' });
     expect(added.mock.calls.filter(([input]) => input.projectId === projectId)).toHaveLength(1);
   });
 
-  it('sends a review bot\'s feedback to its workspace in Review, not in Code, and a person\'s in both', async () => {
-    const { projectId, searchId, authority, send, work, runs, submitted } = await installed(['jules', 'dana', 'coderabbitai[bot]']);
-    await send('pull_request', { action: 'opened', sender: { login: 'jules' }, pull_request: pull(14, { author: 'jules', head: 'feature/search' }) });
-    const sent = async (automationName: string) => (await runs()).filter(run => run.automationName === automationName && run.subject?.number === 14);
+  it('sends review bots\' and people\'s feedback on a linked pull request to its workspace, never the account App\'s own, nor a comment on a linked issue', async () => {
+    const { projectId, searchId, send, work, runs, submitted } = await installed(['jules', 'dana']);
+    await send('pull_request', { action: 'opened', sender: { login: 'jules' }, pull_request: pull(14, { author: 'jules', head: 'feature/search', body: 'Fixes #7' }) });
+    /** A comment on the conversation of PR #14, or of issue #7, which the pull request closes. */
+    const comment = (number: number, body: string, login: string) => ({
+      action: 'created', sender: { login },
+      issue: { number, title: `Item ${number}`, html_url: `${REPOSITORY.html_url}/issues/${number}`, user: { login: 'jules' }, labels: [], ...(number === 14 ? { pull_request: {} } : {}) },
+      comment: { html_url: `${REPOSITORY.html_url}/issues/${number}#issuecomment-${body.length}`, body, user: { login } },
+    });
     await send('pull_request_review_comment', lineComment(1, 'Empty queries throw.', 'coderabbitai[bot]', 100));
-    expect(await sent('Bot review feedback to its workspace')).toEqual([expect.objectContaining({ state: 'skipped', skipReason: 'phase', outcome: 'Skipped: search-work is in Code; it runs in Review, Ship' })]);
-    expect(await sent('Review feedback to its workspace')).toEqual([expect.objectContaining({ state: 'skipped' })]);
-
-    await authority.commitWorkspacePhase(searchId, 'review');
-    await send('pull_request_review_comment', lineComment(2, 'The cache never expires.', 'coderabbitai[bot]', 101));
-    const [bot] = await sent('Bot review feedback to its workspace');
-    expect(bot).toMatchObject({ state: 'queued', workspaceId: searchId, phase: 'review', outcome: null });
+    await send('issue_comment', comment(14, 'Codex: the cache never expires.', 'chatgpt-codex-connector[bot]'));
+    await send('issue_comment', comment(14, 'Fixed in 9bd59bf.', 'gitspace-test[bot]'));
+    await send('issue_comment', comment(7, 'Still seeing this on 2.1.', 'dana'));
+    const runsNow = (await runs()).filter(run => run.automationName === 'Review feedback to its workspace');
+    expect(runsNow.filter(run => run.subject?.number === 14 && run.state === 'queued')).toEqual([expect.objectContaining({ workspaceId: searchId })]);
+    expect(runsNow).toEqual(expect.arrayContaining([
+      expect.objectContaining({ subject: expect.objectContaining({ number: 14 }), state: 'skipped', outcome: 'Skipped: posted by this account\'s GitHub App, which agents post as' }),
+      expect.objectContaining({ subject: expect.objectContaining({ number: 7 }), state: 'skipped', outcome: expect.stringContaining('on an issue') }),
+    ]));
     await work();
-    await vi.waitFor(() => expect(submitted).toHaveBeenCalledWith({ projectId, workspaceId: searchId, requestId: `automation:${bot?.id}`, text: expect.stringContaining('The cache never expires.') }));
-    expect(submitted.mock.calls.some(([input]) => input.text.includes('Empty queries throw.'))).toBe(false);
-    // A person's review reaches it in Review as in Code.
-    await send('pull_request_review_comment', lineComment(3, 'Name the cache size.', 'dana', 102));
-    expect((await sent('Review feedback to its workspace'))[0]).toMatchObject({ state: 'queued', workspaceId: searchId });
+    await vi.waitFor(() => expect(submitted).toHaveBeenCalledWith(expect.objectContaining({ projectId, workspaceId: searchId, text: expect.stringContaining('Empty queries throw.') })));
+    const text = submitted.mock.calls.map(([input]) => input.text).join('\n');
+    expect(text).toContain('Codex: the cache never expires.');
+    expect(text).not.toContain('Fixed in 9bd59bf.');
+    expect(text).not.toContain('Still seeing this on 2.1.');
   });
 
   it('gives a project created under an existing installation its defaults', async () => {

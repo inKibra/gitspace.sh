@@ -68,9 +68,10 @@ const SUBMIT_RETRY_MS: readonly number[] = [30_000, 2 * 60_000, 10 * 60_000];
  * further event arrived for `BATCH_QUIET_MS`, at most `BATCH_MAX_MS` after its first. */
 const BATCH_QUIET_MS = 90_000;
 const BATCH_MAX_MS = 10 * 60_000;
-/** Workspace agents post on GitHub as the person (they run `gh` signed in as them), so what the person's own login
- * authored is never delivered to a workspace: it may be an agent's own post. */
+/** Workspace agents post on GitHub as the person (they run `gh` signed in as them) or as this account's GitHub App, so
+ * what either authored is never delivered to a workspace: it may be an agent's own post. */
 const OWN_ACCOUNT_SKIP = 'Skipped: posted from your account while agents post as you';
+const OWN_APP_SKIP = 'Skipped: posted by this account\'s GitHub App, which agents post as';
 const MAX_NAME = 120;
 const MAX_INSTRUCTION = 16_000;
 /** Recorded deliveries a test without a chosen one reads, and the matching ones it shows. */
@@ -299,25 +300,21 @@ export const GITSPACE_RELEASES_AUTOMATION: AutomationDraft = {
   },
 };
 
-/** Raised when `defaultAutomations` gains an entry, so the GitHub App offers it to the projects it already gave defaults. */
-export const AUTOMATION_DEFAULTS_REVISION = 2;
+/** Raised when `defaultAutomations` changes, so the GitHub App offers the projects it gave defaults the new ones. */
+export const AUTOMATION_DEFAULTS_REVISION = 3;
 /** The defaults every project received at once, before each default's offer was recorded by key. */
 const FIRST_DEFAULT_KEYS = ['review-feedback', 'failed-checks', 'mentions', 'closed'];
+/** Defaults no longer offered: one no person changed is deleted. */
+const RETIRED_DEFAULT_KEYS = ['bot-review-feedback'];
 
 /** The default automations installing the GitHub App adds (docs/AUTOMATIONS-DESIGN.md §4), by key. */
 function defaultAutomations(bot: string): Array<{ key: string; draft: AutomationDraft }> {
   return [
     { key: 'review-feedback', draft: {
       name: 'Review feedback to its workspace', enabled: true,
-      trigger: { kind: 'github', events: [{ event: 'pull_request_review', actions: ['submitted'] }, { event: 'pull_request_review_comment', actions: ['created'] }] },
-      conditions: [{ kind: 'linked', linked: true }, { kind: 'author', mode: 'noneOf', values: ['*[bot]'] }],
-      action: { kind: 'sendToLinked', wake: true, orProjectAgent: false, instruction: 'New review feedback on this workspace\'s pull request: the reviews and comments below. Read each one and address it.' },
-    } },
-    { key: 'bot-review-feedback', draft: {
-      name: 'Bot review feedback to its workspace', enabled: true, phases: ['review', 'ship'],
-      trigger: { kind: 'github', events: [{ event: 'pull_request_review', actions: ['submitted'] }, { event: 'pull_request_review_comment', actions: ['created'] }] },
-      conditions: [{ kind: 'linked', linked: true }, { kind: 'author', mode: 'oneOf', values: ['*[bot]'] }],
-      action: { kind: 'sendToLinked', wake: true, orProjectAgent: false, instruction: 'Review bots commented on this workspace\'s pull request: the reviews and comments below. Check each against the code; fix what holds, and say why for what does not.' },
+      trigger: { kind: 'github', events: [{ event: 'pull_request_review', actions: ['submitted'] }, { event: 'pull_request_review_comment', actions: ['created'] }, { event: 'issue_comment', actions: ['created'] }] },
+      conditions: [{ kind: 'linked', linked: true }, { kind: 'pullRequest', pullRequest: true }],
+      action: { kind: 'sendToLinked', wake: true, orProjectAgent: false, instruction: 'New feedback on this workspace\'s pull request, from people and review bots: the reviews and comments below. Read each one and address it.' },
     } },
     { key: 'failed-checks', draft: {
       name: 'Failed checks to its workspace', enabled: true,
@@ -743,11 +740,7 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
       const projectId = this.ensureProject(input.projectId);
       const automation = this.requiredAutomation(input.automationId);
       const now = Date.now();
-      this.ctx.storage.transactionSync(() => {
-        for (const run of this.rows<RunRow>("SELECT * FROM automation_runs WHERE automation_id=? AND state='queued'", automation.id)) this.finish(run, 'skipped', 'Skipped: its automation was deleted', now);
-        this.ctx.storage.sql.exec('DELETE FROM automations WHERE id=?', automation.id);
-        this.ctx.storage.sql.exec('DELETE FROM automation_exceptions WHERE automation_id=?', automation.id);
-      });
+      this.ctx.storage.transactionSync(() => this.remove(automation.id, now));
       await this.changed(projectId);
       return { projectId, automationId: automation.id, deleted: true };
     });
@@ -1194,6 +1187,8 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
         if (event.watchKey !== null && (await this.repository(projectId))?.toLowerCase() !== event.repository.toLowerCase()) return { trusted: true, label: `You watch ${event.repository}; what it publishes reaches the agent as trusted` };
         if (actor === null) return { trusted: true, label: event.event === 'check_suite' ? 'A check suite carries only GitHub\'s result' : 'Only people with write access can tag the repository' };
         if (event.fromApp) return { trusted: true, label: 'Sent by this account\'s GitHub App' };
+        // Only a GitHub App installed on the repository, or the repository's own workflows, comments as `<name>[bot]`.
+        if (actor.endsWith('[bot]')) return { trusted: true, label: `@${actor} is an app on the repository` };
         if (this.rows('SELECT login FROM automation_trusted WHERE login=?', actor).length > 0) return { trusted: true, label: `@${actor} is on the trust list` };
         try {
           return await github.canWrite(event.repository, actor)
@@ -1310,15 +1305,17 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
     return this.reach(projectId, automation, await this.eventPlan(projectId, automation, context));
   }
 
-  /** What an automation does with an event: one that would reach a workspace is skipped when the person's own login
-   * acted (an agent may have posted it), then trust, then its conditions in order (the first that fails skips it), then
-   * its action's target. The run's message is written when it is recorded, from its events (`eventMessage`). */
+  /** What an automation does with an event: one that would reach a workspace is skipped when the person's own login or
+   * this account's GitHub App acted (an agent may have posted it), then trust, then its conditions in order (the first
+   * that fails skips it), then its action's target. The run's message is written when it is recorded, from its events
+   * (`eventMessage`). */
   private async eventPlan(projectId: string, automation: Automation, context: EventContext): Promise<RunPlan> {
     const { event } = context;
     const pending = automation.conditions.map(condition => ({ label: conditionLabel(condition, context.bot), passed: null }));
-    if ((automation.action.kind === 'sendToLinked' || automation.action.kind === 'messageWorkspace') && event.actor !== null && (await context.ownLogin())?.toLowerCase() === event.actor.toLowerCase()) {
-      const label = `@${event.actor} is your GitHub account, and agents post as you`;
-      return { ...failedPlan(OWN_ACCOUNT_SKIP, 'skipped'), checks: [{ label, passed: false }, ...pending], timeline: [label] };
+    if ((automation.action.kind === 'sendToLinked' || automation.action.kind === 'messageWorkspace') && event.actor !== null) {
+      const own = event.fromApp ? `@${event.actor} is this account's GitHub App, which agents post as`
+        : (await context.ownLogin())?.toLowerCase() === event.actor.toLowerCase() ? `@${event.actor} is your GitHub account, and agents post as you` : null;
+      if (own !== null) return { ...failedPlan(event.fromApp ? OWN_APP_SKIP : OWN_ACCOUNT_SKIP, 'skipped'), checks: [{ label: own, passed: false }, ...pending], timeline: [own] };
     }
     const trust = await context.trust();
     if ('error' in trust) return { ...failedPlan(`Failed: ${trust.error}`), checks: [{ label: 'The author\'s access', passed: null }, ...pending] };
@@ -1505,7 +1502,8 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
     this.ctx.storage.sql.exec('UPDATE automation_runs SET state=?, outcome=?, finished_at=?, retry_at=NULL, timeline_json=? WHERE id=?', state, outcome, now, timelineWith(run, now, label), run.id);
   }
 
-  /** Adds each default automation this project was not yet offered; true when it offered one now. */
+  /** Adds each default automation this project was not yet offered, brings each default no person changed (still at
+   * revision 1) to its current definition, and deletes retired defaults no person changed; true when any changed. */
   private addDefaultAutomations(bot: string): boolean {
     const sql = this.ctx.storage.sql;
     if (this.rows<{ defaults_added: number }>('SELECT defaults_added FROM automation_settings WHERE id=1')[0]?.defaults_added === 1) {
@@ -1514,14 +1512,33 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
       const settings = this.settings();
       sql.exec('INSERT INTO automation_settings(id, concurrency, daily_run_cap, defaults_added) VALUES(1, ?, ?, 1) ON CONFLICT(id) DO UPDATE SET defaults_added=1', settings.concurrency, settings.dailyRunCap);
     }
-    let offered = false;
+    let changed = false;
+    const now = Date.now();
     for (const entry of defaultAutomations(bot)) {
-      if (sql.exec('INSERT OR IGNORE INTO automation_defaults_offered(key) VALUES(?)', entry.key).rowsWritten === 0) continue;
-      offered = true;
-      if (this.rows('SELECT id FROM automations WHERE name=? OR default_key=?', entry.draft.name, entry.key).length > 0) continue;
-      this.save({ id: null, draft: checkDraft(entry.draft), targetName: 'the linked workspace', proposal: null, createdBy: 'person', defaultKey: entry.key });
+      if (sql.exec('INSERT OR IGNORE INTO automation_defaults_offered(key) VALUES(?)', entry.key).rowsWritten > 0) {
+        changed = true;
+        if (this.rows('SELECT id FROM automations WHERE name=? OR default_key=?', entry.draft.name, entry.key).length === 0) {
+          this.save({ id: null, draft: checkDraft(entry.draft), targetName: 'the linked workspace', proposal: null, createdBy: 'person', defaultKey: entry.key });
+          continue;
+        }
+      }
+      const draft = checkDraft(entry.draft);
+      const definition = [JSON.stringify(draft.trigger), JSON.stringify(draft.conditions), JSON.stringify(draft.action), draft.phases === undefined ? null : JSON.stringify(draft.phases)];
+      const updated = sql.exec('UPDATE automations SET trigger_json=?, conditions_json=?, action_json=?, phases_json=?, updated_at=? WHERE default_key=? AND revision=1 AND (trigger_json IS NOT ? OR conditions_json IS NOT ? OR action_json IS NOT ? OR phases_json IS NOT ?)',
+        ...definition, now, entry.key, ...definition);
+      if (updated.rowsWritten > 0) changed = true;
     }
-    return offered;
+    for (const key of RETIRED_DEFAULT_KEYS) {
+      for (const { id } of this.rows<{ id: string }>('SELECT id FROM automations WHERE default_key=? AND revision=1', key)) { this.remove(id, now); changed = true; }
+    }
+    return changed;
+  }
+
+  /** Deletes an automation with its workspace exceptions; its queued runs are skipped. */
+  private remove(automationId: string, now: number): void {
+    for (const run of this.rows<RunRow>("SELECT * FROM automation_runs WHERE automation_id=? AND state='queued'", automationId)) this.finish(run, 'skipped', 'Skipped: its automation was deleted', now);
+    this.ctx.storage.sql.exec('DELETE FROM automations WHERE id=?', automationId);
+    this.ctx.storage.sql.exec('DELETE FROM automation_exceptions WHERE automation_id=?', automationId);
   }
 
   /** Writes a checked draft over automation `id`, or as a new automation; returns its id. */
@@ -1849,6 +1866,12 @@ function checkCondition(condition: AutomationCondition, event: AutomationEvent, 
     case 'draft': return condition.draft
       ? { label, passed: event.draft === true, reason: 'the pull request is not a draft' }
       : { label, passed: event.draft !== true, reason: 'the pull request is a draft' };
+    case 'pullRequest': {
+      const onPullRequest = event.subjects[0]?.kind === 'pullRequest';
+      return condition.pullRequest
+        ? { label, passed: onPullRequest, reason: 'it is on an issue' }
+        : { label, passed: !onPullRequest, reason: 'it is on a pull request' };
+    }
     case 'conclusion': return { label, passed: event.conclusion !== null && values.includes(event.conclusion), reason: `the conclusion is ${event.conclusion ?? 'none yet'}` };
     case 'reviewState': return { label, passed: event.reviewState !== null && values.some(value => value.toLowerCase() === event.reviewState), reason: `the review is ${(event.reviewState ?? 'unknown').replaceAll('_', ' ')}` };
     case 'tag': {
@@ -1882,6 +1905,7 @@ function conditionLabel(condition: AutomationCondition, bot: string | null): str
     case 'labels': return condition.mode === 'oneOf' ? `has the label ${values}` : `has no label ${values}`;
     case 'changedFiles': return condition.mode === 'oneOf' ? `changes files matching ${values}` : `changes no file matching ${values}`;
     case 'draft': return condition.draft ? 'a draft' : 'not a draft';
+    case 'pullRequest': return condition.pullRequest ? 'on a pull request' : 'on an issue';
     case 'conclusion': return `conclusion is ${values}`;
     case 'reviewState': return `review is ${values.replaceAll('_', ' ')}`;
     case 'tag': return `tag is ${not}${values}`;

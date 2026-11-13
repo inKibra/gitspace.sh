@@ -323,6 +323,8 @@ export const AutomationConditionSchema = z.discriminatedUnion('kind', [
   listCondition('changedFiles', 'The files the change touches.'),
   /** `draft: false` passes only pull requests that are not drafts. */
   z.object({ kind: z.literal('draft').describe('Whether the pull request is a draft.'), draft: z.boolean().describe('false passes only pull requests that are not drafts.') }).strict(),
+  /** `pullRequest: true` passes only what is on a pull request; false, only what is on an issue. */
+  z.object({ kind: z.literal('pullRequest').describe('Whether the comment is on a pull request or on an issue.'), pullRequest: z.boolean().describe('true passes only comments on pull requests; false, only comments on issues.') }).strict(),
   z.object({ kind: z.literal('conclusion').describe('The check suite\'s conclusion, such as success or failure.'), values: conditionValues }).strict(),
   z.object({ kind: z.literal('reviewState').describe('The review\'s state, such as approved or changes_requested.'), values: conditionValues }).strict(),
   /** A watched release's or tag's name. */
@@ -341,10 +343,10 @@ export const AutomationConditionCodec = wire.serializable((value): value is Auto
 /** The conditions each event offers. */
 export const AUTOMATION_EVENT_CONDITIONS: Record<AutomationGitHubEvent, readonly AutomationConditionKind[]> = {
   pull_request: ['linked', 'baseBranch', 'headBranch', 'author', 'draft', 'labels', 'changedFiles'],
-  pull_request_review: ['linked', 'mentionsBot', 'baseBranch', 'author', 'reviewState'],
-  pull_request_review_comment: ['linked', 'mentionsBot', 'baseBranch', 'author'],
+  pull_request_review: ['linked', 'pullRequest', 'mentionsBot', 'baseBranch', 'author', 'reviewState'],
+  pull_request_review_comment: ['linked', 'pullRequest', 'mentionsBot', 'baseBranch', 'author'],
   issues: ['linked', 'author', 'labels'],
-  issue_comment: ['linked', 'mentionsBot', 'author', 'labels'],
+  issue_comment: ['linked', 'pullRequest', 'mentionsBot', 'author', 'labels'],
   push: ['linked', 'branch', 'author', 'changedFiles'],
   check_suite: ['linked', 'branch', 'conclusion'],
 };

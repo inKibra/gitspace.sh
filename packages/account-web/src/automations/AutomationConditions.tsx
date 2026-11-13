@@ -3,7 +3,7 @@ import { Trash01, XCircle } from '@untitledui/icons';
 import { useId, useState, type ReactElement, type ReactNode } from 'react';
 import { type AutomationCondition } from '@gitspace/protocol/automations-contract';
 import { options } from './automation-fields.js';
-import { CONDITION_LABEL, DRAFT_RULES, LINKED_RULES, LIST_MODES, LIST_RULE, PRERELEASE_RULES, VALUE_PLACEHOLDER, VALUE_SUGGESTIONS, type ValuesConditionKind } from './automation-formatters.js';
+import { CONDITION_LABEL, DRAFT_RULES, LINKED_RULES, LIST_MODES, LIST_RULE, PRERELEASE_RULES, PULL_REQUEST_RULES, VALUE_PLACEHOLDER, VALUE_SUGGESTIONS, type ValuesConditionKind } from './automation-formatters.js';
 
 export function Code({ children }: { children: ReactNode }): ReactElement {
   return <code className="font-mono text-caption">{children}</code>;
@@ -20,6 +20,7 @@ export function ConditionReadback({ condition, bot }: { condition: AutomationCon
     case 'linked': return condition.linked ? 'it is linked' : 'it has no linked workspace';
     case 'mentionsBot': return <>mentions <Code>{bot}</Code></>;
     case 'draft': return condition.draft ? 'a draft' : 'not a draft';
+    case 'pullRequest': return condition.pullRequest ? 'on a pull request' : 'on an issue';
     case 'conclusion': return <>conclusion is <CodeList values={condition.values} last=" or " /></>;
     case 'reviewState': return <>review is <CodeList values={condition.values} last=" or " /></>;
     case 'labels': return <>{condition.mode === 'oneOf' ? 'labeled' : 'no label'} <CodeList values={condition.values} last=" or " /></>;
@@ -44,6 +45,7 @@ function ConditionRule({ condition, bot, onChange }: { condition: AutomationCond
   switch (condition.kind) {
     case 'linked': return <RuleSelect label={label} value={condition.linked ? 'linked' : 'unlinked'} choices={LINKED_RULES} onChange={value => onChange({ kind: 'linked', linked: value === 'linked' })} />;
     case 'draft': return <RuleSelect label={label} value={condition.draft ? 'draft' : 'ready'} choices={DRAFT_RULES} onChange={value => onChange({ kind: 'draft', draft: value === 'draft' })} />;
+    case 'pullRequest': return <RuleSelect label={label} value={condition.pullRequest ? 'pullRequest' : 'issue'} choices={PULL_REQUEST_RULES} onChange={value => onChange({ kind: 'pullRequest', pullRequest: value === 'pullRequest' })} />;
     case 'prerelease': return <RuleSelect label={label} value={condition.prerelease ? 'prerelease' : 'stable'} choices={PRERELEASE_RULES} onChange={value => onChange({ kind: 'prerelease', prerelease: value === 'prerelease' })} />;
     case 'mentionsBot': return <span className="pt-1.5 text-body text-muted-foreground [overflow-wrap:anywhere]">Mentions {bot}</span>;
     case 'conclusion':

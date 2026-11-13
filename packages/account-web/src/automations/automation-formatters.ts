@@ -54,7 +54,7 @@ export type ValuesConditionKind = Extract<AutomationCondition, { values: string[
 type ListMode = 'oneOf' | 'noneOf';
 export const LIST_MODES: readonly ListMode[] = ['oneOf', 'noneOf'];
 export const CONDITION_LABEL: Record<AutomationConditionKind, string> = {
-  linked: 'Linked', mentionsBot: 'Mentions', baseBranch: 'Base branch', headBranch: 'Head branch', branch: 'Branch', author: 'Author', draft: 'Draft', labels: 'Labels', changedFiles: 'Changed files', conclusion: 'Conclusion', reviewState: 'Review state',
+  linked: 'Linked', mentionsBot: 'Mentions', baseBranch: 'Base branch', headBranch: 'Head branch', branch: 'Branch', author: 'Author', draft: 'Draft', pullRequest: 'On', labels: 'Labels', changedFiles: 'Changed files', conclusion: 'Conclusion', reviewState: 'Review state',
   tag: 'Tag', prerelease: 'Prerelease', environment: 'Environment', deploymentState: 'State',
 };
 export const LIST_RULE: Record<ListConditionKind, Record<ListMode, string>> = {
@@ -69,6 +69,7 @@ export const LIST_RULE: Record<ListConditionKind, Record<ListMode, string>> = {
 };
 export const LINKED_RULES: readonly { value: string; label: string }[] = [{ value: 'linked', label: 'Is linked' }, { value: 'unlinked', label: 'Is not linked' }];
 export const DRAFT_RULES: readonly { value: string; label: string }[] = [{ value: 'ready', label: 'Not a draft' }, { value: 'draft', label: 'Only drafts' }];
+export const PULL_REQUEST_RULES: readonly { value: string; label: string }[] = [{ value: 'pullRequest', label: 'A pull request' }, { value: 'issue', label: 'An issue' }];
 export const PRERELEASE_RULES: readonly { value: string; label: string }[] = [{ value: 'stable', label: 'Not a prerelease' }, { value: 'prerelease', label: 'Only prereleases' }];
 export const VALUE_PLACEHOLDER: Record<ValuesConditionKind, string> = {
   baseBranch: 'main', headBranch: 'dependabot/*', branch: 'main', author: 'dependabot[bot]', labels: 'wontfix', changedFiles: 'docs/**', conclusion: 'failure', reviewState: 'approved',
@@ -192,6 +193,7 @@ export function newCondition(kind: AutomationConditionKind): AutomationCondition
     case 'linked': return { kind, linked: true };
     case 'mentionsBot': return { kind };
     case 'draft': return { kind, draft: false };
+    case 'pullRequest': return { kind, pullRequest: true };
     case 'prerelease': return { kind, prerelease: false };
     case 'conclusion':
     case 'reviewState':
@@ -205,6 +207,7 @@ export function conditionPhrase(condition: AutomationCondition, bot: string): st
   if (condition.kind === 'linked') return condition.linked ? 'on a linked pull request or issue' : 'with no linked workspace';
   if (condition.kind === 'mentionsBot') return `mentioning ${bot}`;
   if (condition.kind === 'draft') return condition.draft ? 'only drafts' : 'not drafts';
+  if (condition.kind === 'pullRequest') return condition.pullRequest ? 'on pull requests' : 'on issues';
   if (condition.kind === 'prerelease') return condition.prerelease ? 'only prereleases' : 'not prereleases';
   const values = condition.values.join(' or ');
   switch (condition.kind) {
