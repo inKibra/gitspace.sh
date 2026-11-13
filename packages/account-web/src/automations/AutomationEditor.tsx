@@ -319,7 +319,7 @@ export function AutomationEditor({ projectId, workspaces, github, modelRoles, so
           })}
         </div> : null}
         {errors.conditions ? <p role="alert" className="text-caption text-destructive [overflow-wrap:anywhere]">{errors.conditions}</p> : null}
-        <p className="text-caption text-muted-foreground">Values can be patterns: <span className="font-mono">{triggerKind === 'watch' ? 'v*' : 'release/*'}</span>, <span className="font-mono">docs/**</span>.{triggerKind === 'watch' ? '' : ' Events from authors without write access who are not on the trust list never match.'}</p>
+        <p className="text-caption text-muted-foreground">Values can be patterns: <span className="font-mono">{triggerKind === 'watch' ? 'v*' : 'release/*'}</span>, <span className="font-mono">docs/**</span>.{triggerKind === 'watch' ? '' : ' Events from people without write access who are not on the trust list never match; bots are apps on the repository and always may.'}</p>
       </section> : null}
 
       <section aria-label="Then" className="flex min-w-0 flex-col gap-3">
