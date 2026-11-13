@@ -173,6 +173,8 @@ export interface GitSpaceShellProps {
   controlsError?: string;
   onRetryControls?: () => void;
   onRetryAgent?: () => Promise<void>;
+  /** Runs the agent again from its conversation as it is, without a message: after its last run ended unanswered. */
+  onContinueAgent?: () => Promise<void>;
   onSetWorkspacePhase?: (workspaceId: string, phase: WorkspaceView['phase']) => void | Promise<void>;
   /** Fast-forwards the project's base branch from origin (Update base); offered on the project's Behind marker. */
   onUpdateBase?: () => Promise<void>;
@@ -359,13 +361,14 @@ function RetryNotice({ retry }: { retry: { at: string; error: string } }) {
 }
 
 // ── Agent canvas ──
-function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onRetryControls, onRetryAgent, turns, transcript, history, transport, onSend, draft, artifactUpload, sessionCommand, pending, error, providers, skills, banner, access, accessBanner }: {
+function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onRetryControls, onRetryAgent, onContinueAgent, turns, transcript, history, transport, onSend, draft, artifactUpload, sessionCommand, pending, error, providers, skills, banner, access, accessBanner }: {
   workspace: AgentScopeView;
   mainAgent: GitSpaceShellProps['mainAgent'];
   sessionControls?: SessionControlsProps;
   controlsError?: string;
   onRetryControls?: () => void;
   onRetryAgent?: GitSpaceShellProps['onRetryAgent'];
+  onContinueAgent?: GitSpaceShellProps['onContinueAgent'];
   turns: TurnBlock[];
   transcript?: TranscriptHistory;
   history?: GitSpaceShellProps['history'];
@@ -414,6 +417,14 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onR
       await onRetryAgent();
     } catch (failure) { setOpenError(rpcErrorMessage(failure, 'Open workspace agent')); }
     finally { openingRef.current = false; setOpening(false); }
+  };
+  const [continuing, setContinuing] = useState(false);
+  const [continueError, setContinueError] = useState<string | null>(null);
+  const continueRun = async (): Promise<void> => {
+    if (continuing || !onContinueAgent) return;
+    setContinuing(true);
+    setContinueError(null);
+    try { await onContinueAgent(); } catch (failure) { setContinueError(rpcErrorMessage(failure, 'Continue')); } finally { setContinuing(false); }
   };
   const idleTitle = workspace.closedAt
     ? (workspace.kind === 'project' ? 'Project archived' : 'Workspace archived')
@@ -472,7 +483,10 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onR
   }, [turns, transport, composerOverlayHeight, virtualTranscript]);
   return <div className="relative flex min-h-0 min-w-0 flex-1 flex-col" style={{ '--composer-overlay-height': `${composerOverlayHeight}px` } as CSSProperties}>
     {history ? <TranscriptHistoryNotice {...history} /> : null}
-    {mainAgent?.errorMessage || mainAgent?.failed ? <p role="alert" className="shrink-0 whitespace-pre-wrap break-words px-4 py-2 text-caption text-destructive">Agent failure: {mainAgent.errorMessage ?? 'No failure reason was recorded for this session.'}</p> : null}
+    {mainAgent?.errorMessage || mainAgent?.failed ? <div role="alert" className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2 text-caption text-destructive">
+      <p className="min-w-0 flex-1 whitespace-pre-wrap break-words">Agent failure: {mainAgent.errorMessage ?? 'No failure reason was recorded for this session.'}{continueError ? ` · ${continueError}` : ''}</p>
+      {mainAgent.failed && onContinueAgent && !running ? <Button variant="secondary" size="compact" className="min-h-10" loading={continuing} disabled={continuing} onClick={() => void continueRun()}>Continue</Button> : null}
+    </div> : null}
     {mainAgent?.retry ? <RetryNotice key={mainAgent.retry.at} retry={mainAgent.retry} /> : null}
     {controlsError && !onRetryControls && !access ? <p role="alert" className="shrink-0 whitespace-pre-wrap break-words px-4 py-2 text-caption text-destructive">{controlsError}</p> : null}
     {accessBanner ? <div className="flex shrink-0 justify-center px-6 pt-3">{accessBanner}</div> : null}
@@ -635,7 +649,7 @@ function TerminalResizeHandle({ height, onHeight }: { height: number; onHeight: 
 }
 
 // ── Shell ──
-export function GitSpaceShell({ project, projects, workspace, baseSpace, workspaces, mainAgent, turns, transcript, history, transport, runtimeSummary, machines = [], onSend, draft, artifactUpload, sessionCommand, resolveResourceFile, sessionControls, controlsError, onRetryControls, onRetryAgent, onSetWorkspacePhase, onUpdateBase, projectOperation, sendPending = false, sendError, onSelectWorkspace, onSelectProject, onArchiveWorkspace, onCreateProject, onCreateWorkspace, onOpenSettings, onNavigateView, terminals, skills, renderInspector, renderEnvironmentStatus, user, providers, deployment, launchBanner, access, accessBanner }: GitSpaceShellProps) {
+export function GitSpaceShell({ project, projects, workspace, baseSpace, workspaces, mainAgent, turns, transcript, history, transport, runtimeSummary, machines = [], onSend, draft, artifactUpload, sessionCommand, resolveResourceFile, sessionControls, controlsError, onRetryControls, onRetryAgent, onContinueAgent, onSetWorkspacePhase, onUpdateBase, projectOperation, sendPending = false, sendError, onSelectWorkspace, onSelectProject, onArchiveWorkspace, onCreateProject, onCreateWorkspace, onOpenSettings, onNavigateView, terminals, skills, renderInspector, renderEnvironmentStatus, user, providers, deployment, launchBanner, access, accessBanner }: GitSpaceShellProps) {
   const accountSidebar = useContext(AccountSidebarContext);
   const accountDirectory = useContext(AccountDirectoryContext);
   // A link naming a capture (`?capture=<id>`, the extension's "Open in GitSpace") opens the Inspector's Browser tab,
@@ -759,7 +773,7 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
       <div className="workspace-workbench" data-terminal-open={terminalOpen && !!terminals || undefined} style={{ '--inspector-width': `${inspectorWidth}px`, '--terminal-height': `${terminalHeight}px` } as CSSProperties}>
             <div className="workspace-content" data-inspector-full={inspectorOpen && inspectorFull && !!renderInspector || undefined}>
               <div className="conversation-stage">
-                <AgentCanvas key={workspace.id} workspace={workspace} mainAgent={mainAgent} sessionControls={sessionControls} controlsError={controlsError} onRetryControls={onRetryControls} onRetryAgent={onRetryAgent} turns={turns} transcript={transcript} history={history} transport={transport} onSend={onSend} draft={draft} artifactUpload={artifactUpload} sessionCommand={sessionCommand} pending={sendPending} error={sendError} providers={providers} skills={skills} banner={launchBanner} access={access ? { card: access.card(openEnvironment), notice: access.notice } : undefined} accessBanner={accessBanner} />
+                <AgentCanvas key={workspace.id} workspace={workspace} mainAgent={mainAgent} sessionControls={sessionControls} controlsError={controlsError} onRetryControls={onRetryControls} onRetryAgent={onRetryAgent} onContinueAgent={onContinueAgent} turns={turns} transcript={transcript} history={history} transport={transport} onSend={onSend} draft={draft} artifactUpload={artifactUpload} sessionCommand={sessionCommand} pending={sendPending} error={sendError} providers={providers} skills={skills} banner={launchBanner} access={access ? { card: access.card(openEnvironment), notice: access.notice } : undefined} accessBanner={accessBanner} />
               </div>
               {inspectorOpen && renderInspector ? <InspectorResizeHandle width={inspectorWidth} onWidth={updateInspectorWidth} /> : null}
               {/* Opaque in every state: on narrow viewports the pane overlays the conversation, so a transparent loading or error state would still swallow its clicks. */}

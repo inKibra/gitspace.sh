@@ -205,6 +205,16 @@ try {
   // before every request, so no request has been answered since and no figure is shown.)
   assert.notEqual((await session({ type: 'control' })).control.context?.tokens, 0, 'A failed request read as an empty context');
   console.log('PASS failed model request surfaces its error, turns the workspace red and keeps the context in use');
+  // Continue runs a failed run again on the conversation as it is: the model answers, and no message is made up for it.
+  await request('/submit?text=reject%20once');
+  await until(snapshot => snapshot.conversations.some(item => item.parentId === null && item.status === 'failed' && (item.error ?? '').includes('rejected the request once')));
+  await session({ type: 'continue' });
+  const continued = await until(snapshot => snapshot.conversations.some(item => item.messages.some(message => message.content.some(part => part.type === 'text' && part.text === 'fixture reply: reject once'))));
+  const continuedRoot = continued.conversations.find(item => item.parentId === null)!;
+  assert.notEqual(continuedRoot.status, 'failed', 'A continued run still shows its failure');
+  assert.equal(continuedRoot.messages.filter(message => message.role === 'user' && message.content.some(part => part.type === 'text' && part.text === 'reject once')).length, 1, 'Continue added a message');
+  assert(!continuedRoot.messages.some(message => message.role === 'user' && message.content.some(part => part.type === 'text' && /continue/iu.test(part.text))), 'Continue made up a message');
+  console.log('PASS continue runs a failed run again with no message of its own');
 
   // The fixture model echoes the prompt, so this reply holds an invalid block: the main agent gets one notice, which
   // starts no turn.

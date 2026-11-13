@@ -151,11 +151,11 @@ const UNANSWERED: Record<string, string> = { aborted: 'it was stopped before it 
 const RUN_FAILURE: Record<RunFailureReason, ((detail: string | undefined) => string) | null> = {
   model_error: detail => providerErrorText(detail ?? 'The model request failed'),
   no_model: detail => `No model was available${detail ? ` (${detail})` : ''}.`,
-  faulted: detail => `The run stopped on an internal error${detail ? `: ${detail}` : ''}. Send a message to start again.`,
-  orphaned: detail => `The run could not continue after an update${detail ? ` (${detail})` : ''}. Send a message to start again.`,
-  interrupted: detail => `The run stopped because the workspace kept restarting while the model answered${detail ? ` (${detail})` : ''}. Send a message to start again.`,
-  restart_limit: detail => `The run stopped after being cut off too often${detail ? ` (${detail})` : ''}. Send a message to start again.`,
-  turn_limit: detail => `The run reached its limit of tool rounds${detail ? ` (${detail})` : ''}. Send a message to continue.`,
+  faulted: detail => `The run stopped on an internal error${detail ? `: ${detail}` : ''}. Continue runs it again.`,
+  orphaned: detail => `The run could not continue after an update${detail ? ` (${detail})` : ''}. Continue runs it again.`,
+  interrupted: detail => `The run stopped because the workspace kept restarting while the model answered${detail ? ` (${detail})` : ''}. Continue runs it again.`,
+  restart_limit: detail => `The run stopped after being cut off too often${detail ? ` (${detail})` : ''}. Continue runs it again.`,
+  turn_limit: detail => `The run reached its limit of tool rounds${detail ? ` (${detail})` : ''}. Continue picks it up from there.`,
   aborted: null, reset: null, nothing_to_answer: null,
 };
 function textParts(content: ModelMessage['content']): string {
@@ -722,7 +722,7 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
     async session(conversationId, command, canApprove = false, deviceId) {
       if (deviceId !== undefined && command.type === 'prompt') options.personPrompted?.();
       const clearsDraft = deviceId !== undefined && command.type === 'prompt' && command.draftRevision !== undefined && (conversationId === undefined || conversationId === String(runtime.root.id));
-      const wakesTasks = ['prompt', 'answerAsk', 'compact', 'promoteQueuedMessage', 'resume'].includes(command.type);
+      const wakesTasks = ['prompt', 'answerAsk', 'compact', 'promoteQueuedMessage', 'resume', 'continue'].includes(command.type);
       const result = await controls.execute(conversationId, command, canApprove, deviceId);
       if (clearsDraft && command.type === 'prompt' && command.draftRevision !== undefined) { await drafts.clear(command.draftRevision, deviceId, command.draftText); publish(); await line; }
       if (wakesTasks) harness.resume();

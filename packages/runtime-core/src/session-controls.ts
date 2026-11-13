@@ -405,6 +405,14 @@ export function createSessionControls(services: SessionControlServices) {
       }
       case 'reloadSettings': case 'instructionsChanged': case 'inferenceChanged': { const kind = command.type === 'reloadSettings' ? 'settings' : command.type === 'instructionsChanged' ? 'instructions' : 'inference'; await services.reload(kind); await mutate(draft => { if (kind === 'settings') draft.settingsRevision++; else if (kind === 'instructions') draft.instructionsRevision++; else draft.inferenceRevision++; }); break; }
       case 'resume': harness.resume(); break;
+      // After a run ended unanswered: it runs again on the conversation as it is, admitted like a prompt, with no message.
+      case 'continue':
+        await services.lifecycle.userInput(String(target.id), async () => {
+          const requestId = crypto.randomUUID();
+          await applyInferenceThinking(target, await admitted(requestId));
+          await target.submit({ type: 'continue', requestId }, ctx);
+        });
+        break;
       case 'persist': case 'handoff': await mutate(draft => { draft.revision++; }); break;
       case 'control': case 'agentSetup': case 'historyAnchorId': case 'historyPage': case 'transcriptPage': case 'transcriptContent': case 'usage': break;
     }

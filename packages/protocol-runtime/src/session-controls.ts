@@ -43,7 +43,8 @@ export const RuntimeSubagentRecordSchema = z.object({ parentId: z.string(), name
 export type RuntimeSubagentRecord = z.infer<typeof RuntimeSubagentRecordSchema>;
 export const AgentDefinitionDiagnosticSchema = z.object({ name: z.string(), winnerPath: z.string(), ignoredPath: z.string() });
 export const AgentSetupSchema = z.object({ sessionId: z.string(), agents: z.array(AgentDefinitionSchema), diagnostics: z.array(AgentDefinitionDiagnosticSchema).optional(), definitionErrors: z.array(z.object({ path: z.string(), message: z.string() })).optional() });
-const simple = ['control', 'agentSetup', 'historyAnchorId', 'usage', 'persist', 'handoff', 'resume', 'stop', 'clearQueue', 'reloadSettings', 'instructionsChanged', 'inferenceChanged'] as const;
+/** `continue`: runs the conversation again from its context as it is, without a message (pi's continue submission). */
+const simple = ['control', 'agentSetup', 'historyAnchorId', 'usage', 'persist', 'handoff', 'resume', 'continue', 'stop', 'clearQueue', 'reloadSettings', 'instructionsChanged', 'inferenceChanged'] as const;
 /** A decision a person staged in the composer, sent with their prompt: once the prompt is in the conversation, the
  * workspace journal records it as a `decision` entry citing that message. `title`: what was decided (the question, or
  * the choice itself when there is none); `choice`: the option chosen; `sectionId`: the Change Guide section it belongs
