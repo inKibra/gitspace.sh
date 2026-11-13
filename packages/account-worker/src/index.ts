@@ -55,7 +55,8 @@ import { BROWSER_SHARE_PATH, browserShareAccount, serveBrowserShare } from './br
 import { BROWSER_WATCH_INTERNAL_PATH, browserWatchDeviceActive, serveBrowserWatch } from './browser-watch.js';
 import { serveBrowserCaptureShare } from './browser-capture-share.js';
 import { BROWSER_CAPTURE_SHARE_PATH, type RuntimeBrowserCaptureShareComment } from '@gitspace/protocol-runtime';
-import { BROWSER_WATCH_PATH } from '@gitspace/protocol-runtime';
+import { BROWSER_WATCH_PATH, DICTATION_PATH } from '@gitspace/protocol-runtime';
+import { serveDictation, workersAiDictation } from './dictation.js';
 import { mintUploadLink, serveUploadLink } from './upload-link.js';
 import { storedImages } from './runtime-images.js';
 import { UPLOAD_LINK_PATH } from '@gitspace/protocol/rpc-contract';
@@ -1248,6 +1249,8 @@ export default {
     if (url.pathname === BROWSER_CAPTURE_SHARE_PATH || url.pathname.startsWith('/api/capture-shares/')) return serveBrowserCaptureShare(request, env);
     // The Watch dialog's socket: a tab's live frames and, while you hold it from this device, your input.
     if (url.pathname === BROWSER_WATCH_PATH) return serveBrowserWatch(request, env);
+    // The composer's dictation socket: a recording in, its text from the profile's dictation provider out.
+    if (url.pathname === DICTATION_PATH) return serveDictation(request, env, workersAiDictation(env.AI));
     if (url.pathname === '/api/services/approve' || /^\/api\/browser-relay\/(pair|status|unpair|confirm|chrome|project-status|project-update|extension\.zip)$/u.test(url.pathname)) {
       if (request.method !== 'POST' || request.headers.get('origin') !== new URL(env.ACCOUNT_URL).origin) return jsonError(403, 'ORIGIN_REJECTED', 'Account origin required');
       const declared = request.headers.get('content-length');

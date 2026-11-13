@@ -93,4 +93,13 @@ describe('inference profile configuration boundaries', () => {
     expect(inferenceSettingsSchema.safeParse({ 'providers.constructor.prototype.polluted': true }).success).toBe(false);
     expect(Object.hasOwn(Object.prototype, 'polluted')).toBe(false);
   });
+
+  it('stores each service as one selector its service can run', () => {
+    const accepts = (settings: Record<string, string>) => inferenceSettingsSchema.safeParse(settings).success;
+    for (const search of ['cloudflare/ceramic', 'cloudflare/linkup', 'cloudflare/exa', 'anthropic/claude-haiku-4-5', 'openai/gpt-5-mini', 'google/gemini-2.5-flash']) expect(accepts({ search })).toBe(true);
+    for (const search of ['cloudflare/bing', 'cloudflare/', 'xai/grok-4', 'claude-haiku-4-5', '/model']) expect(accepts({ search })).toBe(false);
+    expect(accepts({ 'search.provider': 'cloudflare/ceramic' })).toBe(false);
+    for (const dictation of ['cloudflare/flux', 'cloudflare/whisper', 'openai/gpt-4o-transcribe']) expect(accepts({ dictation })).toBe(true);
+    for (const dictation of ['cloudflare/ceramic', 'anthropic/claude-haiku-4-5', 'whisper']) expect(accepts({ dictation })).toBe(false);
+  });
 });

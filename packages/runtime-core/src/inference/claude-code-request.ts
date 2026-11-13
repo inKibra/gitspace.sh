@@ -15,7 +15,7 @@ import { attestationOffset, CCH_PLACEHOLDER, CCH_SEED, ENCODE_UNITS, requestImag
  * an exact Content-Length. No copy of the whole body is made beside the SDK's string: a large conversation is two bytes
  * per character, and copies of it exhausted a workspace object's memory beside its neighbours'.
  */
-const CLAUDE_CODE_INSTRUCTION = "You are Claude Code, Anthropic's official CLI for Claude.";
+export const CLAUDE_CODE_INSTRUCTION = "You are Claude Code, Anthropic's official CLI for Claude.";
 const FINGERPRINT_SALT = '59cf53e54c78';
 const TOOL_PREFIX = '_';
 const BUILTIN_TOOLS: Record<string, true> = { web_search: true, code_execution: true, text_editor: true, computer: true };

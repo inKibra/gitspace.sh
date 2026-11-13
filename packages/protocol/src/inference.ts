@@ -5,7 +5,7 @@ import { RuntimeSubagentRecordSchema } from '@gitspace/protocol-runtime/session-
 
 export const DEFAULT_INFERENCE_PROFILE_ID = 'default';
 export const INFERENCE_PROFILE_VERSION = 1 as const;
-export type InferenceSettingSection = 'Models' | 'Providers';
+export type InferenceSettingSection = 'Models' | 'Providers' | 'Services';
 /** Roles every profile offers; a profile may add its own. An unset role resolves to Default. */
 export const BUILT_IN_MODEL_ROLES = ['default', 'deep', 'fast', 'taste'] as const;
 export const MODEL_ROLE_LABELS: Readonly<Record<string, string>> = { default: 'Default', deep: 'Deep', fast: 'Fast', taste: 'Taste' };
@@ -37,7 +37,32 @@ const namedEntryMaps: Record<string, true> = {
 
 const inferenceRootSections: Record<string, InferenceSettingSection> = {
   modelRoles: 'Models', contextLimits: 'Models', enabledModels: 'Models', visionFallback: 'Models', providers: 'Providers',
+  search: 'Services', dictation: 'Services',
 };
+/** A service selector (`search`, `dictation`): `cloudflare/<option>` runs on the platform's Cloudflare account,
+ * `<provider>/<modelId>` on one of the profile's own credentials for that pi-ai provider. */
+export function parseServiceSelector(value: string): { provider: string; id: string } | null {
+  const slash = value.indexOf('/');
+  if (slash <= 0 || slash === value.length - 1) return null;
+  return { provider: value.slice(0, slash), id: value.slice(slash + 1) };
+}
+/** Web search on Cloudflare's Web Search API, by its provider. */
+export const CLOUDFLARE_SEARCH_PROVIDERS: Readonly<Record<string, true>> = { ceramic: true, linkup: true, exa: true };
+/** Profile providers whose models search the web themselves (Anthropic's and OpenAI's keys and subscriptions, a Gemini key). */
+export const SEARCH_MODEL_PROVIDERS: Readonly<Record<string, true>> = { anthropic: true, openai: true, google: true };
+export const DEFAULT_SEARCH_SELECTOR = 'cloudflare/ceramic';
+export const searchSelectorSchema = z.string().refine(value => {
+  const selector = parseServiceSelector(value);
+  return selector !== null && (selector.provider === 'cloudflare' ? Object.hasOwn(CLOUDFLARE_SEARCH_PROVIDERS, selector.id) : Object.hasOwn(SEARCH_MODEL_PROVIDERS, selector.provider));
+}, 'Web search is cloudflare/ceramic, cloudflare/linkup, cloudflare/exa, or an anthropic, openai or google model');
+/** Dictation on Cloudflare Workers AI: `flux` transcribes live, `whisper` after recording stops. */
+export const CLOUDFLARE_DICTATION_MODELS: Readonly<Record<string, true>> = { flux: true, whisper: true };
+export const DEFAULT_DICTATION_SELECTOR = 'cloudflare/flux';
+export const dictationSelectorSchema = z.string().refine(value => {
+  const selector = parseServiceSelector(value);
+  return selector !== null && (selector.provider === 'cloudflare' ? Object.hasOwn(CLOUDFLARE_DICTATION_MODELS, selector.id) : selector.provider === 'openai');
+}, 'Dictation is cloudflare/flux, cloudflare/whisper, or an openai transcription model');
+const serviceSelectors: Readonly<Record<string, z.ZodType<string>>> = { search: searchSelectorSchema, dictation: dictationSelectorSchema };
 /** One ownership map shared by migration, editors and isolated runtime composition. */
 export function inferenceSettingSection(path: string): InferenceSettingSection | null {
   const dot = path.indexOf('.');
@@ -136,6 +161,8 @@ export const inferenceSettingMetadata: readonly RuntimeSettingSchemaItem[] = [
   { path: 'enabledModels', tab: 'Models', label: 'Enabled models', kind: 'array', value: [], defaultJson: '[]', credential: false },
   { path: 'visionFallback', tab: 'Models', label: 'Vision fallback', kind: 'string', value: '', defaultJson: '""', credential: false, description: 'Describes images for a model that cannot read them. Not offered as a role.' },
   { path: 'providers.models', tab: 'Providers', label: 'Custom provider models', kind: 'record', value: {}, defaultJson: '{}', credential: false, description: 'Non-secret provider endpoints and model definitions. Store credentials through the profile credential vault.' },
+  { path: 'search', tab: 'Services', label: 'Web search', kind: 'string', value: DEFAULT_SEARCH_SELECTOR, defaultJson: JSON.stringify(DEFAULT_SEARCH_SELECTOR), credential: false, description: 'Runs the agents\' web_search tool.' },
+  { path: 'dictation', tab: 'Services', label: 'Dictation', kind: 'string', value: DEFAULT_DICTATION_SELECTOR, defaultJson: JSON.stringify(DEFAULT_DICTATION_SELECTOR), credential: false, description: 'Transcribes the composer\'s microphone.' },
 ];
 
 const profileIdSchema = z.string().min(1).max(160).regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/u);
@@ -148,6 +175,11 @@ export const inferenceSettingsSchema = z.record(z.string(), runtimeSettingValueS
     }
     const limits = path === 'contextLimits' ? value : path.startsWith('contextLimits.') ? { [path.slice('contextLimits.'.length)]: value } : undefined;
     if (limits !== undefined && !contextLimitsSchema.safeParse(limits).success) context.addIssue({ code: 'custom', path: [path], message: `A context limit is a whole number of tokens, at least ${MIN_CONTEXT_LIMIT.toLocaleString('en-US')}` });
+    const root = path.split('.')[0]!;
+    if (Object.hasOwn(serviceSelectors, root)) {
+      const parsed = path === root ? serviceSelectors[root]!.safeParse(value) : null;
+      if (!parsed?.success) context.addIssue({ code: 'custom', path: [path], message: parsed?.error.issues[0]?.message ?? `${root} is one selector` });
+    }
   }
 });
 export const inferenceProfileSchema = z.strictObject({

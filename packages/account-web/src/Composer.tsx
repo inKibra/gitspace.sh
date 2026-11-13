@@ -18,6 +18,7 @@ import type { WorkspaceDraftBinding } from './workspace-draft.js';
 import { uploadArtifactFile, uploadRejection, type ArtifactUploadClient } from './inspector/artifact-upload.js';
 import { previewShare } from './share/share-client.js';
 import { StagedChips, useComposerStaging } from './chat/staging.js';
+import { DictationControl } from './chat/dictation.js';
 
 export type SendBehavior = 'steer' | 'followUp';
 
@@ -129,7 +130,7 @@ function ProviderNotice({ provider, profileId }: { provider: ProviderAuthView; p
 }
 
 export interface ComposerProps {
-  workspace: Pick<AgentScopeView, 'projectId' | 'kind' | 'phase'>;
+  workspace: Pick<AgentScopeView, 'id' | 'projectId' | 'kind' | 'phase'>;
   controls?: SessionControlsProps;
   providers?: readonly ProviderAuthView[];
   skills?: readonly SkillView[];
@@ -410,8 +411,9 @@ export function Composer({ workspace, controls, providers, skills = [], running,
       autoDispatchQueue={false}
       onQueueSteer={steerQueued}
       onStop={controls ? () => runControl(controls.onStop()) : undefined}
-      leftSlot={({ openFilePicker }) => <>
+      leftSlot={({ openFilePicker, insertText }) => <>
         <Button variant="ghost" size="icon-compact" type="button" aria-label="Attach files" onClick={() => openFilePicker()}><Attachment01 width={16} height={16} strokeWidth={1.5} /></Button>
+        {onSend ? <DictationControl identity={{ projectId: workspace.projectId, workspaceId: workspace.id }} insertText={insertText} disabled={recovering} /> : null}
         {controls?.selectionReadOnly ? <span className="text-caption text-muted-foreground" title="This child’s admitted selection is read-only">{controls.value.roleLabel ?? controls.value.role ?? 'No role'} · {selectedModelKey} · {controls.value.thinking ?? 'auto'}</span> : controls ? <>
           <ModelCombobox size="compact" variant="borderless" side="top" icon={glyph(CpuChip01)} ariaLabel="Model" value={selectedModelKey}
             options={[...(invalidModel ? [{ value: selectedModelKey, label: `${selectedModelKey} · unavailable` }] : []), ...modelOptions(controls.value.models, true)]}

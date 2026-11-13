@@ -35,7 +35,9 @@ flowchart LR
   images to the model's limits (references carry size and dimensions, so no bytes are needed).
 - **What moves to the inference worker:** every chat request (`stream`, `streamSimple`), which builds and sends one
   request: pi-ai providers, Claude Code shaping and its billing attestation, and the vision fallback (a model request
-  like any other).
+  like any other). A profile's web search with a model (`webSearch`) runs there too: one non-streaming request with
+  the provider's built-in search tool (`web-search.ts`), Claude Code's shape on a Claude subscription, ending in a
+  `webSearch` event with the answer and results, or `webSearchError`.
 - **What stays in the workspace object:** `generate_image` and `classify` (`generateImages`, `classify`). One call
   sends a prompt and at most a few images and gets one image or a short answer back, unlike a chat request carrying a
   whole context's images. `generate_image` loads stored input images (`images.load`) and stores its output as a

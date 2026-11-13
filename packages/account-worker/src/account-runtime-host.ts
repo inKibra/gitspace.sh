@@ -124,7 +124,7 @@ export async function createAccountWorkspaceRuntime(
   } });
   let runtime: WorkspaceRuntime | undefined;
   const documentMarkdown = createDocumentMarkdown(ctx.storage, env.AI);
-  const services = createRuntimeServices({ ctx, env, identity, schedule, requestAttachment, environment, documentMarkdown, images: { store: images.store, load: images.load }, generateImage: inference.generateImage, model: inference.modelHelper, judge, instructionLoader, runtime() {
+  const services = createRuntimeServices({ ctx, env, identity, schedule, requestAttachment, environment, documentMarkdown, images: { store: images.store, load: images.load }, generateImage: inference.generateImage, model: inference.modelHelper, webSearch: inference.webSearch, judge, instructionLoader, runtime() {
     if (!runtime) throw new Error('Runtime services were invoked before the Harness opened');
     return runtime;
   } });

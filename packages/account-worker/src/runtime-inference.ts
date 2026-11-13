@@ -1,17 +1,26 @@
 import { z } from 'zod';
 import type { Message, Models } from '@earendil-works/pi-ai';
-import { MODEL_ROLE_LABELS, applyInferenceSettings, inferenceProfileSchema, modelRoleThinkingSchema, type InferenceProfile } from '@gitspace/protocol/inference';
-import { RuntimeGenerateImageArgumentsSchema, RuntimeJsonSchema, type RuntimeSnapshot, type RuntimeToolResult } from '@gitspace/protocol-runtime';
+import { DEFAULT_WEB_SEARCH_DESCRIPTION_CHARS, DEFAULT_WEB_SEARCH_LIMIT, createAIWebSearch, type WebSearchProvider } from 'agents/websearch';
+import { DEFAULT_SEARCH_SELECTOR, MODEL_ROLE_LABELS, applyInferenceSettings, inferenceProfileSchema, modelRoleThinkingSchema, parseServiceSelector, type InferenceProfile } from '@gitspace/protocol/inference';
+import { RuntimeGenerateImageArgumentsSchema, RuntimeJsonSchema, RuntimeWebSearchArgumentsSchema, type RuntimeSnapshot, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import { ModelSelectionIntentSchema, type ModelSelectionIntent, type SessionControlView } from '@gitspace/protocol-runtime/session-controls';
 import {
   createVaultModels, createRunModelsRouter, createRequestGate,
   resolveModelSelection, resolveProfileModel, resolveAvailableProfileModel, StoredPiModelSchema, ProfileCatalogSchema, modelAvailability, modelEditTool, generateProfileImage, runProfileModelHelper, describeImagesForModel,
-  type AttemptRunner, type CredentialPins, type VaultModels,
+  type AttemptRunner, type CredentialPins, type ProfileModels, type VaultModels, type WebSearchAnswer, type WebSearchHit,
 } from '@gitspace/runtime-core/inference';
 import { InMemoryModelsStore } from '@earendil-works/pi-ai';
 
 export type RuntimeModelHelperInput = { operation: 'completion' | 'judge'; args: z.infer<typeof RuntimeJsonSchema>; conversationId: string; signal?: AbortSignal };
 export type RuntimeModelHelper = (input: RuntimeModelHelperInput) => Promise<z.infer<typeof RuntimeJsonSchema>>;
+export type RuntimeWebSearchInput = { args: z.infer<typeof RuntimeWebSearchArgumentsSchema>; conversationId: string; signal?: AbortSignal };
+/** The web_search tool's result: `provider` is the profile's search selector that ran it. */
+export type RuntimeWebSearchResult = { query: string; provider: string; answer: string | null; results: WebSearchHit[] };
+/** Cloudflare's Web Search API providers, by the selector's option. */
+const CLOUDFLARE_SEARCH: Readonly<Record<string, WebSearchProvider>> = { ceramic: 'ceramic', linkup: 'linkup', exa: 'exa' };
+/** A Cloudflare search answers in seconds; a model's searches and its answer take longer. */
+const CLOUDFLARE_SEARCH_TIMEOUT_MS = 30_000;
+const MODEL_SEARCH_TIMEOUT_MS = 120_000;
 const admissionSchema = z.object({ requestId: z.string(), conversationId: z.string(), profile: inferenceProfileSchema, assignmentRevision: z.number().int().nonnegative().nullable(), selection: ModelSelectionIntentSchema, model: StoredPiModelSchema, thinking: modelRoleThinkingSchema.optional(), role: z.string().optional() });
 type Admission = z.infer<typeof admissionSchema>;
 const pinSchema = z.object({ credentialId: z.string() });
@@ -56,11 +65,11 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
    * before a hook binds its request, and every admission a running request is bound to until that request's signal
    * ends. A view neither needs is dropped.
    */
-  const admitted = new Map<string, { conversationId: string; models: Promise<Models>; requests: number }>();
+  const admitted = new Map<string, { conversationId: string; models: Promise<ProfileModels>; requests: number }>();
   const latest = new Map<string, string>();
   /** The view a request of `admission` runs with, and its router key: bound to exactly the model it admitted, with the
    * conversation's credential pins. */
-  function admittedView(conversationId: string, admission: Admission, fastMode: boolean): { id: string; models: Promise<Models> } {
+  function admittedView(conversationId: string, admission: Admission, fastMode: boolean): { id: string; models: Promise<ProfileModels> } {
     const id = JSON.stringify(['admitted', conversationId, admission.profile.id, admission.profile.revision, admission.requestId, fastMode]);
     return { id, models: admitted.get(id)?.models ?? catalog(admission.profile).then(models => models.scope({ pins: pinsFor(admission.profile.id, conversationId), pinnedModels: [admission.model], fastMode })) };
   }
@@ -191,6 +200,37 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
       const admission = input.signal ? scopes.get(input.signal)?.admission ?? await active(input.conversationId) : await active(input.conversationId);
       const models = await admittedView(input.conversationId, admission, false).models;
       return runProfileModelHelper(models, input.operation, input.args, input.signal, admission.profile.settings);
+    },
+    /** Runs the web_search tool with the profile's search selector: Cloudflare's Web Search API, or a model's built-in
+     * search on the profile's own credentials. A failure names the selector and where to change it. */
+    async webSearch(input: RuntimeWebSearchInput): Promise<RuntimeWebSearchResult> {
+      const admission = input.signal ? scopes.get(input.signal)?.admission ?? await active(input.conversationId) : await active(input.conversationId);
+      const configured = admission.profile.settings.search;
+      const selector = typeof configured === 'string' ? configured : DEFAULT_SEARCH_SELECTOR;
+      const target = parseServiceSelector(selector);
+      const limit = input.args.limit ?? DEFAULT_WEB_SEARCH_LIMIT;
+      const deadline = AbortSignal.timeout(target?.provider === 'cloudflare' ? CLOUDFLARE_SEARCH_TIMEOUT_MS : MODEL_SEARCH_TIMEOUT_MS);
+      const signal = input.signal ? AbortSignal.any([input.signal, deadline]) : deadline;
+      let found: WebSearchAnswer;
+      try {
+        if (!target) throw new Error('that is not a search selector');
+        if (target.provider === 'cloudflare') {
+          const provider = Object.hasOwn(CLOUDFLARE_SEARCH, target.id) ? CLOUDFLARE_SEARCH[target.id] : undefined;
+          if (!provider) throw new Error('Cloudflare has no such search provider');
+          // Billed to the platform account's AI Gateway credits.
+          const response = await createAIWebSearch({ binding: env.AI, provider }).search({ query: input.args.query, limit }, { signal });
+          found = { answer: null, results: response.items.map(item => ({ title: item.title, url: item.url, ...(item.description ? { description: item.description } : {}), ...(item.lastModifiedDate ? { lastModified: item.lastModifiedDate } : {}) })) };
+        } else {
+          const models = await admittedView(input.conversationId, admission, false).models;
+          const model = models.getModel(target.provider, target.id);
+          if (!model || !(await models.getAvailable(target.provider)).some(available => available.id === target.id)) throw new Error('no credential of this profile can use that model');
+          found = await models.webSearch(model, { query: input.args.query, limit }, signal);
+        }
+      } catch (error) {
+        if (input.signal?.aborted) throw error;
+        throw new Error(`Web search uses ${selector}: ${error instanceof Error ? error.message : String(error)}. Change it in Inference → Services.`);
+      }
+      return { query: input.args.query, provider: selector, answer: found.answer, results: found.results.slice(0, limit).map(result => result.description ? { ...result, description: result.description.slice(0, DEFAULT_WEB_SEARCH_DESCRIPTION_CHARS) } : result) };
     },
     session: {
       async catalog() {

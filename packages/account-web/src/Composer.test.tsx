@@ -3,7 +3,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { automationMessage, type AutomationMessageEvent } from '@gitspace/protocol/automations-contract';
-import type { RuntimeBrowserSharePreview } from '@gitspace/protocol-runtime';
+import type { RuntimeBrowserSharePreview, RuntimeDictationServerMessage } from '@gitspace/protocol-runtime';
 import type { SessionControlView } from '@gitspace/protocol-runtime/session-controls';
 import { verticalSliceFixture } from './App.js';
 import { Composer, type ComposerProps } from './Composer.js';
@@ -274,4 +274,91 @@ it('shows an automation run waiting in the queue as its run, apart from the pers
   expect(dismissRun).toHaveBeenCalledExactlyOnceWith('run-41');
   await act(async () => container.querySelector<HTMLButtonElement>('button[aria-label="Remove queued message: Also update the docs"]')!.click());
   expect(remove).toHaveBeenCalledExactlyOnceWith('followUp', 0);
+});
+
+/** The dictation socket as the composer opens it: what it sent, and server messages delivered on demand. */
+class DictationSocket extends EventTarget {
+  static readonly CONNECTING = 0;
+  static readonly OPEN = 1;
+  static readonly CLOSING = 2;
+  static readonly CLOSED = 3;
+  static all: DictationSocket[] = [];
+  readyState = DictationSocket.OPEN;
+  binaryType = 'blob';
+  sent: (string | ArrayBuffer)[] = [];
+  constructor(readonly url: string) { super(); DictationSocket.all.push(this); }
+  send(data: string | ArrayBuffer) { this.sent.push(data); }
+  close() { this.readyState = DictationSocket.CLOSED; }
+  async receive(message: RuntimeDictationServerMessage) { await act(async () => { this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(message) })); }); }
+}
+/** The worklet's port, answering a flush at once. */
+class FakeWorkletPort {
+  onmessage: ((event: { data: unknown }) => void) | null = null;
+  postMessage(message: unknown) { if (message === 'flush') queueMicrotask(() => this.onmessage?.({ data: 'flushed' })); }
+}
+class FakeWorkletNode {
+  port = new FakeWorkletPort();
+  disconnect() {}
+}
+class FakeAudioContext {
+  state = 'running';
+  audioWorklet = { addModule: async () => undefined };
+  createMediaStreamSource() { return { connect() {} }; }
+  async close() { this.state = 'closed'; }
+}
+
+/** A browser whose microphone opens as `getUserMedia` answers, with an audio graph and a dictation socket of fakes. */
+function microphone(getUserMedia: () => Promise<unknown>) {
+  vi.stubGlobal('WebSocket', DictationSocket);
+  vi.stubGlobal('AudioContext', FakeAudioContext);
+  vi.stubGlobal('AudioWorkletNode', FakeWorkletNode);
+  vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:pcm16');
+  Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: vi.fn(getUserMedia) } });
+  DictationSocket.all = [];
+}
+async function settle() {
+  for (let turn = 0; turn < 20; turn += 1) await act(() => { const { promise, resolve } = Promise.withResolvers<void>(); setTimeout(resolve, 0); return promise; });
+}
+
+it('dictates into the draft at the cursor without sending, showing what it hears while you speak', async () => {
+  microphone(async () => ({ getTracks: () => [{ stop() {} }] }));
+  const onSend = vi.fn<NonNullable<GitSpaceShellProps['onSend']>>(async () => undefined);
+  await act(() => root.render(<Composer workspace={verticalSliceFixture.workspace} running={false} pending={false} onSend={onSend} />));
+  const textarea = container.querySelector('textarea')!;
+  await act(() => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(textarea, 'Fix please');
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  textarea.setSelectionRange(4, 4);
+
+  await act(async () => container.querySelector<HTMLButtonElement>('button[aria-label="Dictate"]')!.click());
+  await settle();
+  const socket = DictationSocket.all[0]!;
+  const opened = new URL(socket.url);
+  expect(`${opened.pathname}${opened.search}`).toBe(`/api/dictation?${new URLSearchParams({ projectId: verticalSliceFixture.workspace.projectId, workspaceId: verticalSliceFixture.workspace.id })}`);
+  await socket.receive({ type: 'ready', mode: 'live' });
+  await socket.receive({ type: 'interim', text: 'the log in' });
+  expect(container.querySelector('[role=status]')?.textContent).toBe('the log in');
+  await socket.receive({ type: 'final', text: 'the login page' });
+  await settle();
+
+  expect(textarea.value).toBe('Fix the login page please');
+  expect(onSend).not.toHaveBeenCalled();
+  await act(async () => container.querySelector<HTMLButtonElement>('button[aria-label="Stop dictation"]')!.click());
+  await settle();
+  expect(socket.sent.at(-1)).toBe(JSON.stringify({ type: 'stop' }));
+  await socket.receive({ type: 'done' });
+  expect(container.querySelector('button[aria-label="Dictate"]')).not.toBeNull();
+  expect(onSend).not.toHaveBeenCalled();
+});
+
+it('says plainly when the microphone is blocked, and opens no dictation', async () => {
+  microphone(async () => { throw new DOMException('Permission denied', 'NotAllowedError'); });
+  await act(() => root.render(<Composer workspace={verticalSliceFixture.workspace} running={false} pending={false} onSend={async () => undefined} />));
+
+  await act(async () => container.querySelector<HTMLButtonElement>('button[aria-label="Dictate"]')!.click());
+  await settle();
+
+  expect(container.querySelector('[role=alert]')?.textContent).toBe('Microphone access is blocked. Allow the microphone for this site in your browser, then try again.');
+  expect(DictationSocket.all).toEqual([]);
 });

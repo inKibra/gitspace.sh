@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { AvailableModel, ComposioSetupRpcView, DeploymentStatusView, DeviceCapability, DeviceView, RuntimeSettingValue, UserSettings } from '@gitspace/protocol';
-import { BUILT_IN_MODEL_ROLES, MIN_CONTEXT_LIMIT, MODEL_ROLE_LABELS, contextLimitsSchema, inferenceSettingSection, parseModelRoleSelector } from '@gitspace/protocol/inference';
+import { BUILT_IN_MODEL_ROLES, MIN_CONTEXT_LIMIT, MODEL_ROLE_LABELS, SEARCH_MODEL_PROVIDERS, contextLimitsSchema, inferenceSettingSection, parseModelRoleSelector } from '@gitspace/protocol/inference';
 import { cloudImageOperationActive, cloudImageOperationCancellable, cloudImageSelectionSchema, type CloudImageChoice, type CloudImageSelection, type CloudImageState } from '@gitspace/protocol/cloud-image';
 import { rpcErrors } from '@gitspace/protocol/rpc-contract';
 import type { MachineDiscardConfirmation, MachineDiscardRequired } from '@gitspace/protocol/machine-discard';
@@ -53,7 +53,7 @@ import { ArrowLeft, Check, CpuChip01, GitBranch01, GitPullRequest, Globe02, Key0
 import { glyph } from './glyph.js';
 import { EmptyState, PageCanvas, PageHeader } from './GitSpaceShell.js';
 import { ProvidersSection, type ProvidersSectionProps } from './ProvidersSection.js';
-import { ModelCombobox, modelOptions } from './ModelCombobox.js';
+import { ModelCombobox, modelOptions, type ModelOption } from './ModelCombobox.js';
 import { desiredLabel, machineRollup, ompRollup, RELEASE_STATUS_COLOR, RELEASE_TARGET_LABEL, RELEASE_TARGETS, releaseSourceText, shortSha, type ReleaseRecordView } from './release.js';
 import { AddMachinePanel } from './AddMachinePanel.js';
 import { navigateProductUrl } from './routes.js';
@@ -61,7 +61,7 @@ import { ConnectBrowserDialog, type BrowserConnectionActions } from './ConnectBr
 
 // Onboarding embeds the same Default profile surface used by Inference.
 type Section = 'profile' | 'runtime' | 'runtime-providers' | 'git' | 'github' | 'machines' | 'connections' | 'hostnames' | 'source' | 'defaults';
-const SETTINGS_TABS = ['Models', 'Providers', 'Advanced'] as const;
+const SETTINGS_TABS = ['Models', 'Providers', 'Services', 'Advanced'] as const;
 export type SettingsTab = (typeof SETTINGS_TABS)[number];
 export interface SettingsMachineView { id: string; label: string; state: 'provisioning' | 'online' | 'sleeping' | 'offline' | 'resuming' | 'deleting' | 'error'; kind: 'physical' | 'sandbox'; provider: 'physical' | 'cloudflare-sandbox'; notes: string; desiredState: 'online' | 'offline' | 'removed'; lifecycleRevision: number; operationId: string | null; error: string | null; agentsMayAttach?: boolean }
 export interface RuntimeSettingView {
@@ -242,6 +242,29 @@ function RoleModelPicker({ role, label, value, models, modelsReady, disabled, on
     </Select>
   </span>;
 }
+/** Cloudflare's Web Search API, run on GitSpace's account, by provider. Exa does not offer zero data retention. */
+const CLOUDFLARE_SEARCH_OPTIONS: readonly ModelOption[] = [
+  { value: 'cloudflare/ceramic', label: 'Cloudflare · Ceramic' },
+  { value: 'cloudflare/linkup', label: 'Cloudflare · Linkup' },
+  { value: 'cloudflare/exa', label: 'Cloudflare · Exa · not zero-retention' },
+];
+/** Dictation on Cloudflare Workers AI, run on GitSpace's account: Flux transcribes while you speak, Whisper after you stop. */
+const CLOUDFLARE_DICTATION_OPTIONS: readonly ModelOption[] = [
+  { value: 'cloudflare/flux', label: 'Cloudflare · Flux · live' },
+  { value: 'cloudflare/whisper', label: 'Cloudflare · Whisper · after you stop' },
+];
+/** OpenAI's transcription models, run with an OpenAI API key of the profile after you stop. */
+const OPENAI_DICTATION_OPTIONS: readonly ModelOption[] = ['gpt-transcribe', 'gpt-4o-transcribe', 'gpt-4o-mini-transcribe', 'whisper-1']
+  .map((model) => ({ value: `openai/${model}`, label: `OpenAI · ${model} · after you stop` }));
+/** A service's provider: one of `options`, or a stored selector this profile can no longer run, shown as such. */
+function ServicePicker({ label, value, options, modelsReady, disabled, onChange }: { label: string; value: string; options: readonly ModelOption[]; modelsReady: boolean; disabled: boolean; onChange(value: string): void }) {
+  const known = options.some((option) => option.value === value);
+  return <span className="flex items-center gap-2">
+    {!known && modelsReady ? <span role="alert" className="max-w-64 text-caption text-destructive">This model is unavailable in this profile. Connect its provider or choose another.</span> : null}
+    <ModelCombobox options={known ? options : [{ value, label: modelsReady ? `${value} (not available here)` : value }, ...options]} value={value} disabled={disabled} ariaLabel={label}
+      onValueChange={(next) => { if (next && next !== value) onChange(next); }} />
+  </span>;
+}
 /** Tokens shown as e.g. `800k` or `1M`. */
 function formatTokens(tokens: number): string {
   return tokens >= 1_000_000 && tokens % 100_000 === 0 ? `${tokens / 1_000_000}M` : `${Math.round(tokens / 1_000)}k`;
@@ -286,6 +309,11 @@ export function RuntimeSettingsEditor({ runtimeSettings, runtimeGeneration, onSe
   };
   const visionItem = runtimeSettings.find((item) => item.path === 'visionFallback');
   const vision = visionItem ? String(parseValue(visionItem) ?? '') : '';
+  const searchItem = runtimeSettings.find((item) => item.path === 'search');
+  const search = searchItem ? String(parseValue(searchItem) ?? '') : '';
+  const dictationItem = runtimeSettings.find((item) => item.path === 'dictation');
+  const dictation = dictationItem ? String(parseValue(dictationItem) ?? '') : '';
+  const openAiKey = providers?.providers.some((provider) => provider.credentialProvider === 'openai' && provider.accounts.some((account) => account.type === 'api_key' && !account.disabled)) ?? false;
   // A role added here shows once named and is stored when a model is chosen for it.
   const [addedRoles, setAddedRoles] = useState<readonly string[]>([]);
   const [newRole, setNewRole] = useState('');
@@ -346,6 +374,17 @@ export function RuntimeSettingsEditor({ runtimeSettings, runtimeGeneration, onSe
         </AccordionItem>
       </Accordion>
     </>;
+  } else if (tab === 'Services') {
+    content = <Group title={<>Services · <span className="tabular-nums">generation {runtimeGeneration}</span></>}>
+      <SettingRows>
+        {searchItem ? <SettingRow title="Web search" description="Runs the agents' web_search tool: Cloudflare's Web Search API on GitSpace's account, or a model of this profile's Anthropic, OpenAI or Gemini credentials searching on that account.">
+          <ServicePicker label="Web search" value={search} options={[...CLOUDFLARE_SEARCH_OPTIONS, ...modelOptions(models.filter((model) => Object.hasOwn(SEARCH_MODEL_PROVIDERS, model.provider)))]} modelsReady={modelsReady} disabled={saving} onChange={(value) => settle(onSetRuntimeSetting(searchItem.path, value))} />
+        </SettingRow> : null}
+        {dictationItem ? <SettingRow title="Dictation" description="Transcribes the composer's microphone: Cloudflare Workers AI on GitSpace's account, or OpenAI with this profile's OpenAI API key.">
+          <ServicePicker label="Dictation" value={dictation} options={[...CLOUDFLARE_DICTATION_OPTIONS, ...(openAiKey ? OPENAI_DICTATION_OPTIONS : [])]} modelsReady={providers !== undefined && !providers.loading} disabled={saving} onChange={(value) => settle(onSetRuntimeSetting(dictationItem.path, value))} />
+        </SettingRow> : null}
+      </SettingRows>
+    </Group>;
   } else {
     const visible = advancedGroups.get(visibleAdvancedTab) ?? [];
     content = <>

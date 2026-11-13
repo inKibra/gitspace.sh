@@ -95,6 +95,10 @@ interface InputMessageSlotContext {
   openFilePicker: (acceptOverride?: string) => void;
   /** Currently-attached files (controlled). */
   files: File[];
+  /** Inserts text into the draft at the textarea's cursor (replacing its
+   *  selection), spaced from the words around it, and leaves the cursor after
+   *  it. Text inserted again before the draft re-renders follows the last. */
+  insertText: (text: string) => void;
 }
 
 type InputMessageSlot =
@@ -564,6 +568,12 @@ const InputMessage = forwardRef<HTMLDivElement, InputMessageProps>(
     if (currentDraft.current.value !== value || currentDraft.current.files !== filesArr) {
       currentDraft.current = { value, files: filesArr };
     }
+    // Always-current change handler and the caret an insertText left, until a
+    // frame places it in the textarea: text inserted later (dictation) reads
+    // these rather than a stale closure or a textarea not yet re-rendered.
+    const valueChangeRef = useRef(onValueChange);
+    valueChangeRef.current = onValueChange;
+    const insertCaret = useRef<number | null>(null);
     const supportsFiles = onFilesChange !== undefined;
 
     // Queue is active only when both the status is controlled and a change
@@ -1044,10 +1054,38 @@ const InputMessage = forwardRef<HTMLDivElement, InputMessageProps>(
       [accept]
     );
 
+    const insertText = useCallback((text: string) => {
+      const el = textareaRef.current;
+      const draft = currentDraft.current;
+      const shown = el !== null && el.value === draft.value;
+      const start = insertCaret.current ?? (shown ? el.selectionStart : draft.value.length);
+      const end = insertCaret.current ?? (shown ? el.selectionEnd : start);
+      const before = draft.value.slice(0, start);
+      const after = draft.value.slice(end);
+      const lead = before && !/\s$/u.test(before) && !/^\s/u.test(text) ? " " : "";
+      const trail = after && !/^\s/u.test(after) && !/\s$/u.test(text) ? " " : "";
+      const next = `${before}${lead}${text}${trail}${after}`;
+      insertCaret.current = before.length + lead.length + text.length + trail.length;
+      currentDraft.current = { ...draft, value: next };
+      setHistoryIndex(null);
+      valueChangeRef.current(next);
+      // The caret goes after the text once the textarea shows it.
+      let frames = 0;
+      const place = () => {
+        const node = textareaRef.current;
+        const caret = insertCaret.current;
+        if (!node || caret === null) return;
+        if (node.value !== currentDraft.current.value && frames++ < 10) { requestAnimationFrame(place); return; }
+        insertCaret.current = null;
+        node.setSelectionRange(caret, caret);
+      };
+      requestAnimationFrame(place);
+    }, []);
+
     // ── Slot rendering ────────────────────────────────────────────────
     const slotCtx = useMemo<InputMessageSlotContext>(
-      () => ({ openFilePicker, files: filesArr }),
-      [openFilePicker, filesArr]
+      () => ({ openFilePicker, files: filesArr, insertText }),
+      [openFilePicker, filesArr, insertText]
     );
     const leftContent =
       typeof leftSlot === "function" ? leftSlot(slotCtx) : leftSlot;

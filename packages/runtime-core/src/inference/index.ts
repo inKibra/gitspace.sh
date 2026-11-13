@@ -1,4 +1,4 @@
-import { createModels, lazyStream, type Api, type Model, type Context, type TranscriptContext, type ApiStreamOptions, type ModelsApiStreamOptions, type AnyModel, type Models, type ModelsStore, type Provider, type AuthResult, type AssistantMessage, type AssistantMessageEvent, type AssistantMessageEventStream, type AssistantImages, type ClassifierResult } from '@earendil-works/pi-ai';
+import { createModels, lazyStream, type Api, type Model, type Context, type TranscriptContext, type ApiStreamOptions, type ModelsApiStreamOptions, type AnyModel, type Models, type ModelsStore, type Provider, type AuthResult, type AssistantMessage, type AssistantMessageEvent, type AssistantMessageEventStream } from '@earendil-works/pi-ai';
 import { z } from 'zod';
 import { isModelType } from '@earendil-works/pi-ai';
 import { isRetryableAssistantError } from '@earendil-works/pi-ai/utils/retry';
@@ -7,7 +7,8 @@ import { limitContextWindows } from './catalog.js';
 import { classifyAuthFailure, orderedAccounts, providerResetAt, type VaultAccess, type CredentialAccount, type CredentialPins, type ResolvedCredential } from './selection.js';
 import { withCatalogRows, type ProfileCatalog } from './account-models.js';
 import { contextWindowLimits } from './admission.js';
-import { attemptOptions, createAttemptRunner, inferenceProviderSource, noAmbientAuth, profileProviders, requestAuth, type AttemptRequest, type AttemptRunner, type InferenceAttempt } from './attempts.js';
+import { attemptOptions, createAttemptRunner, inferenceProviderSource, noAmbientAuth, profileProviders, requestAuth, type AttemptRequest, type AttemptRunner, type ModelAttempt, type WebSearchAttempt } from './attempts.js';
+import type { WebSearchAnswer, WebSearchRequest } from './web-search.js';
 import { fitRequestImages, imageLimits } from './image-limits.js';
 import type { InferenceProfile } from '@gitspace/protocol/inference';
 import { fastServingProvider } from './fast.js';
@@ -24,6 +25,7 @@ export * from './vision.js';
 export * from './request-gate.js';
 export * from './image-requests.js';
 export * from './attempts.js';
+export * from './web-search.js';
 export * from './account-models.js';
 export { claudeCode, XxHash64, type ClaudeCodeTransport } from './claude-code-request.js';
 export { imageDimensions } from './image-limits.js';
@@ -47,11 +49,14 @@ export type VaultModelsOptions = {
 /** What one admitted request adds to its profile's catalog. A pinned model resolves as it was admitted even after the
  * catalog changes or drops it. */
 export type VaultModelsScope = { pins: CredentialPins; fastMode?: boolean; pinnedModels?: readonly AnyModel[] };
+/** A profile's models as one request uses them, with web search by a model's built-in search tool on the profile's
+ * accounts (chosen, refreshed and rotated as for its requests). It throws naming the provider's refusal. */
+export type ProfileModels = Models & { webSearch(model: Model<Api>, search: WebSearchRequest, signal?: AbortSignal): Promise<WebSearchAnswer> };
 /** A profile's catalog (served with `pins`, never in fast mode) and the views its requests share it through. */
-export type VaultModels = Models & {
+export type VaultModels = ProfileModels & {
   /** A view of this catalog for one request: its own credential pins, serving mode, Claude Code session and pinned
    * models. Provider data, the published-catalog overlay and refreshes stay this catalog's. */
-  scope(request: VaultModelsScope): Promise<Models>;
+  scope(request: VaultModelsScope): Promise<ProfileModels>;
 };
 /** One request on one account. It reports the provider's answer, error statuses included (pi's `onResponse` misses a
  * rejected Anthropic request), so a failure knows the provider's reset. It holds a gate permit from before its body is
@@ -136,7 +141,7 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
     return pinned.map(provider => limitContextWindows(provider, ownLimit));
   }
   /** The catalog as one request uses it: `list`'s models, dispatched with `pins` and Claude Code's request shape. */
-  async function view(list: readonly Provider[], pins: CredentialPins, fastMode: boolean): Promise<Models> {
+  async function view(list: readonly Provider[], pins: CredentialPins, fastMode: boolean): Promise<ProfileModels> {
     // One Claude Code session per view, for every attempt it makes wherever it runs.
     const session = { profileId: options.profileId, sessionId: crypto.randomUUID() };
     const claude = await claudeCode(session);
@@ -167,14 +172,16 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
       return resolved;
     }
     /** Each dispatch gets its own Models/auth object; concurrent accounts never share a credential slot. */
-    async function bound(providerId: string, credentialId: string, forceRefresh = false, signal?: AbortSignal) {
-      const resolved = await resolveCredential(providerId, credentialId, forceRefresh, signal);
-      const provider = providerById.get(providerId);
-      if (!provider) throw new Error(`Unknown provider ${providerId}`);
+    function bind(resolved: ResolvedCredential) {
+      const provider = providerById.get(resolved.provider);
+      if (!provider) throw new Error(`Unknown provider ${resolved.provider}`);
       const resolvedAuth = requestAuth(resolved);
       const models = createModels({ authContext: noAmbientAuth, modelsStore: options.modelsStore });
       models.setProvider({ ...(fastMode ? fastServingProvider(provider) : provider), auth: { apiKey: { name: 'Profile vault', resolve: async ({ signal }) => { signal.throwIfAborted(); return { ...resolvedAuth, source: 'Profile vault' }; } } } });
       return models;
+    }
+    async function bound(providerId: string, credentialId: string, forceRefresh = false, signal?: AbortSignal) {
+      return bind(await resolveCredential(providerId, credentialId, forceRefresh, signal));
     }
     async function startAttempt(signal?: AbortSignal): Promise<Attempt> {
       let permit: RequestPermit | undefined = await options.gate.acquire(signal);
@@ -242,14 +249,14 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
         }
       }
     }
-    async function resultAttempts<T extends AssistantImages | ClassifierResult>(model: AnyModel, invoke: (models: Models, attempt: Attempt) => Promise<T>, signal?: AbortSignal): Promise<T> {
+    async function resultAttempts<T extends { stopReason: string; errorMessage?: string }>(model: AnyModel, invoke: (credential: ResolvedCredential, attempt: Attempt) => Promise<T>, signal?: AbortSignal): Promise<T> {
       canonical(model);
       const candidates = await orderedAccounts({ ...options, provider: model.provider, model: model.id });
       for (let index = 0; index < candidates.length; index++) {
         const candidate = candidates[index]!;
         for (let refresh = 0; refresh < 2; refresh++) {
-          let models: Models;
-          try { models = await bound(model.provider, candidate.id, refresh === 1, signal); }
+          let credential: ResolvedCredential;
+          try { credential = await resolveCredential(model.provider, candidate.id, refresh === 1, signal); }
           catch (error) {
             if (refresh === 1 && index < candidates.length - 1 && !signal?.aborted) break;
             throw error;
@@ -257,7 +264,7 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
           await pins.write(model.provider, { credentialId: candidate.id });
           const attempt = await startAttempt(signal);
           let result: T;
-          try { result = await invoke(models, attempt); }
+          try { result = await invoke(credential, attempt); }
           finally { attempt.release(); }
           if (result.stopReason !== 'error') return result;
           const policy = classifyAuthFailure(result.errorMessage ?? '', attempt.status);
@@ -268,7 +275,23 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
           break;
         }
       }
-      throw new Error('Account retry invariant violated');
+      throw new Error(`No account of this profile can use ${model.provider}/${model.id} now`);
+    }
+    /** One web search attempt on the account `resultAttempts` chose, sent by the runner. */
+    async function searched(model: Model<Api>, search: WebSearchRequest, credential: ResolvedCredential, attempt: Attempt, signal?: AbortSignal): Promise<{ stopReason: 'stop'; found: WebSearchAnswer } | { stopReason: 'error'; errorMessage: string }> {
+      const sent: WebSearchAttempt = { method: 'webSearch', model, search, credential, settings, claude: session };
+      try {
+        for await (const event of run(sent, signal)) {
+          attempt.release();
+          if (event.type === 'response') attempt.observe({ status: event.status, headers: event.headers });
+          else if (event.type === 'webSearch') return { stopReason: 'stop', found: event.found };
+          else if (event.type === 'webSearchError') return { stopReason: 'error', errorMessage: event.errorMessage };
+        }
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        return { stopReason: 'error', errorMessage: error instanceof Error ? error.message : String(error) };
+      }
+      return { stopReason: 'error', errorMessage: 'The inference worker ended the web search without an answer' };
     }
     async function available(providerId?: string): Promise<AnyModel[]> {
       const accounts = await options.vault.list(options.profileId, providerId);
@@ -294,10 +317,10 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
      * to the provider lost before or during its answer) names how long it ran, what it received and what its request
      * carried: such an ending has no reason of its own ("Network connection lost"), and these tell the request's size
      * from the reply's. A provider's final error (a usage limit, a refused request) states its reason and stays as it is. */
-    function attempted(method: InferenceAttempt['method'], model: Model<Api>, context: Context, request?: { signal?: AbortSignal; onResponse?: (response: ProviderResponse, model: Model<Api>) => unknown }) {
+    function attempted(method: ModelAttempt['method'], model: Model<Api>, context: Context, request?: { signal?: AbortSignal; onResponse?: (response: ProviderResponse, model: Model<Api>) => unknown }) {
       const fitted = fitRequestImages(context, imageLimits(model));
       return async function* (credential: ResolvedCredential, attempt: Attempt, subscription: boolean): AsyncGenerator<AssistantMessageEvent> {
-        const sent: InferenceAttempt = { method, model: subscription ? subscriptionModel(model) : model, context: fitted, options: attemptOptions(request), credential, settings, fastMode, claude: session };
+        const sent: ModelAttempt = { method, model: subscription ? subscriptionModel(model) : model, context: fitted, options: attemptOptions(request), credential, settings, fastMode, claude: session };
         const startedAt = Date.now();
         let events = 0;
         let characters = 0;
@@ -325,6 +348,7 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
               await request?.onResponse?.(response, model);
               continue;
             }
+            if (event.type === 'webSearch' || event.type === 'webSearchError') throw new Error('The inference worker answered a model request as a web search');
             events += 1;
             if (event.type === 'text_delta' || event.type === 'thinking_delta' || event.type === 'toolcall_delta') characters += event.delta.length;
             ended = event.type === 'done' || event.type === 'error';
@@ -342,7 +366,7 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
         yield request?.signal?.aborted === true ? ending('aborted', 'Request was aborted') : ending('error', measured('The inference worker ended the request without an answer'));
       };
     }
-    const facade: Models = {
+    const facade: ProfileModels = {
       getProviders: () => list.map(provider => ({ ...provider, auth: { apiKey: { name: 'Profile vault', resolve: async () => facade.getAuth(provider.id) } }, stream<T extends Api>(model: Model<T>, context: TranscriptContext, request?: ApiStreamOptions<T>) { rejectOverrides(request); return facade.stream<T>(model, context, request === undefined ? undefined : Object.assign({}, request, { transformHeaders: undefined })); }, streamSimple: (model, context, request) => facade.streamSimple(model, context, request), generateImages: (model, context, request) => facade.generateImages(model, context, request), classify: (model, context, request) => facade.classify(model, context, request), fetchDeferred: (model, handle, request) => facade.streamDeferred(model, handle, request), cancelDeferred: (model, handle, request) => facade.cancelDeferred(model, handle, request) })),
       getProvider: id => facade.getProviders().find(provider => provider.id === id),
       getModels: provider => listing(provider, entry => entry.getModels()),
@@ -367,8 +391,13 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
       streamDeferred: (model, handle, request) => lazyStream(model, async () => { rejectOverrides(request); canonical(model); const pin = await pins.read(model.provider); if (!pin) throw new Error('Deferred response has no admitted account'); return (await bound(model.provider, pin.credentialId, false, request?.signal)).streamDeferred(model, handle, { ...request, fetch: cloudFetch }); }),
       fetchDeferred: (model, handle, request) => facade.streamDeferred(model, handle, request).result(),
       cancelDeferred: async (model, handle, request) => { rejectOverrides(request); canonical(model); const pin = await pins.read(model.provider); if (!pin) throw new Error('Deferred response has no admitted account'); await (await bound(model.provider, pin.credentialId, false, request?.signal)).cancelDeferred(model, handle, { ...request, fetch: cloudFetch }); },
-      generateImages: async (model, context, request) => { rejectOverrides(request); return resultAttempts(model, (models, attempt) => models.generateImages(model, context, { ...request, fetch: attempt.fetch, onResponse: async (response, selected) => { attempt.observe(response); await request?.onResponse?.(response, selected); } }), request?.signal); },
-      classify: async (model, context, request) => { rejectOverrides(request); return resultAttempts(model, (models, attempt) => models.classify(model, context, { ...request, fetch: attempt.fetch, onResponse: async (response, selected) => { attempt.observe(response); await request?.onResponse?.(response, selected); } }), request?.signal); },
+      generateImages: async (model, context, request) => { rejectOverrides(request); return resultAttempts(model, (credential, attempt) => bind(credential).generateImages(model, context, { ...request, fetch: attempt.fetch, onResponse: async (response, selected) => { attempt.observe(response); await request?.onResponse?.(response, selected); } }), request?.signal); },
+      classify: async (model, context, request) => { rejectOverrides(request); return resultAttempts(model, (credential, attempt) => bind(credential).classify(model, context, { ...request, fetch: attempt.fetch, onResponse: async (response, selected) => { attempt.observe(response); await request?.onResponse?.(response, selected); } }), request?.signal); },
+      async webSearch(model, search, signal) {
+        const outcome = await resultAttempts(model, (credential, attempt) => searched(model, search, credential, attempt, signal), signal);
+        if (outcome.stopReason === 'error') throw new Error(outcome.errorMessage);
+        return outcome.found;
+      },
     };
     return facade;
   }

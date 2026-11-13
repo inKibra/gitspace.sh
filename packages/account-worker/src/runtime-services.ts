@@ -11,7 +11,6 @@ import { RuntimeQaItemSchema, type RuntimeQaActionInput, type RuntimeQaItem } fr
 import { ArtifactsCodeStore, artifactsWorkspaceRepository, textPage, snapshotEntries, hasSnapshotConflictMarkers, readSnapshotText, resolveSnapshotConflictText, CloudPublicationUncertain, isAttachmentOnline, isAttachmentReady, type WorkspaceRuntime, type WorkspaceRuntimeOptions } from '@gitspace/runtime-workspace-do';
 import { RuntimeAgentLifecycleRunArgumentsSchema, RuntimeGenerateImageArgumentsSchema, RuntimeLifecycleDispatchArgumentsSchema, RuntimeEnvironmentArgumentsSchema, RuntimeMachinesArgumentsSchema, RuntimeSpaceArtifactsArgumentsSchema, RuntimeDriveTransferStoredSchema, RuntimeSpacePhaseArgumentsSchema, RuntimeReadArgumentsSchema, RuntimeWriteArgumentsSchema, RuntimeEditArgumentsSchema, RuntimeReportIssueArgumentsSchema, RuntimeHistoryReadArgumentsSchema, RuntimeHistorySearchArgumentsSchema, RuntimeWebFetchArgumentsSchema, RuntimeWebSearchArgumentsSchema } from '@gitspace/protocol-runtime';
 import { fetchWeb, renderWebFetchPage, windowWebFetchPage } from 'agents/webfetch';
-import { DEFAULT_WEB_SEARCH_DESCRIPTION_CHARS, createAIWebSearch } from 'agents/websearch';
 import { isSubagentToolCallAllowed, runtimeOperationIsReadOnly, workspaceActivity, workspaceBoard, RuntimeBashCommandArgumentsSchema, RuntimeSyncArgumentsSchema, RuntimeSyncMachineArgumentsSchema, RuntimeSyncMachineCaptureSchema, RuntimeSyncMachineDiffSchema, RuntimeSyncMachineDiscardSchema, RuntimeSyncMachineRestoreSchema, RuntimeSyncMachineStatusSchema } from '@gitspace/protocol-runtime';
 import { RuntimeAutomationsArgumentsSchema, RuntimeWorkspaceArgumentsSchema } from '@gitspace/protocol/inspector-contract';
 import { automationValue } from './project-automations.js';
@@ -34,7 +33,7 @@ import { notifyBrowsers } from './live-notices.js';
 import { workspaceLiveKey } from '@gitspace/protocol/live-notice';
 import { servicesBlock } from './workspace-service-urls.js';
 import { createCloudCodemode } from './runtime-codemode.js';
-import type { RuntimeModelHelper } from './runtime-inference.js';
+import type { RuntimeModelHelper, RuntimeWebSearchInput, RuntimeWebSearchResult } from './runtime-inference.js';
 import { PROCESS_MACHINE_DETACHED, RuntimeProcArgumentsSchema, RuntimeCodeSearchArgumentsSchema } from '@gitspace/protocol-runtime';
 import { fetchInternalService, isHostedServiceHostname } from './service-access.js';
 import { changeAgentWorkspace, setCloudWorkspacePhase } from './cloud-workspace-lifecycle.js';
@@ -60,6 +59,8 @@ type ServicesOptions = {
   /** A model's 0–1 score for each question about `state`, by question key. */
   judge(conversationId: string, state: string, questions: Record<string, string>): Promise<Record<string, number>>;
   model: RuntimeModelHelper;
+  /** Runs a web search with the profile's search selector. */
+  webSearch(input: RuntimeWebSearchInput): Promise<RuntimeWebSearchResult>;
   instructionLoader: RuntimeInstructionLoader;
   /** Requests a workspace attachment of the machine through the human cache-request path; returns before setup. */
   requestAttachment(machineId: string): Promise<{ attachment: RuntimeAttachment }>;
@@ -887,13 +888,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
           async *events(workspaceId, conversationId, before) { yield* readRuntimeTranscript(await transcript(workspaceId, conversationId, before === undefined ? { newestFirst: true } : { newestFirst: true, before })); },
         }, (state, questions) => options.judge(input.conversationId, state, questions), request.cursor));
       }
-      if (input.tool === 'web_search') {
-        const { query, limit } = RuntimeWebSearchArgumentsSchema.parse(input.args);
-        // Cloudflare's Web Search API (Ceramic.ai by default), billed to the account's AI Gateway credits.
-        const deadline = AbortSignal.timeout(30_000);
-        const response = await createAIWebSearch({ binding: env.AI }).search({ query, ...(limit === undefined ? {} : { limit }) }, { signal: input.signal ? AbortSignal.any([input.signal, deadline]) : deadline });
-        return completed(input, { query, results: response.items.map(item => ({ title: item.title, url: item.url, description: item.description?.slice(0, DEFAULT_WEB_SEARCH_DESCRIPTION_CHARS) ?? null, ...(item.lastModifiedDate ? { lastModified: item.lastModifiedDate } : {}) })) });
-      }
+      if (input.tool === 'web_search') return completed(input, await options.webSearch({ ...input, args: RuntimeWebSearchArgumentsSchema.parse(input.args) }));
       if (input.tool === 'web_fetch') {
         const request = RuntimeWebFetchArgumentsSchema.parse(input.args);
         const page = await fetchWeb({ url: request.url, ...(request.format ? { format: request.format } : {}) }, { binding: env.AI, ...(input.signal ? { signal: input.signal } : {}) });

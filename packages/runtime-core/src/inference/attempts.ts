@@ -17,10 +17,12 @@ import { expandedLength, requestImages, type ImageRequestTransport } from './ima
 import { createLegacyCloudProviders } from './providers/index.js';
 import { withPublishedCatalog } from './published-catalog.js';
 import type { ResolvedCredential } from './selection.js';
+import { searchWithModel, type WebSearchEvent, type WebSearchRequest } from './web-search.js';
 
 /** The Claude Code session a request is shaped as: the device is the profile's, the session the requesting view's. */
 export interface ClaudeIdentity { profileId: string; sessionId: string }
-export interface InferenceAttempt {
+/** A model request: pi-ai builds and streams it. */
+export interface ModelAttempt {
   method: 'stream' | 'streamSimple';
   model: Model<Api>;
   /** Images are stored references (`gs-image:v1:…`), never bytes. */
@@ -32,13 +34,23 @@ export interface InferenceAttempt {
   fastMode: boolean;
   claude: ClaudeIdentity;
 }
+/** A web search with the model's built-in search tool: one non-streaming request (`searchWithModel`). */
+export interface WebSearchAttempt {
+  method: 'webSearch';
+  model: Model<Api>;
+  search: WebSearchRequest;
+  credential: ResolvedCredential;
+  settings: InferenceProfile['settings'];
+  claude: ClaudeIdentity;
+}
+export type InferenceAttempt = ModelAttempt | WebSearchAttempt;
 /** What an attempt streams back: pi's events, and the provider's status and headers once they arrive (a failure's
  * account policy and the provider's reset are read from them). */
 export type AttemptResponse = { type: 'response'; status: number; headers: Record<string, string> };
 /** What the request an attempt sent carried, measured as it went out: its body's bytes with each stored image written
  * in, those images and their stored bytes, and the context's messages. A failed attempt names them. */
 export type AttemptRequest = { type: 'request'; bytes: number; images: number; imageBytes: number; messages: number };
-export type AttemptEvent = AssistantMessageEvent | AttemptResponse | AttemptRequest;
+export type AttemptEvent = AssistantMessageEvent | AttemptResponse | AttemptRequest | WebSearchEvent;
 export type AttemptRunner = (attempt: InferenceAttempt, signal?: AbortSignal) => AsyncIterable<AttemptEvent>;
 
 /** A request's options as an attempt carries them: functions, signals and pi's tracing context (`telemetry`, whose span
@@ -143,7 +155,8 @@ export function withBedrockToolStreaming(model: Model<Api>, payload: unknown): u
   const betas = Array.isArray(fields.anthropic_beta) ? fields.anthropic_beta : [];
   return { ...body, additionalModelRequestFields: { ...fields, anthropic_beta: [...betas, 'fine-grained-tool-streaming-2025-05-14'] } };
 }
-/** Runs attempts in this isolate: pi-ai builds and sends each request, with Claude Code's shape for a subscription. */
+/** Runs attempts in this isolate: pi-ai builds and sends each model request, `searchWithModel` each web search, with
+ * Claude Code's shape for a subscription. */
 export function createAttemptRunner(runner: AttemptRunnerOptions = {}): AttemptRunner {
   const shapes = new Map<string, Promise<ClaudeCodeTransport>>();
   return async function* run(attempt, signal) {
@@ -162,16 +175,23 @@ export function createAttemptRunner(runner: AttemptRunnerOptions = {}): AttemptR
     const shape = await shaping;
     const reports: Array<AttemptResponse | AttemptRequest> = [];
     let observed = false;
+    const messages = attempt.method === 'webSearch' ? 1 : attempt.context.messages.length;
     const fetch: typeof globalThis.fetch = async (input, init) => {
       if (typeof init?.body === 'string') {
         const images = requestImages(init.body);
-        reports.push({ type: 'request', bytes: expandedLength(init.body, images), images: images.length, imageBytes: images.reduce((sum, image) => sum + image.size, 0), messages: attempt.context.messages.length });
+        reports.push({ type: 'request', bytes: expandedLength(init.body, images), images: images.length, imageBytes: images.reduce((sum, image) => sum + image.size, 0), messages });
       }
       const response = await shape.fetch(input, init);
       observed = true;
       reports.push({ type: 'response', status: response.status, headers: Object.fromEntries(response.headers.entries()) });
       return response;
     };
+    if (attempt.method === 'webSearch') {
+      const outcome = await searchWithModel(attempt.model, requestAuth(attempt.credential).auth, attempt.credential.credential.type === 'oauth', attempt.search, { fetch, onPayload: shape.onPayload }, signal);
+      yield* reports.splice(0);
+      yield outcome;
+      return;
+    }
     let context = attempt.context;
     const tokens: string[] = [];
     if (attempt.model.api === 'bedrock-converse-stream') context = await replaceImages(context, async part => { const token = standIn(part.data); tokens.push(token); return token; });

@@ -11,6 +11,7 @@ export * from './browser.js';
 export * from './browser-share.js';
 export * from './browser-comments.js';
 export * from './browser-watch.js';
+export * from './dictation.js';
 export * from './browser-takeover.js';
 export * from './lifecycle-approval.js';
 export * from './browser-capture-tracks.js';
