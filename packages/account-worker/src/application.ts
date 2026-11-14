@@ -1815,7 +1815,12 @@ export class CredentialVaultDO extends BudgetedDurableObject {
         const report = await collectUsage(credential);
         this.assertProfileAccess(profileId);
         if (this.credential(row.id, profileId)?.state !== 'active') return;
-        this.ctx.storage.sql.exec('INSERT INTO cloud_account_health(profile_id, credential_id, cooldown_until, observed_at, report_json, error) VALUES (?, ?, 0, ?, ?, NULL) ON CONFLICT(profile_id, credential_id) DO UPDATE SET observed_at = excluded.observed_at, report_json = excluded.report_json, error = NULL', profileId, account.id, Date.now(), JSON.stringify(report));
+        // A read that answers with no used-up shared window proves the account serves again: its pause (a refused request's
+        // cooldown, which can run to the reset the provider named, up to a week) ends now rather than at that time.
+        const observation = usageObservation(report);
+        const available = observation !== undefined && observation.exhausted === undefined;
+        this.ctx.storage.sql.exec(`INSERT INTO cloud_account_health(profile_id, credential_id, cooldown_until, observed_at, report_json, error) VALUES (?, ?, 0, ?, ?, NULL) ON CONFLICT(profile_id, credential_id) DO UPDATE SET observed_at = excluded.observed_at, report_json = excluded.report_json, error = NULL,
+          cooldown_until = CASE WHEN ? THEN 0 ELSE cooldown_until END, cooldown_reason = CASE WHEN ? THEN NULL ELSE cooldown_reason END`, profileId, account.id, Date.now(), JSON.stringify(report), available ? 1 : 0, available ? 1 : 0);
         reports.push({ ...report, credentialId: account.id });
       } catch (error) {
         // Which way the provider's usage read failed, as a sentence the account's row shows; inference is unaffected.

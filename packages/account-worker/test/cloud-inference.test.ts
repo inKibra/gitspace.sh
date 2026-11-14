@@ -202,6 +202,25 @@ describe('Cloud inference credential authority', () => {
     expect((await orderedAccounts({ profileId: 'default', provider: 'anthropic', workspaceId: 'workspace-0', vault: selection(vault), now: Date.parse(reset) })).map(account => account.id)).toContain(first!.id);
   });
 
+  it('ends a paused account\'s pause when a usage read shows room again, and keeps it while the window is still used up', async () => {
+    const vault = env.CREDENTIALS.getByName(await seedVault([
+      { id: 'first', provider: 'anthropic', access: 'access-first', email: 'first@example.com' },
+      { id: 'second', provider: 'anthropic', access: 'access-second', email: 'second@example.com' },
+    ]));
+    const [first, second] = await vault.cloudCredentialAccounts('default');
+    // A refused request paused both until the reset the provider named, days away; the window reset early.
+    const named = Date.now() + 3 * 24 * 3_600_000;
+    for (const account of [first!, second!]) await vault.cloudCredentialFailure({ profileId: 'default', credentialId: account.id, kind: 'rotate', until: named, reason: 'rate_limit_error' });
+    const reset = new Date(Math.ceil((Date.now() + 3_600_000) / 1000) * 1000).toISOString();
+    network.use(http.get('https://api.anthropic.com/api/oauth/usage', ({ request }) => HttpResponse.json(request.headers.get('authorization') === 'Bearer access-first'
+      ? { five_hour: { utilization: 12, resets_at: reset } }
+      : { five_hour: { utilization: 100, resets_at: reset } })));
+    await vault.cloudUsage('default', 'anthropic', true);
+    expect((await vault.cloudProviders('default')).find(provider => provider.id === 'anthropic')!.accounts.map(account => ({ id: account.id, outUntil: account.outUntil })))
+      .toEqual([{ id: first!.id, outUntil: null }, { id: second!.id, outUntil: new Date(named).toISOString() }]);
+    expect((await orderedAccounts({ profileId: 'default', provider: 'anthropic', workspaceId: 'workspace', vault: selection(vault) })).map(account => account.id)).toEqual([first!.id]);
+  });
+
   it("gives each account its own usage report or the reason its read was refused", async () => {
     const vault = env.CREDENTIALS.getByName(await seedVault([
       { id: 'reads', provider: 'anthropic', access: 'access-reads', email: 'reads@example.com' },
