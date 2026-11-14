@@ -33,13 +33,16 @@ export const ServiceIngressPathSchema = z.string().min(1).max(512).refine((path)
 const serviceNameSchema = z.string().regex(NAME);
 const portNameSchema = z.string().regex(NAME);
 
-/** One route as `services.json` declares it; `port` names an `http` port and defaults to the service's first. */
+/** One route as `services.json` declares it; `port` names an `http` port and defaults to the service's first. `tokens: true`
+ * also admits the service's GitSpace-signed tokens (`managed`) on the route. */
 export const ServiceIngressDeclarationSchema = z.object({
   method: ServiceIngressMethodSchema,
   path: ServiceIngressPathSchema,
   port: portNameSchema.optional(),
+  tokens: z.boolean().optional(),
 }).strict();
-export const ServiceIngressRouteSchema = z.object({ method: ServiceIngressMethodSchema, path: ServiceIngressPathSchema }).strict();
+/** A canonical route: `tokens` appears only when set, so routes without it hash as before. */
+export const ServiceIngressRouteSchema = z.object({ method: ServiceIngressMethodSchema, path: ServiceIngressPathSchema, tokens: z.literal(true).optional() }).strict();
 export type ServiceIngressRoute = z.infer<typeof ServiceIngressRouteSchema>;
 /** The routes of one `http` port, so of one workspace URL. */
 export const ServiceIngressGroupSchema = z.object({
@@ -59,14 +62,17 @@ export function serviceIngressMatches(routes: readonly ServiceIngressRoute[], me
 /** One service's declared routes grouped by `http` port, sorted, so equal declarations give equal content. */
 export function resolveServiceIngress(service: { name: string; ports: readonly { name: string; protocol: 'http' | 'tcp' }[] }, raw: unknown): ServiceIngressGroup[] {
   const parsed = z.array(ServiceIngressDeclarationSchema).max(SERVICE_INGRESS_ROUTE_LIMIT).safeParse(raw);
-  if (!parsed.success) throw new EnvironmentError('InvalidConfiguration', `Service ${service.name} ingress must be at most ${SERVICE_INGRESS_ROUTE_LIMIT} routes of {method, path, port?}`, { service: service.name, detail: parsed.error.message });
+  if (!parsed.success) throw new EnvironmentError('InvalidConfiguration', `Service ${service.name} ingress must be at most ${SERVICE_INGRESS_ROUTE_LIMIT} routes of {method, path, port?, tokens?}`, { service: service.name, detail: parsed.error.message });
   const http = service.ports.filter((port) => port.protocol === 'http').map((port) => port.name);
   const groups = new Map<string, Map<string, ServiceIngressRoute>>();
   for (const declaration of parsed.data) {
     const port = declaration.port ?? http[0];
     if (port === undefined || !http.includes(port)) throw new EnvironmentError('InvalidConfiguration', `Service ${service.name} ingress needs an http port${declaration.port ? ` named ${declaration.port}` : ''}`, { service: service.name });
     const routes = groups.get(port) ?? new Map<string, ServiceIngressRoute>();
-    routes.set(`${declaration.path} ${declaration.method}`, { method: declaration.method, path: declaration.path });
+    const key = `${declaration.path} ${declaration.method}`;
+    // A route declared twice admits tokens when either declaration does.
+    const tokens = declaration.tokens === true || routes.get(key)?.tokens === true;
+    routes.set(key, { method: declaration.method, path: declaration.path, ...(tokens ? { tokens: true } : {}) });
     groups.set(port, routes);
   }
   return [...groups].sort(([left], [right]) => left.localeCompare(right)).map(([port, routes]) => ({
@@ -163,11 +169,15 @@ export const HostedIngressCredentialSchema = z.discriminatedUnion('kind', [
 ]);
 export type HostedIngressCredential = z.infer<typeof HostedIngressCredentialSchema>;
 
-/** `project.routes.ingress`: replaces a workspace's signed-caller registrations, one per workspace URL with declared routes. */
+/**
+ * `project.routes.ingress`: replaces a workspace's signed-caller registrations, one per workspace URL with declared routes.
+ * A registration without `credentials` (its run wrote no `ingress.json`) keeps the URL's registered credentials and
+ * changes only its routes.
+ */
 export const HostedIngressRegistrationSchema = z.object({
   projectId: z.string().min(1).max(160),
   workspaceId: z.string().min(1).max(160),
-  /** This machine's running `cloud/provision` or `workspace/materialize` run that wrote `ingress.json`. */
+  /** This machine's running `cloud/provision` or `workspace/materialize` run. */
   runId: z.string().min(1).max(160),
   /** The approved `ingress` execution content the routes come from. */
   ingress: z.string().max(131_072),
@@ -175,7 +185,82 @@ export const HostedIngressRegistrationSchema = z.object({
     hostname: z.string().min(1).max(253),
     service: serviceNameSchema,
     port: portNameSchema,
-    credentials: z.array(HostedIngressCredentialSchema).max(32),
+    credentials: z.array(HostedIngressCredentialSchema).max(32).optional(),
   }).strict()).max(256),
 }).strict();
 export type HostedIngressRegistration = z.infer<typeof HostedIngressRegistrationSchema>;
+
+/**
+ * Service tokens: GitSpace signs ES256 access tokens for a workspace service whose routes set `tokens: true`, with a
+ * key per workspace and service the account vault holds and rotates. Callers send them as `GitSpace-Ingress`.
+ */
+export const SERVICE_TOKEN_HEADER = 'GitSpace-Ingress';
+/** An access token lives at most 8 hours (the browser session window), which is also its default. */
+export const SERVICE_TOKEN_MAX_TTL_S = 8 * 60 * 60;
+export const SERVICE_TOKEN_MIN_TTL_S = 60;
+/** A refresh token is good for 7 days and is replaced on every use. */
+export const SERVICE_TOKEN_REFRESH_TTL_S = 7 * 24 * 60 * 60;
+/** A key signs for 7 days and verifies the tokens it signed for 8 hours more. */
+export const SERVICE_TOKEN_KEY_ROTATION_S = 7 * 24 * 60 * 60;
+/** Where an app exchanges its refresh token, on the service's own URL. */
+export const SERVICE_TOKEN_REFRESH_PATH = '/__gitspace/token';
+
+/** Who the token is for (`sub`): printable ASCII without spaces, like `ios-dev/brad`. */
+export const ServiceTokenSubjectSchema = z.string().min(1).max(256).regex(/^[\x21-\x7E]+$/u, { message: 'A subject is printable ASCII without spaces, like ios-dev/brad' });
+export const ServiceTokenRequestSchema = z.object({
+  service: serviceNameSchema,
+  /** The `http` port whose URL the token is for; the service's first with token routes by default. */
+  port: portNameSchema.optional(),
+  subject: ServiceTokenSubjectSchema,
+  ttlSeconds: z.number().int().min(SERVICE_TOKEN_MIN_TTL_S).max(SERVICE_TOKEN_MAX_TTL_S).optional(),
+  refresh: z.boolean().optional(),
+}).strict();
+export type ServiceTokenRequest = z.infer<typeof ServiceTokenRequestSchema>;
+
+export const ServiceTokenGrantSchema = z.object({
+  service: serviceNameSchema,
+  port: portNameSchema,
+  url: z.string().url(),
+  subject: ServiceTokenSubjectSchema,
+  header: z.literal(SERVICE_TOKEN_HEADER),
+  token: z.string().min(1),
+  expiresAt: z.string().datetime(),
+  refreshToken: z.string().min(1).optional(),
+  refreshExpiresAt: z.string().datetime().optional(),
+  /** `POST` `{refresh_token}` here for a new access token and refresh token. */
+  refreshUrl: z.string().url().optional(),
+}).strict();
+export type ServiceTokenGrant = z.infer<typeof ServiceTokenGrantSchema>;
+
+/** A managed key's public side: its RFC 7638 thumbprint, which is also its `kid`. */
+export const ServiceTokenKeySchema = z.object({
+  fingerprint: z.string().min(1).max(64),
+  createdAt: z.string().datetime(),
+  /** It signs new tokens until then. */
+  signsUntil: z.string().datetime(),
+  /** The edge accepts tokens it signed until then. */
+  verifiesUntil: z.string().datetime(),
+}).strict();
+export type ServiceTokenKey = z.infer<typeof ServiceTokenKeySchema>;
+
+export const IssuedServiceTokenSchema = z.object({
+  id: z.string().min(1).max(64),
+  url: z.string().url(),
+  subject: ServiceTokenSubjectSchema,
+  issuedAt: z.string().datetime(),
+  expiresAt: z.string().datetime(),
+  lastUsedAt: z.string().datetime().nullable(),
+  revokedAt: z.string().datetime().nullable(),
+  /** Issued with or by exchanging a refresh token; revoking it ends that refresh chain too. */
+  refreshable: z.boolean(),
+}).strict();
+export type IssuedServiceToken = z.infer<typeof IssuedServiceTokenSchema>;
+
+/** One service's managed keys and the tokens issued for its workspace URLs that have not expired. */
+export const ServiceTokensViewSchema = z.object({
+  service: serviceNameSchema,
+  urls: z.array(z.object({ port: portNameSchema, url: z.string().url() }).strict()),
+  keys: z.array(ServiceTokenKeySchema),
+  tokens: z.array(IssuedServiceTokenSchema),
+}).strict();
+export type ServiceTokensView = z.infer<typeof ServiceTokensViewSchema>;

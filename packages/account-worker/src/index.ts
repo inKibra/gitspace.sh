@@ -47,6 +47,8 @@ import { z } from 'zod';
 import { rpcBodySha256 } from '@gitspace/protocol/device-grant';
 import { fetchInternalService, isHostedServiceHostname, isWorkspaceServiceHostname } from './service-access.js';
 import { serveIngress } from './service-ingress.js';
+import { serveServiceTokenRefresh } from './service-tokens.js';
+import { SERVICE_TOKEN_REFRESH_PATH } from '@gitspace/protocol-environment';
 import { ServiceSessions, ServiceSessionSchema, sameServiceCaller, type ServiceSession, type ServiceWorkspace, serviceCookie, safeServiceReturn, SERVICE_COOKIE, SERVICE_SESSION_MS, SERVICE_STATE_COOKIE } from './service-sessions.js';
 import { AccountBrowserRelay, BROWSER_SCRIPT_PATH, browserRelayArchive } from './browser-relay.js';
 import { BROWSER_UPLOAD_PATH, browserRouteReply, readBrowserSignedRequest, serveBrowserUpload, type BrowserSignedRequest, type BrowserUploadStep } from './browser-upload.js';
@@ -1181,6 +1183,8 @@ export default {
       return new Response(request.method === 'HEAD' ? null : (object as R2ObjectBody).body, { headers: { 'content-type': 'application/octet-stream', 'content-length': String(object.size), etag: object.httpEtag } });
     }
     if (isHostedServiceHostname(env, url.hostname)) {
+      // An app exchanges a service refresh token on the service's own workspace URL, before routing or sign-in.
+      if (url.pathname === SERVICE_TOKEN_REFRESH_PATH && hostedServiceUrlKind(url.hostname) === 'workspace') return serveServiceTokenRefresh(env, request);
       // A declared route of a workspace URL admits signed callers by credential alone: no origin check, cookie or sign-in.
       const resolved = hostedServiceUrlKind(url.hostname) === 'workspace' ? await env.HOSTED_ROUTES.getByName(url.hostname).resolve(request.method, url.pathname) : undefined;
       if (resolved?.ingress && resolved.ingress.tenant === env.ACCOUNT_ID) return serveIngress(env, request, resolved.ingress, resolved);

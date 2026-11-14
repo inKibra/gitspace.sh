@@ -3,7 +3,7 @@ import { waitUntil } from 'cloudflare:workers';
 import { createLocalJWKSet, createRemoteJWKSet, customFetch, decodeJwt, errors, jwtVerify, type JWTVerifyGetKey } from 'jose';
 import { z } from 'zod';
 import { ingressUrlAllowed } from '@gitspace/protocol-environment';
-import type { HostedIngress, HostedRouteTarget, StoredIngressCredential } from './hosted-route-registry.js';
+import type { HostedIngress, HostedRouteRegistryDO, HostedRouteTarget, StoredIngressCredential } from './hosted-route-registry.js';
 import { fetchInternalService } from './service-access.js';
 
 /** The caller's token when the app's own `Authorization` passes through. */
@@ -75,18 +75,22 @@ async function issuerKeys(issuer: string): Promise<JWTVerifyGetKey> {
 }
 
 /** Null when the credential admits the token, else why it does not. */
-async function rejection(credential: StoredIngressCredential, token: string, request: Request, url: URL): Promise<string | null> {
+async function rejection(credential: StoredIngressCredential, token: string, request: Request, url: URL, registry: DurableObjectStub<HostedRouteRegistryDO>): Promise<string | null> {
   if (credential.kind === 'bearer') {
     const encoder = new TextEncoder();
     const digest = [...new Uint8Array(await crypto.subtle.digest('SHA-256', encoder.encode(token)))].map(byte => byte.toString(16).padStart(2, '0')).join('');
     return credential.hashes.some(hash => timingSafeEqual(encoder.encode(digest), encoder.encode(hash))) ? null : 'bearer_mismatch';
   }
   try {
-    const keys: JWTVerifyGetKey = credential.kind === 'jwt' ? createLocalJWKSet(credential.keys) : async (header, input) => (await issuerKeys(credential.issuer))(header, input);
+    const keys: JWTVerifyGetKey = credential.kind === 'oidc' ? async (header, input) => (await issuerKeys(credential.issuer))(header, input) : createLocalJWKSet(credential.keys);
     const { payload } = await jwtVerify(token, keys, {
-      issuer: credential.issuer, audience: `https://${url.hostname}`, algorithms: ALGORITHMS,
-      requiredClaims: ['exp', 'sub'], maxTokenAge: MAX_TOKEN_AGE_S, clockTolerance: CLOCK_TOLERANCE_S,
+      issuer: credential.issuer, audience: `https://${url.hostname}`, clockTolerance: CLOCK_TOLERANCE_S,
+      // A service token lives up to 8 hours and is good while its `jti` is listed; other callers' tokens are minutes old.
+      ...credential.kind === 'managed'
+        ? { algorithms: ['ES256'], requiredClaims: ['exp', 'sub', 'jti'] }
+        : { algorithms: ALGORITHMS, requiredClaims: ['exp', 'sub'], maxTokenAge: MAX_TOKEN_AGE_S },
     });
+    if (credential.kind === 'managed') return await registry.useManagedToken(payload.jti ?? '', new Date().toISOString()) ? null : 'revoked';
     const subject = payload.sub ?? '';
     if (!credential.subjects.some(pattern => new RegExp(`^${pattern.split('*').map(part => part.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')).join('.*')}$`, 'su').test(subject))) return 'subject';
     if (payload.htm !== undefined && payload.htm !== request.method) return 'htm';
@@ -115,8 +119,8 @@ export async function serveIngress(env: Env, request: Request, ingress: HostedIn
   const failures: string[] = [];
   let admitted: StoredIngressCredential | undefined;
   if (token) for (const credential of [...signed, ...ingress.credentials.filter(credential => credential.kind === 'bearer')]) {
-    // A credential that forwards the app's own `Authorization` takes its token only from `GitSpace-Ingress`.
-    const failure = header === 'authorization' && credential.kind !== 'bearer' && credential.forwardAuthorization ? 'ingress_header_required' : await rejection(credential, token, request, url);
+    // A service token, or a credential that forwards the app's own `Authorization`, is taken only from `GitSpace-Ingress`.
+    const failure = header === 'authorization' && (credential.kind === 'managed' || (credential.kind !== 'bearer' && credential.forwardAuthorization)) ? 'ingress_header_required' : await rejection(credential, token, request, url, registry);
     if (failure === null) {
       admitted = credential;
       break;

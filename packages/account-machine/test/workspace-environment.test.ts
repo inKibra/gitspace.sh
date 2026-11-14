@@ -302,4 +302,33 @@ printf '%s' "$GITSPACE_LIFECYCLE_OUTPUT" > run-output-path.txt
     expect(context.ledger.registrations).toEqual([]);
     expect(context.ledger.state.runs.find((run) => run.phase === 'workspace/materialize')).toMatchObject({ status: 'failed', failure: { code: 'ApprovalRequired' } });
   });
+
+  it('registers approved token routes without credentials when the run writes no ingress.json', async () => {
+    const tokenServices = { services: [{ ...SIGNED_SERVICES.services[0], ingress: [{ method: 'POST', path: '/hooks/*', tokens: true }, { method: 'GET', path: '/status', port: 'admin' }] }, SIGNED_SERVICES.services[1]] };
+    const context = fixture('printf done > done.txt\n', 'workspace/materialize');
+    writeFileSync(join(context.checkout, '.gitspace', 'services.json'), JSON.stringify(tokenServices));
+    await approveActive(context.manager, context.ledger);
+    await context.manager.runPhase('workspace-a', 'workspace/materialize');
+    const run = context.ledger.state.runs.find((entry) => entry.phase === 'workspace/materialize');
+    expect(run?.status).toBe('succeeded');
+    expect(context.ledger.registrations).toStrictEqual([{
+      status: 'running',
+      input: {
+        projectId: 'project-a', workspaceId: 'workspace-a', runId: run?.id ?? '', ingress: serviceIngressContent(JSON.stringify(tokenServices)) ?? '',
+        registrations: [
+          { hostname: 'api-admin--workspace-a--test-srv.gssh.dev', service: 'api', port: 'admin' },
+          { hostname: 'api--workspace-a--test-srv.gssh.dev', service: 'api', port: 'http' },
+        ],
+      },
+    }]);
+  });
+
+  it('registers nothing when the run writes no ingress.json and no approved route takes tokens', async () => {
+    const context = fixture('printf done > done.txt\n', 'workspace/materialize');
+    writeFileSync(join(context.checkout, '.gitspace', 'services.json'), JSON.stringify(SIGNED_SERVICES));
+    await approveActive(context.manager, context.ledger);
+    await context.manager.runPhase('workspace-a', 'workspace/materialize');
+    expect(context.ledger.state.runs.find((entry) => entry.phase === 'workspace/materialize')?.status).toBe('succeeded');
+    expect(context.ledger.registrations).toEqual([]);
+  });
 });

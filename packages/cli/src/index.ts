@@ -8,7 +8,8 @@ import { MACHINE_PAIRING_TTL_MS, createRelayAuthorization, createServerClock, de
 import { credentialProtocolBase64, type SignedCredentialAuthorityGrant } from '@gitspace/protocol/credential-vault';
 import { Command } from 'commander';
 import openBrowser from 'open';
-import { BrowserRelaySupervisor, CloudDataCheckpointBlobStore } from '@gitspace/account-machine';
+import { BrowserRelaySupervisor, CloudDataCheckpointBlobStore, CloudSpaceCheckpointAuthority } from '@gitspace/account-machine';
+import { SERVICE_TOKEN_MAX_TTL_S, SERVICE_TOKEN_MIN_TTL_S, ServiceTokenRequestSchema } from '@gitspace/protocol-environment';
 import { installRuntime } from './bootstrap.js';
 
 const CONFIG_ROOT = process.env.GITSPACE_CONFIG_HOME ?? join(homedir(), '.config', 'gitspace');
@@ -385,6 +386,31 @@ Add it to Chrome now (its pairing waits 10 minutes; run this again after that):
 
 This computer keeps the extension up to date.`);
 });
+const service = program.command('service').description('Call a workspace service from apps, scripts and agents');
+const DURATION_UNIT_SECONDS: Record<string, number> = { '': 1, s: 1, m: 60, h: 3600 };
+service.command('token <service>').description('Mint a GitSpace-signed token for a workspace service; send it as the GitSpace-Ingress header to routes that set tokens: true')
+  .requiredOption('--sub <subject>', 'Who the token is for, e.g. ios-dev')
+  .option('--ttl <duration>', 'Lifetime: 90s, 30m, 8h or plain seconds, from 60s to 8h (default 8h)')
+  .option('--refresh', 'Also issue a 7-day refresh token')
+  .option('--port <name>', 'Service port name (default: the service\'s first http port)')
+  .option('--project <id>', 'Project id (default: GITSPACE_PROJECT_ID)')
+  .option('--workspace <id>', 'Workspace id (default: GITSPACE_WORKSPACE_ID)')
+  .action(async (name: string, options: { sub: string; ttl?: string; refresh?: boolean; port?: string; project?: string; workspace?: string }) => {
+    let ttlSeconds: number | undefined;
+    if (options.ttl !== undefined) {
+      const match = /^(\d+)([smh]?)$/.exec(options.ttl.trim());
+      ttlSeconds = match ? Number(match[1]) * (DURATION_UNIT_SECONDS[match[2] ?? ''] ?? 1) : Number.NaN;
+      if (!(ttlSeconds >= SERVICE_TOKEN_MIN_TTL_S && ttlSeconds <= SERVICE_TOKEN_MAX_TTL_S)) throw new Error(`--ttl must be a duration from 60s to 8h, like 90s, 30m, 8h or plain seconds; got ${options.ttl}`);
+    }
+    const projectId = options.project ?? process.env.GITSPACE_PROJECT_ID;
+    const workspaceId = options.workspace ?? process.env.GITSPACE_WORKSPACE_ID;
+    if (!projectId || !workspaceId) throw new Error('No workspace: run this in a workspace terminal or agent command, or pass both --project and --workspace');
+    const request = ServiceTokenRequestSchema.parse({ service: name, subject: options.sub, ...(options.port === undefined ? {} : { port: options.port }), ...(ttlSeconds === undefined ? {} : { ttlSeconds }), ...(options.refresh ? { refresh: true } : {}) });
+    const config = await requireConfig();
+    const authority = new CloudSpaceCheckpointAuthority({ baseUrl: config.apiUrl, userId: config.userId, machineId: config.machine.id, signingPrivateKey: credentialProtocolBase64.decode(config.machine.signingPrivateKey), clock: accountClock });
+    const grant = await authority.mintServiceToken(projectId, workspaceId, request);
+    console.log(JSON.stringify(grant, null, 2));
+  });
 program.command('doctor').description('Check this machine installation and account connection').action(async () => {
   const config = await loadConfig();
   const checks: Array<[string, 'ok' | 'warn' | 'fail', string]> = [['machine', config ? 'ok' : 'warn', config?.machine.label ?? 'Link from Settings > Machines in your account']];

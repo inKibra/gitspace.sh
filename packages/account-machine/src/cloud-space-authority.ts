@@ -31,7 +31,7 @@ import {
 import { hashBytes, verifiedBytes, type BlobHash, type DataWorkspace, type StreamingBlobStore } from './checkpoint-blobs.js';
 import type { EffectiveSecretMetadata } from '@gitspace/protocol/rpc-contract';
 import { cloudResponseRay, withCloudRequestDiagnostics, type UploadDiagnostics } from './cloud-request-diagnostics.js';
-import { EnvironmentError, EnvironmentFailureSchema, type EnvironmentLifecycleAuthority, type HostedIngressRegistration, type LifecycleMutation, type LifecycleState, type LifecycleRunLog } from '@gitspace/protocol-environment';
+import { EnvironmentError, EnvironmentFailureSchema, ServiceTokenGrantSchema, type EnvironmentLifecycleAuthority, type HostedIngressRegistration, type LifecycleMutation, type LifecycleState, type LifecycleRunLog, type ServiceTokenGrant, type ServiceTokenRequest } from '@gitspace/protocol-environment';
 
 export class CloudSpaceAuthorityError extends Error {
   constructor(readonly code: string, message: string, readonly details: Record<string, unknown> = {}) {
@@ -486,6 +486,10 @@ export class CloudSpaceCheckpointAuthority implements EnvironmentLifecycleAuthor
   /** Replaces the workspace's signed-caller registrations, from its running `cloud/provision` or `workspace/materialize` run. */
   registerHostedIngress(input: HostedIngressRegistration): Promise<{ hostnames: string[] }> {
     return this.call('project.routes.ingress', input);
+  }
+
+  async mintServiceToken(projectId: string, workspaceId: string, request: ServiceTokenRequest): Promise<ServiceTokenGrant> {
+    return ServiceTokenGrantSchema.parse(await this.call('project.services.token', { projectId, workspaceId, request }));
   }
 
   listMachineDefinitions(): Promise<FleetMachineDefinition[]> {

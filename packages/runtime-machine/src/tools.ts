@@ -140,7 +140,8 @@ export async function executeMachineTool(dispatch: RuntimeToolDispatch, local: L
         return operation(dispatch, local, signal);
       }
       const args = RuntimeBashCommandArgumentsSchema.parse(dispatch.args);
-      const result = await command('/bin/bash', ['-c', args.command], args.cwd ? await machineFilePath(local.rootPath, args.cwd) : local.rootPath, await checkoutTerminalEnvironment(local.rootPath, inheritedCommandEnvironment()));
+      const env = await checkoutTerminalEnvironment(local.rootPath, { ...inheritedCommandEnvironment(), GITSPACE_PROJECT_ID: local.attachment.projectId, GITSPACE_WORKSPACE_ID: local.attachment.workspaceId });
+      const result = await command('/bin/bash', ['-c', args.command], args.cwd ? await machineFilePath(local.rootPath, args.cwd) : local.rootPath, env);
       return text(`Exit code: ${result.exitCode}\n${result.output}`);
     }
     case 'grep': {

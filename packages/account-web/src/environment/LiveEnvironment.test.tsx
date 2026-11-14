@@ -17,7 +17,7 @@ const reads = vi.hoisted(() => new Map<string, unknown>());
 const fleet = vi.hoisted(() => ({ machines: [] as { id: string; label: string; state: string; kind: string }[] }));
 vi.mock('../rpc-client.js', () => ({
   rpcClient: {
-    environment: { get: 'environment', approve: rpc.approve, revokeApproval: rpc.revokeApproval, runChecks: rpc.runChecks, runPhase: rpc.runPhase, putValue: rpc.putValue, setProfile: rpc.setProfile, cancelRun: rpc.cancelRun, runLog: rpc.runLog },
+    environment: { get: 'environment', serviceTokens: 'serviceTokens', approve: rpc.approve, revokeApproval: rpc.revokeApproval, runChecks: rpc.runChecks, runPhase: rpc.runPhase, putValue: rpc.putValue, setProfile: rpc.setProfile, cancelRun: rpc.cancelRun, runLog: rpc.runLog },
     runtime: { snapshot: 'snapshot', sync: rpc.sync, attachment: { cache: { request: rpc.cache }, detach: rpc.detach } },
     terminals: { create: rpc.createTerminal },
   },
@@ -105,7 +105,7 @@ beforeEach(() => {
   openTerminal.mockReset();
   reads.clear();
   reads.set('environment', environment());
-  fleet.machines = [{ id: 'darktop', label: 'Darktop', state: 'online', kind: 'physical' }, { id: 'sandbox', label: 'Sandbox', state: 'sleeping', kind: 'sandbox' }, { id: 'mbp', label: 'MacBook Pro', state: 'offline', kind: 'physical' }];
+  fleet.machines = [{ id: 'lab', label: 'Lab', state: 'online', kind: 'physical' }, { id: 'sandbox', label: 'Sandbox', state: 'sleeping', kind: 'sandbox' }, { id: 'mbp', label: 'MacBook Pro', state: 'offline', kind: 'physical' }];
   container = document.createElement('div'); document.body.append(container); root = createRoot(container);
 });
 afterEach(async () => {
@@ -116,20 +116,20 @@ afterEach(async () => {
 });
 
 it('shows one status per machine from the status document, and No machine when none is attached', async () => {
-  await render(snapshot([{ id: 'darktop' }, { id: 'sandbox', online: false, ready: false }, { id: 'mbp', online: false, ready: false, platform: 'darwin' }]));
-  expect(machineCard('Darktop').querySelector('[role="status"]')?.textContent).toBe('Linux · online');
+  await render(snapshot([{ id: 'lab' }, { id: 'sandbox', online: false, ready: false }, { id: 'mbp', online: false, ready: false, platform: 'darwin' }]));
+  expect(machineCard('Lab').querySelector('[role="status"]')?.textContent).toBe('Linux · online');
   expect(machineCard('Sandbox').querySelector('[role="status"]')?.textContent).toBe('Paused');
   expect(machineCard('MacBook Pro').querySelector('[role="status"]')?.textContent).toBe('Offline');
-  await render(snapshot([{ id: 'darktop', ready: false, platform: 'darwin' }]));
-  expect(machineCard('Darktop').querySelector('[role="status"]')?.textContent).toBe('macOS · starting');
+  await render(snapshot([{ id: 'lab', ready: false, platform: 'darwin' }]));
+  expect(machineCard('Lab').querySelector('[role="status"]')?.textContent).toBe('macOS · starting');
   await render(snapshot([]));
   expect(document.querySelector('[aria-label="Machines"]')?.textContent).toContain('No machine');
   expect(document.querySelector('[aria-label="Overview"] [role="status"]')?.textContent).toContain('No machine');
 });
 
 it('lists the named setup steps with approvals and interactive scripts', async () => {
-  rpc.runPhase.mockResolvedValue({ status: 'ok', value: { machineId: 'darktop', terminalName: 'lifecycle-1' } });
-  await render(snapshot([{ id: 'darktop' }]));
+  rpc.runPhase.mockResolvedValue({ status: 'ok', value: { machineId: 'lab', terminalName: 'lifecycle-1' } });
+  await render(snapshot([{ id: 'lab' }]));
   for (const name of ['Prepare machine', 'Prepare checkout', 'Checks', 'Agent setup']) expect(step(name), name).not.toBeNull();
   // An unapproved script needs approval; approving reviews its exact content first, and approves it for the project.
   expect(step('Prepare checkout').textContent).toContain('Needs approval');
@@ -147,12 +147,12 @@ it('lists the named setup steps with approvals and interactive scripts', async (
   expect(loginRow.textContent).toContain('Interactive');
   expect(loginRow.textContent).not.toContain('Needs approval');
   await click('Run in terminal', loginRow);
-  expect(rpc.runPhase).toHaveBeenCalledWith({ spaceId: 'workspace', machineId: 'darktop', runId: expect.any(String), phase: 'machine/prepare', rerun: true, interactive: true });
-  expect(openTerminal).toHaveBeenCalledWith('darktop', 'lifecycle-1');
+  expect(rpc.runPhase).toHaveBeenCalledWith({ spaceId: 'workspace', machineId: 'lab', runId: expect.any(String), phase: 'machine/prepare', rerun: true, interactive: true });
+  expect(openTerminal).toHaveBeenCalledWith('lab', 'lifecycle-1');
   await click('Revoke', loginRow);
   expect(rpc.revokeApproval).toHaveBeenCalledWith({ spaceId: 'workspace', scope: 'project', executionHash: loginHash });
   await click('Run checks', step('Checks'));
-  expect(rpc.runChecks).toHaveBeenCalledWith({ spaceId: 'workspace', machineId: 'darktop', runId: expect.any(String) });
+  expect(rpc.runChecks).toHaveBeenCalledWith({ spaceId: 'workspace', machineId: 'lab', runId: expect.any(String) });
 });
 
 it('asks for approval of the routes services.json opens to signed callers, and revokes it', async () => {
@@ -161,7 +161,7 @@ it('asks for approval of the routes services.json opens to signed callers, and r
   const ingress = { id: 'ingress', kind: 'ingress' as const, label: 'Signed callers', command: '.gitspace/services.json', hash, content, phase: null, fileName: null };
   const unapproved = environment();
   reads.set('environment', { ...unapproved, executions: [...unapproved.executions, { ...ingress, approval: null }] });
-  await render(snapshot([{ id: 'darktop' }]));
+  await render(snapshot([{ id: 'lab' }]));
   expect(document.querySelector('[aria-label="Overview"] [role="status"]')?.textContent).toContain('2 need approval');
   expect(step('Signed callers').textContent).toContain('Needs approval');
   await click('Review & approve', step('Signed callers'));
@@ -170,10 +170,26 @@ it('asks for approval of the routes services.json opens to signed callers, and r
   expect(rpc.approve).toHaveBeenCalledWith({ spaceId: 'workspace', scope: 'project', executionHash: hash });
   const approved = environment();
   reads.set('environment', { ...approved, executions: [...approved.executions, { ...ingress, approval: 'workspace' }], lifecycle: { ...approved.lifecycle, approvals: [...approved.lifecycle.approvals, { scope: 'workspace', executionHash: hash, approvedBy: 'device', approvedAt: stamp }] } });
-  await render(snapshot([{ id: 'darktop' }]));
+  await render(snapshot([{ id: 'lab' }]));
   expect(step('Signed callers').textContent).not.toContain('Needs approval');
   await click('Revoke', step('Signed callers'));
   expect(rpc.revokeApproval).toHaveBeenCalledWith({ spaceId: 'workspace', scope: 'workspace', executionHash: hash });
+});
+
+it('shows a Service tokens panel for each service whose approved ingress has a route that admits tokens', async () => {
+  const content = JSON.stringify([
+    { service: 'api', port: 'http', routes: [{ method: 'GET', path: '/v1/*', tokens: true }] },
+    { service: 'hooks', port: 'http', routes: [{ method: 'POST', path: '/webhooks/*' }] },
+  ], null, 2);
+  const hash = await executionHash({ kind: 'ingress', command: content });
+  const ingress = { id: 'ingress', kind: 'ingress' as const, label: 'Signed callers', command: '.gitspace/services.json', hash, content, phase: null, fileName: null };
+  const base = environment();
+  reads.set('environment', { ...base, executions: [...base.executions, { ...ingress, approval: null }] });
+  await render(snapshot([{ id: 'lab' }]));
+  expect(document.querySelector('[aria-label^="Setup step Service tokens"]')).toBeNull();
+  reads.set('environment', { ...base, executions: [...base.executions, { ...ingress, approval: 'workspace' }] });
+  await render(snapshot([{ id: 'lab' }]));
+  expect([...document.querySelectorAll('[aria-label^="Setup step Service tokens"]')].map(panel => panel.getAttribute('aria-label'))).toEqual(['Setup step Service tokens api']);
 });
 
 it('approves a committed browser site for the project at the chosen level, shows a working-copy-only site as uncommitted, and changes the level of every approval of a site', async () => {
@@ -181,7 +197,7 @@ it('approves a committed browser site for the project at the chosen level, shows
   const unapproved = environment();
   // staging.example is only in the working copy's bundle.
   reads.set('environment', withSites(unapproved, { ...unapproved.lifecycle, browserOrigins: [{ pattern: 'bank.example', hash }] }, ['bank.example', 'staging.example']));
-  await render(snapshot([{ id: 'darktop' }]));
+  await render(snapshot([{ id: 'lab' }]));
   const staging = step('Browser access').querySelector('[aria-label="Site staging.example"]')!;
   expect(staging.textContent).toContain('In your working copy, not committed — commit to approve');
   expect(staging.querySelector('button')).toBeNull();
@@ -195,7 +211,7 @@ it('approves a committed browser site for the project at the chosen level, shows
   const approved = environment();
   // Approvals stored before the levels were renamed: steps (now interact) and scripts (now full).
   reads.set('environment', withSites(approved, { ...approved.lifecycle, browserOrigins: [{ pattern: 'bank.example', hash }], approvals: [...approved.lifecycle.approvals, { scope: 'project', executionHash: hash, approvedBy: 'device', approvedAt: stamp, level: 'steps' }, { scope: 'workspace', executionHash: hash, approvedBy: 'device', approvedAt: stamp, level: 'scripts' }] }, ['bank.example']));
-  await render(snapshot([{ id: 'darktop' }]));
+  await render(snapshot([{ id: 'lab' }]));
   const selected = step('Browser access').querySelector<HTMLSelectElement>('select[aria-label="Level for bank.example"]')!;
   expect([...selected.options].map(option => option.value)).toEqual(['read', 'interact', 'full']);
   expect(selected.value).toBe('interact');
@@ -207,7 +223,7 @@ it('approves a committed browser site for the project at the chosen level, shows
 });
 
 it('lists secrets and values by name and never renders a value', async () => {
-  await render(snapshot([{ id: 'darktop' }]));
+  await render(snapshot([{ id: 'lab' }]));
   const values = document.querySelector('[aria-label="Values"]')!;
   expect(values.querySelector('[aria-label="Secret NPM_TOKEN"]')?.textContent?.replaceAll('NPM_TOKENproject secret', '')).toBe('');
   expect(values.querySelector('[aria-label="Value ADMIN_EMAILS"]')?.textContent).toContain('project');
@@ -227,12 +243,12 @@ it('runs the sync line through the sync operations on that machine', async () =>
   rpc.sync.mockImplementation(async ({ args }: { args: { method: string } }) => ({ status: 'ok', value: args.method === 'diff'
     ? { method: 'diff', unsent: [{ status: 'M', path: 'src/app.ts' }], unsentTruncated: false, notOnMachine: [{ status: 'A', path: 'docs/new.md' }], notOnMachineTruncated: false }
     : args.method === 'now' ? { method: 'now', version: commit, conflicts: [] } : { method: 'resolve', resolved: 'src/a.ts', keep: 'machine', backup: 'refs/gitspace/backups/cloud/1', conflicts: [] } }));
-  await render(snapshot([{ id: 'darktop' }, { id: 'mbp', online: false, ready: false }], ['src/a.ts']));
-  expect(machineCard('Darktop').textContent).toContain('2 unsent changes');
-  await click('Sync now', machineCard('Darktop'));
-  expect(rpc.sync).toHaveBeenLastCalledWith({ projectId: 'project', workspaceId: 'workspace', requestId: expect.any(String), args: { method: 'now', on: 'darktop' } });
-  await click('Show unsent changes', machineCard('Darktop'));
-  expect(rpc.sync).toHaveBeenLastCalledWith({ projectId: 'project', workspaceId: 'workspace', requestId: expect.any(String), args: { method: 'diff', on: 'darktop' } });
+  await render(snapshot([{ id: 'lab' }, { id: 'mbp', online: false, ready: false }], ['src/a.ts']));
+  expect(machineCard('Lab').textContent).toContain('2 unsent changes');
+  await click('Sync now', machineCard('Lab'));
+  expect(rpc.sync).toHaveBeenLastCalledWith({ projectId: 'project', workspaceId: 'workspace', requestId: expect.any(String), args: { method: 'now', on: 'lab' } });
+  await click('Show unsent changes', machineCard('Lab'));
+  expect(rpc.sync).toHaveBeenLastCalledWith({ projectId: 'project', workspaceId: 'workspace', requestId: expect.any(String), args: { method: 'diff', on: 'lab' } });
   expect(document.querySelector('[aria-label="Unsent changes"]')?.textContent).toContain('M src/app.ts');
   expect(document.querySelector('[aria-label="Unsent changes"]')?.textContent).toContain('A docs/new.md');
   await click('Close');
@@ -245,35 +261,35 @@ it('runs the sync line through the sync operations on that machine', async () =>
 
 it('opens a terminal in the checkout and runs checks from the machine menu', async () => {
   rpc.createTerminal.mockResolvedValue({ status: 'ok', value: { name: 'shell-1' } });
-  await render(snapshot([{ id: 'darktop' }]));
-  await chooseMenuItem('Darktop actions', 'Open terminal');
-  expect(rpc.createTerminal).toHaveBeenCalledWith({ spaceId: 'workspace', machineId: 'darktop' });
-  expect(openTerminal).toHaveBeenCalledWith('darktop', 'shell-1');
-  await chooseMenuItem('Darktop actions', 'Run checks');
-  expect(rpc.runChecks).toHaveBeenCalledWith({ spaceId: 'workspace', machineId: 'darktop', runId: expect.any(String) });
+  await render(snapshot([{ id: 'lab' }]));
+  await chooseMenuItem('Lab actions', 'Open terminal');
+  expect(rpc.createTerminal).toHaveBeenCalledWith({ spaceId: 'workspace', machineId: 'lab' });
+  expect(openTerminal).toHaveBeenCalledWith('lab', 'shell-1');
+  await chooseMenuItem('Lab actions', 'Run checks');
+  expect(rpc.runChecks).toHaveBeenCalledWith({ spaceId: 'workspace', machineId: 'lab', runId: expect.any(String) });
 });
 
 it('runs setup only on the chosen machine and never substitutes another after it is detached', async () => {
-  await render(snapshot([{ id: 'darktop' }, { id: 'mbp' }]));
+  await render(snapshot([{ id: 'lab' }, { id: 'mbp' }]));
   expect(buttons('Run checks').some(button => !button.disabled)).toBe(false);
   const select = document.querySelector<HTMLSelectElement>('select[aria-label="Setup machine"]')!;
   await act(() => { select.value = 'mbp'; select.dispatchEvent(new Event('change', { bubbles: true })); });
   await click('Run checks', step('Checks'));
   expect(rpc.runChecks).toHaveBeenCalledWith({ spaceId: 'workspace', machineId: 'mbp', runId: expect.any(String) });
-  await render(snapshot([{ id: 'darktop' }, { id: 'sandbox' }]));
+  await render(snapshot([{ id: 'lab' }, { id: 'sandbox' }]));
   expect(document.querySelector<HTMLSelectElement>('select[aria-label="Setup machine"]')!.value).toBe('');
   expect(buttons('Run checks').some(button => !button.disabled)).toBe(false);
 });
 
 it('requires explicit LFS consent before detaching a machine', async () => {
-  const runtime = snapshot([{ id: 'darktop', online: false, ready: false }]);
+  const runtime = snapshot([{ id: 'lab', online: false, ready: false }]);
   runtime.documents['gitspace.code'] = { ...RuntimeGitCheckpointSchema.parse(runtime.documents['gitspace.code']), lfs: { objects: [], heldBack: [{ path: 'assets/local.psd', kind: 'modified' }] } };
   await render(runtime);
-  await chooseMenuItem('Darktop actions', 'Detach');
+  await chooseMenuItem('Lab actions', 'Detach');
   expect(document.body.textContent).toContain('assets/local.psd');
   await click('Cancel');
   expect(rpc.detach).not.toHaveBeenCalled();
-  await chooseMenuItem('Darktop actions', 'Detach');
+  await chooseMenuItem('Lab actions', 'Detach');
   await click('Continue without them');
-  expect(rpc.detach).toHaveBeenCalledWith({ projectId: 'project', workspaceId: 'workspace', machineId: 'darktop', attachmentId: 'attachment-darktop', generation: 2 });
+  expect(rpc.detach).toHaveBeenCalledWith({ projectId: 'project', workspaceId: 'workspace', machineId: 'lab', attachmentId: 'attachment-lab', generation: 2 });
 });

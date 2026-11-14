@@ -261,12 +261,13 @@ export class WorkspaceHubTerminalCoordinator {
   async createShell(spaceId: string): Promise<WorkspaceTerminalView> {
     await this.checkouts.use(spaceId);
     const scope = await this.scope(spaceId);
+    const projectId = this.checkouts.projectId(spaceId);
     const shell = process.env.SHELL || (process.platform === 'win32' ? process.env.COMSPEC : undefined) || '/bin/bash';
     const spec: DaemonStartSpec = {
       name: `gitspace-${spaceId.slice(0, 8)}-${crypto.randomUUID().slice(0, 8)}`,
       application: shell,
       args: [],
-      env: await checkoutTerminalEnvironment(scope.space.rootPath, inheritedCommandEnvironment()),
+      env: await checkoutTerminalEnvironment(scope.space.rootPath, { ...inheritedCommandEnvironment(), ...(projectId === null ? {} : { GITSPACE_PROJECT_ID: projectId }), GITSPACE_WORKSPACE_ID: spaceId }),
       cwd: scope.space.rootPath,
       pty: true,
       restart: 'no',

@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { RuntimeContentSchema, RuntimeIdentitySchema, RuntimeJsonSchema, RuntimeMachineIdSchema } from './base.js';
 import { RuntimeJobHandleSchema } from './execution-contracts.js';
 import { RuntimeDispatchSelectionSchema, RuntimeMachineNeedsSchema } from './scheduling.js';
-import { LifecycleRunRequestSchema, LifecycleMutationSchema } from '@gitspace/protocol-environment';
+import { LifecycleRunRequestSchema, LifecycleMutationSchema, ServiceTokenRequestSchema } from '@gitspace/protocol-environment';
 import { DaemonSnapshotSchema, DaemonStartSpecSchema } from '@gitspace/supervisor/protocol';
 
 const path = z.string().min(1);
@@ -241,6 +241,14 @@ export const RuntimeEnvironmentArgumentsSchema = z.discriminatedUnion('method', 
   putValue.omit({ op: true }).extend({ method: z.literal('putValue').describe('Set a value the lifecycle scripts read.'), name: valueName, scope: valueScope, value: z.string().max(16_384).describe('The value.') }),
   putValue.omit({ op: true, value: true }).extend({ method: z.literal('deleteValue').describe('Remove a value.'), name: valueName, scope: valueScope }),
   z.object({ method: z.literal('cancelRun').describe('Cancel a run.'), runId: path.describe('The run to cancel.') }),
+  ServiceTokenRequestSchema.extend({
+    method: z.literal('token').describe('Sign an app token for a service whose routes set tokens: true.'),
+    service: ServiceTokenRequestSchema.shape.service.describe('The service, as .gitspace/services.json names it.'),
+    port: ServiceTokenRequestSchema.shape.port.describe('Its http port whose workspace URL the token is for; the first with token routes by default.'),
+    subject: ServiceTokenRequestSchema.shape.subject.describe('Who the token is for (its sub), like ios-dev/brad.'),
+    ttlSeconds: ServiceTokenRequestSchema.shape.ttlSeconds.describe('Lifetime in seconds, 60 to 28800 (8 hours, the default).'),
+    refresh: ServiceTokenRequestSchema.shape.refresh.describe('Also return a refresh token (7 days, replaced on every use).'),
+  }),
 ]);
 /** `import_ref` runs on a machine holding the project's base checkout: it fetches one origin ref with the machine's own git
  * credentials and publishes it to the project's cloud repository, for origins the cloud cannot read. */

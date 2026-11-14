@@ -60,6 +60,8 @@ export const controlOperationSchema = z.enum([
   'project.routes.release',
   /** Replaces a workspace's signed-caller credentials, during this machine's approved provision or materialize run. */
   'project.routes.ingress',
+  /** Signs a service token for a workspace service whose routes admit them (`gitspace service token`). */
+  'project.services.token',
   'project.events.append',
   'devices.list',
   /** Starts pairing a Chrome for `gitspace browser install`: the short code Pair a Chrome makes, one waiting per

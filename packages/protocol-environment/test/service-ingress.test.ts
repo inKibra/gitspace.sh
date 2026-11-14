@@ -46,6 +46,18 @@ describe('signed-caller routes', () => {
     expect(await derive(null)).toEqual([]);
   });
 
+  it('keeps tokens: true in the approved content, merges a route declared twice, and leaves content without it unchanged', async () => {
+    const declared = [{ method: 'POST', path: '/webhooks/*' }, { method: 'POST', path: '/app/*', tokens: true }, { method: 'POST', path: '/app/*', tokens: false }, { method: 'GET', path: '/health', tokens: false }];
+    expect(JSON.parse(serviceIngressContent(services(declared)) ?? '')).toEqual([
+      { service: 'api', port: 'http', routes: [{ method: 'POST', path: '/app/*', tokens: true }, { method: 'GET', path: '/health' }, { method: 'POST', path: '/webhooks/*' }] },
+    ]);
+    const [plain] = await derive(services([{ method: 'POST', path: '/webhooks/*' }]));
+    const [unset] = await derive(services([{ method: 'POST', path: '/webhooks/*', tokens: false }]));
+    const [opted] = await derive(services([{ method: 'POST', path: '/webhooks/*', tokens: true }]));
+    expect(unset?.hash).toBe(plain?.hash);
+    expect(opted?.hash).not.toBe(plain?.hash);
+  });
+
   it('refuses routes on tcp or missing ports, unknown fields, and more than 64 routes', () => {
     expect(() => serviceIngressContent(services([{ method: 'GET', path: '/', port: 'db' }]))).toThrow('http port');
     expect(() => serviceIngressContent(services([{ method: 'GET', path: '/' }], [{ name: 'db', protocol: 'tcp' }]))).toThrow('http port');

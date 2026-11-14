@@ -2101,12 +2101,15 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
     });
   }
 
-  /** Ends workspace URLs (one workspace's, or every one when null): each registry drops the pointer and signed callers, then the mirrors. */
+  /** Ends workspace URLs (one workspace's, or every one when null): each registry drops the pointer and signed callers, the
+   * vault the workspace's service token keys, then the mirrors. */
   private async clearHostedPointers(workspaceId: string | null): Promise<void> {
     const rows = (workspaceId === null
       ? this.ctx.storage.sql.exec<{ hostname: string; workspace_id: string }>('SELECT hostname, workspace_id FROM hosted_pointers UNION SELECT hostname, workspace_id FROM hosted_ingress')
       : this.ctx.storage.sql.exec<{ hostname: string; workspace_id: string }>('SELECT hostname, workspace_id FROM hosted_pointers WHERE workspace_id=? UNION SELECT hostname, workspace_id FROM hosted_ingress WHERE workspace_id=?', workspaceId, workspaceId)).toArray();
     await Promise.all(rows.map(row => this.env.HOSTED_ROUTES.getByName(row.hostname).clear(this.env.ACCOUNT_ID, row.workspace_id)));
+    const ingress = this.ctx.storage.sql.exec<{ workspace_id: string }>(workspaceId === null ? 'SELECT DISTINCT workspace_id FROM hosted_ingress' : 'SELECT DISTINCT workspace_id FROM hosted_ingress WHERE workspace_id=?', ...(workspaceId === null ? [] : [workspaceId])).toArray();
+    await Promise.all(ingress.map(row => this.env.CREDENTIALS.getByName(this.env.ACCOUNT_ID).deleteServiceTokens(row.workspace_id)));
     for (const row of rows) {
       this.ctx.storage.sql.exec('DELETE FROM hosted_pointers WHERE hostname=? AND workspace_id=?', row.hostname, row.workspace_id);
       this.ctx.storage.sql.exec('DELETE FROM hosted_ingress WHERE hostname=? AND workspace_id=?', row.hostname, row.workspace_id);

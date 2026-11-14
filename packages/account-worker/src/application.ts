@@ -79,7 +79,8 @@ import {
   inferenceDeleteInputSchema, inferenceAssignInputSchema,
   type InferenceProfile, type InferenceState,
 } from '@gitspace/protocol/inference';
-import { HostedIngressRegistrationSchema, LifecycleMutationSchema, authorizeLifecycleMachineMutation, environmentFailure, executionHash, parseServiceIngressContent, type LifecycleState } from '@gitspace/protocol-environment';
+import { HostedIngressRegistrationSchema, LifecycleMutationSchema, SERVICE_TOKEN_MAX_TTL_S, ServiceTokenRequestSchema, authorizeLifecycleMachineMutation, environmentFailure, executionHash, parseServiceIngressContent, type LifecycleState } from '@gitspace/protocol-environment';
+import { createManagedKey, ManagedKeySchema, mintServiceToken, signManagedToken, type ManagedKey, type SignedServiceToken } from './service-tokens.js';
 import { LiveChanges } from './live-changes.js';
 import { sendSized, tenantNamespace, tenantStore, TenantObjectIntegrityError, verifying, type TenantNamespace } from './tenant-store.js';
 import { requireWorkspaceAccess } from './runtime-access.js';
@@ -451,6 +452,19 @@ type CloudLoginRow = {
   flow_id: string; profile_id: string; provider: string; revision: number; sealed_state: string;
   events_json: string; status: 'pending' | 'busy' | 'done'; expires_at: number;
 };
+
+interface ServiceTokenKeyRow extends Record<string, SqlStorageValue> {
+  kid: string;
+  public_jwk: string;
+  created_at: string;
+  signs_until: string;
+  verifies_until: string;
+}
+
+function serviceTokenKey(row: ServiceTokenKeyRow): ManagedKey {
+  return ManagedKeySchema.parse({ kid: row.kid, jwk: JSON.parse(row.public_jwk), createdAt: row.created_at, signsUntil: row.signs_until, verifiesUntil: row.verifies_until });
+}
+
 function publicError(code: string, message: string, retryAfterMs?: number): CredentialVaultResult<never> {
 
   return { status: 'error', error: { code, message, ...(retryAfterMs === undefined ? {} : { retryAfterMs }) } };
@@ -586,6 +600,15 @@ export class CredentialVaultDO extends BudgetedDurableObject {
         CREATE TABLE IF NOT EXISTS scope_keys (
           scope TEXT PRIMARY KEY, wrapped BLOB NOT NULL, root_version INTEGER NOT NULL, created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS service_token_urls (
+          hostname TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, service TEXT NOT NULL, port TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS service_token_urls_service ON service_token_urls(workspace_id, service);
+        CREATE TABLE IF NOT EXISTS service_token_keys (
+          kid TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, service TEXT NOT NULL, sealed_private_key TEXT NOT NULL,
+          public_jwk TEXT NOT NULL, created_at TEXT NOT NULL, signs_until TEXT NOT NULL, verifies_until TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS service_token_keys_service ON service_token_keys(workspace_id, service);
         INSERT OR IGNORE INTO inference_migration(id, version, revision) VALUES (1, 0, 0);
       `);
       this.ctx.storage.sql.exec('INSERT OR IGNORE INTO credential_snapshot(id, generation) VALUES (1, ?)', Date.now());
@@ -627,6 +650,88 @@ export class CredentialVaultDO extends BudgetedDurableObject {
         });
       }
     });
+  }
+
+  /**
+   * Service tokens. Keeps the workspace URLs of the workspace's services whose routes set `tokens: true` (replacing the
+   * workspace's earlier ones) and gives each such service a signing key; the keys of services no longer listed go.
+   * Answers each listed service's issuer and public keys.
+   */
+  async registerServiceTokenUrls(workspaceId: string, urls: readonly { hostname: string; service: string; port: string }[]): Promise<Record<string, { issuer: string; keys: ManagedKey[] }>> {
+    const listed = urls.toSorted((left, right) => left.hostname.localeCompare(right.hostname));
+    const stored = this.ctx.storage.sql.exec<{ hostname: string; service: string; port: string }>('SELECT hostname, service, port FROM service_token_urls WHERE workspace_id = ? ORDER BY hostname', workspaceId).toArray();
+    const services = [...new Set(listed.map(url => url.service))];
+    if (JSON.stringify(stored.map(row => [row.hostname, row.service, row.port])) !== JSON.stringify(listed.map(url => [url.hostname, url.service, url.port]))) {
+      this.ctx.storage.transactionSync(() => {
+        this.ctx.storage.sql.exec('DELETE FROM service_token_urls WHERE workspace_id = ?', workspaceId);
+        for (const url of listed) {
+          this.ctx.storage.sql.exec('INSERT INTO service_token_urls(hostname, workspace_id, service, port) VALUES (?, ?, ?, ?) ON CONFLICT(hostname) DO UPDATE SET workspace_id = excluded.workspace_id, service = excluded.service, port = excluded.port', url.hostname, workspaceId, url.service, url.port);
+        }
+        this.ctx.storage.sql.exec('DELETE FROM service_token_keys WHERE workspace_id = ? AND service NOT IN (SELECT value FROM json_each(?))', workspaceId, JSON.stringify(services));
+      });
+    }
+    const answered: Record<string, { issuer: string; keys: ManagedKey[] }> = {};
+    for (const service of services) answered[service] = { issuer: this.serviceTokenKeys(workspaceId, service).issuer, keys: (await this.serviceTokenSigner(workspaceId, service, false)).keys };
+    return answered;
+  }
+
+  /** A service's workspace URLs that admit tokens and the public keys whose tokens may still be live; changes nothing. */
+  serviceTokenKeys(workspaceId: string, service: string): { issuer: string; urls: Array<{ hostname: string; port: string }>; keys: ManagedKey[] } {
+    const urls = this.ctx.storage.sql.exec<{ hostname: string; port: string }>('SELECT hostname, port FROM service_token_urls WHERE workspace_id = ? AND service = ? ORDER BY port', workspaceId, service).toArray();
+    if (!urls.length) throw new Error(`${service} has no workspace URL whose routes set "tokens": true; add it to its ingress routes in .gitspace/services.json, approve them in Environment, and run workspace/materialize`);
+    const keys = this.ctx.storage.sql.exec<ServiceTokenKeyRow>('SELECT kid, public_jwk, created_at, signs_until, verifies_until FROM service_token_keys WHERE workspace_id = ? AND service = ? AND verifies_until > ? ORDER BY created_at DESC', workspaceId, service, new Date().toISOString()).toArray();
+    // The issuer names the workspace and service under the account's URL.
+    return { issuer: new URL(`/issuers/${encodeURIComponent(workspaceId)}/${service}`, this.env.ACCOUNT_URL).href, urls: urls.map(url => ({ hostname: url.hostname, port: url.port })), keys: keys.map(serviceTokenKey) };
+  }
+
+  /** Signs an access token for one of the service's workspace URLs (`port`, else its first) with its current key. */
+  async signServiceToken(input: { workspaceId: string; service: string; port?: string; subject: string; ttlSeconds: number; jti: string }): Promise<SignedServiceToken> {
+    const { urls, issuer } = this.serviceTokenKeys(input.workspaceId, input.service);
+    const url = input.port === undefined ? urls[0] : urls.find(entry => entry.port === input.port);
+    if (!url) throw new Error(`${input.service} port ${input.port} has no routes that set "tokens": true; its ports with token routes: ${urls.map(entry => entry.port).join(', ')}`);
+    const signer = await this.serviceTokenSigner(input.workspaceId, input.service, false);
+    const issuedAt = Math.floor(Date.now() / 1000);
+    const expiresAt = issuedAt + Math.min(input.ttlSeconds, SERVICE_TOKEN_MAX_TTL_S);
+    const token = await signManagedToken(signer.privateJwk, signer.kid, { issuer, audience: `https://${url.hostname}`, subject: input.subject, jti: input.jti, issuedAt, expiresAt });
+    return { token, hostname: url.hostname, port: url.port, issuer, issuedAt: new Date(issuedAt * 1000).toISOString(), expiresAt: new Date(expiresAt * 1000).toISOString(), keys: signer.keys };
+  }
+
+  /** A new key signs from now; every earlier key of the service stops verifying at once, ending the tokens it signed. */
+  async rotateServiceTokenKey(workspaceId: string, service: string): Promise<{ urls: Array<{ hostname: string; port: string }>; keys: ManagedKey[] }> {
+    const { urls } = this.serviceTokenKeys(workspaceId, service);
+    return { urls, keys: (await this.serviceTokenSigner(workspaceId, service, true)).keys };
+  }
+
+  /** An archived or deleted workspace's service URLs and keys go. */
+  deleteServiceTokens(workspaceId: string): void {
+    this.ctx.storage.sql.exec('DELETE FROM service_token_urls WHERE workspace_id = ?', workspaceId);
+    this.ctx.storage.sql.exec('DELETE FROM service_token_keys WHERE workspace_id = ?', workspaceId);
+  }
+
+  /**
+   * The service's current key, opened, with every key whose tokens may still be live. A key past its 7 days of signing
+   * is followed by a new one and keeps verifying 8 hours more; `rotate` ends every earlier key now. Expired keys go.
+   */
+  private async serviceTokenSigner(workspaceId: string, service: string, rotate: boolean): Promise<{ kid: string; privateJwk: string; keys: ManagedKey[] }> {
+    const config = this.config();
+    if (!config) throw new Error('Vault is not configured');
+    const now = Date.now();
+    const at = new Date(now).toISOString();
+    this.ctx.storage.sql.exec('DELETE FROM service_token_keys WHERE workspace_id = ? AND service = ? AND verifies_until <= ?', workspaceId, service, at);
+    if (rotate) this.ctx.storage.sql.exec('UPDATE service_token_keys SET signs_until = MIN(signs_until, ?), verifies_until = ? WHERE workspace_id = ? AND service = ?', at, at, workspaceId, service);
+    const context = (kid: string) => JSON.stringify(['service-token-key/v1', config.user_id, workspaceId, service, kid]);
+    let current = this.ctx.storage.sql.exec<{ kid: string; sealed_private_key: string }>('SELECT kid, sealed_private_key FROM service_token_keys WHERE workspace_id = ? AND service = ? AND signs_until > ? ORDER BY created_at DESC LIMIT 1', workspaceId, service, at).toArray()[0];
+    if (!current) {
+      const created = await createManagedKey(now);
+      const sealed = await sealVaultText(created.privateJwk, credentialProtocolBase64.decode(config.vault_key), context(created.key.kid));
+      this.ctx.storage.sql.exec(
+        'INSERT INTO service_token_keys(kid, workspace_id, service, sealed_private_key, public_jwk, created_at, signs_until, verifies_until) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        created.key.kid, workspaceId, service, sealed, JSON.stringify(created.key.jwk), created.key.createdAt, created.key.signsUntil, created.key.verifiesUntil,
+      );
+      current = { kid: created.key.kid, sealed_private_key: sealed };
+    }
+    const keys = this.ctx.storage.sql.exec<ServiceTokenKeyRow>('SELECT kid, public_jwk, created_at, signs_until, verifies_until FROM service_token_keys WHERE workspace_id = ? AND service = ? AND verifies_until > ? ORDER BY created_at DESC', workspaceId, service, at).toArray();
+    return { kid: current.kid, privateJwk: await openVaultText(current.sealed_private_key, credentialProtocolBase64.decode(config.vault_key), context(current.kid)), keys: keys.map(serviceTokenKey) };
   }
 
   /** Local lifecycle hook; never calls a project authority and cannot deadlock registration. */
@@ -3885,7 +3990,8 @@ const worker = {
             || body.operation.startsWith('deploy.')
             || body.operation.startsWith('lfs.')
             || body.operation.startsWith('project.environment.')
-            || body.operation.startsWith('project.mcp.') ? 'space.control'
+            || body.operation.startsWith('project.mcp.')
+            || body.operation === 'project.services.token' ? 'space.control'
           : 'storage.access';
         if (diagnostics) diagnostics.stage = 'authorize';
         const authorized = await authorizeControl(env, body, capability);
@@ -4206,11 +4312,28 @@ const worker = {
               if (new Set(hostnames).size !== hostnames.length || hostnames.some(hostname => hostedServiceUrlKind(hostname) !== 'workspace' || !hostname.endsWith(`--${env.TENANT_ID}-srv.gssh.dev`))) throw new Error('Signed callers are registered on distinct workspace URLs');
               const mirrored = await authority.addHostedIngress(input.workspaceId, hostnames);
               const registeredAt = new Date().toISOString();
-              await Promise.all(registrations.map(item => env.HOSTED_ROUTES.getByName(item.hostname).registerIngress(body.userId, input.workspaceId, item.routes, item.credentials, registeredAt)));
+              await Promise.all(registrations.map(item => env.HOSTED_ROUTES.getByName(item.hostname).registerIngress(body.userId, input.workspaceId, item.routes, item.credentials ?? null, registeredAt)));
+              // Service tokens: the vault keeps a key for each service with routes that set `tokens: true`, and each such URL
+              // admits it beside (never replaced by) the credentials a script registers.
+              const managed = await credentialVault(env, body.userId).registerServiceTokenUrls(input.workspaceId,
+                registrations.filter(item => item.routes.some(route => route.tokens)).map(item => ({ hostname: item.hostname, service: item.service, port: item.port })));
+              await Promise.all(registrations.map(item => {
+                const service = item.routes.some(route => route.tokens) ? managed[item.service] : undefined;
+                const registry = env.HOSTED_ROUTES.getByName(item.hostname);
+                return service ? registry.registerManaged(body.userId, input.workspaceId, item.service, item.port, service.issuer, service.keys) : registry.clearManaged(body.userId, input.workspaceId);
+              }));
               const ended = mirrored.filter(hostname => !hostnames.includes(hostname));
               await Promise.all(ended.map(hostname => env.HOSTED_ROUTES.getByName(hostname).clearIngress(body.userId, input.workspaceId)));
               await authority.removeHostedIngress(input.workspaceId, ended);
               value = { hostnames };
+              break;
+            }
+            // `gitspace service token` on a machine: a token for a service of an active workspace of this project.
+            case 'project.services.token': {
+              const workspaceId = z.string().min(1).max(160).parse(body.payload.workspaceId);
+              const request = ServiceTokenRequestSchema.parse(body.payload.request);
+              if (!(await authority.listWorkspaces()).some(item => item.id === workspaceId && item.archivedAt === null)) throw new Error('Service tokens are signed only for an active workspace of this project');
+              value = await mintServiceToken(env, workspaceId, request);
               break;
             }
             case 'project.events.append':

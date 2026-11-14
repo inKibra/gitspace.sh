@@ -459,26 +459,29 @@ export class WorkspaceEnvironmentManager {
   /**
    * Registers the signed callers a succeeded `cloud/provision` or `workspace/materialize` run wrote to `ingress.json`: one
    * registration per workspace URL with declared routes, only while those routes (re-read from the checkout) are approved.
-   * A bearer names a secret of the profile and is sent as the SHA-256 of its value.
+   * A bearer names a secret of the profile and is sent as the SHA-256 of its value. Without `ingress.json`, approved
+   * routes are still registered when any sets `tokens: true`, without `credentials`, so the worker keeps each URL's
+   * registered credentials and admits the service's GitSpace-signed tokens; otherwise nothing is registered.
    */
   private async registerIngress(input: { current: WorkspaceEnvironmentView; spaceId: string; runId: string; checkout: string; ingressFile: string; secretValues: Readonly<Record<string, string>> }): Promise<void> {
     const { current, spaceId } = input;
     const source = await readFile(input.ingressFile, 'utf8').catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? null : Promise.reject(error));
-    if (source === null) return;
-    const { credentials } = parseIngressFile(source);
+    const credentials = source === null ? null : parseIngressFile(source).credentials;
     const services = await readServicesJson(input.checkout);
     const content = serviceIngressContent(services);
     if (content === null) {
-      if (credentials.length > 0) throw new EnvironmentError('InvalidConfiguration', 'ingress.json registers credentials, but .gitspace/services.json declares no ingress routes');
+      if (credentials && credentials.length > 0) throw new EnvironmentError('InvalidConfiguration', 'ingress.json registers credentials, but .gitspace/services.json declares no ingress routes');
       return;
     }
     const hash = await executionHash({ kind: 'ingress', command: content });
-    if (!current.lifecycle.approvals.some((approval) => approval.executionHash === hash)) {
+    const approved = current.lifecycle.approvals.some((approval) => approval.executionHash === hash);
+    const groups = parseServiceIngressContent(content);
+    if (credentials === null && (!approved || !groups.some((group) => group.routes.some((route) => route.tokens === true)))) return;
+    if (!approved) {
       throw new EnvironmentError('ApprovalRequired', 'The signed caller routes in .gitspace/services.json need approval before credentials are registered', { executionId: SERVICE_INGRESS_EXECUTION_ID });
     }
     const definitions = parseServiceDefinitions(services);
-    const groups = parseServiceIngressContent(content);
-    const hosted = credentials.map((credential): { group: ServiceIngressGroup; credential: HostedIngressCredential } => {
+    const hosted = (credentials ?? []).map((credential): { group: ServiceIngressGroup; credential: HostedIngressCredential } => {
       const port = credential.port ?? definitions.find((service) => service.name === credential.service)?.ports.find((item) => item.protocol === 'http')?.name;
       const group = groups.find((item) => item.service === credential.service && item.port === port);
       if (!group) throw new EnvironmentError('InvalidConfiguration', `ingress.json names ${credential.service}${port ? ` port ${port}` : ''}, which declares no ingress routes`, { service: credential.service });
@@ -492,7 +495,7 @@ export class WorkspaceEnvironmentManager {
     const registrations = groups.map((group) => {
       const hostname = urls.find((url) => url.service === group.service && url.port === group.port)?.hostname;
       if (!hostname) throw new EnvironmentError('InvalidConfiguration', 'Signed callers need public service routing, which this machine does not have', { service: group.service });
-      return { hostname, service: group.service, port: group.port, credentials: hosted.filter((item) => item.group === group).map((item) => item.credential) };
+      return { hostname, service: group.service, port: group.port, ...(credentials === null ? {} : { credentials: hosted.filter((item) => item.group === group).map((item) => item.credential) }) };
     });
     await this.authority.registerHostedIngress({ projectId: current.projectId, workspaceId: spaceId, runId: input.runId, ingress: content, registrations });
   }

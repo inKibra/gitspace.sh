@@ -223,6 +223,7 @@ export function EnvironmentView(props: EnvironmentViewProps) {
               {entry.approved ? <><Button variant="ghost" size="compact" disabled={busy} onClick={() => props.onOpenScript(entry.id)}>View</Button><Button variant="ghost" size="compact" disabled={busy} onClick={() => props.onRevoke(entry.id)}>Revoke</Button></> : <><Badge size="compact" color="amber">Needs approval</Badge><Button variant="secondary" size="compact" disabled={busy} onClick={() => props.onApprove(entry.id)}>Review & approve</Button></>}
             </li>)}</ul>
           </div> : null}
+          {props.serviceTokens}
         </div>
       </Section>
 

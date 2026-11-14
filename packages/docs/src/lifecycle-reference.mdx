@@ -254,6 +254,7 @@ Each service may list up to 64 routes in `ingress`:
 | `method` | `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, or `*` for any method. A WebSocket upgrade is a `GET` |
 | `path` | An exact path (`/status`) or a prefix ending in `/*` (`/webhooks/*` matches `/webhooks/` and every path below it, not `/webhooks`; `/*` matches every path). No `..`, `.`, empty segments, other wildcards, query, or `/__gitspace` paths |
 | `port` | An `http` port of the service; defaults to its first. Each port is its own workspace URL |
+| `tokens` | `true` also admits the service's [GitSpace-signed tokens](#service-tokens) on the route |
 
 The routes of every service form one **Signed callers** entry in Environment, approved by the SHA-256 of their canonical content like a script. Reordering routes keeps the approval; any other change needs a new one. The entry never runs. Until it is approved, nothing is registered.
 
@@ -273,7 +274,7 @@ Only an approved `cloud/provision` or `workspace/materialize` script registers c
 }
 ```
 
-After the phase's scripts succeed, the machine checks the file (at most 64 KiB; each credential names a service and `http` port with declared routes; the routes are approved) and replaces the workspace's registrations with it; a phase that writes no file leaves them unchanged. An invalid file or unapproved routes fail the run. GitSpace keeps registrations with the workspace URL, apart from the machine serving it, and ends them when the workspace is archived or deleted. Agents cannot register: the account accepts a registration only from the machine running that approved phase, for approved routes.
+After the phase's scripts succeed, the machine checks the file (at most 64 KiB; each credential names a service and `http` port with declared routes; the routes are approved) and replaces the workspace's registrations with it. A phase that writes no file leaves the credentials unchanged; when an approved route sets `tokens: true`, it still registers the routes. An invalid file or unapproved routes fail the run. GitSpace keeps registrations with the workspace URL, apart from the machine serving it, and ends them when the workspace is archived or deleted. Agents cannot register: the account accepts a registration only from the machine running that approved phase, for approved routes.
 
 | Kind | Checked |
 | --- | --- |
@@ -285,6 +286,22 @@ A JWT must use EdDSA, ES256, or RS256 and carry `iss` equal to the issuer, `aud`
 
 The caller sends the token as `Authorization: Bearer <token>` or `GitSpace-Ingress: <token>`. Set `"forwardAuthorization": true` on an `oidc` or `jwt` credential when the service checks its own `Authorization` header; the caller then uses `GitSpace-Ingress`, and `Authorization` reaches the service. GitSpace counts admissions and refusals per workspace URL and keeps the last refusal's reason.
 
+### Service tokens
+
+For apps that cannot use the browser sign-in (a dev phone build, a simulator app, a script), GitSpace signs the tokens itself: set `"tokens": true` on the routes they may call. Once those routes are approved and a `cloud/provision` or `workspace/materialize` run registers them, GitSpace keeps a P-256 signing key for the workspace and service. The private key never leaves GitSpace's credential vault; a key signs for 7 days and the tokens it signed stay valid 8 hours more. Scripts' credentials never replace it.
+
+Get a token from the agent's `environment` tool (`token`), from `gitspace service token <service> --sub <subject> [--ttl 30m] [--refresh] [--port <name>]` in a workspace terminal or agent command (prints JSON), or from **Copy app token** in Environment (with a QR code). A token is an ES256 JWT whose `sub` names the caller, valid 8 hours unless a shorter `ttl` is given. Send it as `GitSpace-Ingress: <token>`; the app's own `Authorization` reaches the service. It is accepted only on routes that set `tokens: true`, and refused once it expires, once it is revoked, or once its key is rotated out (Environment's **Rotate now** ends every earlier key at once).
+
+With a refresh token (7 days), an app gets a new pair before the access token expires:
+
+```sh
+curl -X POST https://api--<workspace>--<account>-srv.gssh.dev/__gitspace/token \
+  -H 'content-type: application/json' -d '{"refresh_token":"…"}'
+# {"access_token":"…","token_type":"Bearer","expires_in":28800,"refresh_token":"…"}
+```
+
+Each refresh token works once. Presenting one that was already used revokes every token issued from it (the app must get a new token), and an invalid one answers `400` `{"error":"invalid_grant"}`. Environment lists the tokens issued for each service with their subject, expiry and last use; **Revoke** ends a token and its refresh chain.
+
 ## Agent API and durable logs
 
 Use the typed `environment` tool directly:
@@ -293,7 +310,7 @@ Use the typed `environment` tool directly:
 { "args": { "method": "get" } }
 ```
 
-Available methods are `get`, `setProfile`, `putValue`, `deleteValue`, `runChecks`, `runPhase`, `cancelRun`, and `runLog`. Arguments go inside `args`; all operations target the current workspace. A run request supplies `runId`, optional `deadlineAt`, and a phase for `runPhase`. A log request supplies `runId` and optional `offset`. Agent calls cannot request protected interactive execution.
+Available methods are `get`, `setProfile`, `putValue`, `deleteValue`, `runChecks`, `runPhase`, `cancelRun`, `runLog`, and `token`. Arguments go inside `args`; all operations target the current workspace. A run request supplies `runId`, optional `deadlineAt`, and a phase for `runPhase`. A log request supplies `runId` and optional `offset`. A token request supplies `service`, `subject`, and optional `port`, `ttlSeconds`, and `refresh` (see [Service tokens](#service-tokens)). Agent calls cannot request protected interactive execution.
 
 An authorized phase request names one of the five canonical phases and can set `rerun: true` only for an explicitly authorized rerun. The agent surface runs noninteractively only, and refuses `cloud/destroy` on the project's base workspace. Content approval governs the runs GitSpace starts; an agent asked by the user to set up a workspace may run its scripts directly with bash.
 

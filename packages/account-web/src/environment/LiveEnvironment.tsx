@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useResultQuery } from 'result-rpc/react';
 import { LIFECYCLE_APPROVAL_CHOICES, RuntimeIdentitySchema, RuntimeMachineIdSchema, type RuntimeLifecycleApprovalAnswer, type RuntimeSyncRequestInput, type RuntimeSyncRequestResult } from '@gitspace/protocol-runtime';
-import { BROWSER_SITE_LEVELS, BrowserSiteLevelSchema, EnvironmentBundleSchema, executionHash, isLifecycleRunActive, latestExecutionRun, lifecycleExecutionOutcome, projectEnvironmentState, type BrowserSiteLevel, type LifecycleRunPhase } from '@gitspace/protocol-environment';
+import { BROWSER_SITE_LEVELS, BrowserSiteLevelSchema, EnvironmentBundleSchema, executionHash, isLifecycleRunActive, latestExecutionRun, lifecycleExecutionOutcome, parseServiceIngressContent, projectEnvironmentState, type BrowserSiteLevel, type LifecycleRunPhase } from '@gitspace/protocol-environment';
 import { Button, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@gitspace/ui';
 import { rpcClient } from '../rpc-client.js';
 import { rpcErrorMessage } from '../rpc-error-message.js';
@@ -15,6 +15,7 @@ import type { RuntimeInspectorContext } from '../RuntimeWorkspace.js';
 import { EnvironmentView } from './EnvironmentView.js';
 import { LifecycleLogDialog } from './LifecycleLogDialog.js';
 import { BROWSER_SITE_LEVEL_LABEL, OPTIONAL_STEPS, SETUP_STEPS, STEP_LABEL } from './lifecycle.js';
+import { ServiceTokens } from './ServiceTokens.js';
 import type { EnvironmentMachine, EnvironmentScript, EnvironmentViewModel, EnvironmentViewProps, ScriptRun } from './types.js';
 
 const CONFIGURE_ENVIRONMENT_PROMPT = 'Use the workspace-lifecycle skill to help me configure this repository. Inspect the repository and our shared environment ledger, then discuss the local preparation and cloud resources this project needs. Propose the lifecycle phases and profiles. Do not edit files or run lifecycle scripts until I review the plan; approval to edit is not approval to execute.';
@@ -132,6 +133,9 @@ export function LiveEnvironment({ projectId, projectName, workspaceName, spaceId
     secrets: remote.effective.secrets.map(name => ({ name, source: remote.secretMetadata.find(secret => secret.name === name)?.source ?? 'project', granted: remote.configuredSecrets.includes(name) })),
     values: Object.entries(remote.values.effective).map(([name, value]) => ({ name, value, source: name in remote.values.workspace ? 'workspace' : name in remote.values.project ? 'project' : name in remote.values.global ? 'account' : 'default' })),
   };
+  /** Services whose approved ingress has a route that admits GitSpace-signed tokens. */
+  const tokenServices = [...new Set(remote.executions.filter(item => item.kind === 'ingress' && item.approval !== null)
+    .flatMap(item => parseServiceIngressContent(item.content)).filter(group => group.routes.some(route => route.tokens)).map(group => group.service))];
   const selectedLogRun = logSelection && remote.lifecycle.runs.find(run => run.id === logSelection.runId);
   const heldBack = runtimeLfsHeldBack(snapshot);
   const commitLfs = async () => { if (onAskAgent) await onAskAgent('Help me review and commit the uncommitted Git LFS changes before continuing.'); else onOpenAgent(); };
@@ -146,6 +150,7 @@ export function LiveEnvironment({ projectId, projectName, workspaceName, spaceId
       model={model}
       busy={busy}
       machinesFooter={heldBack.length ? <p role="alert" className="text-caption text-warning">Uncommitted Git LFS changes are held back on their machine. Commit them before detaching.</p> : null}
+      serviceTokens={tokenServices.map(service => <ServiceTokens key={service} spaceId={spaceId} service={service} />)}
       onProfileChange={profile => mutate(async () => { const result = await rpcClient.environment.setProfile({ spaceId, profile }); if (result.status === 'error') throw result.error; })}
       onConfigure={onAskAgent ? () => mutate(() => onAskAgent(CONFIGURE_ENVIRONMENT_PROMPT)) : undefined}
       onAttach={id => mutate(async () => { const result = await rpcClient.runtime.attachment.cache.request({ ...identity, machineId: RuntimeMachineIdSchema.parse(id) }); if (result.status === 'error') throw result.error; })}

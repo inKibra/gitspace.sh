@@ -36,6 +36,7 @@ import { createCloudCodemode } from './runtime-codemode.js';
 import type { RuntimeModelHelper, RuntimeWebSearchInput, RuntimeWebSearchResult } from './runtime-inference.js';
 import { PROCESS_MACHINE_DETACHED, RuntimeProcArgumentsSchema, RuntimeCodeSearchArgumentsSchema, questionState } from '@gitspace/protocol-runtime';
 import { fetchInternalService, isHostedServiceHostname } from './service-access.js';
+import { mintServiceToken } from './service-tokens.js';
 import { changeAgentWorkspace, setCloudWorkspacePhase } from './cloud-workspace-lifecycle.js';
 import { readProjectWorkspaces } from './workspace-board.js';
 import { cutForAgent } from '@gitspace/protocol-workspace';
@@ -524,6 +525,10 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       const result = await options.environment.mutateLifecycleState(identity, mutation, { machineId: `cloud:${identity.workspaceId}`, actorId: `conversation:${input.conversationId}`, kind: 'client', lifecycleControl: false });
       if (result.status === 'error') throw new Error(result.failure.message);
       return completed(input, projectEnvironmentState(result.state));
+    }
+    if (method === 'token') {
+      const { method: ignored, ...request } = args;
+      return completed(input, await mintServiceToken(env, identity.workspaceId, request));
     }
     throw new Error('Environment approval, recovery, secret access and protected I/O require human control');
   }

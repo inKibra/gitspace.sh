@@ -219,6 +219,10 @@ Every exposed operation has a reviewed entry in the [annotation table](../packag
 | `environment.approve`<br>`environment.revokeApproval` | `rpc.write` + `lifecycle.control` for clients | F | F | T | F | Tool | Records or withdraws approval for exact execution content or browser-origin hashes without running or cancelling anything. API/MCP keys with `lifecycle.control` may approve browser origins. Project origin approval applies only where the workspace's committed bundle lists that origin. Content-hash preconditions remain required. |
 | `environment.runChecks`<br>`environment.runPhase` | `rpc.write` | F | T | T | T | Tool | Requires `machineId`, accepted in the cloud and dispatched only to the named attached ready or resumable cache. Missing attachment is a typed attach error, never an arbitrary-online fallback. Same spaceId/runId is deduplicated by durable acceptance; preserve machineId and all inputs and reconcile results. `cloud/destroy` additionally requires lifecycle authority. |
 | `environment.cancelRun` | `rpc.write` + `lifecycle.control` for clients | F | T | T | T | Tool | Records cancellation, not proof of process exit. Poll the durable run to terminal state. |
+| `environment.serviceTokens` | `rpc.read` | T | - | - | F | Tool | One service's managed key fingerprints and lifetimes and its unexpired issued tokens. Never the private key, never a token. |
+| `environment.mintServiceToken` | `rpc.write` | F | F | F | F | Tool | Signs an app token (and a refresh token when asked) for a service whose approved routes set `tokens: true`; the token appears only in this answer. Each call issues a new token. |
+| `environment.rotateServiceTokenKey` | `rpc.write` | F | T | F | F | Tool | A new key signs from now; every earlier key stops verifying at once, ending the tokens it signed. |
+| `environment.revokeServiceToken` | `rpc.write` | F | T | T | F | Tool | Ends one issued token and, when it came with a refresh token, its refresh chain. |
 
 ### mcp
 

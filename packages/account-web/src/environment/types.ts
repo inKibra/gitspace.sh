@@ -70,6 +70,8 @@ export interface EnvironmentViewProps {
   busy?: boolean;
   /** Rendered at the end of the Machines section: browser groups and held-back LFS changes. */
   machinesFooter?: ReactNode;
+  /** Rendered after Signed callers in the Setup section: a Service tokens panel per service whose approved routes admit tokens. */
+  serviceTokens?: ReactNode;
   onProfileChange(profile: string): void;
   onConfigure?(): void;
   onAttach(machineId: string): void;

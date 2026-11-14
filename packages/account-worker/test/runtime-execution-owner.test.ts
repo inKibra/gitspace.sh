@@ -14,6 +14,8 @@ import { executorCapabilities } from '../src/runtime-attachments.js';
 import { QuestionsDoc, WorkspaceDoc } from '@gitspace/runtime-core';
 import { UI_BLOCK_BRIEF, uiBlockPrompt } from '@gitspace/protocol/gitspace-ui';
 import { emptyWorkspaceStatus } from '@gitspace/protocol-workspace';
+import { ServiceTokenGrantSchema } from '@gitspace/protocol-environment';
+import { decodeJwt } from 'jose';
 
 const unsupported = async (): Promise<never> => { throw new Error('Unexpected external operation'); };
 
@@ -590,6 +592,29 @@ test('an agent runs cloud/destroy for its own workspace; on the project\'s base 
       } finally { machine.mockRestore(); await runtime.harness.close(BACKGROUND_CONTEXT); }
     });
   }
+});
+
+test('environment token signs an app token for a service whose routes admit tokens, and says what is missing otherwise', async () => {
+  const workspaceId = `tokens-${crypto.randomUUID().slice(0, 8)}`;
+  const hostname = `api--${workspaceId}--${env.TENANT_ID}-srv.gssh.dev`;
+  await env.CREDENTIALS.getByName(env.ACCOUNT_ID).bootstrap({ userId: env.ACCOUNT_ID, rootPublicKey: env.AUTH_PUBLIC_KEY, vaultKey: credentialProtocolBase64.encode(new Uint8Array(32).fill(49)) });
+  await runInDurableObject(env.SPACE_AUTHORITY.getByName(`tokens:${crypto.randomUUID()}`), async (_instance, ctx) => {
+    const { runtime, invoke, text } = await ownerFixture(ctx, RuntimeIdentitySchema.parse({ projectId: 'owner-project', workspaceId }));
+    try {
+      await expect(invoke('environment', { method: 'token', service: 'api', subject: 'agent/sim' })).rejects.toThrow('"tokens": true');
+      // What a materialize run's registration leaves: the vault's key for the service and the URL admitting it.
+      const { api } = await env.CREDENTIALS.getByName(env.ACCOUNT_ID).registerServiceTokenUrls(workspaceId, [{ hostname, service: 'api', port: 'http' }]);
+      await env.HOSTED_ROUTES.getByName(hostname).registerManaged(env.ACCOUNT_ID, workspaceId, 'api', 'http', api!.issuer, api!.keys);
+      const result = await invoke('environment', { method: 'token', service: 'api', subject: 'agent/sim', ttlSeconds: 600, refresh: true });
+      expect(result.status, text(result)).toBe('completed');
+      const grant = ServiceTokenGrantSchema.parse(JSON.parse(text(result)));
+      expect(grant).toMatchObject({ url: `https://${hostname}`, subject: 'agent/sim', header: 'GitSpace-Ingress', refreshToken: expect.any(String) });
+      const claims = decodeJwt(grant.token);
+      expect(claims).toMatchObject({ aud: `https://${hostname}`, sub: 'agent/sim' });
+      expect(claims.exp! - claims.iat!).toBe(600);
+      expect(await env.HOSTED_ROUTES.getByName(hostname).managedTokens(env.ACCOUNT_ID, workspaceId)).toMatchObject([{ id: claims.jti, subject: 'agent/sim', refreshable: true }]);
+    } finally { await runtime.harness.close(BACKGROUND_CONTEXT); }
+  });
 });
 
 test('space_workspace list and board give every workspace\'s status in one read of stored rows, and a failed read its reason', async () => {

@@ -10,7 +10,7 @@ import { RuntimeAttachmentReadyResultSchema, RuntimeCacheAttachmentRequestInputS
 import { RuntimeDraftSaveInputSchema, WorkspaceDraftSaveResultSchema } from '@gitspace/protocol-runtime/draft';
 import { RuntimeServiceInputSchema, RuntimeServiceResultSchema } from '@gitspace/protocol-runtime/services';
 import { RuntimeSyncRequestInputSchema, RuntimeSyncRequestResultSchema } from '@gitspace/protocol-runtime/tool-arguments';
-import { EnvironmentFailureSchema, LifecycleRunSchema, LifecycleStateSchema, type EnvironmentFailure, type LifecycleRun, type LifecycleState } from '@gitspace/protocol-environment';
+import { EnvironmentFailureSchema, LifecycleRunSchema, LifecycleStateSchema, ServiceTokenGrantSchema, ServiceTokensViewSchema, type EnvironmentFailure, type LifecycleRun, type LifecycleState } from '@gitspace/protocol-environment';
 import {
   AgentHealthStateSchema, AgentLifecycleStateSchema, AgentSessionRenderStateSchema, SessionActivitySchema,
   type AgentHealthState, type AgentLifecycleState, type AgentSessionRenderState, type SessionActivity,
@@ -997,6 +997,38 @@ export const getWorkspaceEnvironmentRunLogContract = gitspaceRpc
   .output(wire.object({ output: wire.string, nextOffset: wire.nullable(wire.number), cursor: wire.number }))
   .errors({ EnvironmentFailure: rpcErrors.environmentFailure, OperationFailed: rpcErrors.operationFailed })
   .query();
+
+/** A workspace service's managed keys and the unexpired tokens issued for its workspace URLs. */
+export const getWorkspaceServiceTokensContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ spaceId: wire.string, service: wire.string }))
+  .output(runtimeWire(ServiceTokensViewSchema, 'gitspace/service-tokens/v1'))
+  .errors({ EnvironmentFailure: rpcErrors.environmentFailure, OperationFailed: rpcErrors.operationFailed })
+  .query();
+
+/** Signs an app token for the service (8 hours at most), with a refresh token when asked; shown once. */
+export const mintWorkspaceServiceTokenContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ spaceId: wire.string, service: wire.string, port: wire.optional(wire.string), subject: wire.string, ttlSeconds: wire.optional(wire.number), refresh: wire.optional(wire.boolean) }))
+  .output(runtimeWire(ServiceTokenGrantSchema, 'gitspace/service-token-grant/v1'))
+  .errors({ EnvironmentFailure: rpcErrors.environmentFailure, OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
+/** A new key signs from now; every earlier key of the service stops verifying, ending the tokens it signed. */
+export const rotateWorkspaceServiceTokenKeyContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ spaceId: wire.string, service: wire.string }))
+  .output(runtimeWire(ServiceTokensViewSchema, 'gitspace/service-tokens/v1'))
+  .errors({ EnvironmentFailure: rpcErrors.environmentFailure, OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
+/** Ends one issued token and, when it came with a refresh token, its refresh chain. */
+export const revokeWorkspaceServiceTokenContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ spaceId: wire.string, service: wire.string, url: wire.string, tokenId: wire.string }))
+  .output(runtimeWire(ServiceTokensViewSchema, 'gitspace/service-tokens/v1'))
+  .errors({ EnvironmentFailure: rpcErrors.environmentFailure, OperationFailed: rpcErrors.operationFailed })
+  .mutation();
 
 export const listMcpConnectionsContract = gitspaceRpc
   .procedure()
@@ -2564,6 +2596,10 @@ export const gitspaceContract = gitspaceRpc.contract({
     runPhase: runWorkspaceEnvironmentPhaseContract,
     cancelRun: cancelWorkspaceEnvironmentRunContract,
     runLog: getWorkspaceEnvironmentRunLogContract,
+    serviceTokens: getWorkspaceServiceTokensContract,
+    mintServiceToken: mintWorkspaceServiceTokenContract,
+    rotateServiceTokenKey: rotateWorkspaceServiceTokenKeyContract,
+    revokeServiceToken: revokeWorkspaceServiceTokenContract,
   },
   storageIncidents: { list: storageIncidentsListContract, resume: storageIncidentsResumeContract, pause: storageIncidentsPauseContract, inspect: storageIncidentsInspectContract },
   github: {

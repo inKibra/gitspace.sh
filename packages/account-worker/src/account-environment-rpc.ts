@@ -1,6 +1,6 @@
 import {
   executionHash, browserOriginHash, projectEnvironmentState, EnvironmentError, environmentFailure, parseEnvironmentBundleJson, LifecycleMutationSchema,
-  assertLifecycleCommandAuthorized, isLifecycleRunActive, parseLifecycleRunRequest, type LifecycleMutation, type LifecycleRunRequest, type LifecycleState,
+  assertLifecycleCommandAuthorized, isLifecycleRunActive, parseLifecycleRunRequest, ServiceTokenRequestSchema, type LifecycleMutation, type LifecycleRunRequest, type LifecycleState,
 } from '@gitspace/protocol-environment';
 import { deviceCanAdminister, type GitSpaceRpcContext, type VerifiedDevice } from '@gitspace/protocol';
 import {
@@ -10,11 +10,13 @@ import {
   putWorkspaceEnvironmentBundleContract, setWorkspaceEnvironmentProfileContract,
   putWorkspaceEnvironmentValueContract, deleteWorkspaceEnvironmentValueContract,
   runWorkspaceEnvironmentChecksContract, runWorkspaceEnvironmentPhaseContract,
+  getWorkspaceServiceTokensContract, mintWorkspaceServiceTokenContract, rotateWorkspaceServiceTokenKeyContract, revokeWorkspaceServiceTokenContract,
 } from '@gitspace/protocol/rpc-contract';
 import { err, ok } from 'result-rpc';
 import { serverRpc } from 'result-rpc/server';
 import type { ProjectAuthorityDO, UserProjectIndexDO } from './project-authority.js';
 import type { ProjectSecretsDO } from './project-secrets.js';
+import { mintServiceToken, revokeServiceToken, rotateServiceTokenKey, serviceTokensView } from './service-tokens.js';
 
 /** Cloud reads do not possess, materialize, or start an agent in the workspace; edits land in cloud state alone. */
 export function environmentCloudProcedures(env: Env, userId: string, deviceId: string, currentDevice: () => Promise<VerifiedDevice>, requireLifecycleControl: () => Promise<VerifiedDevice>) {
@@ -190,5 +192,42 @@ export function environmentCloudProcedures(env: Env, userId: string, deviceId: s
       return err(failure ? errors.EnvironmentFailure(failure) : errors.OperationFailed({ operation: `run workspace environment ${input.phase}`, message: error instanceof Error ? error.message : String(error) }));
     }
   });
-  return { get, putBundle, setProfile, putValue, deleteValue, approve: approveExecution, revokeApproval, cancelRun, runLog, runChecks, runPhase };
+  /** Service tokens of a workspace service whose routes set `tokens: true`; the workspace must be this account's. */
+  const serviceTokens = server.implement(getWorkspaceServiceTokensContract).handler(async ({ input, errors }) => {
+    try {
+      await authorityFor(input.spaceId);
+      return ok(await serviceTokensView(env, input.spaceId, input.service));
+    } catch (error) {
+      return err(errors.OperationFailed({ operation: 'read service tokens', message: error instanceof Error ? error.message : String(error) }));
+    }
+  });
+  const mintToken = server.implement(mintWorkspaceServiceTokenContract).handler(async ({ input, errors }) => {
+    try {
+      await authorityFor(input.spaceId);
+      const { spaceId: _spaceId, ...request } = input;
+      return ok(await mintServiceToken(env, input.spaceId, ServiceTokenRequestSchema.parse(request)));
+    } catch (error) {
+      return err(errors.OperationFailed({ operation: 'sign service token', message: error instanceof Error ? error.message : String(error) }));
+    }
+  });
+  const rotateKey = server.implement(rotateWorkspaceServiceTokenKeyContract).handler(async ({ input, errors }) => {
+    try {
+      await authorityFor(input.spaceId);
+      return ok(await rotateServiceTokenKey(env, input.spaceId, input.service));
+    } catch (error) {
+      return err(errors.OperationFailed({ operation: 'rotate service token key', message: error instanceof Error ? error.message : String(error) }));
+    }
+  });
+  const revokeToken = server.implement(revokeWorkspaceServiceTokenContract).handler(async ({ input, errors }) => {
+    try {
+      await authorityFor(input.spaceId);
+      return ok(await revokeServiceToken(env, input.spaceId, input.service, input.url, input.tokenId));
+    } catch (error) {
+      return err(errors.OperationFailed({ operation: 'revoke service token', message: error instanceof Error ? error.message : String(error) }));
+    }
+  });
+  return {
+    get, putBundle, setProfile, putValue, deleteValue, approve: approveExecution, revokeApproval, cancelRun, runLog, runChecks, runPhase,
+    serviceTokens, mintServiceToken: mintToken, rotateServiceTokenKey: rotateKey, revokeServiceToken: revokeToken,
+  };
 }

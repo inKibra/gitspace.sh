@@ -201,6 +201,7 @@
         "@gitspace/account-machine": "workspace:*",
         "@gitspace/deployment": "workspace:*",
         "@gitspace/protocol": "workspace:*",
+        "@gitspace/protocol-environment": "workspace:*",
         "@noble/curves": "^2.2.0",
         "@noble/hashes": "^2.2.0",
         "commander": "^12.1.0",

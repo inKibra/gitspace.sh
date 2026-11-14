@@ -384,6 +384,28 @@ export const reviewedAnnotations: Record<string, ToolAnnotation> = {
     "readOnlyHint": true,
     "openWorldHint": false
   },
+  "environment.serviceTokens": {
+    "readOnlyHint": true,
+    "openWorldHint": false
+  },
+  "environment.mintServiceToken": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": false,
+    "openWorldHint": false
+  },
+  "environment.rotateServiceTokenKey": {
+    "readOnlyHint": false,
+    "destructiveHint": true,
+    "idempotentHint": false,
+    "openWorldHint": false
+  },
+  "environment.revokeServiceToken": {
+    "readOnlyHint": false,
+    "destructiveHint": true,
+    "idempotentHint": true,
+    "openWorldHint": false
+  },
   "mcp.connections.list": {
     "readOnlyHint": true,
     "openWorldHint": false
