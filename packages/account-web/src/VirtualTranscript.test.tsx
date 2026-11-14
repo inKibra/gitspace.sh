@@ -21,7 +21,7 @@ function rows(start: number, count: number): TranscriptRow[] {
 
 function historyFor(items: TranscriptRow[], extra: Partial<TranscriptHistory> = {}): TranscriptHistory {
   return {
-    rows: items, generation: 'session-generation', loading: false, initialLoading: false, error: null,
+    rows: items, generation: 'session-generation', loading: false, initialLoading: false, error: null, saved: false,
     navigation: null,
     hasBefore: false, hasAfter: false, total: items.length,
     refresh: vi.fn(), loadOlder: vi.fn(), loadNewer: vi.fn(), jumpToLatest: vi.fn(), jumpToRow: vi.fn(), setViewport: vi.fn(),

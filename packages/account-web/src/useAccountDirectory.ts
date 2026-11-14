@@ -86,8 +86,9 @@ export function useWorkspaceProjection(projects: readonly Pick<ProjectLifecycleV
         accepted.current = Object.fromEntries(Object.entries(accepted.current).filter(([id]) => ids.has(id)));
         setDirectory(accepted.current);
       }
-      // A requested reconnect is not new authoritative state or proof of recovery.
-      if (snapshot.connection === 'connecting') return;
+      // A requested reconnect is not new authoritative state or proof of recovery. A saved copy waiting for the first
+      // connection is drawn, so the sidebar paints before the socket opens.
+      if (snapshot.connection === 'connecting' && !snapshot.restored) return;
       const directoryError = snapshot.transportError?.message ?? (snapshot.resync ? 'Directory resynchronizing' : null);
       const refreshAll = force;
       force = false;

@@ -1,4 +1,5 @@
 import { clearDevice, loadDevice, type BrowserDevice } from './device.js';
+import { clearFirstPaintCache } from './first-paint-cache.js';
 
 /**
  * Process-wide handle on the enrolled device so every RPC client shares one
@@ -18,9 +19,11 @@ export function setCurrentDevice(device: BrowserDevice | null): void {
 
 export const DEVICE_REJECTED_EVENT = 'gitspace:device-rejected';
 
-/** The machine no longer accepts this device: drop it and let the gate re-render. */
+/** The machine no longer accepts this device (signed out or revoked): drop it and everything this browser saved for
+ * it, and let the gate re-render. */
 export function deviceRejected(code: string): void {
   setCurrentDevice(null);
   void clearDevice();
+  void clearFirstPaintCache();
   window.dispatchEvent(new CustomEvent(DEVICE_REJECTED_EVENT, { detail: { code } }));
 }

@@ -5,7 +5,8 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { verticalSliceFixture } from './App.js';
 import { GitSpaceShell } from './GitSpaceShell.js';
-import { EMPTY_TRANSCRIPT_CACHE, mergeTranscriptPage } from './transcriptHistoryCache.js';
+import { EMPTY_TRANSCRIPT_CACHE, mergeTranscriptPage, type SavedTranscript } from './transcriptHistoryCache.js';
+import type { SavedCopy } from './first-paint-cache.js';
 import { useTranscriptHistory, type TranscriptHistory, type TranscriptHistorySource } from './useTranscriptHistory.js';
 import { TranscriptContentCache } from './transcriptContentCache.js';
 
@@ -58,7 +59,7 @@ let animationDescriptor: PropertyDescriptor | undefined;
 function Probe({ source, shell = false }: { source: TranscriptHistorySource | null; shell?: boolean }) {
   history = useTranscriptHistory(source);
   if (shell) return <GitSpaceShell {...verticalSliceFixture} turns={[]} transcript={history} transport={[]}
-    history={{ loading: history.initialLoading || (history.loading && history.error !== null), error: history.error, onRetry: history.refresh }}
+    history={{ loading: history.initialLoading || (history.loading && history.error !== null), saved: history.saved, error: history.error, onRetry: history.refresh }}
     renderInspector={() => <p>Repository files are available</p>} />;
   return <output>{history.rows.map(({ item }) => item.type === 'message' ? item.text : null).filter(Boolean).join('|')}</output>;
 }
@@ -465,4 +466,49 @@ it('removes hidden calls from an authoritative page interval and its now-empty t
   expect(cache.rows.map(({ ordinal }) => ordinal)).toEqual([1, 10]);
   expect(cache.hasAfter).toBe(false);
   expect(cache.total).toBe(2);
+});
+
+function savedCopyOf(saved: SavedTranscript | undefined) {
+  const writes: SavedTranscript[] = [];
+  const copy: SavedCopy<SavedTranscript> = { read: () => saved, load: async () => saved, write: (value) => { writes.push(value); } };
+  return { copy, writes };
+}
+
+it('paints the saved transcript on a reload before its first page answers, and says it is the saved copy', async () => {
+  const pending = controlledPage(page([row(1), row(2), row(3)], { revision: 3 }));
+  const { source, requests } = sourceFor('workspace-a', pending);
+  const { copy } = savedCopyOf({ generation: 'generation-a', revision: 3, rows: [row(1), row(2), row(3)], hasBefore: false, hasAfter: false, total: 3 });
+  await act(() => root.render(<Probe source={{ ...source, saved: copy }} shell />));
+  // The page was requested and has not answered: the rows on screen are the saved ones.
+  expect(requests).toHaveLength(1);
+  expect(container.textContent).toContain('Message 3');
+  expect(history.saved).toBe(true);
+  expect(container.textContent).toContain('Showing the copy saved in this browser');
+  await act(() => pending.finish());
+  expect(history.saved).toBe(false);
+  expect(container.textContent).not.toContain('Showing the copy saved in this browser');
+});
+
+it('replaces saved rows with the server’s in place, without duplicates, and saves the new window', async () => {
+  const live = controlledPage(page([row(2), row(3, 'Edited 3'), row(4), row(5)], { revision: 7, hasBefore: true, total: 5 }));
+  const { source } = sourceFor('workspace-a', live);
+  const { copy, writes } = savedCopyOf({ generation: 'generation-a', revision: 3, rows: [row(1), row(2), row(3)], hasBefore: false, hasAfter: false, total: 3 });
+  await act(() => root.render(<Probe source={{ ...source, saved: copy }} />));
+  expect(container.textContent).toBe('Message 1|Message 2|Message 3');
+  await act(() => live.finish());
+  expect(container.textContent).toBe('Message 1|Message 2|Edited 3|Message 4|Message 5');
+  const ids = history.rows.map((item) => item.id);
+  expect(new Set(ids).size).toBe(ids.length);
+  expect(writes.at(-1)).toMatchObject({ generation: 'generation-a', revision: 7, total: 5 });
+  expect(writes.at(-1)?.rows.map((item) => item.id)).toEqual(ids);
+});
+
+it('drops saved rows from another generation instead of merging them', async () => {
+  const live = controlledPage(page([row(1, 'New session')], { generation: 'generation-b', revision: 1 }));
+  const { source } = sourceFor('workspace-a', live);
+  const { copy } = savedCopyOf({ generation: 'generation-a', revision: 9, rows: [row(1), row(2)], hasBefore: false, hasAfter: false, total: 2 });
+  await act(() => root.render(<Probe source={{ ...source, saved: copy }} />));
+  expect(container.textContent).toBe('Message 1|Message 2');
+  await act(() => live.finish());
+  expect(container.textContent).toBe('New session');
 });

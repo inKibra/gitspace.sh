@@ -1,6 +1,8 @@
+import { z } from 'zod';
 import {
   TRANSCRIPT_CACHE_BYTES,
   TRANSCRIPT_CACHE_ROWS,
+  transcriptRowSchema,
   type TranscriptPage,
   type TranscriptPageRequest,
   type TranscriptRow,
@@ -120,4 +122,26 @@ export function mergeTranscriptPage(
     hasAfter: hasAfter || end < merged.length,
     total: page.total,
   };
+}
+
+/** What this browser saves of a transcript for its next first paint: the newest rows of its window, at most this many
+ * bytes. */
+export const SAVED_TRANSCRIPT_BYTES = 1024 * 1024;
+export const savedTranscriptSchema = z.object({
+  generation: z.string().min(1),
+  revision: z.number().int().nonnegative(),
+  rows: z.array(transcriptRowSchema).max(TRANSCRIPT_CACHE_ROWS),
+  hasBefore: z.boolean(),
+  hasAfter: z.boolean(),
+  total: z.number().int().nonnegative(),
+});
+export type SavedTranscript = z.infer<typeof savedTranscriptSchema>;
+
+/** The newest rows of `cache` that fit `SAVED_TRANSCRIPT_BYTES`, with the generation and revision they came from. */
+export function savedTranscript(cache: TranscriptHistoryCache): SavedTranscript | null {
+  if (cache.generation === null) return null;
+  let start = cache.rows.length;
+  let bytes = 0;
+  while (start > 0 && bytes + cache.rowBytes[start - 1]! <= SAVED_TRANSCRIPT_BYTES) bytes += cache.rowBytes[--start]!;
+  return { generation: cache.generation, revision: cache.revision, rows: cache.rows.slice(start), hasBefore: cache.hasBefore || start > 0, hasAfter: cache.hasAfter, total: cache.total };
 }

@@ -67,6 +67,11 @@ export function createRoutedTransport(options: RoutedTransportOptions): ClientTr
   // capture can outlast ordinary queries. Keep those calls out of their batch and timeout budget.
   const provisioning = fetchTransport({ url: options.homeUrl, fetch, timeoutMs: 300_000 });
   const inspectorContext = batch();
+  // A batch answers when its slowest call does. The account-wide states every page reads on load wait on the account
+  // vault, and a workspace's runtime reads wait on its runtime opening: each gets its own batch, so neither holds
+  // back the other or the account's quick reads.
+  const accountState = batch();
+  const runtimes = new Map<string, ClientTransport>();
   // A signed machine batch goes whole to one explicit machine and workspace. A machine runs its own release, which
   // reloading this page cannot change: its replies carry this page's contract, so a machine on another release never
   // reports skew (the "GitSpace was updated" prompt). A reply this page cannot read still fails to decode.
@@ -99,6 +104,13 @@ export function createRoutedTransport(options: RoutedTransportOptions): ClientTr
         path === 'machine.resume' || path === 'machine.sleep' || path === 'machine.destroy' || path === 'environment.runChecks' || path === 'environment.runPhase' || path === 'runtime.sync' ||
         (path.startsWith('machine.image.') && path !== 'machine.image.list')) return provisioning;
     if (path === 'inspector.view' || path === 'inspector.transcript' || path === 'inspector.transcriptPage' || path === 'inspector.transcriptContent' || path === 'inspector.availability') return inspectorContext;
+    if (path === 'settings.state' || path === 'inference.list' || path === 'machine.image.list') return accountState;
+    if (path === 'runtime.watch' || path === 'runtime.session') {
+      const workspace = input !== null && typeof input === 'object' && 'workspaceId' in input && typeof input.workspaceId === 'string' ? input.workspaceId : '';
+      let runtime = runtimes.get(workspace);
+      if (!runtime) { runtime = batch(); runtimes.set(workspace, runtime); }
+      return runtime;
+    }
     if (accountRpcAuthority(path) === 'cloud') return account;
     const target = rpcCallTarget(path, input);
     if (!target) return home;

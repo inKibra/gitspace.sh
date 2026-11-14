@@ -3,8 +3,9 @@ import { liveKeyId, liveKeySchema, MAX_LIVE_SUBSCRIPTIONS, type LiveKey, type Li
 import type { StreamEvent } from '@gitspace/protocol-sync';
 import type { SynchronizationSource } from './synchronization.js';
 
-/** `null`: the socket (re)opened, so notices sent while it was down are lost and every watcher refetches. */
-type NoticeListener = (version: number | null) => void;
+/** `null`: the socket (re)opened, so notices sent while it was down are lost and every watcher refetches.
+ * `firstSocket`: this is the tab's first socket, so every watcher's first read was issued before it opened. */
+type NoticeListener = (version: number | null, firstSocket: boolean) => void;
 type LiveRead<T> = (after: number | null, signal: AbortSignal) => Promise<{ status: 'ok'; value: readonly StreamEvent<T>[] } | { status: 'error'; error: Error }>;
 /** What the subscriptions use of the account directory socket: its state and text frames. */
 interface LiveSocket { readonly readyState: number; send(message: string): void }
@@ -13,6 +14,7 @@ interface LiveSocket { readonly readyState: number; send(message: string): void 
 export class LiveNotices {
   private readonly watched = new Map<string, { key: LiveKey; listeners: Set<NoticeListener> }>();
   private socket: LiveSocket | null = null;
+  private opened = false;
 
   /** Throws on a key the account refuses: one invalid key in a subscription closes the tab's directory socket, so on
    * every reconnect it would cut every other key's notices too. */
@@ -37,9 +39,11 @@ export class LiveNotices {
   /** The socket is open: subscribe every watched key again, then have every watcher refetch. */
   attach(socket: LiveSocket): void {
     this.socket = socket;
+    const firstSocket = !this.opened;
+    this.opened = true;
     const keys = [...this.watched.values()].map(entry => entry.key);
     for (let start = 0; start < keys.length; start += MAX_LIVE_SUBSCRIPTIONS) this.send('subscribe', keys.slice(start, start + MAX_LIVE_SUBSCRIPTIONS));
-    for (const entry of [...this.watched.values()]) for (const listener of [...entry.listeners]) listener(null);
+    for (const entry of [...this.watched.values()]) for (const listener of [...entry.listeners]) listener(null, firstSocket);
   }
 
   detach(socket: LiveSocket): void {
@@ -48,7 +52,7 @@ export class LiveNotices {
 
   receive(notice: LiveNotice): void {
     const entry = this.watched.get(liveKeyId(notice));
-    for (const listener of [...entry?.listeners ?? []]) listener(notice.version);
+    for (const listener of [...entry?.listeners ?? []]) listener(notice.version, false);
   }
 
   private send(type: 'subscribe' | 'unsubscribe', keys: LiveKey[]): void {
@@ -61,12 +65,14 @@ export const liveNotices = new LiveNotices();
 
 /** Yields once now, then once per burst of notices for `keys` or socket reopen, and once after `fallbackMs` passes
  * without either when it names a wait: a reader that must not stall on one lost notice. Notices arriving while the
- * consumer works between yields queue exactly one more yield: one refetch in flight plus at most one more. */
-export async function* liveTicks(keys: readonly LiveKey[], signal: AbortSignal, notices: LiveNotices = liveNotices, fallbackMs: () => number | null = () => null): AsyncGenerator<void> {
+ * consumer works between yields queue exactly one more yield: one refetch in flight plus at most one more.
+ * `repeatOnFirstSocket: false` does not yield when the tab's first socket opens: the read that yield would repeat was
+ * issued moments before, and a change between that read and the subscription arrives with its key's next notice. */
+export async function* liveTicks(keys: readonly LiveKey[], signal: AbortSignal, notices: LiveNotices = liveNotices, fallbackMs: () => number | null = () => null, repeatOnFirstSocket = true): AsyncGenerator<void> {
   let pending = true;
   let wake: (() => void) | null = null;
   const notify = () => { pending = true; wake?.(); };
-  const stops = keys.map(key => notices.watch(key, notify));
+  const stops = keys.map(key => notices.watch(key, (version, firstSocket) => { if (version !== null || !firstSocket || repeatOnFirstSocket) notify(); }));
   signal.addEventListener('abort', notify);
   try {
     while (!signal.aborted) {
@@ -91,10 +97,11 @@ export async function* liveTicks(keys: readonly LiveKey[], signal: AbortSignal, 
 
 /** Cursors for state reads: increasing across every source, so a newer read always replaces an older one. */
 let stateCursor = 0;
-/** A resource whose current state is read again on every notice burst for `keys`; nothing is replayed. */
-export function liveState<T>(resource: string, keys: readonly LiveKey[], read: (signal: AbortSignal) => Promise<{ status: 'ok'; value: T } | { status: 'error'; error: Error }>, notices: LiveNotices = liveNotices): SynchronizationSource<T> {
+/** A resource whose current state is read again on every notice burst for `keys`; nothing is replayed.
+ * `repeatOnFirstSocket` as for `liveTicks`. */
+export function liveState<T>(resource: string, keys: readonly LiveKey[], read: (signal: AbortSignal) => Promise<{ status: 'ok'; value: T } | { status: 'error'; error: Error }>, notices: LiveNotices = liveNotices, repeatOnFirstSocket = true): SynchronizationSource<T> {
   return async function* (_after, signal) {
-    for await (const _tick of liveTicks(keys, signal, notices)) {
+    for await (const _tick of liveTicks(keys, signal, notices, () => null, repeatOnFirstSocket)) {
       const result = await read(signal);
       if (signal.aborted) return;
       if (result.status === 'error') {

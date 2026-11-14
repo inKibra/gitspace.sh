@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { accountLiveKey, workspaceLiveKey } from '@gitspace/protocol/live-notice';
 import type { StreamEvent } from '@gitspace/protocol-sync';
-import { LiveNotices, liveSource, liveTicks } from './live-notices.js';
+import { LiveNotices, liveSource, liveState, liveTicks } from './live-notices.js';
 import { SynchronizationOwner } from './synchronization.js';
 
 const key = workspaceLiveKey('workspace', 'environment');
@@ -114,4 +114,22 @@ it('reads again after its fallback wait when no notice comes; without one it wai
     expect(quietRead).toBe(false);
     quiet.abort();
   } finally { vi.useRealTimers(); }
+});
+
+it('reads an account-wide state once on load: the tab’s first socket does not read it again, a reconnect does', async () => {
+  const notices = new LiveNotices();
+  const read = vi.fn(async () => ({ status: 'ok' as const, value: 'settings' }));
+  const owner = new SynchronizationOwner();
+  owners.push(owner);
+  const channel = owner.channel('settings', liveState('settings', [accountLiveKey('settings')], read, notices, false));
+  channel.subscribe(() => {});
+  await vi.waitFor(() => expect(channel.snapshot()).toMatchObject({ value: 'settings', connection: 'open' }));
+  notices.attach({ readyState: 1, send: () => {} });
+  await settle();
+  expect(read).toHaveBeenCalledTimes(1);
+  // A later socket follows a disconnect, during which notices were lost.
+  notices.attach({ readyState: 1, send: () => {} });
+  await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+  notices.receive({ ...accountLiveKey('settings'), version: 5 });
+  await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(3));
 });

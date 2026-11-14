@@ -1,16 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { canonicalDriveResourceUrl, parseResourceUri, resourceMediaType } from '@gitspace/protocol/resource-uri';
 import type { ResourceFile } from './resource-files.js';
-import { APPROVAL_DECISION, APPROVE, REJECT, type TranscriptContentRequest, type TranscriptPageRequest } from '@gitspace/blocks';
+import { APPROVAL_DECISION, APPROVE, REJECT } from '@gitspace/blocks';
 import { useResultQuery } from 'result-rpc/react';
-import type { CloudProjectOperation, InspectorView, LaunchSourceView } from '@gitspace/protocol';
-import { questionState, RuntimeIdentitySchema, RuntimeMachineIdSchema, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
+import type { CloudProjectOperation, InspectorView, LaunchSourceView, SpaceView } from '@gitspace/protocol';
+import { InspectorViewCodec, rpcErrors, SpaceViewCodec } from '@gitspace/protocol/rpc-contract';
+import { questionState, RuntimeIdentitySchema, RuntimeMachineIdSchema, RuntimeSnapshotSchema, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
 import { Button, ThinkingIndicator } from '@gitspace/ui';
 import { EmptyState, GitSpaceShell, StatusDot, type GitSpaceShellProps, type SessionControlsProps } from './GitSpaceShell.js';
 import { useWorkspaceRuntime } from './useWorkspaceRuntime.js';
 import { useWorkspaceDraft } from './useWorkspaceDraft.js';
 import { useCloudSessionControls } from './useCloudSessionControls.js';
-import { useTranscriptHistory } from './useTranscriptHistory.js';
+import { useTranscriptHistory, type TranscriptHistory, type TranscriptHistorySource } from './useTranscriptHistory.js';
+import { forgetFirstPaintGroup, savedCopy, schemaForm, touchFirstPaintGroup, useSavedCopy, workspaceGroup } from './first-paint-cache.js';
+import { savedTranscriptSchema } from './transcriptHistoryCache.js';
 import { useInference } from './InferenceContext.js';
 import { useRetainedQueryValue } from './useRetainedRead.js';
 import { rpcClient } from './rpc-client.js';
@@ -66,34 +69,96 @@ export interface RuntimeWorkspaceProps {
   projectOperation?: CloudProjectOperation | null;
   /** Opens the project's settings, where the change shows its steps. */
   onOpenProjectSettings?(): void;
+  /** Shown instead of the workspace when the project has no such workspace. */
+  notFound?: ReactNode;
+}
+
+/** What the workspace reads besides its runtime snapshot. Requested when the workspace opens, in parallel with
+ * `runtime.watch`, and drawn from this browser's saved copies until they answer. */
+export interface WorkspaceReads {
+  transcript: TranscriptHistory;
+  relations: { value: SpaceView | undefined; loaded: boolean; error: unknown; refetch(): Promise<void> };
+  providers: { value: GitSpaceShellProps['providers']; error: unknown; refetch(): Promise<void> };
+  skills: GitSpaceShellProps['skills'];
 }
 
 export function RuntimeWorkspace(props: RuntimeWorkspaceProps) {
-  const runtime = useWorkspaceRuntime(props.projectId, props.workspaceId);
-  const inspection = useResultQuery(rpcClient.inspector.view, { projectId: props.projectId, workspaceId: props.workspaceId === props.projectId ? null : props.workspaceId });
-  const saved = useRetainedQueryValue(inspection, JSON.stringify([props.projectId, props.workspaceId]));
-  return <>{runtime.error ? <div role="alert" className="flex items-center gap-2 px-4 py-2 text-caption text-destructive">{runtime.error}<Button variant="ghost" onClick={runtime.retry}>Reconnect</Button></div> : null}{inspection.state === 'failure' ? <div role="alert" className="flex items-center gap-2 px-4 py-2 text-caption text-destructive">{rpcErrorMessage(inspection.error, 'Read workspace')}<Button variant="ghost" onClick={() => void inspection.refetch()}>Retry workspace</Button></div> : null}{runtime.snapshot && saved ? <RuntimeWorkspaceShell {...props} snapshot={runtime.snapshot} inspection={saved} connected={runtime.connected} refreshInspection={async () => { await inspection.refetch(); }} /> : <EmptyState icon={<ThinkingIndicator />} title="Loading workspace…" description="Reading the cloud conversation and workspace state." />}</>;
+  const { projectId, workspaceId } = props;
+  const group = workspaceGroup(projectId, workspaceId);
+  const saved = useMemo(() => ({
+    runtime: savedCopy(group, 'runtime', schemaForm(RuntimeSnapshotSchema)),
+    inspection: savedCopy(group, 'inspection', InspectorViewCodec),
+    space: savedCopy(group, 'space', SpaceViewCodec),
+    transcript: savedCopy(group, 'transcript', schemaForm(savedTranscriptSchema)),
+  }), [group]);
+  useEffect(() => { touchFirstPaintGroup(group); }, [group]);
+  const viewInput = { projectId, workspaceId: workspaceId === projectId ? null : workspaceId };
+  const readKey = JSON.stringify([projectId, workspaceId]);
+  const inspection = useResultQuery(rpcClient.inspector.view, viewInput);
+  // The project has no such workspace (a link naming the wrong project, or a deleted workspace): nothing else is read.
+  const missing = inspection.state === 'failure' && (rpcErrors.workspaceNotFound.is(inspection.error) || rpcErrors.projectNotFound.is(inspection.error));
+  useEffect(() => { if (missing) forgetFirstPaintGroup(group); }, [missing, group]);
+  const runtime = useWorkspaceRuntime(projectId, workspaceId, !missing, saved.runtime);
+  const inspectionValue = useSavedCopy(saved.inspection, useRetainedQueryValue(inspection, readKey));
+  const relationQuery = useResultQuery(rpcClient.space.view, viewInput, { enabled: !missing });
+  const relationValue = useSavedCopy(saved.space, useRetainedQueryValue(relationQuery, readKey));
+  const inference = useInference();
+  const profileId = inference?.state?.assignments.find(item => item.projectId === projectId)?.profileId ?? '';
+  const providers = useResultQuery(rpcClient.providers.list, { profileId }, { enabled: !!profileId && !missing });
+  const providerValues = useRetainedQueryValue(providers, profileId);
+  const skills = useResultQuery(rpcClient.skills.list, {}, { enabled: !missing });
+  const skillValues = useRetainedQueryValue(skills, 'skills');
+  const identity = useMemo(() => RuntimeIdentitySchema.parse({ projectId, workspaceId }), [projectId, workspaceId]);
+  // The main conversation's transcript does not wait for the snapshot that names it: a session command without a
+  // conversation reads the runtime's main one. Once a snapshot (saved or live) names it, pages name it too.
+  const conversationId = useRef<string | undefined>(undefined);
+  conversationId.current = runtime.snapshot?.conversations.find(item => item.parentId === null)?.id;
+  const liveCursor = runtime.live?.cursor ?? null;
+  const transcriptSource = useMemo((): TranscriptHistorySource | null => missing ? null : {
+    key: readKey, revision: liveCursor, saved: saved.transcript,
+    page: async (request, signal) => {
+      const response = await rpcClient.runtime.session({ ...identity, ...(conversationId.current ? { conversationId: conversationId.current } : {}), command: { type: 'transcriptPage', request } }, { signal });
+      if (response.status === 'error') throw response.error;
+      if (!response.value.transcriptPage) throw new Error('The runtime did not return a transcript page.');
+      return response.value.transcriptPage;
+    },
+    content: async (request, signal) => {
+      const response = await rpcClient.runtime.session({ ...identity, ...(conversationId.current ? { conversationId: conversationId.current } : {}), command: { type: 'transcriptContent', request } }, { signal });
+      if (response.status === 'error') throw response.error;
+      if (!response.value.transcriptContent) throw new Error('The runtime did not return transcript content.');
+      return response.value.transcriptContent;
+    },
+  }, [identity, readKey, liveCursor, missing, saved.transcript]);
+  const transcript = useTranscriptHistory(transcriptSource);
+  if (missing) return props.notFound ?? <EmptyState title="Workspace not found" description={rpcErrorMessage(inspection.error, 'Read workspace')} />;
+  const reads: WorkspaceReads = {
+    transcript,
+    relations: { value: relationValue, loaded: relationQuery.state === 'success' && relationQuery.fetch !== 'fetching', error: relationQuery.state === 'failure' ? relationQuery.error : null, refetch: async () => { await relationQuery.refetch(); } },
+    providers: { value: providerValues?.providers, error: providers.state === 'failure' ? providers.error : null, refetch: async () => { await providers.refetch(); } },
+    skills: skillValues,
+  };
+  return <>
+    {runtime.error ? <div role="alert" className="flex items-center gap-2 px-4 py-2 text-caption text-destructive">{runtime.error}<Button variant="ghost" onClick={runtime.retry}>Reconnect</Button></div> : null}
+    {inspection.state === 'failure' ? <div role="alert" className="flex items-center gap-2 px-4 py-2 text-caption text-destructive">{rpcErrorMessage(inspection.error, 'Read workspace')}<Button variant="ghost" onClick={() => void inspection.refetch()}>Retry workspace</Button></div> : null}
+    {props.creation}
+    {runtime.snapshot && inspectionValue ? <RuntimeWorkspaceShell {...props} snapshot={runtime.snapshot} inspection={inspectionValue} connected={runtime.connected} reads={reads} refreshInspection={async () => { await inspection.refetch(); }} /> : <EmptyState icon={<ThinkingIndicator />} title="Loading workspace…" description="Reading the cloud conversation and workspace state." />}
+  </>;
 }
 
-/** The production shell, fed by accepted runtime snapshots and the existing typed RPC client. */
-export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refreshInspection, ...props }: RuntimeWorkspaceProps & { snapshot: RuntimeSnapshot; inspection: InspectorView; connected: boolean; refreshInspection(): Promise<void> }) {
+/** The production shell, fed by accepted runtime snapshots (or this browser's saved copy until one arrives), the
+ * workspace's reads, and the existing typed RPC client. */
+export function RuntimeWorkspaceShell({ snapshot, inspection, connected, reads, refreshInspection, ...props }: RuntimeWorkspaceProps & { snapshot: RuntimeSnapshot; inspection: InspectorView; connected: boolean; reads: WorkspaceReads; refreshInspection(): Promise<void> }) {
   const conversation = snapshot.conversations.find(item => item.parentId === null);
   const conversationId = conversation?.id;
   const session = useCloudSessionControls(snapshot, conversationId);
   const value = session.result?.control;
   const run = session.run;
   const inference = useInference();
-  const profileId = inference?.state?.assignments.find(item => item.projectId === snapshot.projectId)?.profileId ?? '';
-  const providers = useResultQuery(rpcClient.providers.list, { profileId }, { enabled: !!profileId });
-  const providerValues = useRetainedQueryValue(providers, profileId);
-  const skills = useResultQuery(rpcClient.skills.list, {});
-  const skillValues = useRetainedQueryValue(skills, 'skills');
   const deployment = useResultQuery(rpcClient.deployment.status, {}, { enabled: inspection.project.role === 'gitspace-source' });
   const deploymentValue = useRetainedQueryValue(deployment, inspection.project.id);
   const launch = useRuntimeLaunch(deploymentValue, deployment.refetch);
   const [launchRequest, setLaunchRequest] = useState<{ source: LaunchSourceView; targets: typeof RELEASE_TARGETS } | null>(null);
-  const relationQuery = useResultQuery(rpcClient.space.view, { projectId: props.projectId, workspaceId: inspection.workspace.kind === 'base' ? null : props.workspaceId });
-  const relationValue = useRetainedQueryValue(relationQuery, JSON.stringify([props.projectId, props.workspaceId]));
+  const relationValue = reads.relations.value;
   // A project whose private repository the GitHub App does not reach syncs through the machine attached to its base
   // workspace under a banner; with no such machine, or while its repository waits for a machine to copy it in (the
   // cloud's import was refused), it shows the ways in instead of a transcript.
@@ -132,7 +197,7 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
   const [actionError, setActionError] = useState<string | null>(null);
   const [terminalChoice, setTerminalChoice] = useState<{ spaceId: string; machineId: string } | null>(null);
   const scope = useMemo(() => runtimeScope(snapshot, inspection, relationValue), [snapshot, inspection, relationValue]);
-  const relationsEditable = relationQuery.state === 'success' && relationQuery.fetch !== 'fetching' && scope.relationsReady;
+  const relationsEditable = reads.relations.loaded && scope.relationsReady;
   const relationAuthority = useRef({ value: relationValue, editable: relationsEditable });
   relationAuthority.current = { value: relationValue, editable: relationsEditable };
   const turns = useMemo(() => runtimeTurns(snapshot, conversationId), [snapshot, conversationId]);
@@ -142,22 +207,7 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
     if (result.status === 'error') throw result.error;
     return result.value;
   });
-  const transcriptSource = useMemo(() => conversationId ? {
-    key: JSON.stringify([snapshot.projectId, snapshot.workspaceId, conversationId]), revision: snapshot.cursor,
-    page: async (request: TranscriptPageRequest, signal: AbortSignal) => {
-      const response = await rpcClient.runtime.session({ ...identity, conversationId, command: { type: 'transcriptPage', request } }, { signal });
-      if (response.status === 'error') throw response.error;
-      if (!response.value.transcriptPage) throw new Error('The runtime did not return a transcript page.');
-      return response.value.transcriptPage;
-    },
-    content: async (request: TranscriptContentRequest, signal: AbortSignal) => {
-      const response = await rpcClient.runtime.session({ ...identity, conversationId, command: { type: 'transcriptContent', request } }, { signal });
-      if (response.status === 'error') throw response.error;
-      if (!response.value.transcriptContent) throw new Error('The runtime did not return transcript content.');
-      return response.value.transcriptContent;
-    },
-  } : null, [identity, conversationId, snapshot.cursor]);
-  const transcript = useTranscriptHistory(transcriptSource);
+  const transcript = reads.transcript;
   // Asks, plans, take-over requests and lifecycle approvals answer on their cards in the transcript, which also show
   // how they ended. An open approval that gates a tool (a machine-attach request, the project agent's batch of
   // answers) has no call there and answers above the composer, through the same questions.
@@ -194,7 +244,7 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
       const result = await rpcClient.workspace.setRelations({ workspaceId, dependsOn: [...relations.dependsOn], relatedTo: [...relations.relatedTo], stackedOn: relations.stackedOn });
       if (result.status === 'error') throw result.error;
     } finally {
-      await Promise.all([relationQuery.refetch(), refreshInspection()]);
+      await Promise.all([reads.relations.refetch(), refreshInspection()]);
     }
   };
   const spaceId = snapshot.workspaceId;
@@ -241,21 +291,20 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, refresh
     },
     watch: (card, onClose) => <BrowserWatchDialog identity={identity} request={sessionCommand} target={{ source: card.source, groupId: card.groupId, targetId: card.targetId, title: card.title, url: card.url, label: card.browser }} focusInChrome={card.source === 'chrome'} takeover onClose={onClose} /> }), [snapshot.questions, sessionCommand, identity]);
   return <>
-    {props.creation}
     {actionError ? <p role="alert" className="px-4 py-2 text-caption text-destructive">{actionError}</p> : null}
     {status.cloud.conflicts.length ? <section role="alert" aria-label="Workspace merge conflicts" className="shrink-0 bg-surface-2 px-4 py-3 text-caption shadow-surface-1"><h2 className="font-medium text-destructive">Workspace merge conflicts</h2><p className="mt-1 text-muted-foreground">Machine changes reached the cloud working copy with conflicts. Resolve these files before continuing.</p><ul className="mt-2 list-inside list-disc break-all font-mono">{status.cloud.conflicts.map(path => <li key={path}>{path}</li>)}</ul></section> : null}
     {deployment.state === 'failure' ? <div role="alert" className="flex items-center gap-2 px-4 py-2 text-caption text-destructive">{rpcErrorMessage(deployment.error, 'Read deployment status')}<Button variant="ghost" onClick={() => void deployment.refetch()}>Retry deployment status</Button></div> : null}
     {launch.launch && !launch.open ? <Button variant="ghost" size="compact" onClick={() => launch.setOpen(true)}>Show launch progress</Button> : null}
-    {relationQuery.state === 'failure' ? <div role="alert" className="flex items-center gap-2 px-4 py-2 text-caption text-destructive">{rpcErrorMessage(relationQuery.error, "Load this project's workspaces")}<Button variant="ghost" onClick={() => void relationQuery.refetch()}>Retry</Button></div> : null}
-    {relationValue?.statusError ? <div role="status" className="flex items-center gap-2 px-4 py-2 text-caption text-muted-foreground">Workspace statuses are unavailable: {relationValue.statusError}<Button variant="ghost" onClick={() => void relationQuery.refetch()}>Retry</Button></div> : null}
+    {reads.relations.error !== null ? <div role="alert" className="flex items-center gap-2 px-4 py-2 text-caption text-destructive">{rpcErrorMessage(reads.relations.error, "Load this project's workspaces")}<Button variant="ghost" onClick={() => void reads.relations.refetch()}>Retry</Button></div> : null}
+    {relationValue?.statusError ? <div role="status" className="flex items-center gap-2 px-4 py-2 text-caption text-muted-foreground">Workspace statuses are unavailable: {relationValue.statusError}<Button variant="ghost" onClick={() => void reads.relations.refetch()}>Retry</Button></div> : null}
     <QuestionCardsContext.Provider value={questionCards}>
     <ComposerStagingProvider>
     <RequirementAcceptance.Provider value={acceptRequirement}>
     {/* No onSend, so a closed composer, until the draft binding exists: text typed before it would be replaced by the workspace draft. A session command in flight only holds the send (sendPending); the box stays editable. */}
-    <GitSpaceShell project={{ id: inspection.project.id, name: inspection.project.name, repository: inspection.project.repositoryReference ?? '', connected }} {...scope} mainAgent={{ id: value?.sessionId ?? conversationId ?? 'root', title: conversation?.title ?? 'Workspace agent', state: conversation?.status === 'running' ? 'running' : conversation?.status === 'waiting' ? 'permission-needed' : 'waiting', model: value?.model ?? '', controlsAvailable: true, recovering: !value, failed: conversation?.status === 'failed', errorMessage: conversation?.error ?? null, retry: conversation?.retry ?? null }} turns={turns} transcript={conversationId ? transcript : undefined} history={conversationId ? { loading: transcript.initialLoading, error: transcript.error, onRetry: transcript.refresh } : undefined} transport={[]} artifacts={[]} sessionControls={controls} skills={skillValues} providers={providerValues?.providers} draft={draft} sendPending={session.pending} onSend={value && draft ? async (text, streamingBehavior, draft, decisions) => { await run({ type: 'prompt', text, streamingBehavior, draftRevision: draft?.draftRevision, draftText: draft?.text, decisions: decisions?.length ? decisions : undefined }); } : undefined}
+    <GitSpaceShell project={{ id: inspection.project.id, name: inspection.project.name, repository: inspection.project.repositoryReference ?? '', connected }} {...scope} mainAgent={{ id: value?.sessionId ?? conversationId ?? 'root', title: conversation?.title ?? 'Workspace agent', state: conversation?.status === 'running' ? 'running' : conversation?.status === 'waiting' ? 'permission-needed' : 'waiting', model: value?.model ?? '', controlsAvailable: true, recovering: !value, failed: conversation?.status === 'failed', errorMessage: conversation?.error ?? null, retry: conversation?.retry ?? null }} turns={turns} transcript={conversationId ? transcript : undefined} history={conversationId ? { loading: transcript.initialLoading, saved: transcript.saved, error: transcript.error, onRetry: transcript.refresh } : undefined} transport={[]} artifacts={[]} sessionControls={controls} skills={reads.skills} providers={reads.providers.value} draft={draft} sendPending={session.pending} onSend={value && draft ? async (text, streamingBehavior, draft, decisions) => { await run({ type: 'prompt', text, streamingBehavior, draftRevision: draft?.draftRevision, draftText: draft?.text, decisions: decisions?.length ? decisions : undefined }); } : undefined}
       onRetryAgent={async () => { await run({ type: 'resume' }); }} onContinueAgent={async () => { await run({ type: 'continue' }); }} onOpenSettings={props.onOpenSettings} onSelectProject={props.onSelectProject} onSelectWorkspace={props.onSelectWorkspace}
-      controlsError={session.error ?? (providers.state === 'failure' ? rpcErrorMessage(providers.error, 'Load provider authentication') : inference?.error) ?? undefined}
-      onRetryControls={() => { void run({ type: 'control' }).catch(() => {}); void providers.refetch(); void inference?.refresh(); }}
+      controlsError={session.error ?? (reads.providers.error !== null ? rpcErrorMessage(reads.providers.error, 'Load provider authentication') : inference?.error) ?? undefined}
+      onRetryControls={() => { void run({ type: 'control' }).catch(() => {}); void reads.providers.refetch(); void inference?.refresh(); }}
       runtimeSummary={{ holder: scope.workspace.holder, closedAt: scope.workspace.closedAt, generation: scope.workspace.generation, status: scope.workspace.status, freshness: connected ? 'fresh' : 'stale', detail: connected ? null : 'Reconnecting to cloud runtime' }}
       onSetWorkspacePhase={async (_id, phase) => { await run({ type: 'setWorkspacePhase', phase }); await refreshInspection(); }}
       projectOperation={props.projectOperation

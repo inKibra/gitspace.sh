@@ -155,7 +155,7 @@ export interface GitSpaceShellProps {
   mainAgent: { id: string; title: string; state: AgentSessionRenderState; model: string; recovering?: boolean; controlsAvailable?: boolean; errorMessage?: string | null; failed?: boolean; retry?: { at: string; error: string } | null } | null;
   turns: TurnBlock[];
   transcript?: TranscriptHistory;
-  history?: { loading: boolean; error: string | null; onRetry(): void };
+  history?: { loading: boolean; saved?: boolean; error: string | null; onRetry(): void };
   transport: TransportBlock[];
   artifacts: ArtifactView[];
   /** Cloud runtime status is independent of the directory's machine placement projection. */
@@ -337,11 +337,13 @@ export function EmptyState({ icon, title, description, action }: { icon?: ReactN
   </section>;
 }
 
-export function TranscriptHistoryNotice({ loading, error, onRetry }: NonNullable<GitSpaceShellProps['history']>) {
-  if (!loading && !error) return null;
+/** `saved`: the rows shown are this browser's saved copy, not yet replaced by the server's. */
+export function TranscriptHistoryNotice({ loading, saved = false, error, onRetry }: NonNullable<GitSpaceShellProps['history']>) {
+  if (!loading && !error && !saved) return null;
   return <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2 sm:px-6">
     <div className="min-w-0 flex-1">
-      {loading ? <p role="status" className="flex items-center gap-2 text-caption text-muted-foreground"><ThinkingIndicator size="compact" />Loading transcript history…</p> : null}
+      {saved ? <p role="status" className="flex items-center gap-2 text-caption text-muted-foreground">{loading ? <ThinkingIndicator size="compact" /> : null}Showing the copy saved in this browser{loading ? ' · loading the latest…' : ''}</p>
+        : loading ? <p role="status" className="flex items-center gap-2 text-caption text-muted-foreground"><ThinkingIndicator size="compact" />Loading transcript history…</p> : null}
       {error ? <p role="alert" className="text-caption text-destructive [overflow-wrap:anywhere]">Transcript history could not be loaded: {error}</p> : null}
     </div>
     {error ? <Button variant="ghost" className="min-h-10" disabled={loading} onClick={onRetry}>Retry transcript</Button> : null}

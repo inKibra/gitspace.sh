@@ -1,17 +1,21 @@
 import { applyStreamEvent, initialStreamState, type StreamEvent, type StreamState } from '@gitspace/protocol-sync';
+import type { SavedCopy } from './first-paint-cache.js';
 
 /** `open`: the source is connected and the reader is current, with nothing new to apply. */
 export type SynchronizationSource<T> = (after: number | null, signal: AbortSignal) => AsyncIterable<{ status: 'ok'; value: StreamEvent<T> } | { status: 'open' } | { status: 'error'; error: Error }>;
-export interface SynchronizedValue<T> extends StreamState<T> { connection: 'connecting' | 'open' | 'disconnected'; transportError: Error | null }
-interface Channel<T> { value: SynchronizedValue<T>; listeners: Set<() => void>; eventListeners: Set<(event: StreamEvent<T>) => void>; refreshes: Set<() => void>; source: SynchronizationSource<T>; controller: AbortController | null; epoch: number; snapshotRequested: boolean }
+/** `restored`: `value` is this browser's saved copy and no source has delivered since; the source replaces it. */
+export interface SynchronizedValue<T> extends StreamState<T> { connection: 'connecting' | 'open' | 'disconnected'; transportError: Error | null; restored: boolean }
+interface Channel<T> { value: SynchronizedValue<T>; listeners: Set<() => void>; eventListeners: Set<(event: StreamEvent<T>) => void>; refreshes: Set<() => void>; source: SynchronizationSource<T>; saved: SavedCopy<T> | undefined; controller: AbortController | null; epoch: number; snapshotRequested: boolean }
 
 /** One channel per authority/resource, irrespective of how many panes observe it. */
 export class SynchronizationOwner {
   private readonly channels = new Map<string, unknown>();
-  channel<T>(resource: string, source: SynchronizationSource<T>) {
+  /** `saved` seeds a new channel with this browser's saved copy and keeps it current with every accepted value. */
+  channel<T>(resource: string, source: SynchronizationSource<T>, saved?: SavedCopy<T>) {
     let channel = this.channels.get(resource) as Channel<T> | undefined;
     if (!channel) {
-      channel = { value: { ...initialStreamState<T>(resource), connection: 'connecting', transportError: null }, listeners: new Set(), eventListeners: new Set(), refreshes: new Set(), source, controller: null, epoch: 0, snapshotRequested: false };
+      const restored = saved?.read();
+      channel = { value: { ...initialStreamState<T>(resource), value: restored, connection: 'connecting', transportError: null, restored: restored !== undefined }, listeners: new Set(), eventListeners: new Set(), refreshes: new Set(), source, saved, controller: null, epoch: 0, snapshotRequested: false };
       this.channels.set(resource, channel);
     }
     const selected = channel;
@@ -94,7 +98,8 @@ export class SynchronizationOwner {
             }
             const next = applyStreamEvent(channel.value, result.value);
             const accepted = next !== channel.value && !next.resync;
-            publish({ ...next, connection: 'open', transportError: null });
+            publish({ ...next, connection: 'open', transportError: null, restored: accepted ? false : channel.value.restored });
+            if (accepted && next.value !== undefined) channel.saved?.write(next.value);
             if (accepted) for (const listener of channel.eventListeners) listener(result.value);
             delay = 250;
             quietRetry = true;

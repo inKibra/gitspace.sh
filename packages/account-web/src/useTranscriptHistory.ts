@@ -7,9 +7,12 @@ import type {
 } from '@gitspace/blocks';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { rpcErrorMessage } from './rpc-error-message.js';
+import type { SavedCopy } from './first-paint-cache.js';
 import {
   EMPTY_TRANSCRIPT_CACHE,
   mergeTranscriptPage,
+  savedTranscript,
+  type SavedTranscript,
   type TranscriptHistoryCache,
   type TranscriptViewport,
 } from './transcriptHistoryCache.js';
@@ -21,6 +24,8 @@ export interface TranscriptHistorySource {
   revision: unknown;
   page(request: TranscriptPageRequest, signal: AbortSignal): Promise<TranscriptPage>;
   content(request: TranscriptContentRequest, signal: AbortSignal): Promise<TranscriptContentPage>;
+  /** This browser's saved copy: shown until the first page answers, then replaced by pages and kept current. */
+  saved?: SavedCopy<SavedTranscript>;
 }
 
 export interface TranscriptHistory {
@@ -31,6 +36,8 @@ export interface TranscriptHistory {
   loading: boolean;
   initialLoading: boolean;
   error: string | null;
+  /** `rows` are this browser's saved copy and no page has answered yet: not the live transcript. */
+  saved: boolean;
   refresh(): void;
   hasBefore: boolean;
   hasAfter: boolean;
@@ -58,6 +65,8 @@ interface HistorySession {
   setViewport(firstId: string | null, lastId: string | null, following: boolean): void;
   content(rowId: string, offset: number, signal: AbortSignal): Promise<TranscriptContentPage>;
   executionPage(executionId: string, request: TranscriptPageRequest, signal: AbortSignal): Promise<TranscriptPage>;
+  /** Shows a saved copy read after mount, unless a page or another copy is already shown. */
+  adopt(cache: TranscriptHistoryCache): void;
 }
 interface HistoryState {
   identity: HistorySession['identity'];
@@ -66,6 +75,7 @@ interface HistoryState {
   loading: boolean;
   hasSnapshot: boolean;
   error: string | null;
+  saved: boolean;
 }
 
 /** Retains only a bounded, contiguous window; full content is fetched separately. */
@@ -74,7 +84,15 @@ export function useTranscriptHistory(source: TranscriptHistorySource | null, ini
   const sourceRef = useRef(source);
   sourceRef.current = source;
   const session = useRef<HistorySession | null>(null);
-  const [state, setState] = useState<HistoryState>({ identity, cache: EMPTY_TRANSCRIPT_CACHE, navigation: null, loading: source !== null, hasSnapshot: false, error: null });
+  // The saved copy is drawn in the first render: in memory when this workspace opened the page, else read once mounted.
+  const [loadedCopy, setLoadedCopy] = useState<{ identity: HistorySession['identity']; saved: SavedTranscript } | null>(null);
+  const restored = useMemo(() => {
+    const saved = loadedCopy?.identity === identity ? loadedCopy.saved : sourceRef.current?.saved?.read();
+    return saved ? mergeTranscriptPage(EMPTY_TRANSCRIPT_CACHE, saved, { generation: null, before: null, after: null, around: null }, { firstId: null, lastId: null, following: true }, true) : null;
+  }, [identity, loadedCopy]);
+  const restoredRef = useRef(restored);
+  restoredRef.current = restored;
+  const [state, setState] = useState<HistoryState>({ identity, cache: restored ?? EMPTY_TRANSCRIPT_CACHE, navigation: null, loading: source !== null, hasSnapshot: false, error: null, saved: restored !== null });
   const initial = useRef(initialPosition);
   const refresh = useCallback(() => {
     if (session.current?.identity === identity) session.current.refresh();
@@ -106,8 +124,10 @@ export function useTranscriptHistory(source: TranscriptHistorySource | null, ini
   useEffect(() => {
     if (!sourceRef.current) return;
     let active = true;
-    let cache = { ...EMPTY_TRANSCRIPT_CACHE, generation: initial.current?.generation ?? null };
-    let viewport: TranscriptViewport = { firstId: initial.current?.rowId ?? null, lastId: initial.current?.rowId ?? null, following: !initial.current?.rowId };
+    const savedCache = restoredRef.current;
+    let cache = savedCache ?? { ...EMPTY_TRANSCRIPT_CACHE, generation: initial.current?.generation ?? null };
+    let saved = savedCache !== null;
+    let viewport: TranscriptViewport = savedCache ? { firstId: null, lastId: null, following: true } : { firstId: initial.current?.rowId ?? null, lastId: initial.current?.rowId ?? null, following: !initial.current?.rowId };
     let controller: AbortController | null = null;
     const contentControllers = new Set<AbortController>();
     let requested = false;
@@ -125,7 +145,7 @@ export function useTranscriptHistory(source: TranscriptHistorySource | null, ini
       if (!active || currentSource?.key !== identity.key) return;
       const current = new AbortController();
       controller = current;
-      setState({ identity, cache, navigation, loading: true, hasSnapshot, error });
+      setState({ identity, cache, navigation, loading: true, hasSnapshot, error, saved });
       try {
         const page = await currentSource.page(request, current.signal);
         if (!active || current.signal.aborted || controller !== current || sourceRef.current?.key !== identity.key) return;
@@ -144,7 +164,10 @@ export function useTranscriptHistory(source: TranscriptHistorySource | null, ini
         else cache = mergeTranscriptPage(cache, page, request, viewport, replace || generationChanged);
         if (replace || generationChanged) navigation = { rowId: generationChanged ? null : request.around };
         hasSnapshot = true;
+        saved = false;
         error = null;
+        const copy = savedTranscript(cache);
+        if (copy) currentSource.saved?.write(copy);
       } catch (cause) {
         if (!active || current.signal.aborted || controller !== current || sourceRef.current?.key !== identity.key) return;
         error = rpcErrorMessage(cause, 'Read transcript history');
@@ -152,7 +175,7 @@ export function useTranscriptHistory(source: TranscriptHistorySource | null, ini
       if (!active || current.signal.aborted || controller !== current) return;
       controller = null;
       pendingNavigation = null;
-      setState({ identity, cache, navigation, loading: requested, hasSnapshot, error });
+      setState({ identity, cache, navigation, loading: requested, hasSnapshot, error, saved });
       if (requested) invalidate();
       else if (viewportRefreshRequested) {
         viewportRefreshRequested = false;
@@ -288,9 +311,17 @@ export function useTranscriptHistory(source: TranscriptHistorySource | null, ini
           contentControllers.delete(current);
         }
       },
+      adopt(next) {
+        if (!active || hasSnapshot || cache.rows.length > 0) return;
+        cache = next;
+        saved = true;
+        viewport = { firstId: null, lastId: null, following: true };
+        setState({ identity, cache, navigation, loading: controller !== null || requested, hasSnapshot, error, saved });
+      },
     };
     session.current = currentSession;
     invalidate();
+    if (!savedCache) void sourceRef.current.saved?.load().then((copy) => { if (active && copy) setLoadedCopy({ identity, saved: copy }); });
     return () => {
       active = false;
       controller?.abort();
@@ -298,6 +329,9 @@ export function useTranscriptHistory(source: TranscriptHistorySource | null, ini
       if (session.current === currentSession) session.current = null;
     };
   }, [identity]);
+  useEffect(() => {
+    if (restored && session.current?.identity === identity) session.current.adopt(restored);
+  }, [identity, restored]);
 
   const revision = source?.revision;
   const previousRevision = useRef({ identity, revision });
@@ -308,7 +342,7 @@ export function useTranscriptHistory(source: TranscriptHistorySource | null, ini
   }, [identity, revision]);
 
   // Hide a replaced source synchronously, before cleanup or late completions.
-  const current = state.identity === identity ? state : { cache: EMPTY_TRANSCRIPT_CACHE, navigation: null, loading: source !== null, hasSnapshot: false, error: null };
+  const current = state.identity === identity ? state : { cache: restored ?? EMPTY_TRANSCRIPT_CACHE, navigation: null, loading: source !== null, hasSnapshot: false, error: null, saved: restored !== null };
   return {
     rows: current.cache.rows,
     generation: current.cache.generation,
@@ -316,6 +350,7 @@ export function useTranscriptHistory(source: TranscriptHistorySource | null, ini
     loading: current.loading,
     initialLoading: current.loading && !current.hasSnapshot,
     error: current.error,
+    saved: current.saved,
     hasBefore: current.cache.hasBefore,
     hasAfter: current.cache.hasAfter,
     total: current.cache.total,

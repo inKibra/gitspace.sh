@@ -2,13 +2,16 @@ import { useEffect, useRef, useState } from 'react';
 import { applyImmutable } from '@earendil-works/chord/delta';
 import { workspaceLiveKey } from '@gitspace/protocol/live-notice';
 import { RuntimeIdentitySchema, RuntimeSnapshotSchema, RuntimeWatchEventsSchema, type RuntimeSnapshot, type RuntimeWatchEvent } from '@gitspace/protocol-runtime';
+import { useSavedCopy, type SavedCopy } from './first-paint-cache.js';
 import { liveTicks } from './live-notices.js';
 import { rpcClient } from './rpc-client.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
 
 /** One ordered cloud replica per selected workspace, refetched after its cursor on every `runtime` notice burst. A gap
- * requests a fresh snapshot, never a replayed mutation. */
-export function useWorkspaceRuntime(projectId: string, workspaceId: string) {
+ * requests a fresh snapshot, never a replayed mutation. Until the first read answers, `snapshot` is this browser's saved
+ * copy (`live` stays null and `connected` false); the replica itself always starts from a snapshot read, never from the
+ * saved cursor. `active: false` watches nothing. */
+export function useWorkspaceRuntime(projectId: string, workspaceId: string, active = true, saved: SavedCopy<RuntimeSnapshot> | null = null) {
   const [snapshot, setSnapshot] = useState<RuntimeSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
@@ -22,6 +25,7 @@ export function useWorkspaceRuntime(projectId: string, workspaceId: string) {
     }
     setError(null);
     setConnected(false);
+    if (!active) return;
     const identity = RuntimeIdentitySchema.parse({ projectId, workspaceId });
     const accept = (value: RuntimeSnapshot) => {
       if (value.projectId !== identity.projectId || value.workspaceId !== identity.workspaceId) throw new Error('Runtime snapshot belongs to another workspace.');
@@ -84,6 +88,7 @@ export function useWorkspaceRuntime(projectId: string, workspaceId: string) {
     const reconnect = () => retry((value) => value + 1);
     window.addEventListener('online', reconnect);
     return () => { controller.abort(); window.removeEventListener('online', reconnect); };
-  }, [projectId, workspaceId, revision]);
-  return { snapshot, connected, error, retry: () => retry((value) => value + 1) };
+  }, [projectId, workspaceId, revision, active]);
+  const shown = useSavedCopy(saved, snapshot ?? undefined);
+  return { snapshot: shown ?? null, live: snapshot, connected, error, retry: () => retry((value) => value + 1) };
 }

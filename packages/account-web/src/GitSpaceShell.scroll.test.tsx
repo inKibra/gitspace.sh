@@ -190,7 +190,7 @@ it('presents legacy missing failure details honestly and removes the retry affor
 
 it('leaves virtual transcript scroll ownership with its native viewport renderer', async () => {
   const transcript: TranscriptHistory = {
-    generation: 'virtual-generation', loading: false, initialLoading: false, error: null,
+    generation: 'virtual-generation', loading: false, initialLoading: false, error: null, saved: false,
     navigation: null,
     hasBefore: false, hasAfter: false, total: 100,
     rows: Array.from({ length: 100 }, (_, ordinal) => ({

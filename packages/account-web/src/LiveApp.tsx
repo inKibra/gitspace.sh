@@ -59,7 +59,7 @@ import { CloudCreationProgress } from './CloudCreationProgress.js';
 import { latestOperation, useAccountOperations } from './OperationProgress.js';
 import { releaseWorkspaceCaches } from './workspace-cache-actions.js';
 import { useWorkspaceAutomations } from './goal/useWorkspaceAutomations.js';
-
+import { ACCOUNT_GROUP, openFirstPaintCache, workspaceGroup } from './first-paint-cache.js';
 
 
 
@@ -609,12 +609,22 @@ function LiveWorkspace(props: LiveWorkspaceProps) {
   useOriginCheck(projectValues?.find((project) => project.id === projectId) ?? null);
   if (!projectId) return <AccountWork view="projects" />;
   if (!projectValues && projects.state === 'failure') return <PageCanvas><EmptyState title="Project directory unavailable" description={rpcErrorMessage(projects.error, 'Load project directory')} action={<Button variant="ghost" onClick={() => void projects.refetch()}>Retry</Button>} /></PageCanvas>;
-  if (!projectValues) return <PageCanvas><EmptyState icon={<ThinkingIndicator />} title="Loading projects…" description="Reading your account without starting a machine." /></PageCanvas>;
-  const selectedProject = projectValues.find((project) => project.id === projectId);
-  if (!selectedProject) return <PageCanvas><EmptyState title="Project not found" description="Choose another project from your account sidebar." /></PageCanvas>;
+  // The workspace opens at once; the directory, when it arrives, only says whether the project exists.
+  const selectedProject = projectValues?.find((project) => project.id === projectId);
+  if (projectValues && !selectedProject) return <PageCanvas><EmptyState title="Project not found" description="Choose another project from your account sidebar." /></PageCanvas>;
   const projectOperation = latestOperation(operations.filter((operation) => operation.projectId === projectId), null);
+  // A workspace link under the wrong project: the directory knows the workspace's own project.
+  const owner = workspaceId ? account?.projects.find((project) => project.id !== projectId && account.directory[project.id]?.workspaces.some((workspace) => workspace.id === workspaceId)) : undefined;
+  const notFound = <PageCanvas><EmptyState title={owner ? `This workspace is in ${owner.name}` : workspaceId ? 'Workspace not found' : 'Project not found'}
+    description={owner ? `The link names ${selectedProject?.name ?? 'another project'}, but the workspace belongs to ${owner.name}.` : workspaceId ? `${selectedProject?.name ?? 'This project'} has no such workspace. It may have been deleted, or the link names the wrong project.` : 'Choose another project from your account sidebar.'}
+    action={<div className="flex flex-wrap justify-center gap-2">
+      {owner && workspaceId ? <Button variant="primary" onClick={() => selectInspection(owner.id, workspaceId)}>Open in {owner.name}</Button> : null}
+      {workspaceId ? <Button variant="ghost" onClick={() => selectInspection(projectId, null)}>Back to {selectedProject?.name ?? 'the project'}</Button> : null}
+      <Button variant="ghost" onClick={() => navigateProductUrl(setProductRoute(new URL(window.location.href), 'projects'))}>All projects</Button>
+    </div>} /></PageCanvas>;
   return <RuntimeWorkspace key={JSON.stringify([projectId, workspaceId])} projectId={projectId} workspaceId={workspaceId ?? projectId} onOpenSettings={props.onOpenSettings} onSelectProject={(id) => selectInspection(id, null)} onSelectWorkspace={(id) => selectInspection(projectId, id)} renderInspector={(context) => <RuntimeInspector context={context} />} creation={workspaceId ? <CloudCreationProgress projectId={projectId} workspaceId={workspaceId} onDeleted={() => selectInspection(projectId, null)} /> : null}
     projectOperation={projectOperation && projectOperation.state !== 'succeeded' ? projectOperation : null}
+    notFound={notFound}
     onOpenProjectSettings={() => { projectSettings?.onChange(projectId); navigateProductUrl(setProductRoute(new URL(window.location.href), 'projects')); }} />;
 }
 
@@ -1085,8 +1095,10 @@ function GitSpaceProduct() {
     initialTab={onboarding || location.searchParams.get('section') === 'providers' ? 'Providers' : undefined}
   />;
   if (route === 'inference') return inferencePage();
-  // Account/machine metadata refreshes are not navigation away from an open workspace.
-  if (settingsValue && draft?.onboardingComplete && !forceOnboarding && route !== 'settings') return <>
+  // Account/machine metadata refreshes are not navigation away from an open workspace. A workspace link opens the
+  // workspace without waiting for settings; settings that arrive saying setup is unfinished still show setup.
+  const onboarded = draft?.onboardingComplete ?? settingsValue?.onboardingComplete;
+  if (!forceOnboarding && route !== 'settings' && (onboarded ?? (route === 'agent' && selectedProjectId.length > 0))) return <>
     <LiveWorkspace onOpenSettings={(section) => navigateProduct('settings', 'push', section ?? null)} />
     {settingsQuery.state === 'failure' && !appUpdate.current() ? <div role="alert" className="fixed inset-x-0 top-[var(--app-notice-top)] z-50 mx-auto w-fit max-w-full rounded-lg bg-surface-3 px-3 py-2 text-caption text-foreground shadow-surface-3">Account settings: {rpcErrorMessage(settingsQuery.error, 'settings.get')}<Button variant="ghost" size="compact" onClick={() => void settingsQuery.refetch()}>Retry</Button></div> : null}
   </>;
@@ -1175,6 +1187,15 @@ type DeviceGateState =
   | { status: 'enrolled' }
   | { status: 'unenrolled'; error: string | null };
 
+/** Reads what this browser saved of the account's shell and of the workspace the URL opens, before the first enrolled
+ * render, so both paint before any request answers. */
+function openSavedCopies(device: BrowserDevice): Promise<void> {
+  const url = new URL(window.location.href);
+  const projectId = url.searchParams.get('project');
+  const workspaceId = url.searchParams.get('workspace');
+  return openFirstPaintCache(JSON.stringify([window.location.origin, device.userId]), projectId ? [ACCOUNT_GROUP, workspaceGroup(projectId, workspaceId ?? projectId)] : [ACCOUNT_GROUP]);
+}
+
 /**
  * Nothing renders until this browser holds an enrolled device: `#enroll=`
  * redeems an invite, a stored device passes straight through, and a
@@ -1199,7 +1220,9 @@ function DeviceGate({ children }: { children: ReactNode }) {
     try {
       const pageUrl = new URL(window.location.href);
       const checkedToken = enrollmentTokenForLocation(token, pageUrl);
-      setCurrentDevice(await enrollDevice(checkedToken, accountHandleFromUrl(pageUrl) ? pageUrl.origin : undefined));
+      const device = await enrollDevice(checkedToken, accountHandleFromUrl(pageUrl) ? pageUrl.origin : undefined);
+      await openSavedCopies(device);
+      setCurrentDevice(device);
       setState({ status: 'enrolled' });
     } catch (error) {
       setState({ status: 'unenrolled', error: error instanceof Error ? error.message : 'Enrollment failed' });
@@ -1214,7 +1237,9 @@ function DeviceGate({ children }: { children: ReactNode }) {
     try {
       const recovery = recoverAccountBrowser(handle, key, new URL(window.location.href));
       key = '';
-      setCurrentDevice(await recovery);
+      const device = await recovery;
+      await openSavedCopies(device);
+      setCurrentDevice(device);
       setState({ status: 'enrolled' });
     } catch (error) {
       setState({ status: 'unenrolled', error: error instanceof Error ? error.message : 'Account recovery failed' });
@@ -1229,7 +1254,10 @@ function DeviceGate({ children }: { children: ReactNode }) {
       const url = new URL(window.location.href);
       const token = new URLSearchParams(url.hash.slice(1)).get('enroll') ?? url.searchParams.get('enroll');
       if (token) void redeem(token);
-      else void currentDevice().then((device) => setState(device ? { status: 'enrolled' } : { status: 'unenrolled', error: null }));
+      else void currentDevice().then(async (device) => {
+        if (device) await openSavedCopies(device);
+        setState(device ? { status: 'enrolled' } : { status: 'unenrolled', error: null });
+      });
     }
     const onRejected = (event: Event): void => {
       const code = event instanceof CustomEvent ? String(event.detail?.code ?? '') : '';

@@ -5,19 +5,19 @@ import { afterEach, beforeEach, expect, it, vi, type Mock } from 'vitest';
 import { RuntimeSnapshotSchema } from '@gitspace/protocol-runtime';
 import type { RuntimeSessionResult, SessionControlView } from '@gitspace/protocol-runtime/session-controls';
 import { emptyWorkspaceStatus } from '@gitspace/protocol-workspace';
-import type { InspectorView } from '@gitspace/protocol';
+import type { InspectorView, SpaceView } from '@gitspace/protocol';
 import { cloudProjectSummarySchema, cloudWorkspaceDefinitionSchema } from '@gitspace/protocol/project-authority';
 import type { GitSpaceShellProps } from './GitSpaceShell.js';
-import { RuntimeWorkspaceShell } from './RuntimeWorkspace.js';
+import { RuntimeWorkspaceShell, type WorkspaceReads } from './RuntimeWorkspace.js';
+import type { TranscriptHistory } from './useTranscriptHistory.js';
 
-const mocks = vi.hoisted((): { setRelations: Mock; refresh: Mock; cancelRun: Mock; session: { result: RuntimeSessionResult | null; run: Mock }; shell: GitSpaceShellProps | null; saved: unknown; access: unknown; failed: boolean; pending: boolean } => ({ setRelations: vi.fn(), refresh: vi.fn(), cancelRun: vi.fn(), session: { result: null, run: vi.fn() }, shell: null, saved: null, access: undefined, failed: false, pending: false }));
+const mocks = vi.hoisted((): { setRelations: Mock; refresh: Mock; cancelRun: Mock; session: { result: RuntimeSessionResult | null; run: Mock }; shell: GitSpaceShellProps | null; saved: SpaceView | null; access: unknown; failed: boolean; pending: boolean } => ({ setRelations: vi.fn(), refresh: vi.fn(), cancelRun: vi.fn(), session: { result: null, run: vi.fn() }, shell: null, saved: null, access: undefined, failed: false, pending: false }));
 const createTerminal = vi.hoisted(() => vi.fn(async (_input: { spaceId: string; machineId: string }) => ({ status: 'ok' as const, value: {} })));
 const copyCalls = vi.hoisted(() => ({ seed: vi.fn(async (_input: { projectId: string; machineId: string }) => ({ status: 'ok' as const, value: { baseBranch: 'main', commit: 'c'.repeat(40) } })), attach: vi.fn(async (_input: { projectId: string; workspaceId: string; machineId: string }) => ({ status: 'ok' as const, value: {} })) }));
-vi.mock('./rpc-client.js', () => ({ rpcClient: { providers: { list: 'providers' }, skills: { list: 'skills' }, deployment: { status: 'deployment' }, space: { view: 'relations' }, github: { projectAccess: 'projectAccess' }, workspace: { setRelations: mocks.setRelations }, terminals: { create: createTerminal }, project: { seed: copyCalls.seed }, runtime: { attachment: { cache: { request: copyCalls.attach } } }, automations: { cancelRun: mocks.cancelRun } } }));
-vi.mock('result-rpc/react', () => ({ useResultQuery: (procedure: string) => ({ state: procedure === 'relations' && mocks.failed ? 'failure' : procedure === 'relations' && mocks.pending ? 'pending' : 'success', error: new Error('relations unavailable'), value: procedure === 'relations' ? mocks.saved : procedure === 'projectAccess' ? mocks.access : undefined, refetch: mocks.refresh }) }));
+vi.mock('./rpc-client.js', () => ({ rpcClient: { deployment: { status: 'deployment' }, github: { projectAccess: 'projectAccess' }, workspace: { setRelations: mocks.setRelations }, terminals: { create: createTerminal }, project: { seed: copyCalls.seed }, runtime: { attachment: { cache: { request: copyCalls.attach } } }, automations: { cancelRun: mocks.cancelRun } } }));
+vi.mock('result-rpc/react', () => ({ useResultQuery: (procedure: string) => ({ state: 'success', value: procedure === 'projectAccess' ? mocks.access : undefined, refetch: mocks.refresh }) }));
 vi.mock('./InferenceContext.js', () => ({ useInference: () => null }));
 vi.mock('./useCloudSessionControls.js', () => ({ useCloudSessionControls: () => ({ result: mocks.session.result, run: mocks.session.run, error: null }) }));
-vi.mock('./useTranscriptHistory.js', () => ({ useTranscriptHistory: () => ({ refresh: vi.fn() }) }));
 vi.mock('./GitSpaceShell.js', () => ({ GitSpaceShell: (props: GitSpaceShellProps) => { mocks.shell = props; return <div>{props.workspaces[0]?.relations.dependsOn.join(',')}{props.renderEnvironmentStatus?.(inspectEnvironment, () => {})}{props.accessBanner}{props.access?.card(inspectEnvironment)}</div>; }, EmptyState: () => null, StatusDot: ({ color }: { color: string }) => <span data-status-color={color} /> }));
 const stamp = '2026-10-03T00:00:00.000Z';
 const inspectEnvironment = vi.fn();
@@ -35,11 +35,24 @@ const inspection: InspectorView = {
   artifacts: [], creation: null,
 };
 const snapshot = RuntimeSnapshotSchema.parse({ version: 1, projectId: project.id, workspaceId: workspace.id, cursor: 0, conversations: [], tasks: [], attachments: [], questions: [], documents: {} });
-const listedBase = { id: project.id, status: emptyWorkspaceStatus };
+const relationView = (relations: SpaceView['workspaces'][number]['relations'], blockedBy: string[]): SpaceView => ({
+  project: { id: project.id, name: project.name, baseBranch: 'main', connected: true },
+  baseSpace: { id: project.id, projectId: project.id, kind: 'base', name: project.name, branch: 'main', closedAt: null, status: emptyWorkspaceStatus },
+  workspaces: [{ id: workspace.id, projectId: project.id, projectName: project.name, name: workspace.name, branch: 'work', rootPath: '/work', phase: 'code', closedAt: null, status: emptyWorkspaceStatus, relations, stack: { blockedBy, blocking: [], findings: [] } }],
+  statusError: null, operations: [],
+});
+const transcript: TranscriptHistory = { rows: [], generation: null, navigation: null, loading: false, initialLoading: false, error: null, saved: false, hasBefore: false, hasAfter: false, total: 0, refresh: vi.fn(), loadOlder: vi.fn(), loadNewer: vi.fn(), jumpToLatest: vi.fn(), jumpToRow: vi.fn(), setViewport: vi.fn(), content: vi.fn(), executionPage: vi.fn() };
+/** What RuntimeWorkspace hands the shell: the retained relation graph, whether its read is current, and its failure. */
+const reads = (): WorkspaceReads => ({
+  transcript,
+  relations: { value: mocks.saved ?? undefined, loaded: !mocks.pending && !mocks.failed, error: mocks.failed ? new Error('relations unavailable') : null, refetch: async () => { await mocks.refresh(); } },
+  providers: { value: undefined, error: null, refetch: async () => {} },
+  skills: undefined,
+});
 const refreshInspection = vi.fn();
 let root: Root;
 let container: HTMLDivElement;
-const render = () => root.render(<RuntimeWorkspaceShell projectId={project.id} workspaceId={workspace.id} snapshot={snapshot} inspection={inspection} connected refreshInspection={refreshInspection} onOpenSettings={() => {}} onSelectWorkspace={() => {}} onSelectProject={() => {}} renderInspector={() => null} />);
+const render = () => root.render(<RuntimeWorkspaceShell projectId={project.id} workspaceId={workspace.id} snapshot={snapshot} inspection={inspection} connected reads={reads()} refreshInspection={refreshInspection} onOpenSettings={() => {}} onSelectWorkspace={() => {}} onSelectProject={() => {}} renderInspector={() => null} />);
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
   mocks.setRelations.mockReset(); mocks.refresh.mockReset(); mocks.cancelRun.mockReset(); refreshInspection.mockReset(); mocks.failed = false; mocks.pending = false; mocks.access = undefined;
@@ -48,7 +61,7 @@ beforeEach(() => {
   snapshot.conversations = [];
   snapshot.attachments = [];
   inspectEnvironment.mockReset();
-  mocks.saved = { baseSpace: listedBase, workspaces: [{ id: workspace.id, relations: { dependsOn: ['parent'], relatedTo: [], stackedOn: 'parent' }, stack: { blockedBy: ['parent'], blocking: [], findings: [] } }] };
+  mocks.saved = relationView({ dependsOn: ['parent'], relatedTo: [], stackedOn: 'parent' }, ['parent']);
   container = document.createElement('div'); document.body.append(container); root = createRoot(container);
 });
 afterEach(async () => { await act(() => root.unmount()); container.remove(); vi.unstubAllGlobals(); });
@@ -57,7 +70,7 @@ it('edits the real saved relation graph and refreshes it after accepted writes',
   expect(container.textContent).toContain('parent');
   const relations = { dependsOn: [], relatedTo: ['parent'], stackedOn: null };
   mocks.setRelations.mockImplementation(async () => {
-    mocks.saved = { baseSpace: listedBase, workspaces: [{ id: workspace.id, relations, stack: { blockedBy: [], blocking: [], findings: [] } }] };
+    mocks.saved = relationView(relations, []);
     return { status: 'ok', value: {} };
   });
   await act(async () => { await (mocks.shell as GitSpaceShellProps).onSetWorkspaceRelations!(workspace.id, relations); });
@@ -145,7 +158,7 @@ it('renders a brand-new workspace whose code document is still null', async () =
 });
 
 const baseInspection: InspectorView = { ...inspection, project: { ...project, repositoryReference: 'git@github.com:octo-labs/portal.git' }, workspace: { ...workspace, id: project.id, kind: 'base', phase: null } };
-const renderProject = () => root.render(<RuntimeWorkspaceShell projectId={project.id} workspaceId={project.id} snapshot={snapshot} inspection={baseInspection} connected refreshInspection={refreshInspection} onOpenSettings={() => {}} onSelectWorkspace={() => {}} onSelectProject={() => {}} renderInspector={() => null} />);
+const renderProject = () => root.render(<RuntimeWorkspaceShell projectId={project.id} workspaceId={project.id} snapshot={snapshot} inspection={baseInspection} connected reads={reads()} refreshInspection={refreshInspection} onOpenSettings={() => {}} onSelectWorkspace={() => {}} onSelectProject={() => {}} renderInspector={() => null} />);
 const needsApp = { state: 'needs-app', repository: 'octo-labs/portal', organization: 'octo-labs', appName: 'GitSpace BrandByX' };
 
 it('syncs a project through its bridging machine under a banner instead of walling it off', async () => {
@@ -170,7 +183,7 @@ it('copies a refused repository in through the chosen online machine, then attac
   mocks.access = { ...needsApp, bridge: { machineId: 'machine-old', label: 'old-laptop', online: false }, awaitsCopy: true };
   const machine = (id: string, label: string, state: 'online' | 'offline'): InspectorView['machines'][number] => ({ id, label, state, kind: 'physical', provider: 'physical', notes: '', desiredState: 'online', lifecycleRevision: 1, operationId: null, error: null, rpcEndpoint: null });
   const machines = [machine('machine-off', 'attic-box', 'offline'), machine('machine-on', 'studio-mac', 'online')];
-  await act(async () => { root.render(<RuntimeWorkspaceShell projectId={project.id} workspaceId={project.id} snapshot={snapshot} inspection={{ ...baseInspection, machines }} connected refreshInspection={refreshInspection} onOpenSettings={() => {}} onSelectWorkspace={() => {}} onSelectProject={() => {}} renderInspector={() => null} />); });
+  await act(async () => { root.render(<RuntimeWorkspaceShell projectId={project.id} workspaceId={project.id} snapshot={snapshot} inspection={{ ...baseInspection, machines }} connected reads={reads()} refreshInspection={refreshInspection} onOpenSettings={() => {}} onSelectWorkspace={() => {}} onSelectProject={() => {}} renderInspector={() => null} />); });
   // A repository still waiting for its copy stays walled even with a machine attached.
   expect(mocks.shell?.accessBanner).toBeUndefined();
   const labels = [...container.querySelectorAll<HTMLButtonElement>('[aria-label="Repository access"] button')].map(button => button.textContent);

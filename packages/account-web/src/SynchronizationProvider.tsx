@@ -5,10 +5,18 @@ import { SynchronizationOwner, type SynchronizationSource, type SynchronizedValu
 import { rpcClient } from './rpc-client.js';
 import { flushIncidentOutbox } from './incident-outbox.js';
 import { accountDirectorySource } from './account-directory-transport.js';
-import { liveState, useLiveChanges } from './live-notices.js';
-import type { AccountDirectorySnapshot } from '@gitspace/protocol/account-directory';
+import { liveNotices, liveState, useLiveChanges } from './live-notices.js';
+import { accountDirectorySnapshotSchema, type AccountDirectorySnapshot } from '@gitspace/protocol/account-directory';
+import { InferenceStateCodec } from '@gitspace/protocol/inference';
+import { settingsStateContract } from '@gitspace/protocol/rpc-contract';
+import { ACCOUNT_GROUP, savedCopy, schemaForm, type SavedCopy } from './first-paint-cache.js';
 
-const settingsSource = liveState('settings', [accountLiveKey('settings')], signal => rpcClient.settings.state({}, { signal }));
+// Account-wide states every page reads once on load: the tab's first socket opening does not read them again.
+const settingsSource = liveState('settings', [accountLiveKey('settings')], signal => rpcClient.settings.state({}, { signal }), liveNotices, false);
+/** The shell's first paint: what this browser saved of the account's settings, inference profiles and directory. */
+const savedSettings = savedCopy(ACCOUNT_GROUP, 'settings', settingsStateContract._def.output);
+const savedInference = savedCopy(ACCOUNT_GROUP, 'inference', InferenceStateCodec);
+const savedDirectory = savedCopy(ACCOUNT_GROUP, 'directory', schemaForm(accountDirectorySnapshotSchema));
 
 export const SynchronizationContext = createContext<SynchronizationOwner | null>(null);
 export function useSynchronizationOwner(): SynchronizationOwner {
@@ -16,9 +24,9 @@ export function useSynchronizationOwner(): SynchronizationOwner {
   if (!owner) throw new Error('SynchronizationProvider is required');
   return owner;
 }
-export function useSynchronizedResource<T>(resource: string, source: SynchronizationSource<T>) {
+export function useSynchronizedResource<T>(resource: string, source: SynchronizationSource<T>, saved?: SavedCopy<T>) {
   const owner = useSynchronizationOwner();
-  const channel = useMemo(() => owner.channel(resource, source), [owner, resource]);
+  const channel = useMemo(() => owner.channel(resource, source, saved), [owner, resource]);
   const value = useSyncExternalStore(channel.subscribe, channel.snapshot, channel.snapshot);
   return { ...value, refetch: channel.refresh };
 }
@@ -37,7 +45,7 @@ export function useProjectChanges(projectId: string): number | null {
   return useLiveChanges(projectLiveKey(projectId, 'project'));
 }
 export function useAccountDirectorySnapshot(source: SynchronizationSource<AccountDirectorySnapshot> = accountDirectorySource) {
-  return useSynchronizedResource('account-directory', source);
+  return useSynchronizedResource('account-directory', source, source === accountDirectorySource ? savedDirectory : undefined);
 }
 function readSnapshot<T, Value>(snapshot: SynchronizedValue<T> & { refetch(): Promise<void> }, select: (value: T) => Value) {
   const previous = snapshot.value === undefined ? undefined : select(snapshot.value);
@@ -46,19 +54,19 @@ function readSnapshot<T, Value>(snapshot: SynchronizedValue<T> & { refetch(): Pr
   return { state: 'success' as const, value: select(snapshot.value), refetch: snapshot.refetch };
 }
 export function useAccountSettings() {
-  const snapshot = useSynchronizedResource('settings', settingsSource);
+  const snapshot = useSynchronizedResource('settings', settingsSource, savedSettings);
   return readSnapshot(snapshot, (value) => value.user);
 }
 export function useAccountGitIdentity() {
-  const snapshot = useSynchronizedResource('settings', settingsSource);
+  const snapshot = useSynchronizedResource('settings', settingsSource, savedSettings);
   return readSnapshot(snapshot, (value) => value.git);
 }
 export function useAccountRuntimeConfiguration() {
-  const snapshot = useSynchronizedResource('settings', settingsSource);
+  const snapshot = useSynchronizedResource('settings', settingsSource, savedSettings);
   return readSnapshot(snapshot, (value) => value.runtime);
 }
 export function useAccountInference() {
-  const snapshot = useSynchronizedResource('inference', liveState('inference', [accountLiveKey('inference')], signal => rpcClient.inference.list({}, { signal })));
+  const snapshot = useSynchronizedResource('inference', liveState('inference', [accountLiveKey('inference')], signal => rpcClient.inference.list({}, { signal }), liveNotices, false), savedInference);
   return readSnapshot(snapshot, (value) => value);
 }
 export function useAccountMachines() {
@@ -66,7 +74,7 @@ export function useAccountMachines() {
   return readSnapshot(snapshot, (value) => value.machines);
 }
 export function useAccountCloudImages() {
-  const snapshot = useSynchronizedResource('cloud-images', liveState('cloud-images', [accountLiveKey('cloud-images')], signal => rpcClient.machine.image.list({}, { signal })));
+  const snapshot = useSynchronizedResource('cloud-images', liveState('cloud-images', [accountLiveKey('cloud-images')], signal => rpcClient.machine.image.list({}, { signal }), liveNotices, false));
   return readSnapshot(snapshot, (value) => value);
 }
 export function useAccountProjects() {
@@ -99,7 +107,7 @@ export function useEventRefresh(cursor: number | null, refresh: () => Promise<un
 }
 
 function AccountSynchronization() {
-  const settings = useSynchronizedResource('settings', settingsSource);
+  const settings = useSynchronizedResource('settings', settingsSource, savedSettings);
   // The account directory stays connected for the app's lifetime; pages read its retained snapshot.
   useAccountDirectorySnapshot();
   useEffect(() => {
