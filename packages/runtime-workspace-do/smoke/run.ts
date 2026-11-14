@@ -197,6 +197,9 @@ try {
   assert.equal(written.conversations.find(item => item.parentId === null)?.streamed, undefined, 'A stored reply still shows as being written');
   const writtenPage = (await session({ type: 'transcriptPage', request: { generation: null, before: null, after: null, around: null } }, writingRoot.id)).transcriptPage!;
   assert(!writtenPage.rows.some(row => row.item.type === 'message' && row.item.pending === true), 'A stored reply left a pending row');
+  // The reader's page held by the pending row reads on from the stored reply that replaced it.
+  const heldPage = (await session({ type: 'transcriptPage', request: { generation: writtenPage.generation, before: null, after: null, around: pending.id, aroundOrdinal: pending.ordinal } }, writingRoot.id)).transcriptPage!;
+  assert(heldPage.rows.some(row => row.item.type === 'message' && row.item.text.includes('word14')), 'The page held by a replaced pending row lost the stored reply');
   console.log('PASS a reply being written shows in the snapshot and the transcript as it grows, and as stored once written');
   await request('/submit?text=fail%20the%20model');
   const failed = await until(snapshot => snapshot.conversations.some(item => item.status === 'failed'));

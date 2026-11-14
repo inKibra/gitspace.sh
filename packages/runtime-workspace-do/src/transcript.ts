@@ -447,13 +447,12 @@ export function createTranscriptReader(storage: Storage, withdrawn: WithdrawnNot
 
   /** The row `rowId` and the projection of the window it starts in: read at its ordinal when the reader gives it, else
    * at the position its ID names (a turn's rows name their entry), else where its tool call was made. */
-  async function find(conversationId: ConversationId, rowId: string, ordinal: number | undefined, openers: Openers, running: boolean, highWater: number): Promise<{ projection: Projection; value: ProjectedRow }> {
+  async function locate(conversationId: ConversationId, rowId: string, ordinal: number | undefined, openers: Openers, running: boolean, highWater: number): Promise<{ projection: Projection; value: ProjectedRow } | undefined> {
     const at = ordinal ?? positionOf(rowId) ?? await callPosition(conversationId, rowId);
-    if (at === undefined) throw new Error('Transcript row not found');
+    if (at === undefined) return undefined;
     const projection = await project(conversationId, await windowStarting(conversationId, entryOf(at), highWater), openers, running);
     const value = projection.rows.get(rowId);
-    if (!value) throw new Error('Transcript row not found');
-    return { projection, value };
+    return value ? { projection, value } : undefined;
   }
 
   return {
@@ -470,7 +469,11 @@ export function createTranscriptReader(storage: Storage, withdrawn: WithdrawnNot
       const running = await live(conversationId);
       const windows = request.executionId ? SCOPED_WINDOWS : PAGE_WINDOWS;
       const enough = request.executionId ? 1 : PAGE_FILL_ROWS;
-      const start = request.around !== null ? (await find(conversationId, request.around, request.aroundOrdinal, openers, running, highWater)).value.ordinal
+      // The row a reader holds its place by can be gone when the page is read: the pending rows of the reply being written
+      // are replaced by the stored reply under other IDs. Its ordinal still marks the place; without one, or with nothing
+      // stored from there on, the latest page.
+      const anchored = request.around === null ? undefined : await locate(conversationId, request.around, request.aroundOrdinal, openers, running, highWater);
+      const start = request.around !== null ? anchored?.value.ordinal ?? request.aroundOrdinal ?? null
         : request.after === null ? null : request.after + 1;
       if (start !== null) {
         // Ascending: from the row asked around (or after), reading later windows until the page is full.
@@ -490,7 +493,8 @@ export function createTranscriptReader(storage: Storage, withdrawn: WithdrawnNot
           from = view.last + 1;
         }
         const fitted = fit(rows);
-        return { ...envelope, rows: fitted, hasBefore, hasAfter: fitted.length < rows.length || newer };
+        const vanished = request.around !== null && anchored === undefined;
+        if (!vanished || fitted.length > 0) return { ...envelope, rows: fitted, hasBefore, hasAfter: fitted.length < rows.length || newer };
       }
       // Descending: the latest rows, or those before `before`, reading earlier windows until the page is full.
       const before = request.before;
@@ -514,7 +518,9 @@ export function createTranscriptReader(storage: Storage, withdrawn: WithdrawnNot
       if (request.generation !== `${GENERATION}:${conversationId}`) throw new Error('Transcript generation changed');
       const newest = await newestEntry(storage, conversationId);
       if (!newest) throw new Error('Transcript row not found');
-      const { value } = await find(conversationId, request.rowId, request.ordinal, await openersOf(conversationId), false, Number(newest.id));
+      const found = await locate(conversationId, request.rowId, request.ordinal, await openersOf(conversationId), false, Number(newest.id));
+      if (!found) throw new Error('Transcript row not found');
+      const { value } = found;
       const text = JSON.stringify(withImageUrls(value.item, imageUrl));
       if (request.offset > text.length) throw new Error('Transcript content offset is out of range');
       const end = Math.min(text.length, request.offset + TRANSCRIPT_CONTENT_CHARACTERS);

@@ -283,13 +283,21 @@ test('the reply the model is writing shows as pending text and thinking while it
     await started.promise;
     const partial = { role: 'assistant', content: [{ type: 'thinking', thinking: 'Weighing the options' }, { type: 'text', text: 'The first half of' }] };
     const reader = createTranscriptReader(storage, none, undefined, undefined, async () => partial);
-    const items = async () => (await reader.page(root.id, { generation: null, before: null, after: null, around: null })).rows.map(row => row.item);
-    const streaming = await items();
+    const page = (around: string | null = null, aroundOrdinal?: number) => reader.page(root.id, { generation: null, before: null, after: null, around, ...(aroundOrdinal === undefined ? {} : { aroundOrdinal }) });
+    const streamingPage = await page();
+    const streaming = streamingPage.rows.map(row => row.item);
     expect(streaming).toContainEqual(expect.objectContaining({ type: 'message', role: 'assistant', text: 'The first half of', pending: true }));
     expect(streaming).toContainEqual(expect.objectContaining({ type: 'thinking', text: 'Weighing the options' }));
+    const held = streamingPage.rows.find(row => row.item.type === 'message' && row.item.pending === true)!;
     release.resolve();
     await root.waitForIdle(context);
-    expect((await items()).some(item => item.type === 'message' && item.pending === true)).toBe(false);
+    expect((await page()).rows.some(row => row.item.type === 'message' && row.item.pending === true)).toBe(false);
+    // A reader who held their place by the pending reply still gets the transcript once the turn ends: nothing was stored
+    // after it here, so the latest page, with or without its ordinal.
+    const latest = (await page()).rows;
+    expect(latest.length).toBeGreaterThan(0);
+    expect((await page(held.id, held.ordinal)).rows).toEqual(latest);
+    expect((await page(held.id)).rows).toEqual(latest);
   } finally {
     release.resolve();
     await harness.close(context);
