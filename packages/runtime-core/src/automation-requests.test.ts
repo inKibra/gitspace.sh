@@ -97,7 +97,7 @@ test('a batch that grows while the turn runs stays one queued input, delivered o
     const automation = requests(harness, storage);
     await root.submit({ type: 'input', content: 'Busy user work', requestId: 'user' }, context);
     await entered.promise;
-    await automation.submit({ requestId: 'automation:batch', text: 'Review feedback: two comments' });
+    await automation.submit({ requestId: 'automation:batch', text: 'Review feedback: two comments', whenBusy: 'followUp' });
     expect(await automation.update({ requestId: 'automation:batch', text: 'Review feedback: three comments' })).toBe(true);
     expect((await harness.snapshot(InboxDoc, root.id, context))?.items.map(item => item.mode === 'write' ? item.entry : item.content)).toEqual(['Review feedback: three comments']);
     release.resolve();
@@ -108,6 +108,38 @@ test('a batch that grows while the turn runs stays one queued input, delivered o
     expect(await automation.status('automation:batch')).toMatchObject({ state: 'succeeded' });
     expect(await automation.update({ requestId: 'automation:batch', text: 'Review feedback: four comments' })).toBe(false);
     expect(await automation.update({ requestId: 'automation:unknown', text: 'Anything' })).toBe(false);
+  } finally { release.resolve(); await harness.close(context); }
+});
+
+const BUSY_CASES: Array<{ whenBusy?: 'followUp'; mode: 'steer' | 'followUp' }> = [{ mode: 'steer' }, { whenBusy: 'followUp', mode: 'followUp' }];
+for (const { whenBusy, mode } of BUSY_CASES) test(`an automation message into a busy conversation ${whenBusy === undefined ? 'with no whenBusy waits to steer the running turn' : 'with followUp waits for the running turn to end'}; its batch grows until it is placed`, async () => {
+  const storage = new MemoryStorage();
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const prompts: string[] = [];
+  const models: Models = Object.assign(createModels(), { getModel: () => model, streamSimple(_model, input) {
+    prompts.push(JSON.stringify(input));
+    const stream = createAssistantMessageEventStream();
+    const finish = () => { const message = reply(); stream.push({ type: 'done', reason: 'stop', message }); stream.end(message); };
+    if (prompts.length === 1) { entered.resolve(); void release.promise.then(finish); } else finish();
+    return stream;
+  } } satisfies Partial<Models>);
+  const harness = await Harness.open(storage, { registry: createRegistry(), models, settings: { compaction: { enabled: false } } }, context);
+  try {
+    const root = await harness.root(context, { agent: { model: reference } });
+    const automation = requests(harness, storage);
+    await root.submit({ type: 'input', content: 'Busy user work', requestId: 'user', whenBusy: 'followUp' }, context);
+    await entered.promise;
+    await automation.submit({ requestId: 'automation:busy', text: 'Check the deploy', ...(whenBusy === undefined ? {} : { whenBusy }) });
+    expect((await harness.snapshot(InboxDoc, root.id, context))?.items.map(item => item.mode)).toEqual([mode]);
+    expect(await automation.update({ requestId: 'automation:busy', text: 'Check the deploy and its logs' })).toBe(true);
+    expect((await harness.snapshot(InboxDoc, root.id, context))?.items.map(item => item.mode === 'write' ? item.entry : `${item.mode}: ${item.content}`)).toEqual([`${mode}: Check the deploy and its logs`]);
+    release.resolve();
+    await root.waitForIdle(context);
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain('Check the deploy and its logs');
+    expect(await automation.status('automation:busy')).toMatchObject({ state: 'succeeded' });
+    expect(await automation.update({ requestId: 'automation:busy', text: 'Check the deploy, its logs and alerts' })).toBe(false);
   } finally { release.resolve(); await harness.close(context); }
 });
 

@@ -11,7 +11,7 @@ import { AuthorSection, Code, ConditionRow } from './AutomationConditions.js';
 import { CheckList, TestResults } from './AutomationRuns.js';
 import { type AutomationWorkspace } from './AutomationsPage.js';
 import { Field, TextInput, options } from './automation-fields.js';
-import { ACTION_LABEL, type ActionKind, type AuthorCondition, CONDITION_LABEL, DEFAULT_ROLE, DELIVERY_OPTIONS, EVENT_NOUN, type EventChoice, type FilterCondition, LABEL_MODE, MINUTES, MODE_LABEL, NEW_AUTOMATION_CRON, NEW_EVENT, PHASE_ACTIONS, PRESET_LABEL, PlayGlyph, PlusGlyph, RECENT_EVENTS, RECORDED_EVENT_LIMIT, SCHEDULE_PRESETS, type ScheduleChoice, TRIGGER_ACTIONS, TRIGGER_KINDS, TRIGGER_NOUN, TRIGGER_OPTION_LABEL, TestGlyph, WATCH_EVERY, WATCH_NOUN, WATCH_ONS, WEEKDAYS, conditionPhrase, formatUtc, missingValues, newCondition, phasesLabel, scheduleChoice, scheduleCron, settle, subjectNoun, twoDigits } from './automation-formatters.js';
+import { ACTION_LABEL, type ActionKind, type AuthorCondition, BUSY_OPTIONS, CONDITION_LABEL, DEFAULT_ROLE, DELIVERY_OPTIONS, EVENT_NOUN, type EventChoice, type FilterCondition, LABEL_MODE, MINUTES, MODE_LABEL, NEW_AUTOMATION_CRON, NEW_EVENT, PHASE_ACTIONS, PRESET_LABEL, PlayGlyph, PlusGlyph, RECENT_EVENTS, RECORDED_EVENT_LIMIT, SCHEDULE_PRESETS, type ScheduleChoice, TRIGGER_ACTIONS, TRIGGER_KINDS, TRIGGER_NOUN, TRIGGER_OPTION_LABEL, TestGlyph, WATCH_EVERY, WATCH_NOUN, WATCH_ONS, WEEKDAYS, conditionPhrase, formatUtc, missingValues, newCondition, phasesLabel, scheduleChoice, scheduleCron, settle, subjectNoun, twoDigits } from './automation-formatters.js';
 
 type EditorField = 'name' | 'cron' | 'events' | 'conditions' | 'action' | 'mode' | 'role' | 'workspace' | 'instruction';
 /** The `field` an `automationInvalid` error names, mapped to the editor control that shows it. */
@@ -48,6 +48,7 @@ export function AutomationEditor({ projectId, workspaces, github, modelRoles, so
   const [wake, setWake] = useState(source?.action.kind === 'sendToLinked' ? source.action.wake : true);
   const [orProjectAgent, setOrProjectAgent] = useState(source?.action.kind === 'sendToLinked' ? source.action.orProjectAgent : false);
   const [workspaceId, setWorkspaceId] = useState(source?.action.kind === 'messageWorkspace' ? source.action.workspaceId : '');
+  const [when, setWhen] = useState(source !== null && 'when' in source.action ? source.action.when : 'steer');
   const [instruction, setInstruction] = useState(source?.action.instruction ?? '');
   /** Null: every phase. */
   const [phases, setPhases] = useState<readonly AutomationMode[] | null>(source?.phases ?? null);
@@ -93,10 +94,12 @@ export function AutomationEditor({ projectId, workspaces, github, modelRoles, so
   const authorEvents = automationAuthorEvents(trigger);
   const authorsQuery = useResultQuery(rpcClient.automations.authors, { projectId, events: [...authorEvents] }, { enabled: offered.includes('people') && authorEvents.length > 0 });
   const authors = offered.includes('people') && authorsQuery.state === 'success' ? authorsQuery.value : { people: [], bots: [] };
-  const action: AutomationAction = actionKind === 'messageWorkspace' ? { kind: 'messageWorkspace', workspaceId, instruction }
+  const action: AutomationAction = actionKind === 'messageWorkspace' ? { kind: 'messageWorkspace', workspaceId, instruction, when }
     : actionKind === 'startWorkspace' ? { kind: 'startWorkspace', mode, ...(role === DEFAULT_ROLE ? {} : { role }), instruction }
-      : actionKind === 'sendToLinked' ? { kind: 'sendToLinked', wake, orProjectAgent, instruction }
-        : { kind: 'messageProjectAgent', instruction };
+      : actionKind === 'sendToLinked' ? { kind: 'sendToLinked', wake, orProjectAgent, instruction, when }
+        : { kind: 'messageProjectAgent', instruction, when };
+  // A notice that goes to no agent meets no running turn.
+  const messagesAgent = actionKind === 'messageWorkspace' || actionKind === 'messageProjectAgent' || (actionKind === 'sendToLinked' && (wake || orProjectAgent));
   // A person's automation runs at once; a proposal edited here is switched on when saved. Phases apply only to an action
   // that reaches a workspace by phase.
   const draft: AutomationDraft = { name: name.trim(), trigger, conditions: shownConditions, action, enabled: source === null || proposal !== null || source.enabled, ...(phases && PHASE_ACTIONS.includes(actionKind) ? { phases: [...phases] } : {}) };
@@ -339,6 +342,9 @@ export function AutomationEditor({ projectId, workspaces, github, modelRoles, so
           </Select></Field> : null}
           {actionKind === 'messageWorkspace' ? <Field label="Workspace" error={errors.workspace}><Select value={workspaceId} onValueChange={setWorkspaceId} disabled={choices.length === 0}>
             <SelectTrigger aria-label="Workspace" placeholder={choices.length ? 'Choose a workspace' : 'No open workspaces'} />{options(choices.map(workspace => ({ value: workspace.id, label: workspace.active ? workspace.name : `${workspace.name} (archived)` })))}
+          </Select></Field> : null}
+          {messagesAgent ? <Field label="If the agent is busy"><Select value={when} onValueChange={value => setWhen(BUSY_OPTIONS.find(option => option.value === value)?.value ?? 'steer')}>
+            <SelectTrigger aria-label="If the agent is busy" />{options(BUSY_OPTIONS)}
           </Select></Field> : null}
         </div>
         {actionKind === 'sendToLinked' ? <Switch label="When it has no linked workspace, send it to the project agent" checked={orProjectAgent} onToggle={() => setOrProjectAgent(current => !current)} /> : null}

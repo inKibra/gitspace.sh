@@ -19,7 +19,7 @@ const github = { repository: 'inKibra/inkibra-core', bot: '@gitspace-bradleat' }
 const proposed: AutomationView = {
   id: 'audit', projectId: 'project', revision: 3, name: 'Nightly dependency audit',
   trigger: { kind: 'schedule', cron: '0 6 * * *' }, conditions: [],
-  action: { kind: 'messageProjectAgent', instruction: 'Audit the dependencies.' },
+  action: { kind: 'messageProjectAgent', instruction: 'Audit the dependencies.', when: 'steer' },
   enabled: false, createdBy: 'projectAgent', isDefault: false,
   proposal: { conversationId: 'conversation', asked: 'Can you audit dependencies every night?', reason: 'Updates land most nights.', tested: [{ label: 'Tue 06:00 UTC', result: 'Would message the project agent', runs: true }], proposedAt: at },
   nextRunAt: null, lastRun: null, createdAt: at, updatedAt: at,
@@ -37,7 +37,7 @@ const review: AutomationView = {
 const linked: AutomationView = {
   id: 'feedback', projectId: 'project', revision: 1, name: 'Review feedback',
   trigger: { kind: 'github', events: [{ event: 'pull_request_review_comment', actions: ['created'] }] }, conditions: [],
-  action: { kind: 'sendToLinked', wake: false, orProjectAgent: false, instruction: 'Address the review comment.' },
+  action: { kind: 'sendToLinked', wake: false, orProjectAgent: false, instruction: 'Address the review comment.', when: 'steer' },
   enabled: true, createdBy: 'person', isDefault: true, proposal: null,
   nextRunAt: null, lastRun: null, createdAt: at, updatedAt: at,
 };
@@ -161,7 +161,22 @@ it('refuses a cron expression the parser rejects, with its message, and reads a 
   expect(document.body.querySelector('[role="alert"]')).toBeNull();
   await act(async () => button('Create automation').click());
   expect(rpc.create).toHaveBeenCalledExactlyOnceWith({ projectId: 'project', draft: {
-    name: 'Weekday audit', trigger: { kind: 'schedule', cron: '30 6 * * 1-5' }, conditions: [], action: { kind: 'messageProjectAgent', instruction: 'Audit the dependencies.' }, enabled: true,
+    name: 'Weekday audit', trigger: { kind: 'schedule', cron: '30 6 * * 1-5' }, conditions: [], action: { kind: 'messageProjectAgent', instruction: 'Audit the dependencies.', when: 'steer' }, enabled: true,
+  } });
+});
+
+it('sends a message into the agent\'s running turn unless the person chooses to queue it after that turn', async () => {
+  rpc.create.mockResolvedValue({ status: 'ok', value: proposed });
+  await renderProject([]);
+  await act(() => button('New automation').click());
+  await choose('Trigger', 'Schedule');
+  await type(field('input[aria-label="Name"]'), 'Nightly audit');
+  await type(field<HTMLTextAreaElement>('textarea[aria-label="Instruction"]'), 'Audit the dependencies.');
+  expect(field('[aria-label="If the agent is busy"]').textContent).toContain('Steer into its current turn (default)');
+  await choose('If the agent is busy', 'Queue after it');
+  await act(async () => button('Create automation').click());
+  expect(rpc.create).toHaveBeenCalledExactlyOnceWith({ projectId: 'project', draft: {
+    name: 'Nightly audit', trigger: { kind: 'schedule', cron: '0 6 * * *' }, conditions: [], action: { kind: 'messageProjectAgent', instruction: 'Audit the dependencies.', when: 'queue' }, enabled: true,
   } });
 });
 

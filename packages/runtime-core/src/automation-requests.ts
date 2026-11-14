@@ -5,8 +5,9 @@ import { applyInferenceThinking, selectRole, SessionControlsDoc } from './sessio
 import type { RuntimeHarnessOptions } from './harness.js';
 
 /** An automation run's instruction to the main conversation; its request id makes a retried submission deliver it once.
- * `role` (a workspace an automation started) becomes the conversation's model role with this first run. */
-export type RuntimeAutomationInput = { requestId: string; text: string; role?: string };
+ * `role` (a workspace an automation started) becomes the conversation's model role with this first run. `whenBusy`
+ * while a turn runs: `steer` (the default) joins it at its next tool boundary, `followUp` waits for it to end. */
+export type RuntimeAutomationInput = { requestId: string; text: string; role?: string; whenBusy?: 'steer' | 'followUp' };
 export type RuntimeRequestStatus = { state: 'pending' | 'queued' | 'running' | 'succeeded' | 'failed' | 'withdrawn'; conversationId: string | null; message: string | null };
 
 /** Request tracking for automation runs: idempotent submission by request id, status, withdraw and cancel. */
@@ -51,13 +52,14 @@ export function createAutomationRequests(options: Pick<RuntimeHarnessOptions, 'a
         if (role !== undefined) await target.commit(async tx => { const controls = await tx.doc(SessionControlsDoc, target.id); selectRole(controls, role); controls.revision++; }, context);
         await options.configureModel(target.id, model);
         await applyInferenceThinking(target, model);
-        await target.submit({ type: 'input', content: input.text, requestId: input.requestId, whenBusy: 'followUp' }, context);
+        await target.submit({ type: 'input', content: input.text, requestId: input.requestId, whenBusy: input.whenBusy ?? 'steer' }, context);
       }
       await options.wake();
       return { conversationId: id };
     }); },
-    /** A run's batch grew while its instruction waited: the queued input takes the new text and stays one input. False
-     * once the input was placed or withdrawn, or when the request is unknown; nothing changes then. */
+    /** A run's batch grew while its instruction waited in the inbox (behind the running turn, or for its next tool boundary
+     * when steered): the input takes the new text and stays one input. False once the input was placed or withdrawn, or
+     * when the request is unknown; nothing changes then. */
     update(input: { requestId: string; text: string }): Promise<boolean> { return serialized(async () => {
       const record = (await options.harness.snapshot(AutomationRequestsDoc, context))?.requests[input.requestId];
       if (!record || record.withdrawn) return false;

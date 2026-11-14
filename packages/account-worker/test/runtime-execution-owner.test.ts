@@ -9,6 +9,7 @@ import { credentialProtocolBase64 } from '@gitspace/protocol';
 import { ArtifactsCodeStore, createToolResultStore, createWorkspaceRuntime, type WorkspaceRuntime, type WorkspaceRuntimeOptions } from '@gitspace/runtime-workspace-do';
 import { z } from 'zod';
 import { createRuntimeServices } from '../src/runtime-services.js';
+import { SpaceAuthorityDO } from '../src/space-authority.js';
 import { createDispatchSelector } from '../src/runtime-dispatch-selection.js';
 import { executorCapabilities } from '../src/runtime-attachments.js';
 import { QuestionsDoc, WorkspaceDoc } from '@gitspace/runtime-core';
@@ -661,5 +662,21 @@ test('space_workspace list and board give every workspace\'s status in one read 
         expect(text(failed)).toBe('Network connection lost.');
       } finally { unreachable.mockRestore(); }
     } finally { workspaceRead.mockRestore(); await runtime.harness.close(BACKGROUND_CONTEXT); }
+  });
+});
+
+test('the project agent\'s start steers a busy workspace\'s running turn unless it asks to queue', async () => {
+  const projectId = `start-${crypto.randomUUID().slice(0, 8)}`;
+  const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`);
+  await authority.bootstrap({ id: projectId, name: 'Start project', repositoryReference: null, baseBranch: 'main', createdBy: 'test' });
+  await authority.putWorkspace({ projectId, kind: 'worktree', sourceKind: 'base', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0, id: 'billing', name: 'Billing export', branch: 'billing', phase: 'code' });
+  const started = vi.spyOn(SpaceAuthorityDO.prototype, 'runtimeStartFromProject').mockResolvedValue({ accepted: true, cursor: 1, conversationId: 'root', historyFrom: 0 });
+  await runInDurableObject(env.SPACE_AUTHORITY.getByName(`start:${crypto.randomUUID()}`), async (_instance, ctx) => {
+    const { runtime, invoke } = await ownerFixture(ctx, RuntimeIdentitySchema.parse({ projectId, workspaceId: projectId }));
+    try {
+      expect((await invoke('space_workspace', { method: 'start', workspaceId: 'billing', instruction: 'Export to the archive bucket.' })).status).toBe('completed');
+      expect((await invoke('space_workspace', { method: 'start', workspaceId: 'billing', instruction: 'Then tidy the export names.', when: 'queue' })).status).toBe('completed');
+      expect(started.mock.calls.map(([, input]) => input.whenBusy)).toEqual(['steer', 'followUp']);
+    } finally { started.mockRestore(); await runtime.harness.close(BACKGROUND_CONTEXT); }
   });
 });

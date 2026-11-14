@@ -81,9 +81,9 @@ async function watchFixture(ctx: DurableObjectState) {
     while (waits.length) await Promise.all(waits.splice(0));
     if (failures.length) throw new AggregateError(failures, 'The runtime reported failures');
   };
-  const start = (requestId: string, text: string, onDone: 'quiet' | 'wake' = 'quiet', whenBusy: 'steer' | 'followUp' = 'followUp') => startFromProject(ctx.storage, runtime, { ...identity, requestId, text: `Instruction from the project agent:\n\n${text}`, whenBusy }, { name: 'FEAT-33', onDone });
+  const start = (requestId: string, text: string, onDone: 'quiet' | 'wake' = 'quiet', whenBusy: 'steer' | 'followUp' = 'steer') => startFromProject(ctx.storage, runtime, { ...identity, requestId, text: `Instruction from the project agent:\n\n${text}`, whenBusy }, { name: 'FEAT-33', onDone });
   const submit = (requestId: string, text: string, deviceId?: string) => runtime.submit({ ...identity, requestId, text }, deviceId);
-  const automate = (requestId: string, text: string) => submitAutomationTurn(ctx.storage, runtime, { requestId, text });
+  const automate = (requestId: string, text: string, whenBusy?: 'steer' | 'followUp') => submitAutomationTurn(ctx.storage, runtime, { requestId, text, ...(whenBusy === undefined ? {} : { whenBusy }) });
   return { identity, runtime, root, reply, call, requests, reports, published, automationReports, wakes, reported: () => reported.promise, settle, start, submit, automate, progress: () => projectProgress(ctx.storage, async () => runtime) };
 }
 
@@ -208,6 +208,45 @@ test('an automation instruction withdrawn while it waits reports its turn withdr
       expect(f.automationReports).toEqual([{ ...run, state: 'ended', outcome: 'withdrawn', text: 'it was withdrawn before it started' }]);
       expect(f.requests).not.toContain('Fix the failed checks.');
     } finally { held.resolve(); await f.runtime.harness.close(BACKGROUND_CONTEXT); }
+  });
+});
+
+test('an automation message with no when steers the running turn at its next tool boundary, and that turn reports as its run', async () => {
+  await runInDurableObject(room(), async (_instance, ctx) => {
+    const f = await watchFixture(ctx);
+    const tool = Promise.withResolvers<void>();
+    try {
+      const first = f.call('bash', { command: 'pnpm test' }, tool.promise);
+      f.reply('Tests pass, and the audit is clean.');
+      await f.submit('person', 'Run the tests.', 'device-1');
+      await first.requested.promise;
+      await f.automate('automation:steer', 'Run the audit.');
+      tool.resolve();
+      await f.settle();
+      expect(f.requests).toEqual(['Run the tests.', 'Run the audit.']);
+      const run = { projectId: f.identity.projectId, workspaceId: f.identity.workspaceId, requestId: 'automation:steer' };
+      expect(f.automationReports).toEqual([{ ...run, state: 'running' }, { ...run, state: 'ended', outcome: 'finished', text: 'Tests pass, and the audit is clean.' }]);
+    } finally { tool.resolve(); await f.runtime.harness.close(BACKGROUND_CONTEXT); }
+  });
+});
+
+test('an automation message queued with followUp waits for the running turn to end and runs its own turn', async () => {
+  await runInDurableObject(room(), async (_instance, ctx) => {
+    const f = await watchFixture(ctx);
+    const tool = Promise.withResolvers<void>();
+    try {
+      const first = f.call('bash', { command: 'pnpm test' }, tool.promise);
+      f.reply('Tests pass.');
+      f.reply('Audit clean.');
+      await f.submit('person', 'Run the tests.', 'device-1');
+      await first.requested.promise;
+      await f.automate('automation:queue', 'Run the audit.', 'followUp');
+      tool.resolve();
+      await f.settle();
+      expect(f.requests).toEqual(['Run the tests.', 'Run the tests.', 'Run the audit.']);
+      const run = { projectId: f.identity.projectId, workspaceId: f.identity.workspaceId, requestId: 'automation:queue' };
+      expect(f.automationReports).toEqual([{ ...run, state: 'running' }, { ...run, state: 'ended', outcome: 'finished', text: 'Audit clean.' }]);
+    } finally { tool.resolve(); await f.runtime.harness.close(BACKGROUND_CONTEXT); }
   });
 });
 

@@ -399,18 +399,23 @@ export function automationAuthorEvents(trigger: AutomationTrigger): readonly Aut
 
 /** The project agent's workspace id is its project's id. */
 const automationInstruction = z.string().max(16_000).describe('What to do; {{field}} names a field of the event, filled in when it runs.');
+/** A message to an agent whose turn is running: `steer` (the default; a stored action without it reads as steer) joins
+ * that turn at its next tool boundary, `queue` waits for it to end. */
+const automationWhen = z.enum(['queue', 'steer']).default('steer');
 export const AutomationActionSchema = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('messageProjectAgent').describe('Message the project agent.'), instruction: automationInstruction }).strict(),
-  z.object({ kind: z.literal('messageWorkspace').describe('Message one workspace\'s agent.'), workspaceId: z.string().min(1).max(200).describe('The workspace.'), instruction: automationInstruction }).strict(),
+  z.object({ kind: z.literal('messageProjectAgent').describe('Message the project agent.'), instruction: automationInstruction, when: automationWhen.describe('steer (the default): into the agent\'s running turn at its next tool boundary; queue: after it ends.') }).strict(),
+  z.object({ kind: z.literal('messageWorkspace').describe('Message one workspace\'s agent.'), workspaceId: z.string().min(1).max(200).describe('The workspace.'), instruction: automationInstruction, when: automationWhen.describe('steer (the default): into the agent\'s running turn at its next tool boundary; queue: after it ends.') }).strict(),
   /** A new workspace for the event's pull request, issue or branch, linked to it; the rendered instruction and the event
    * are its first message. `mode` null (a label trigger only) starts in the label's mode. `role` is the model role of
    * the project's inference profile its first run uses, set on its session as a person switching role sets it; absent,
    * the profile's default role. */
   z.object({ kind: z.literal('startWorkspace').describe('Start a workspace for the event\'s pull request, issue or branch, linked to it.'), mode: z.enum(AUTOMATION_MODES).nullable().describe('The phase it starts in; null (label triggers only) for the label\'s.'), role: z.string().min(1).max(100).optional().describe('The model role its first run uses; the profile\'s default when omitted.'), instruction: automationInstruction }).strict(),
   /** The workspace linked to the event's subject: `wake` starts its agent, otherwise a notice leaves it asleep. With no
-   * linked workspace the run is skipped, or with `orProjectAgent` goes to the project agent. */
-  z.object({ kind: z.literal('sendToLinked').describe('Send the event to the workspace linked to its subject.'), wake: z.boolean().describe('true starts its agent; false leaves a notice.'), orProjectAgent: z.boolean().describe('With no linked workspace: true sends it to the project agent; false skips the run.'), instruction: automationInstruction }).strict(),
+   * linked workspace the run is skipped, or with `orProjectAgent` goes to the project agent. `when` applies to a message
+   * that wakes an agent: with `wake` true, or sent to the project agent. */
+  z.object({ kind: z.literal('sendToLinked').describe('Send the event to the workspace linked to its subject.'), wake: z.boolean().describe('true starts its agent; false leaves a notice.'), orProjectAgent: z.boolean().describe('With no linked workspace: true sends it to the project agent; false skips the run.'), instruction: automationInstruction, when: automationWhen.describe('Only when wake is true (or it goes to the project agent): steer (the default) into the agent\'s running turn at its next tool boundary; queue: after it ends.') }).strict(),
 ]).describe('What the automation does.');
+/** A parsed action: a message action always names `when`. */
 export type AutomationAction = z.infer<typeof AutomationActionSchema>;
 export const AutomationActionCodec = wire.serializable((value): value is AutomationAction => AutomationActionSchema.safeParse(value).success, { id: 'gitspace/automation-action/v2', jsonSchema: AutomationActionSchema });
 
@@ -562,7 +567,9 @@ export const AutomationDraftSchema = z.object({
   phases: AutomationPhasesSchema.optional(),
 }).strict();
 export type AutomationDraft = z.infer<typeof AutomationDraftSchema>;
-export const AutomationDraftCodec = wire.serializable((value): value is AutomationDraft => AutomationDraftSchema.safeParse(value).success, { id: 'gitspace/automation-draft/v2', jsonSchema: AutomationDraftSchema });
+/** A draft as a person or client writes it: a message action may leave `when` out (steer). */
+export type AutomationDraftInput = z.input<typeof AutomationDraftSchema>;
+export const AutomationDraftCodec = wire.serializable((value): value is AutomationDraftInput => AutomationDraftSchema.safeParse(value).success, { id: 'gitspace/automation-draft/v2', jsonSchema: AutomationDraftSchema });
 
 /** One line of a test: what a draft would do with a past event, or at a coming schedule time. */
 export const AutomationTestResultCodec = wire.object({ label: wire.string, result: wire.string, runs: wire.boolean });

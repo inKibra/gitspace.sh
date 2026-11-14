@@ -1,6 +1,6 @@
 import { env, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { AUTOMATION_MAX_QUEUE_MS, type AutomationDraft, type AutomationMode } from '@gitspace/protocol/automations-contract';
+import { AUTOMATION_MAX_QUEUE_MS, type AutomationDraftInput, type AutomationMode } from '@gitspace/protocol/automations-contract';
 import { automationEvent } from '../src/automation-events.js';
 import { automationValue } from '../src/project-automations.js';
 import { SpaceAuthorityDO } from '../src/space-authority.js';
@@ -26,7 +26,7 @@ async function project(repositoryReference: string | null = null) {
   return { projectId, workspaceId, automations, alarm };
 }
 
-function manual(name: string, instruction = 'Check the project.'): AutomationDraft {
+function manual(name: string, instruction = 'Check the project.'): AutomationDraftInput {
   return { name, trigger: { kind: 'manual' }, conditions: [], action: { kind: 'messageProjectAgent', instruction }, enabled: true };
 }
 
@@ -52,7 +52,8 @@ describe('ProjectAutomationsDO', () => {
     const [run] = automationValue(await automations.runs({ projectId }));
     expect(run).toMatchObject({ automationId: created.id, trigger: 'schedule', state: 'running', workspaceId, scheduledFor: new Date(six) });
     expect(submit).toHaveBeenCalledTimes(1);
-    expect(submit).toHaveBeenCalledWith({ projectId, workspaceId, requestId: `automation:${run?.id}`, text: expect.stringContaining(`Audit dependencies as of ${new Date(six).toISOString()}.`) });
+    // An action without `when` steers into the agent's running turn.
+    expect(submit).toHaveBeenCalledWith({ projectId, workspaceId, requestId: `automation:${run?.id}`, text: expect.stringContaining(`Audit dependencies as of ${new Date(six).toISOString()}.`), whenBusy: 'steer' });
     // The run works in its workspace; the only deadline left is tomorrow's run.
     expect(await alarm()).toBe(six + DAY);
   });
@@ -60,7 +61,7 @@ describe('ProjectAutomationsDO', () => {
   it('never runs a proposal until a person approves it, and refuses an approval of a revision since changed', async () => {
     const submit = vi.spyOn(SpaceAuthorityDO.prototype, 'runtimeAutomationSubmit').mockResolvedValue({ conversationId: 'root' });
     const { projectId, automations, alarm } = await project();
-    const draft: AutomationDraft = { name: 'Heartbeat', trigger: { kind: 'schedule', cron: '*/5 * * * *' }, conditions: [], action: { kind: 'messageProjectAgent', instruction: 'Check in.' }, enabled: true };
+    const draft: AutomationDraftInput = { name: 'Heartbeat', trigger: { kind: 'schedule', cron: '*/5 * * * *' }, conditions: [], action: { kind: 'messageProjectAgent', instruction: 'Check in.' }, enabled: true };
     const asked = { conversationId: 'conversation-1', asked: 'Check in every five minutes', reason: 'A heartbeat finds a stuck project early' };
     const proposed = automationValue(await automations.propose({ projectId, draft, ...asked }));
     expect(proposed).toMatchObject({ createdBy: 'projectAgent', enabled: false, nextRunAt: null, proposal: { conversationId: 'conversation-1', tested: [{ result: 'Would message the project agent', runs: true }, { runs: true }, { runs: true }] } });
@@ -139,6 +140,26 @@ describe('ProjectAutomationsDO', () => {
     expect(await alarm()).toBeNull();
   });
 
+  it('queues a message after the agent\'s running turn when its action says queue; one stored without `when` steers', async () => {
+    const submit = vi.spyOn(SpaceAuthorityDO.prototype, 'runtimeAutomationSubmit').mockResolvedValue({ conversationId: 'root' });
+    const { projectId, workspaceId, automations } = await project();
+    const queued = automationValue(await automations.create({ projectId, draft: { name: 'Queued', trigger: { kind: 'manual' }, conditions: [], action: { kind: 'messageWorkspace', workspaceId, instruction: 'After the current work.', when: 'queue' }, enabled: true } }));
+    expect(queued.action).toEqual({ kind: 'messageWorkspace', workspaceId, instruction: 'After the current work.', when: 'queue' });
+    const stored = automationValue(await automations.create({ projectId, draft: manual('Stored before when') }));
+    // As an automation saved before `when` existed holds its action.
+    await runInDurableObject(automations, (_instance, state) => {
+      state.storage.sql.exec('UPDATE automations SET action_json=? WHERE id=?', JSON.stringify({ kind: 'messageProjectAgent', instruction: 'Check the project.' }), stored.id);
+    });
+    expect((await automations.list(projectId)).automations.find(automation => automation.id === stored.id)?.action).toEqual({ kind: 'messageProjectAgent', instruction: 'Check the project.', when: 'steer' });
+    const queuedRun = automationValue(await automations.runNow({ projectId, automationId: queued.id, requestedBy: 'Brad' }));
+    const storedRun = automationValue(await automations.runNow({ projectId, automationId: stored.id, requestedBy: 'Brad' }));
+    // As a run queued before runs recorded `when_busy` holds it.
+    await runInDurableObject(automations, (_instance, state) => { state.storage.sql.exec('UPDATE automation_runs SET when_busy=NULL WHERE id=?', storedRun.id); });
+    await runDurableObjectAlarm(automations);
+    expect(submit).toHaveBeenCalledWith(expect.objectContaining({ requestId: `automation:${queuedRun.id}`, whenBusy: 'followUp' }));
+    expect(submit).toHaveBeenCalledWith(expect.objectContaining({ requestId: `automation:${storedRun.id}`, whenBusy: 'steer' }));
+  });
+
   it('records a dismissed run as cancelled when the workspace reports the withdrawal before the cancel returns', async () => {
     vi.spyOn(SpaceAuthorityDO.prototype, 'runtimeAutomationSubmit').mockResolvedValue({ conversationId: 'root' });
     const { projectId, workspaceId, automations } = await project();
@@ -156,7 +177,7 @@ describe('ProjectAutomationsDO', () => {
 
   it('refuses an instruction naming a field its trigger lacks, an invalid UTC schedule and a workspace outside the project', async () => {
     const { projectId, automations } = await project();
-    const refused = (draft: AutomationDraft) => automations.create({ projectId, draft });
+    const refused = (draft: AutomationDraftInput) => automations.create({ projectId, draft });
     expect(await refused(manual('Pull requests', 'Review {{pull_request.html_url}}'))).toMatchObject({ status: 'error', failure: { kind: 'invalid', field: 'action.instruction' } });
     expect(await refused({ name: 'Nightly', trigger: { kind: 'schedule', cron: '0 6 * * *' }, conditions: [], action: { kind: 'messageProjectAgent', instruction: 'Asked by {{requested_by}}' }, enabled: true })).toMatchObject({ status: 'error', failure: { kind: 'invalid', field: 'action.instruction' } });
     for (const cron of ['61 * * * *', '0 0 30 2 *', 'every 5m']) {
@@ -234,17 +255,28 @@ describe('ProjectAutomationsDO', () => {
     expect(others).toEqual([]);
     expect(run).toMatchObject({ state: 'running', workspaceId, events: Array.from({ length: 8 }, () => expect.objectContaining({ event: 'issue_comment.created' })) });
     expect(run?.timeline.at(-1)?.label).toBe('Sent to release-work as one message: 8 comments');
+    // Delivered, the message steers the running turn: a comment joins it until the turn's next tool boundary places it.
+    const update = vi.spyOn(SpaceAuthorityDO.prototype, 'runtimeAutomationUpdate').mockResolvedValue(true);
+    await comment('While it waits');
+    expect(update).toHaveBeenCalledWith(expect.objectContaining({ requestId: `automation:${run?.id}`, text: expect.stringContaining('While it waits') }));
+    const [grown, ...none] = automationValue(await automations.runs({ projectId }));
+    expect(none).toEqual([]);
+    expect(grown?.timeline.at(-1)?.label).toMatch(/joined the batch \(9 comments\); its message waits for the running turn's next tool boundary$/u);
+    // Placed, it no longer changes: the next comment opens a batch of its own.
+    update.mockResolvedValue(false);
+    await comment('After it was placed');
+    expect(automationValue(await automations.runs({ projectId }))).toHaveLength(2);
   });
 
   describe('phases', () => {
     /** A manual automation messaging the project's workspace (in Code), limited to `phases` when given. */
-    const toWorkspace = (name: string, workspaceId: string, phases?: AutomationMode[]): AutomationDraft => ({
+    const toWorkspace = (name: string, workspaceId: string, phases?: AutomationMode[]): AutomationDraftInput => ({
       name, trigger: { kind: 'manual' }, conditions: [], action: { kind: 'messageWorkspace', workspaceId, instruction: 'Check the release.' }, enabled: true, ...(phases ? { phases } : {}),
     });
 
     it('runs in every phase without phases, skips a workspace in a phase it does not name, and records the workspace\'s phase on its runs', async () => {
       const { projectId, workspaceId, automations } = await project();
-      const run = async (draft: AutomationDraft) => {
+      const run = async (draft: AutomationDraftInput) => {
         const automation = automationValue(await automations.create({ projectId, draft }));
         return automationValue(await automations.runNow({ projectId, automationId: automation.id, requestedBy: 'Brad' }));
       };

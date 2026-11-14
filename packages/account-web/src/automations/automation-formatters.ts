@@ -33,6 +33,8 @@ export const LABEL_MODE = 'label';
 /** The role a started workspace runs as when the action names none. */
 export const DEFAULT_ROLE = 'default';
 export const DELIVERY_OPTIONS: readonly { value: string; label: string }[] = [{ value: 'wake', label: 'Wakes the agent' }, { value: 'notice', label: 'A notice; the agent stays asleep' }];
+/** How a message meets the agent's running turn (the action's `when`). */
+export const BUSY_OPTIONS: readonly { value: 'steer' | 'queue'; label: string }[] = [{ value: 'steer', label: 'Steer into its current turn (default)' }, { value: 'queue', label: 'Queue after it' }];
 /** The Recorded event choice that tests the recent deliveries the trigger starts on. */
 export const RECENT_EVENTS = 'recent';
 

@@ -6,7 +6,7 @@ import { createBrowserClient } from 'result-rpc/client';
 import { createDeviceBinding, createSignedRpcFetch, credentialProtocolBase64, signDeviceInvite } from '@gitspace/protocol';
 import { gitspaceContract } from '@gitspace/protocol/rpc-contract';
 import { createRoutedTransport } from '@gitspace/protocol/routed-transport';
-import { automationEventCount, parseAutomationMessage, type AutomationDraft } from '@gitspace/protocol/automations-contract';
+import { automationEventCount, parseAutomationMessage, type AutomationDraftInput } from '@gitspace/protocol/automations-contract';
 import { z } from 'zod';
 import { ArtifactsCodeStore } from '@gitspace/runtime-workspace-do';
 import { archiveCloudWorkspace, completedOperation } from '../src/cloud-workspace-lifecycle.js';
@@ -150,13 +150,13 @@ const submittedReview = (id: number, body: string, login: string, state: string)
 /** What a run submitted: its message's text. */
 const submittedText = (call: readonly unknown[] | undefined) => z.object({ text: z.string() }).parse(call?.[0]).text;
 
-const reviewPullRequests: AutomationDraft = {
+const reviewPullRequests: AutomationDraftInput = {
   name: 'Review pull requests', enabled: true,
   trigger: { kind: 'github', events: [{ event: 'pull_request', actions: ['opened', 'ready_for_review'] }] },
   conditions: [{ kind: 'baseBranch', mode: 'oneOf', values: ['main'] }, { kind: 'draft', draft: false }],
   action: { kind: 'startWorkspace', mode: 'review', instruction: 'Review {{pull_request.html_url}} against {{pull_request.base.ref}}.' },
 };
-const startFromLabels: AutomationDraft = {
+const startFromLabels: AutomationDraftInput = {
   name: 'Start work from labels', enabled: true, trigger: { kind: 'label' }, conditions: [],
   action: { kind: 'startWorkspace', mode: null, instruction: 'Work on {{subject.url}}, labeled {{label.name}}.' },
 };
@@ -189,7 +189,8 @@ describe('automations on GitHub events', () => {
     const [feedback] = await runs();
     expect(feedback).toMatchObject({ automationName: 'Review feedback to its workspace', outcome: null, workspaceId: searchId });
     await work();
-    await vi.waitFor(() => expect(submitted).toHaveBeenCalledWith({ projectId, workspaceId: searchId, requestId: `automation:${feedback?.id}`, text: expect.stringContaining('Please handle empty queries.') }));
+    // The default sends it into the workspace agent's running turn at its next tool boundary.
+    await vi.waitFor(() => expect(submitted).toHaveBeenCalledWith({ projectId, workspaceId: searchId, requestId: `automation:${feedback?.id}`, text: expect.stringContaining('Please handle empty queries.'), whenBusy: 'steer' }));
 
     const { links } = await automations.list(projectId);
     expect(links.map(link => [link.subject.kind, link.subject.number, link.workspaceId, link.source])).toEqual(expect.arrayContaining([
@@ -222,7 +223,7 @@ describe('automations on GitHub events', () => {
     if (!original) throw new Error('The project has no inference profile');
     const withReviewer = await vault.updateInferenceProfile({ profileId, name: original.name, settings: { ...original.settings, 'modelRoles.reviewer': 'openai/gpt-5' }, expectedRevision: original.revision });
     if (withReviewer.status !== 'ok') throw new Error('The profile did not take the reviewer role');
-    const review = (role: string): AutomationDraft => ({ ...reviewPullRequests, action: { kind: 'startWorkspace', mode: 'review', role, instruction: 'Review {{pull_request.html_url}}.' } });
+    const review = (role: string): AutomationDraftInput => ({ ...reviewPullRequests, action: { kind: 'startWorkspace', mode: 'review', role, instruction: 'Review {{pull_request.html_url}}.' } });
 
     expect(await automations.create({ projectId, draft: review('critic') })).toMatchObject({ status: 'error', failure: { kind: 'invalid', field: 'action.role', message: 'critic is not a model role of this project\'s inference profile; it offers default, deep, fast, taste, reviewer' } });
     automationValue(await automations.create({ projectId, draft: review('reviewer') }));
@@ -557,8 +558,8 @@ describe('automations on GitHub events', () => {
       issue: { number, title: `Item ${number}`, html_url: `${REPOSITORY.html_url}/issues/${number}`, user: { login: 'dana' }, labels: [] },
       comment: { html_url: `${REPOSITORY.html_url}/issues/${number}#issuecomment-${number}`, body: `From ${login}.`, user: { login } },
     });
-    const trigger: AutomationDraft['trigger'] = { kind: 'github', events: [{ event: 'issue_comment', actions: ['created'] }] };
-    const action: AutomationDraft['action'] = { kind: 'messageProjectAgent', instruction: 'Read {{comment.html_url}}.' };
+    const trigger: AutomationDraftInput['trigger'] = { kind: 'github', events: [{ event: 'issue_comment', actions: ['created'] }] };
+    const action: AutomationDraftInput['action'] = { kind: 'messageProjectAgent', instruction: 'Read {{comment.html_url}}.' };
     automationValue(await automations.create({ projectId, draft: { name: 'Not GitHub Actions', enabled: true, trigger, conditions: [{ kind: 'bots', mode: 'noneOf', values: ['github-actions[bot]'] }], action } }));
     automationValue(await automations.create({ projectId, draft: { name: 'Only CodeRabbit', enabled: true, trigger, conditions: [{ kind: 'bots', mode: 'oneOf', values: ['coderabbitai[bot]'] }], action } }));
     await send('issue_comment', comment(1, 'github-actions[bot]'));
@@ -600,7 +601,7 @@ describe('automations on GitHub events', () => {
 
   it('refuses conditions the trigger does not offer and a start without a mode outside a label trigger', async () => {
     const { projectId, automations } = await installed([]);
-    const refused = (change: Partial<AutomationDraft>) => automations.create({ projectId, draft: { ...reviewPullRequests, ...change } });
+    const refused = (change: Partial<AutomationDraftInput>) => automations.create({ projectId, draft: { ...reviewPullRequests, ...change } });
     expect(await refused({ conditions: [{ kind: 'conclusion', values: ['failure'] }] })).toMatchObject({ status: 'error', failure: { field: 'conditions' } });
     expect(await refused({ action: { kind: 'startWorkspace', mode: null, instruction: 'Review it.' } })).toMatchObject({ status: 'error', failure: { field: 'action.mode' } });
     expect(await refused({ trigger: { kind: 'github', events: [{ event: 'pull_request', actions: ['opened'] }, { event: 'issues', actions: ['opened'] }] } })).toMatchObject({ status: 'error', failure: { field: 'conditions' } });

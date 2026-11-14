@@ -29,6 +29,7 @@ import {
   type AutomationCheck,
   type AutomationCondition,
   type AutomationDraft,
+  type AutomationDraftInput,
   type AutomationException,
   type AutomationLinkSource,
   type AutomationLinkView,
@@ -242,8 +243,9 @@ async function settled<T>(work: () => T | Promise<T>): Promise<AutomationOutcome
 
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error);
 
-/** A draft with its name, values and schedule normalized, or the field that refuses it. */
-function checkDraft(draft: AutomationDraft): AutomationDraft {
+/** A draft with its name, values and schedule normalized, its action's defaults filled in (a message action without
+ * `when` steers), or the field that refuses it. */
+function checkDraft(draft: AutomationDraftInput): AutomationDraft {
   const name = draft.name.trim();
   if (name.length === 0 || name.length > MAX_NAME) refuse('name', `Name must be 1 to ${MAX_NAME} characters`);
   let trigger: AutomationTrigger = draft.trigger;
@@ -275,7 +277,7 @@ function checkDraft(draft: AutomationDraft): AutomationDraft {
     if ('values' in condition && condition.values.length === 0 && !('mode' in condition && condition.mode === 'none')) refuse('conditions', `Give ${condition.kind} at least one value`);
   }
   if (new Set(conditions.map(condition => condition.kind)).size !== conditions.length) refuse('conditions', 'Use each condition once');
-  const { action } = draft;
+  const action = AutomationActionSchema.parse(draft.action);
   const event = trigger.kind === 'github' || trigger.kind === 'label';
   if (action.kind === 'sendToLinked' && !event) refuse('action.kind', 'Sending to the linked workspace needs a GitHub event or label: a schedule, manual run or watched repository has no pull request or issue');
   if (action.kind === 'startWorkspace' && !event && trigger.kind !== 'watch') refuse('action.kind', 'Starting a workspace needs a GitHub event, a label or a watched repository: a schedule or manual run starts none');
@@ -316,7 +318,7 @@ function peopleAndBots(legacy: z.infer<typeof LegacyAuthorConditionSchema>): Aut
 /** The GitSpace project's release automation (docs/TENANT-RELEASES-DESIGN.md §5): GitSpace's releases go to its project
  * agent, which asks how to take each one. `repository` null watches the project's repository, or its upstream parent
  * when the project builds a fork, so it follows the project wherever Project settings point it. */
-export const GITSPACE_RELEASES_AUTOMATION: AutomationDraft = {
+export const GITSPACE_RELEASES_AUTOMATION: AutomationDraftInput = {
   name: 'GitSpace releases', enabled: true,
   trigger: { kind: 'watch', repository: null, on: 'release', every: 'daily' },
   conditions: [{ kind: 'tag', mode: 'oneOf', values: ['v*'] }],
@@ -339,7 +341,7 @@ const FIRST_DEFAULT_KEYS = ['review-feedback', 'failed-checks', 'mentions', 'clo
 const RETIRED_DEFAULT_KEYS = ['bot-review-feedback'];
 
 /** The default automations installing the GitHub App adds (docs/AUTOMATIONS-DESIGN.md §4), by key. */
-function defaultAutomations(bot: string): Array<{ key: string; draft: AutomationDraft }> {
+function defaultAutomations(bot: string): Array<{ key: string; draft: AutomationDraftInput }> {
   return [
     { key: 'review-feedback', draft: {
       name: 'Review feedback to its workspace', enabled: true,
@@ -430,12 +432,16 @@ interface RunRow extends Record<string, SqlStorageValue> {
   /** `phase` when the workspace's phase ruled the run out; null otherwise, and on runs recorded before it. */
   skip_reason: 'phase' | null;
   /** A GitHub event's run for an automation, subject and target: later events for the same key join it while it waits
-   * to be delivered, or while its message waits behind the workspace's running turn. Null for every other run. */
+   * to be delivered, or while its message waits in the workspace's inbox (behind the running turn, or for that turn's
+   * next tool boundary when it steers). Null for every other run. */
   batch_key: string | null;
   /** The run's GitHub events (`AutomationEventSchema`), oldest first; null for a schedule or manual run. */
   events_json: string | null;
   /** When a waiting batch is delivered: 90 s after its latest event, at most 10 minutes after its first. */
   deliver_at: number | null;
+  /** How a `message` run meets the agent's running turn, from its action's `when`: `steer` joins it at its next tool
+   * boundary, `followUp` waits for it to end. Null for other runs, and on runs recorded before it (they steer). */
+  when_busy: 'steer' | 'followUp' | null;
 }
 
 interface LinkRow extends Record<string, SqlStorageValue> {
@@ -580,7 +586,8 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
           skip_reason TEXT,
           batch_key TEXT,
           events_json TEXT,
-          deliver_at INTEGER
+          deliver_at INTEGER,
+          when_busy TEXT
         );
         CREATE INDEX IF NOT EXISTS automation_runs_automation ON automation_runs(automation_id, created_at);
         CREATE INDEX IF NOT EXISTS automation_runs_state ON automation_runs(state, created_at);
@@ -625,8 +632,9 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
 
   /** Objects written before GitHub events: their automations kept a schedule and a message target in columns, and their
    * runs table refused event triggers. Objects written before phases lack the automations' phases and the runs' phase;
-   * those written before batches lack the runs' batch key, events and delivery time. Automations written before the
-   * People and Bots conditions hold one `author` condition, which becomes them. */
+   * those written before batches lack the runs' batch key, events and delivery time, and those written before `when`
+   * the runs' `when_busy`. Automations written before the People and Bots conditions hold one `author` condition, which
+   * becomes them. */
   private migrate(): void {
     const sql = this.ctx.storage.sql;
     const columns = (table: string) => sql.exec<{ name: string }>(`PRAGMA table_info(${table})`).toArray().map(column => column.name);
@@ -672,7 +680,7 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
     const recorded = columns('automation_runs');
     if (recorded.length > 0 && !recorded.includes('phase')) sql.exec('ALTER TABLE automation_runs ADD COLUMN phase TEXT');
     if (recorded.length > 0 && !recorded.includes('skip_reason')) sql.exec('ALTER TABLE automation_runs ADD COLUMN skip_reason TEXT');
-    for (const [column, type] of [['batch_key', 'TEXT'], ['events_json', 'TEXT'], ['deliver_at', 'INTEGER']]) {
+    for (const [column, type] of [['batch_key', 'TEXT'], ['events_json', 'TEXT'], ['deliver_at', 'INTEGER'], ['when_busy', 'TEXT']]) {
       if (recorded.length > 0 && !recorded.includes(column)) sql.exec(`ALTER TABLE automation_runs ADD COLUMN ${column} ${type}`);
     }
     if (automations.length > 0) {
@@ -707,7 +715,7 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
   }
 
   /** A person's automation: it takes effect at once. */
-  async create(input: { projectId: string; draft: AutomationDraft }): Promise<AutomationOutcome<AutomationView>> {
+  async create(input: { projectId: string; draft: AutomationDraftInput }): Promise<AutomationOutcome<AutomationView>> {
     return settled(async () => {
       const projectId = this.ensureProject(input.projectId);
       const draft = checkDraft(input.draft);
@@ -718,7 +726,7 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
   }
 
   /** A person's change: it takes effect at once and clears a proposal. */
-  async update(input: { projectId: string; automationId: string; draft: AutomationDraft }): Promise<AutomationOutcome<AutomationView>> {
+  async update(input: { projectId: string; automationId: string; draft: AutomationDraftInput }): Promise<AutomationOutcome<AutomationView>> {
     return settled(async () => {
       const projectId = this.ensureProject(input.projectId);
       const current = this.requiredAutomation(input.automationId);
@@ -731,7 +739,7 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
 
   /** The project agent's automation, new or a change to one: it is Proposed and does not run until a person approves
    * it. Its test is kept with it: the coming schedule times, or what it would do with recent recorded events. */
-  async propose(input: { projectId: string; automationId?: string; draft: AutomationDraft; conversationId: string; asked: string; reason: string }): Promise<AutomationOutcome<AutomationView>> {
+  async propose(input: { projectId: string; automationId?: string; draft: AutomationDraftInput; conversationId: string; asked: string; reason: string }): Promise<AutomationOutcome<AutomationView>> {
     return settled(async () => {
       const projectId = this.ensureProject(input.projectId);
       const current = input.automationId === undefined ? null : this.requiredAutomation(input.automationId);
@@ -881,9 +889,10 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
   /**
    * Adds `event` to its automation's open batch for the subject and target, returning the batch's run; null when none
    * is open, so the event opens one. A batch is open while it waits to be delivered (each event moves its delivery to
-   * 90 s later, at most 10 minutes after its first), and while its message waits behind the workspace's running turn:
-   * then the waiting message takes the new text, still one input, delivered when the turn ends. A message the
-   * workspace has placed (or cannot update) no longer changes.
+   * 90 s later, at most 10 minutes after its first), and while its message waits in the workspace's inbox: then the
+   * waiting message takes the new text, still one input. A queued message waits for the running turn to end; a steered
+   * one only for that turn's next tool boundary, so later events start a new batch sooner. A message the workspace has
+   * placed (or cannot update) no longer changes.
    */
   private async addToBatch(projectId: string, automation: Automation, batch: string, event: AutomationEvent): Promise<string | null> {
     const open = this.rows<RunRow>("SELECT * FROM automation_runs WHERE batch_key=? AND (state='queued' OR (state='running' AND submitted=1 AND started_at IS NULL)) ORDER BY created_at DESC, rowid DESC LIMIT 1", batch)[0];
@@ -902,7 +911,8 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
     const now = Date.now();
     const current = this.requiredRun(open.id);
     const deliverAt = current.state === 'queued' ? Math.min(now + BATCH_QUIET_MS, current.created_at + BATCH_MAX_MS) : current.deliver_at;
-    const waits = current.state === 'queued' ? 'it is delivered 90 s after the latest event' : 'its message waits for the running turn to end';
+    const waits = current.state === 'queued' ? 'it is delivered 90 s after the latest event'
+      : current.when_busy === 'followUp' ? 'its message waits for the running turn to end' : 'its message waits for the running turn\'s next tool boundary';
     this.ctx.storage.sql.exec('UPDATE automation_runs SET events_json=?, message=?, deliver_at=?, timeline_json=? WHERE id=?', JSON.stringify(events), message, deliverAt,
       timelineWith(current, now, `${describeAutomationEvent(event)} joined the batch (${automationEventCount(messageEvents(events))}); ${waits}`), current.id);
     return current.id;
@@ -982,7 +992,7 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
   /** What a draft would do, without saving or running it: a schedule's coming times; for GitHub events, what it would do
    * with recent recorded deliveries, or with one (`deliveryId`) its checks and instruction. Trust is checked as it would
    * be on arrival. (`test` names a Workers event handler; RPC cannot call it.) */
-  async testDraft(input: { projectId: string; draft: AutomationDraft; requestedBy: string; deliveryId?: string }): Promise<AutomationOutcome<AutomationTest>> {
+  async testDraft(input: { projectId: string; draft: AutomationDraftInput; requestedBy: string; deliveryId?: string }): Promise<AutomationOutcome<AutomationTest>> {
     return settled(async () => {
       const projectId = this.ensureProject(input.projectId);
       const draft = checkDraft(input.draft);
@@ -1174,7 +1184,8 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
           if (current?.state === 'running') this.finish(current, 'finished', 'Notice added; the agent stays asleep', Date.now());
           return;
         }
-        await space.runtimeAutomationSubmit(delivery);
+        // A started workspace's first message meets no running turn.
+        await space.runtimeAutomationSubmit(run.kind === 'message' ? { ...delivery, whenBusy: run.when_busy ?? 'steer' } : delivery);
         this.ctx.storage.sql.exec('UPDATE automation_runs SET submitted=1, retry_at=NULL WHERE id=?', run.id);
       } catch (error) {
         const current = this.run(run.id);
@@ -1540,14 +1551,15 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
     const timeline: Timeline = labels.map(label => ({ at: now, label }));
     const trigger = event === null ? firing.trigger === 'schedule' ? 'schedule' : 'manual' : automation.trigger.kind === 'label' ? 'label' : 'github';
     const message = event !== null && ended === null ? eventMessage(id, automation, events) : plan.message;
+    const whenBusy = plan.kind !== 'message' ? null : 'when' in automation.action && automation.action.when === 'queue' ? 'followUp' : 'steer';
     this.ctx.storage.sql.exec(`
-      INSERT INTO automation_runs(id, automation_id, automation_name, trigger, kind, event, subject_json, event_json, checks_json, start_json, state, workspace_id, target_name, message, outcome, timeline_json, scheduled_for, created_at, finished_at, phase, skip_reason, batch_key, events_json, deliver_at)
-      VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO automation_runs(id, automation_id, automation_name, trigger, kind, event, subject_json, event_json, checks_json, start_json, state, workspace_id, target_name, message, outcome, timeline_json, scheduled_for, created_at, finished_at, phase, skip_reason, batch_key, events_json, deliver_at, when_busy)
+      VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, id, automation.id, automation.name, trigger, plan.kind, event === null ? null : automationEventName(event), subject ? JSON.stringify(subject) : null,
     event === null ? null : JSON.stringify(event), JSON.stringify(plan.checks), plan.start === null ? null : JSON.stringify(plan.start), ended?.state ?? 'queued',
     plan.ended === null || plan.phase !== null ? plan.workspaceId : null, plan.targetName, message, ended?.outcome ?? null, JSON.stringify(timeline),
     scheduledFor, now, ended === null ? null : now, plan.phase, ended?.skipReason ?? null,
-    ended === null ? batch : null, event === null ? null : JSON.stringify(events), ended === null && batch !== null ? now + BATCH_QUIET_MS : null);
+    ended === null ? batch : null, event === null ? null : JSON.stringify(events), ended === null && batch !== null ? now + BATCH_QUIET_MS : null, whenBusy);
     this.ctx.storage.sql.exec(`
       DELETE FROM automation_runs WHERE automation_id=? AND state IN ('finished', 'skipped', 'failed')
         AND id NOT IN (SELECT id FROM automation_runs WHERE automation_id=? ORDER BY created_at DESC, rowid DESC LIMIT ?)

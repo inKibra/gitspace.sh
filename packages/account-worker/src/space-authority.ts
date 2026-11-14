@@ -1249,17 +1249,17 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     return { attachment };
   }
 
-  /** An automation run's instruction, submitted once per request id; the turn it starts reports its start and end to
-   * the project's automations. `role`, on the first run of a workspace an automation started, becomes its session's
-   * model role. */
+  /** An automation run's instruction, submitted once per request id; the turn it starts or steers reports its start and
+   * end to the project's automations. `role`, on the first run of a workspace an automation started, becomes its
+   * session's model role. `whenBusy` (steer when absent) is how it meets a running turn. */
   async runtimeAutomationSubmit(raw: unknown) {
-    const input = RuntimeIdentitySchema.extend({ requestId: z.string().startsWith(AUTOMATION_REQUEST_PREFIX), text: z.string().min(1), role: z.string().min(1).optional() }).parse(raw);
+    const input = RuntimeIdentitySchema.extend({ requestId: z.string().startsWith(AUTOMATION_REQUEST_PREFIX), text: z.string().min(1), role: z.string().min(1).optional(), whenBusy: z.enum(['steer', 'followUp']).default('steer') }).parse(raw);
     await this.runtimeAccess(input, true);
-    return submitAutomationTurn(this.ctx.storage, await this.getRuntime(input), { requestId: input.requestId, text: input.text, ...(input.role === undefined ? {} : { role: input.role }) });
+    return submitAutomationTurn(this.ctx.storage, await this.getRuntime(input), { requestId: input.requestId, text: input.text, whenBusy: input.whenBusy, ...(input.role === undefined ? {} : { role: input.role }) });
   }
 
-  /** A run's batch grew while its instruction waits behind the running turn: the instruction takes the new text. False
-   * once it was placed or withdrawn; the automations then start a new batch. */
+  /** A run's batch grew while its instruction waits in the inbox, behind the running turn or for its next tool boundary:
+   * the instruction takes the new text. False once it was placed or withdrawn; the automations then start a new batch. */
   async runtimeAutomationUpdate(raw: unknown): Promise<boolean> {
     const input = RuntimeIdentitySchema.extend({ requestId: z.string().startsWith(AUTOMATION_REQUEST_PREFIX), text: z.string().min(1) }).parse(raw);
     await this.runtimeAccess(input, true);

@@ -133,8 +133,8 @@ export type WorkspaceRuntime = {
   reconcileLfsSources(objects: readonly GitLfsConfirmedObject[]): Promise<void>;
   /** An automation run's instruction to the main conversation, submitted once per request id; its turn reports through `turnChanged`. */
   automationSubmit(input: RuntimeAutomationInput): Promise<{ conversationId: string }>;
-  /** The run's batch grew while its instruction is queued behind the running turn: the instruction takes the new text,
-   * still one input. False once it was placed or withdrawn. */
+  /** The run's batch grew while its instruction waits in the inbox (behind the running turn, or for its next tool
+   * boundary when steered): the instruction takes the new text, still one input. False once it was placed or withdrawn. */
   automationUpdate(input: { requestId: string; text: string }): Promise<boolean>;
   /** A person's cancel: withdraws the instruction, or stops the workspace agent once it has started. */
   automationCancel(requestId: string): Promise<RuntimeRequestStatus>;
