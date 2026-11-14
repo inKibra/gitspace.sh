@@ -36,9 +36,11 @@ it('keeps the phase and shows the server’s refusal when a phase would pass wha
   expect(review).toBeDefined();
   await act(async () => { review!.click(); });
   expect(onSetWorkspacePhase).toHaveBeenCalledWith(verticalSliceFixture.workspace.id, 'review');
-  expect(container.querySelector('[role="alert"]')?.textContent).toContain(refusal);
+  const refusalToast = () => container.querySelector('section[aria-label="Notifications"] [role="alert"]');
+  expect(refusalToast()?.textContent).toContain(refusal);
+  expect(container.querySelector('.workspace-workbench')?.parentElement?.textContent).not.toContain(refusal);
   expect(container.querySelector('[aria-label="Workspace phase"]')?.textContent).toContain('Code');
 
-  await act(() => [...container.querySelectorAll<HTMLButtonElement>('button')].find((button) => button.textContent === 'Dismiss')!.click());
-  expect(container.querySelector('[role="alert"]')).toBeNull();
+  await act(() => refusalToast()!.querySelector<HTMLButtonElement>('button[aria-label="Dismiss"]')!.click());
+  expect(refusalToast()).toBeNull();
 });

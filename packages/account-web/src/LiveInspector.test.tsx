@@ -9,6 +9,7 @@ import { emptyWorkspaceStatus } from '@gitspace/protocol-workspace';
 import type * as Synchronization from './SynchronizationProvider.js';
 import type { WorkspaceView } from './GitSpaceShell.js';
 import { LiveInspector } from './LiveApp.js';
+import { Toasts } from './toasts.js';
 import { RuntimeSnapshotSchema, SessionControlSchema } from '@gitspace/protocol-runtime';
 import type { InspectorProps } from './inspector/Inspector.js';
 
@@ -70,7 +71,7 @@ const render = ({ possessedBy = '', generation = 0, refreshToken = 0 }: { posses
     snapshot: RuntimeSnapshotSchema.parse(snapshotRead?.state === 'success' ? snapshotRead.value : { version: 1, projectId: 'project', workspaceId: 'workspace', cursor: refreshToken, conversations: [{ id: 'main', parentId: null, title: 'Main', status: 'idle', messages: [] }], tasks: [], attachments: [], questions: [], documents: {} }),
     conversationId: 'main', sessionId: 'main', turns: [], scope: workspace, workspaces: [], onClose: () => {}, onOpenTerminal: () => {}, onAskAgent: async () => {},
   };
-  root.render(<LiveInspector projectId="project" spaceId="workspace" generation={generation} reviewerId="device" sessionId="main" scope={workspace} workspaces={[]} onSelectWorkspace={() => {}} refreshToken={refreshToken} onClose={() => {}} runtimeAvailable runtimeContext={runtimeContext} />);
+  root.render(<Toasts><LiveInspector projectId="project" spaceId="workspace" generation={generation} reviewerId="device" sessionId="main" scope={workspace} workspaces={[]} onSelectWorkspace={() => {}} refreshToken={refreshToken} onClose={() => {}} runtimeAvailable runtimeContext={runtimeContext} /></Toasts>);
 };
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);

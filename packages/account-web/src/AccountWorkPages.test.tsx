@@ -9,6 +9,7 @@ import { verticalSliceFixture } from './App.js';
 import type { SidebarWorkspace } from './AppSidebar.js';
 import { CreateWorkspaceDialog, type ProjectLifecycleView } from './GitSpaceShell.js';
 import type { Directory } from './useAccountDirectory.js';
+import { Toasts } from './toasts.js';
 const rpc = vi.hoisted(() => ({ updateBase: vi.fn(), refresh: vi.fn(), checkInterval: vi.fn(async () => ({ status: 'ok', value: { interval: 'daily' } })) }));
 vi.mock('./rpc-client.js', () => ({ rpcClient: { project: { updateBase: rpc.updateBase, remote: { refresh: rpc.refresh, checkInterval: rpc.checkInterval } } } }));
 
@@ -52,7 +53,7 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 async function render(view: AccountWorkPagesProps['view'], actions: AccountWorkPagesProps['actions'] = {}, projectList = projects) {
-  await act(() => root.render(<AccountWorkPages view={view} projects={projectList} directory={directory} loading={false} onRefresh={vi.fn()} onOpenWorkspace={onOpenWorkspace} onOpenProject={onOpenProject} actions={actions} />));
+  await act(() => root.render(<Toasts><AccountWorkPages view={view} projects={projectList} directory={directory} loading={false} onRefresh={vi.fn()} onOpenWorkspace={onOpenWorkspace} onOpenProject={onOpenProject} actions={actions} /></Toasts>));
 }
 async function click(label: string) {
   const element = document.body.querySelector<HTMLElement>(`[aria-label="${label}"]`);
@@ -122,7 +123,7 @@ it('keeps the cloud workspace navigable after a cache-release failure and fences
   expect(container.querySelector<HTMLButtonElement>('[aria-label="Archive beta-release"]')?.disabled).toBe(true);
   expect(container.querySelector<HTMLButtonElement>('[aria-label="Restore beta-archive"]')?.disabled).toBe(true);
   await act(async () => { pending.reject(new Error('Attachment generation changed')); });
-  expect(container.querySelector('[role="alert"]')?.textContent).toContain('Attachment generation changed');
+  expect(container.querySelector('section[aria-label="Notifications"] [role="alert"]')?.textContent).toContain('Attachment generation changed');
   expect(container.querySelector<HTMLButtonElement>('[aria-label="Archive beta-release"]')?.disabled).toBe(false);
   await click('Open beta-release');
   expect(onOpenWorkspace).toHaveBeenCalledExactlyOnceWith('beta', 'beta-release');
@@ -162,7 +163,7 @@ it('changes a project base branch from Settings at its current revision, the Git
   const setBaseBranch = vi.fn();
   const source: ProjectLifecycleView = { ...projects[0]!, id: 'source', name: 'GitSpace', role: 'gitspace-source', baseBranch: 'develop', repositoryReference: 'https://github.com/inKibra/gitspace.sh.git' };
   const onSettingsProjectChange = vi.fn();
-  const open = (project: ProjectLifecycleView) => act(() => root.render(<AccountWorkPages view="projects" projects={[...projects, project]} directory={directory} loading={false} onRefresh={vi.fn()} onOpenWorkspace={onOpenWorkspace} onOpenProject={onOpenProject} actions={{ onSetProjectBaseBranch: setBaseBranch }} settingsProjectId={project.id} onSettingsProjectChange={onSettingsProjectChange} />));
+  const open = (project: ProjectLifecycleView) => act(() => root.render(<Toasts><AccountWorkPages view="projects" projects={[...projects, project]} directory={directory} loading={false} onRefresh={vi.fn()} onOpenWorkspace={onOpenWorkspace} onOpenProject={onOpenProject} actions={{ onSetProjectBaseBranch: setBaseBranch }} settingsProjectId={project.id} onSettingsProjectChange={onSettingsProjectChange} /></Toasts>));
   await open(source);
   expect(document.body.textContent).toContain('Published GitSpace releases launch as they are.');
   const row = [...document.body.querySelectorAll('span')].find((span) => span.textContent === 'Base branch')!.closest('div')!;

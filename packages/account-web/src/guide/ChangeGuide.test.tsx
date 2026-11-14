@@ -13,6 +13,7 @@ import { SECTION_KIND } from './GuideSection.js';
 import { ISO_LABEL, placeIsoLabels, projectIsoMap, type FileChange } from './iso-layout.js';
 import { AREA_HEIGHT, AREA_WIDTH, layoutChangeMap } from './map-layout.js';
 import { SMALLEST_TILE, guideFiles, layoutTreemap, type ChangedFile, type Rect } from './treemap-layout.js';
+import { Toasts } from '../toasts.js';
 
 const date = '2026-01-01T00:00:00.000Z';
 const base = 'a'.repeat(40);
@@ -88,10 +89,10 @@ function button(label: string): HTMLElement {
   return found;
 }
 async function surface(overrides: Partial<Parameters<typeof ChangeGuideSurface>[0]> = {}) {
-  await act(async () => root.render(<ChangeGuideSurface guide={guide} reviewerId="reviewer" goal={goal} workspaces={[]}
+  await act(async () => root.render(<Toasts><ChangeGuideSurface guide={guide} reviewerId="reviewer" goal={goal} workspaces={[]}
     review={{ threads: [], onOpenFile() {}, onSelectThread() {}, onSelectRange() {} }} onOpenEvidence={() => undefined}
     captures={{ content: () => null, status: () => undefined, error: () => undefined, load() {}, size: () => null, browserCapture: () => ({ poster: null, recording: null }) }}
-    onLoadDiff={async (path) => diffFor(path)} onMarkRead={unavailable} {...overrides} />));
+    onLoadDiff={async (path) => diffFor(path)} onMarkRead={unavailable} {...overrides} /></Toasts>));
 }
 
 describe('change map layout', () => {
@@ -425,14 +426,16 @@ describe('Change Guide revisions', () => {
     expect(badges()).toEqual({ schedule: null, heat: null, quiet: null });
   });
 
-  it('shows a picked older revision read-only under a banner, and goes back to the latest', async () => {
+  it('shows a picked older revision read-only under a toast, and goes back to the latest', async () => {
     const setAcceptance = vi.fn(async () => {});
     const loadDiff = vi.fn(async (path: string) => diffFor(path));
     await surface({ guide: latest, revisions: handlers([]), onSetAcceptance: setAcceptance, onLoadDiff: loadDiff });
     await vi.waitFor(() => expect(button('Guide revision')).toBeDefined());
-    expect(container.querySelector('[role="status"]')).toBeNull();
+    const notice = () => container.querySelector('section[aria-label="Notifications"] [role="status"]');
+    expect(notice()).toBeNull();
     await choose('Guide revision', 'r2 ');
-    await vi.waitFor(() => expect(container.querySelector('[role="status"]')?.textContent).toContain('Viewing r2 of 3'));
+    await vi.waitFor(() => expect(notice()?.textContent).toContain('Viewing r2 of 3'));
+    expect(container.querySelector('article')?.textContent).not.toContain('Viewing r2 of 3');
     expect(container.textContent).toContain('Brew on a schedule, draft');
     expect(container.textContent).toContain('Legacy start button');
     expect(container.textContent).toContain('The panel starts the heater.');
@@ -443,7 +446,7 @@ describe('Change Guide revisions', () => {
     await vi.waitFor(() => expect(loadDiff).toHaveBeenCalledWith('ui/panel.tsx', { revision: 2 }));
 
     await act(async () => button('Back to latest').click());
-    expect(container.querySelector('[role="status"]')).toBeNull();
+    expect(notice()).toBeNull();
     expect(container.textContent).not.toContain('Legacy start button');
     expect(button('A press schedules a brew').getAttribute('aria-disabled')).toBeNull();
     expect([...container.querySelectorAll('button')].some((node) => node.textContent === 'Mark read and continue →')).toBe(true);

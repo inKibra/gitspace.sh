@@ -4,8 +4,9 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { GitHubProjectBridge } from '@gitspace/protocol/github';
 import { verticalSliceFixture } from './App.js';
-import { RepositoryAccessCard, RepositoryBridgeBanner, type GitHubBlockedAccess } from './GitHubAccess.js';
-import { GitSpaceShell } from './GitSpaceShell.js';
+import { RepositoryAccessCard, useRepositoryBridgeToasts, type GitHubBlockedAccess } from './GitHubAccess.js';
+import { GitSpaceShell, type GitSpaceShellProps } from './GitSpaceShell.js';
+import { Toasts } from './toasts.js';
 
 const stamp = '2026-11-01T09:00:00.000Z';
 const needsApp: GitHubBlockedAccess = { state: 'needs-app', repository: 'octo-labs/portal', organization: 'octo-labs', appName: 'GitSpace BrandByX', bridge: null, awaitsCopy: false };
@@ -35,19 +36,25 @@ afterEach(async () => {
   if (!animationDescriptor) Reflect.deleteProperty(Element.prototype, 'getAnimations');
 });
 
-async function renderBanner(access: GitHubBlockedAccess, bridge: GitHubProjectBridge) {
-  await act(() => root.render(<GitSpaceShell {...verticalSliceFixture} onSend={async () => undefined} accessBanner={<RepositoryBridgeBanner access={access} bridge={bridge} onInstall={async () => '#'} onOpenSettings={() => undefined} />} />));
-  return container.querySelector<HTMLElement>('[aria-label="GitHub sync"]');
+function Bridge({ access, bridge }: { access: GitHubBlockedAccess; bridge: GitHubProjectBridge | null }) {
+  useRepositoryBridgeToasts(bridge ? { access, bridge } : null, async () => '#', () => undefined);
+  return null;
+}
+
+/** The project page with the bridge toast, as RuntimeWorkspace reports it; returns the toast. */
+async function renderBridged(access: GitHubBlockedAccess, bridge: GitHubProjectBridge | null) {
+  await act(() => root.render(<Toasts><Bridge access={access} bridge={bridge} /><GitSpaceShell {...verticalSliceFixture} onSend={async () => undefined} /></Toasts>));
+  return container.querySelector<HTMLElement>('section[aria-label="Notifications"] [data-tone]');
 }
 
 function buttons(within: Element | null): string[] {
   return [...(within?.querySelectorAll('button') ?? [])].map((button) => button.textContent ?? '');
 }
 
-it('keeps the transcript and a working composer on a bridged project, with the App as an upgrade above them', async () => {
-  const banner = await renderBanner(needsApp, online);
-  expect(banner?.querySelector('p')?.textContent).toBe('Syncs with GitHub through studio-mac, using your own access. Install GitSpace BrandByX on octo-labs for pull requests, checks, automations and syncing without a machine.');
-  expect(buttons(banner)).toContain('Install on octo-labs');
+it('keeps the transcript and a working composer on a bridged project, with the App as an upgrade in a toast', async () => {
+  const toast = await renderBridged(needsApp, online);
+  expect(toast?.textContent).toContain('Syncs with GitHub through studio-mac, using your own access. Install GitSpace BrandByX on octo-labs for pull requests, checks, automations and syncing without a machine.');
+  expect(buttons(toast)).toContain('Install on octo-labs');
   expect(container.textContent).toContain(transcriptText);
   expect(container.querySelector('[aria-label="Repository access"]')).toBeNull();
   expect(container.querySelector('[inert]')).toBeNull();
@@ -56,21 +63,49 @@ it('keeps the transcript and a working composer on a bridged project, with the A
   expect(composer?.disabled).toBe(false);
 });
 
+it('puts no notice strip in the main frame: the conversation stage starts right under the top bar', async () => {
+  await renderBridged(needsApp, online);
+  const frame = container.querySelector('.workspace-workbench')?.parentElement;
+  expect(frame?.children).toHaveLength(2);
+  expect(frame?.children[0]?.querySelector('nav[aria-label="Location"]')).not.toBeNull();
+  expect(frame?.children[1]?.classList.contains('workspace-workbench')).toBe(true);
+  // The agent canvas holds the transcript's scroll area first and the floating composer; nothing above them.
+  const canvas = container.querySelector('.conversation-stage')?.firstElementChild;
+  expect(canvas?.children).toHaveLength(2);
+  expect(canvas?.firstElementChild?.querySelector('[data-slot="scroll-area-viewport"]')).not.toBeNull();
+  expect(container.querySelector('[aria-label="GitHub sync"]')).toBeNull();
+  expect(container.querySelector('.conversation-stage')?.textContent).not.toContain('Syncs with GitHub');
+});
+
+it('hides a dismissed bridge toast while its condition holds, and shows it again when the condition changes or recurs', async () => {
+  const toast = await renderBridged(needsApp, online);
+  await act(() => toast?.querySelector<HTMLButtonElement>('button[aria-label="Dismiss"]')?.click());
+  expect(await renderBridged(needsApp, online)).toBeNull();
+  const offline = await renderBridged(needsApp, { ...online, online: false });
+  expect(offline?.textContent).toContain('GitHub sync paused: studio-mac is offline.');
+  expect(offline?.getAttribute('data-tone')).toBe('warning');
+  await act(() => offline?.querySelector<HTMLButtonElement>('button[aria-label="Dismiss"]')?.click());
+  expect(await renderBridged(needsApp, { ...online, online: false })).toBeNull();
+  expect(await renderBridged(needsApp, null)).toBeNull();
+  expect((await renderBridged(needsApp, { ...online, online: false }))?.textContent).toContain('GitHub sync paused');
+});
+
 it('says GitHub sync is paused while the bridging machine is offline', async () => {
-  const banner = await renderBanner(needsApp, { ...online, online: false });
-  expect(banner?.querySelector('p')?.textContent).toBe('GitHub sync paused: studio-mac is offline. Install GitSpace BrandByX on octo-labs for pull requests, checks, automations and syncing without a machine.');
-  expect(buttons(banner)).toContain('Install on octo-labs');
+  const toast = await renderBridged(needsApp, { ...online, online: false });
+  expect(toast?.textContent).toContain('GitHub sync paused: studio-mac is offline. Install GitSpace BrandByX on octo-labs for pull requests, checks, automations and syncing without a machine.');
+  expect(buttons(toast)).toContain('Install on octo-labs');
   expect(container.textContent).toContain(transcriptText);
 });
 
 it('names what is pending instead of offering Install while an install is requested or the repository not selected', async () => {
-  const waiting = await renderBanner(requested, online);
+  const waiting = await renderBridged(requested, online);
   expect(waiting?.textContent).toContain('Waiting for an owner of octo-labs to approve GitSpace BrandByX');
   expect(buttons(waiting).some((label) => label.startsWith('Install'))).toBe(false);
-  const notAllowed = await renderBanner(notSelected, online);
+  expect(buttons(waiting)).toContain('Copy steps for the owner');
+  const notAllowed = await renderBridged(notSelected, online);
   expect(notAllowed?.textContent).toContain("GitSpace BrandByX is installed on octo-labs, but portal isn't one of its selected repositories.");
   expect(buttons(notAllowed).some((label) => label.startsWith('Install'))).toBe(false);
-  const appless = await renderBanner(noApp, online);
+  const appless = await renderBridged(noApp, online);
   expect(appless?.textContent).toContain('Create your GitHub App in Settings → GitHub');
   expect(buttons(appless)).toContain('Open Settings → GitHub');
 });
@@ -131,4 +166,53 @@ it('says no machine is online to copy through, and offers the copy alone for a r
   expect(container.textContent).toContain('Copy this repository in through one of your machines');
   expect(container.querySelector('[role="status"]')?.textContent).toBe('None of your machines is online. Start one that can read it, or add a computer in Settings → Machines.');
   expect(buttons(container).filter((label) => label.startsWith('Copy through') || label.startsWith('Install'))).toEqual([]);
+});
+
+function toasts(): HTMLElement[] {
+  return [...container.querySelectorAll<HTMLElement>('section[aria-label="Notifications"] [data-tone]')];
+}
+
+function toastButton(toast: HTMLElement | undefined, label: string): HTMLButtonElement {
+  const found = [...(toast?.querySelectorAll<HTMLButtonElement>('button') ?? [])].find((candidate) => candidate.textContent === label || candidate.getAttribute('aria-label') === label);
+  if (!found) throw new Error(`No toast button ${label}`);
+  return found;
+}
+
+it('reports a disconnected provider as a toast whose Connect opens Inference → Providers', async () => {
+  const rejects = async (): Promise<never> => { throw new Error('not called'); };
+  const sessionControls: NonNullable<GitSpaceShellProps['sessionControls']> = {
+    value: { sessionId: 'session-a', role: null, roleLabel: null, roles: [], provider: 'anthropic', models: [{ provider: 'anthropic', id: 'claude', name: 'Claude', contextWindow: null, unavailable: null }], model: 'claude', thinking: null, fastMode: false, planMode: false, context: null, cost: 0, todos: [], queue: { steering: [], followUp: [] }, pendingAsk: null, goal: null, history: [], historyAnchorId: null },
+    onCycleRole: rejects, onSetModel: rejects, onSetThinking: rejects, onSetFast: rejects, onSetGoal: rejects, onCompact: rejects, onClearQueue: rejects, onRemoveQueuedMessage: rejects, onPromoteQueuedMessage: rejects, onDismissAutomationRun: rejects, onAnswerAsk: rejects, onStop: rejects, onNavigateTree: rejects,
+  };
+  await act(() => root.render(<GitSpaceShell {...verticalSliceFixture} sessionControls={sessionControls} providers={[{ id: 'anthropic', name: 'Anthropic', hasAuth: false }]} />));
+  const toast = toasts().find((item) => item.textContent?.includes('Anthropic isn’t connected in this inference profile'));
+  expect(toast?.getAttribute('data-tone')).toBe('warning');
+  await act(() => toastButton(toast, 'Connect').click());
+  expect(new URL(window.location.href).searchParams.get('section')).toBe('providers');
+  await act(() => root.render(<GitSpaceShell {...verticalSliceFixture} sessionControls={sessionControls} providers={[{ id: 'anthropic', name: 'Anthropic', hasAuth: true }]} />));
+  expect(toasts().some((item) => item.textContent?.includes('isn’t connected'))).toBe(false);
+});
+
+it('reports a failed agent and a failed transcript read as error toasts that keep Continue and Retry transcript', async () => {
+  const onContinueAgent = vi.fn(async () => undefined);
+  const onRetry = vi.fn();
+  const mainAgent: GitSpaceShellProps['mainAgent'] = { id: 'session-a', title: 'Workspace agent', model: 'GPT-5.6', state: 'waiting', failed: true, errorMessage: 'Model overloaded' };
+  await act(() => root.render(<GitSpaceShell {...verticalSliceFixture} mainAgent={mainAgent} onContinueAgent={onContinueAgent} history={{ loading: false, error: 'Network down', onRetry }} />));
+  const failure = toasts().find((item) => item.textContent?.includes('Agent failure: Model overloaded'));
+  const history = toasts().find((item) => item.textContent?.includes('Transcript history could not be loaded: Network down'));
+  expect([failure?.getAttribute('data-tone'), history?.getAttribute('data-tone')]).toEqual(['error', 'error']);
+  await act(() => toastButton(failure, 'Continue').click());
+  expect(onContinueAgent).toHaveBeenCalledTimes(1);
+  await act(() => toastButton(history, 'Retry transcript').click());
+  expect(onRetry).toHaveBeenCalledTimes(1);
+  expect(container.querySelector('.conversation-stage')?.textContent).not.toContain('Agent failure');
+});
+
+it('marks a transcript shown from this browser’s saved copy in the top bar, not in a row above the transcript', async () => {
+  await act(() => root.render(<GitSpaceShell {...verticalSliceFixture} history={{ loading: true, saved: true, error: null, onRetry: () => undefined }} />));
+  const mark = container.querySelector('nav[aria-label="Location"] [role="status"]');
+  expect(mark?.getAttribute('aria-label')).toBe('Showing the copy saved in this browser, loading the latest');
+  expect(container.querySelector('.workspace-workbench')?.parentElement?.children).toHaveLength(2);
+  expect(container.querySelector('.conversation-stage')?.textContent).not.toContain('saved in this browser');
+  expect(toasts()).toHaveLength(0);
 });

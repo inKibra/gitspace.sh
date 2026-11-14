@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { PluginsPage } from './PluginsPage.js';
+import { Toasts } from './toasts.js';
 import type { BrowserPluginsState } from './BrowserPlugins.js';
 
 const noop = async () => undefined;
@@ -24,7 +25,7 @@ const composioProps = {
 describe('PluginsPage', () => {
   it('renders account connections and their machine targets independently of runtime discovery', () => {
     const now = new Date();
-    const html = renderToStaticMarkup(<PluginsPage
+    const html = renderToStaticMarkup(<Toasts><PluginsPage
       projects={[{ id: 'project-a', name: 'GitSpace' }]}
       connections={[{
         principalId: 'principal-a', id: 'paper', label: 'Paper Desktop', enabled: true,
@@ -39,7 +40,7 @@ describe('PluginsPage', () => {
       onDelete={noop}
       onSetGrant={noop}
       onRefresh={noop}
-    />);
+    /></Toasts>);
     expect(html).toContain('Paper Desktop');
     expect(html).toContain('Studio');
     expect(html).toContain('ready');
@@ -50,7 +51,7 @@ describe('PluginsPage', () => {
 
   it('renders connected and available Composio plugins as plugins', () => {
     const now = new Date();
-    const html = renderToStaticMarkup(<PluginsPage
+    const html = renderToStaticMarkup(<Toasts><PluginsPage
       {...composioProps}
       composioCatalog={{ configured: true, toolkits: [{ slug: 'github', name: 'GitHub', description: 'Manage GitHub work', logoUrl: null, toolsCount: 42 }] }}
       projects={[{ id: 'project-a', name: 'GitSpace' }]}
@@ -66,7 +67,7 @@ describe('PluginsPage', () => {
       onDelete={noop}
       onSetGrant={noop}
       onRefresh={noop}
-    />);
+    /></Toasts>);
     expect(html).toContain('Work GitHub');
     expect(html).toContain('All tools denied · 1 exception');
     expect(html).toContain('Manage plugin');

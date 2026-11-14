@@ -10,6 +10,8 @@ import { cloudProjectSummarySchema, cloudWorkspaceDefinitionSchema } from '@gits
 import type { GitSpaceShellProps } from './GitSpaceShell.js';
 import { RuntimeWorkspaceShell, type WorkspaceReads } from './RuntimeWorkspace.js';
 import type { TranscriptHistory } from './useTranscriptHistory.js';
+import { Toasts } from './toasts.js';
+import { LAUNCHED_STORAGE_KEY } from './LaunchSheet.js';
 
 const mocks = vi.hoisted((): { setRelations: Mock; refresh: Mock; cancelRun: Mock; session: { result: RuntimeSessionResult | null; run: Mock }; shell: GitSpaceShellProps | null; saved: SpaceView | null; access: unknown; failed: boolean; pending: boolean } => ({ setRelations: vi.fn(), refresh: vi.fn(), cancelRun: vi.fn(), session: { result: null, run: vi.fn() }, shell: null, saved: null, access: undefined, failed: false, pending: false }));
 const createTerminal = vi.hoisted(() => vi.fn(async (_input: { spaceId: string; machineId: string }) => ({ status: 'ok' as const, value: {} })));
@@ -18,7 +20,7 @@ vi.mock('./rpc-client.js', () => ({ rpcClient: { deployment: { status: 'deployme
 vi.mock('result-rpc/react', () => ({ useResultQuery: (procedure: string) => ({ state: 'success', value: procedure === 'projectAccess' ? mocks.access : undefined, refetch: mocks.refresh }) }));
 vi.mock('./InferenceContext.js', () => ({ useInference: () => null }));
 vi.mock('./useCloudSessionControls.js', () => ({ useCloudSessionControls: () => ({ result: mocks.session.result, run: mocks.session.run, error: null }) }));
-vi.mock('./GitSpaceShell.js', () => ({ GitSpaceShell: (props: GitSpaceShellProps) => { mocks.shell = props; return <div>{props.workspaces[0]?.relations.dependsOn.join(',')}{props.renderEnvironmentStatus?.(inspectEnvironment, () => {})}{props.accessBanner}{props.access?.card(inspectEnvironment)}</div>; }, EmptyState: () => null, StatusDot: ({ color }: { color: string }) => <span data-status-color={color} /> }));
+vi.mock('./GitSpaceShell.js', () => ({ GitSpaceShell: (props: GitSpaceShellProps) => { mocks.shell = props; return <div>{props.workspaces[0]?.relations.dependsOn.join(',')}{props.renderEnvironmentStatus?.(inspectEnvironment, () => {})}{props.access?.card(inspectEnvironment)}</div>; }, EmptyState: () => null, StatusDot: ({ color }: { color: string }) => <span data-status-color={color} /> }));
 const stamp = '2026-10-03T00:00:00.000Z';
 const inspectEnvironment = vi.fn();
 const project = cloudProjectSummarySchema.parse({ id: 'project', name: 'Project', lifecycle: 'active', repositoryReference: null, baseBranch: 'main', revision: 1, archivedAt: null, updatedAt: stamp });
@@ -52,7 +54,8 @@ const reads = (): WorkspaceReads => ({
 const refreshInspection = vi.fn();
 let root: Root;
 let container: HTMLDivElement;
-const render = () => root.render(<RuntimeWorkspaceShell projectId={project.id} workspaceId={workspace.id} snapshot={snapshot} inspection={inspection} connected reads={reads()} refreshInspection={refreshInspection} onOpenSettings={() => {}} onSelectWorkspace={() => {}} onSelectProject={() => {}} renderInspector={() => null} />);
+const render = () => root.render(<Toasts><RuntimeWorkspaceShell projectId={project.id} workspaceId={workspace.id} snapshot={snapshot} inspection={inspection} connected reads={reads()} refreshInspection={refreshInspection} onOpenSettings={() => {}} onSelectWorkspace={() => {}} onSelectProject={() => {}} renderInspector={() => null} /></Toasts>);
+const toasts = () => [...container.querySelectorAll<HTMLElement>('section[aria-label="Notifications"] [data-tone]')];
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
   mocks.setRelations.mockReset(); mocks.refresh.mockReset(); mocks.cancelRun.mockReset(); refreshInspection.mockReset(); mocks.failed = false; mocks.pending = false; mocks.access = undefined;
@@ -116,19 +119,47 @@ it('retains the accepted graph read-only and rejects stale edit callbacks during
   expect(mocks.setRelations).not.toHaveBeenCalled();
 });
 
-it('announces persistent cloud merge conflicts while the machines dialog is closed', async () => {
+it('announces persistent cloud merge conflicts in a toast while the machines dialog is closed', async () => {
   const status = (conflicts: string[]) => ({ summary: emptyWorkspaceStatus, cloud: { version: null, conflicts }, machines: [] });
   snapshot.documents['gitspace.status'] = status(['src/shared.ts', 'assets/config.json']);
   await act(render);
-  const alert = container.querySelector('[role="alert"][aria-label="Workspace merge conflicts"]');
+  const alert = toasts().find(toast => toast.querySelector('[aria-label="Conflicting files"]'));
+  expect(alert?.getAttribute('role')).toBe('alert');
   expect(alert?.textContent).toContain('src/shared.ts');
   expect(alert?.textContent).toContain('assets/config.json');
   expect(document.querySelector('[role="dialog"]')).toBeNull();
   await act(render);
-  expect(container.querySelector('[aria-label="Workspace merge conflicts"]')).not.toBeNull();
+  expect(container.querySelector('[aria-label="Conflicting files"]')).not.toBeNull();
   snapshot.documents['gitspace.status'] = status([]);
   await act(render);
-  expect(container.querySelector('[aria-label="Workspace merge conflicts"]')).toBeNull();
+  expect(container.querySelector('[aria-label="Conflicting files"]')).toBeNull();
+});
+
+it('reports a failed workspace list as a toast with Retry that stays dismissed while it fails and returns when it fails again', async () => {
+  mocks.failed = true;
+  await act(render);
+  const failure = () => toasts().find(toast => toast.textContent?.includes('relations unavailable'));
+  await act(() => [...failure()!.querySelectorAll('button')].find(button => button.textContent === 'Retry')!.click());
+  expect(mocks.refresh).toHaveBeenCalledTimes(1);
+  await act(() => failure()!.querySelector<HTMLButtonElement>('button[aria-label="Dismiss"]')!.click());
+  expect(failure()).toBeUndefined();
+  await act(render);
+  expect(failure()).toBeUndefined();
+  mocks.failed = false;
+  await act(render);
+  mocks.failed = true;
+  await act(render);
+  expect(failure()?.getAttribute('data-tone')).toBe('error');
+});
+
+it('says what this page now runs after a launch reload in a toast whose Back to default and dismiss keep their meaning', async () => {
+  sessionStorage.setItem(LAUNCHED_STORAGE_KEY, JSON.stringify({ sha: 'abc1234', label: 'Launched build', at: Date.now() }));
+  await act(render);
+  const running = toasts().find(toast => toast.textContent?.includes('Now running Launched build'));
+  expect([...running!.querySelectorAll('button')].map(button => button.textContent)).toContain('Back to default');
+  await act(() => running!.querySelector<HTMLButtonElement>('button[aria-label="Dismiss"]')!.click());
+  expect(sessionStorage.getItem(LAUNCHED_STORAGE_KEY)).toBeNull();
+  expect(toasts().some(toast => toast.textContent?.includes('Now running'))).toBe(false);
 });
 
 it('opens Inspector Environment from the single environment chip instead of a machines dialog', async () => {
@@ -158,21 +189,21 @@ it('renders a brand-new workspace whose code document is still null', async () =
 });
 
 const baseInspection: InspectorView = { ...inspection, project: { ...project, repositoryReference: 'git@github.com:octo-labs/portal.git' }, workspace: { ...workspace, id: project.id, kind: 'base', phase: null } };
-const renderProject = () => root.render(<RuntimeWorkspaceShell projectId={project.id} workspaceId={project.id} snapshot={snapshot} inspection={baseInspection} connected reads={reads()} refreshInspection={refreshInspection} onOpenSettings={() => {}} onSelectWorkspace={() => {}} onSelectProject={() => {}} renderInspector={() => null} />);
+const renderProject = () => root.render(<Toasts><RuntimeWorkspaceShell projectId={project.id} workspaceId={project.id} snapshot={snapshot} inspection={baseInspection} connected reads={reads()} refreshInspection={refreshInspection} onOpenSettings={() => {}} onSelectWorkspace={() => {}} onSelectProject={() => {}} renderInspector={() => null} /></Toasts>);
 const needsApp = { state: 'needs-app', repository: 'octo-labs/portal', organization: 'octo-labs', appName: 'GitSpace BrandByX' };
 
-it('syncs a project through its bridging machine under a banner instead of walling it off', async () => {
+it('syncs a project through its bridging machine under a toast instead of walling it off', async () => {
   mocks.access = { ...needsApp, bridge: { machineId: 'machine-1', label: 'studio-mac', online: true } };
   await act(async () => { renderProject(); });
   expect(mocks.shell?.access).toBeUndefined();
-  expect(container.querySelector('[aria-label="GitHub sync"]')?.textContent).toContain('Syncs with GitHub through studio-mac, using your own access. Install GitSpace BrandByX on octo-labs');
+  expect(toasts().find(toast => toast.textContent?.includes('Syncs with GitHub'))?.textContent).toContain('Syncs with GitHub through studio-mac, using your own access. Install GitSpace BrandByX on octo-labs');
   expect(container.querySelector('[aria-label="Repository access"]')).toBeNull();
 });
 
 it('walls off a project no machine bridges with a card whose machine button opens the Environment', async () => {
   mocks.access = { ...needsApp, bridge: null };
   await act(async () => { renderProject(); });
-  expect(mocks.shell?.accessBanner).toBeUndefined();
+  expect(toasts().some(toast => toast.textContent?.includes('Syncs with GitHub'))).toBe(false);
   expect(mocks.shell?.access?.notice).toBe('The project agent starts once GitSpace can read octo-labs/portal.');
   const attach = [...container.querySelectorAll<HTMLButtonElement>('[aria-label="Repository access"] button')].find(button => button.textContent === 'Attach a machine');
   await act(() => attach?.click());
@@ -183,9 +214,9 @@ it('copies a refused repository in through the chosen online machine, then attac
   mocks.access = { ...needsApp, bridge: { machineId: 'machine-old', label: 'old-laptop', online: false }, awaitsCopy: true };
   const machine = (id: string, label: string, state: 'online' | 'offline'): InspectorView['machines'][number] => ({ id, label, state, kind: 'physical', provider: 'physical', notes: '', desiredState: 'online', lifecycleRevision: 1, operationId: null, error: null, rpcEndpoint: null });
   const machines = [machine('machine-off', 'attic-box', 'offline'), machine('machine-on', 'studio-mac', 'online')];
-  await act(async () => { root.render(<RuntimeWorkspaceShell projectId={project.id} workspaceId={project.id} snapshot={snapshot} inspection={{ ...baseInspection, machines }} connected reads={reads()} refreshInspection={refreshInspection} onOpenSettings={() => {}} onSelectWorkspace={() => {}} onSelectProject={() => {}} renderInspector={() => null} />); });
+  await act(async () => { root.render(<Toasts><RuntimeWorkspaceShell projectId={project.id} workspaceId={project.id} snapshot={snapshot} inspection={{ ...baseInspection, machines }} connected reads={reads()} refreshInspection={refreshInspection} onOpenSettings={() => {}} onSelectWorkspace={() => {}} onSelectProject={() => {}} renderInspector={() => null} /></Toasts>); });
   // A repository still waiting for its copy stays walled even with a machine attached.
-  expect(mocks.shell?.accessBanner).toBeUndefined();
+  expect(toasts().some(toast => toast.textContent?.includes('Syncs with GitHub') || toast.textContent?.includes('GitHub sync paused'))).toBe(false);
   const labels = [...container.querySelectorAll<HTMLButtonElement>('[aria-label="Repository access"] button')].map(button => button.textContent);
   expect(labels).toContain('Copy through studio-mac');
   expect(labels).not.toContain('Copy through attic-box');

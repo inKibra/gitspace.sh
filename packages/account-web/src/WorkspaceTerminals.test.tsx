@@ -5,6 +5,7 @@ import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { liveNotices } from './live-notices.js';
+import { Toasts } from './toasts.js';
 import { WorkspaceTerminals, type WorkspaceTerminalView, type WorkspaceTerminalsProps } from './WorkspaceTerminals.js';
 
 const synchronized = vi.hoisted(() => ({ value: { terminals: [] as WorkspaceTerminalView[], output: null }, cursor: 0, transportError: null }));
@@ -114,7 +115,7 @@ function button(text: string): HTMLButtonElement | undefined {
 }
 
 async function render(options: WorkspaceTerminalsProps) {
-  await act(() => root.render(<WorkspaceTerminals {...options} />));
+  await act(() => root.render(<Toasts><WorkspaceTerminals {...options} /></Toasts>));
   await flushFrames();
 }
 

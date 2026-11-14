@@ -47,6 +47,7 @@ import { glyph } from './glyph.js';
 import { EmptyState, PageCanvas, PageHeader } from './GitSpaceShell.js';
 import { ProjectAssignmentMatrix } from './ProjectAssignmentMatrix.js';
 import { BrowserPlugins, PairChromeDialog, type BrowserPluginsState, type PairChromeRequest } from './BrowserPlugins.js';
+import { useToasts } from './toasts.js';
 
 export interface PluginsPageProps {
   connections: readonly McpConnectionRpcView[];
@@ -263,6 +264,8 @@ export function PluginsPage(props: PluginsPageProps) {
   }, [props.onRefresh]);
 
   const error = props.error ?? actionError;
+  // The open dialog shows the same error inline.
+  useToasts([error && expandedConnection === null && connectedToolkit === null && !creatingCustom ? { key: `plugins:${error}`, tone: 'error', message: error, onDismiss: () => setActionError(null) } : null]);
   return <PageCanvas>
     <PageHeader kicker="Account configuration" title="Plugins" description="Manage account connections, then explicitly grant each project access. Runtime diagnostics are separate and never required for management." />
 
@@ -327,8 +330,6 @@ export function PluginsPage(props: PluginsPageProps) {
       <div className="flex flex-wrap gap-3"><Select value={diagnosticProjectId} disabled={pending !== null} onValueChange={(id) => { setDiagnosticProjectId(id); setDiscoveredTools(null); }}><SelectTrigger aria-label="Diagnostic project" placeholder="Choose project" />{selectOptions(props.projects.map((project) => ({ value: project.id, label: project.name })))}</Select><Button variant="secondary" disabled={pending !== null || !diagnosticProjectId} loading={pending === 'discover'} onClick={() => void settle('discover', async () => { setDiscoveredTools(null); setDiscoveredTools(await props.onDiscover(diagnosticProjectId)); })}>Discover runtime tools</Button></div>
       {discoveredTools ? <><p role="status" className="text-caption tabular-nums text-muted-foreground">{discoveredTools.length} discovered tools · project space {props.projects.find((project) => project.id === diagnosticProjectId)?.name}</p>{discoveredTools.map((tool) => <p key={tool.ompToolName} className="text-caption"><code>{tool.ompToolName}</code> · {tool.description ?? tool.name}</p>)}</> : <p className="text-caption text-muted-foreground">Not checked. Connections and assignments remain editable without a machine.</p>}
     </section> : null}
-
-    {error ? <p role="alert" className="mt-4 text-body text-destructive">{error}</p> : null}
 
     <Dialog open={expandedConnection !== null} onOpenChange={(open) => { if (!open) setExpanded(null); }}>
       {expandedConnection ? <DialogContent size="lg"><DialogHeader><DialogTitle>{expandedConnection.label}</DialogTitle><DialogDescription>Choose where agents can discover this plugin and, for Composio plugins, which tools they may call.</DialogDescription></DialogHeader>

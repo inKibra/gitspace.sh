@@ -10,6 +10,7 @@ import { machineLiveResource, terminalLiveResource, terminalStreamResource, type
 import { useSynchronizedResource } from './SynchronizationProvider.js';
 import { liveNotices, liveSource, liveTicks } from './live-notices.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
+import { useToasts } from './toasts.js';
 
 export type WorkspaceTerminalKind = 'user' | 'agent' | 'lifecycle' | 'service';
 export type WorkspaceTerminalState = 'starting' | 'running' | 'ready' | 'restarting' | 'stopping' | 'exited' | 'failed';
@@ -675,6 +676,11 @@ function MachineTerminals(props: WorkspaceTerminalsProps & { machine: WorkspaceT
   const running = terminals.filter((terminal) => isRunning(terminal.state)).length;
   const selectedIndex = selected ? terminals.indexOf(selected) : 0;
   const newTerminal = <Button variant="secondary" size="compact" leadingIcon={PlusGlyph} onClick={() => void create()} disabled={creating} loading={creating}>{creating ? 'Opening' : 'New terminal'}</Button>;
+  const disconnected = listed.transportError ?? streamed.transportError ? selected?.protected ? 'Terminal status disconnected; reconnecting.' : 'Terminal delivery disconnected. Last received output is retained; reconnecting.' : null;
+  useToasts([
+    error === null ? null : { key: `terminal:${machine.id}:${error}`, tone: 'error', persistent: true, message: error, onDismiss: () => setError(null) },
+    disconnected === null ? null : { key: `terminal-transport:${machine.id}:${disconnected}`, tone: 'warning', persistent: true, message: disconnected },
+  ]);
 
   return <section className="flex h-full min-h-0 flex-col bg-surface-1" aria-label="Hub terminals">
     <header className="flex shrink-0 items-center gap-2 border-b border-border px-2 py-1.5">
@@ -701,7 +707,5 @@ function MachineTerminals(props: WorkspaceTerminalsProps & { machine: WorkspaceT
       </div>
       <TerminalErrorBoundary resetKey={selected.id} onError={() => setError('Terminal display unavailable. Close and reopen to reconnect.')}><div className="flex min-h-0 flex-1 flex-col" key={selected.id}>{selected.protected ? <ProtectedTerminal spaceId={spaceId} machineId={machine.id} name={selected.name} running={isRunning(selected.state)} live={(name, after, signal) => props.live(machine.id, name, after, signal)} onData={sendInput} onDisconnect={() => { pendingInput.current.length = 0; }} onError={() => setError('Protected terminal display unavailable. Close and reopen to reconnect.')} /> : <HubGhosttyTerminal data={output?.data ?? ''} disabled={!isRunning(selected.state)} onData={sendInput} onError={(cause) => setError(cause.message)} />}</div></TerminalErrorBoundary>
     </> : <div className="flex min-h-0 flex-1 items-center justify-center p-6"><EmptyState icon={<TerminalSquare width={24} height={24} strokeWidth={1.5} />} title="No terminals" description={`Open a terminal on ${machine.label} in this workspace's checkout.`} action={newTerminal} /></div>}
-    {error ? <div className="shrink-0 bg-destructive-light px-3 py-1.5 text-caption text-destructive" role="alert">{error}</div> : null}
-    {listed.transportError ?? streamed.transportError ? <div className="shrink-0 px-3 py-1.5 text-caption text-muted-foreground" role="status">{selected?.protected ? 'Terminal status disconnected; reconnecting.' : 'Terminal delivery disconnected. Last received output is retained; reconnecting.'}</div> : null}
   </section>;
 }

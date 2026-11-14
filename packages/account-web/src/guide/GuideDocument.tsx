@@ -60,12 +60,10 @@ function useFileChanges(sections: readonly ChangeGuideSection[], loadDiff: (path
   return { changes, measuring: runtimeAvailable && changes === null };
 }
 
-export function GuideDocument({ guide, kicker, banner, actions, onLoadDiff, workspace, captures, comparison, focusSection, initialOpen, onOpenChange }: {
+export function GuideDocument({ guide, kicker, actions, onLoadDiff, workspace, captures, comparison, focusSection, initialOpen, onOpenChange }: {
   guide: GuideContent;
   /** The line above the title: where the guide is from. */
   kicker: ReactNode;
-  /** Above everything else: that an older revision is shown. */
-  banner?: ReactNode;
   /** Controls beside the header (revisions, sharing). */
   actions?: ReactNode;
   onLoadDiff(path: string): Promise<RepositoryDiffView>;
@@ -106,7 +104,6 @@ export function GuideDocument({ guide, kicker, banner, actions, onLoadDiff, work
   const otherCaptures = guide.captures?.filter((reference) => reference.kind !== 'artifact') ?? [];
   return <article className="flex w-full min-w-0 flex-col px-5 pb-16 pt-4">
     <header className={`flex flex-col gap-3 ${MEASURE}`}>
-      {banner}
       <span className="text-caption text-muted-foreground">{kicker}</span>
       <h1 className="flex flex-wrap items-center gap-x-1.5 text-[22px] font-semibold leading-snug text-foreground">{guide.title}<Source by="agent" what="the title, the introduction and the sections" /></h1>
       <p className="flex flex-wrap items-center gap-x-1.5 text-caption tabular-nums text-muted-foreground">

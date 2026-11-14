@@ -7,6 +7,7 @@ import { rpcClient } from '../rpc-client.js';
 import { rpcErrorMessage } from '../rpc-error-message.js';
 import { navigateProductUrl, setProductRoute } from '../routes.js';
 import { useAccountMachines, useEnvironmentSynchronization } from '../SynchronizationProvider.js';
+import { useToasts } from '../toasts.js';
 import { useRetainedQueryValue, useRetainedRead } from '../useRetainedRead.js';
 import { useWorkspaceRunMachine } from '../useWorkspaceRunMachine.js';
 import { workspaceMachines, workspaceStatus } from '../workspace-status.js';
@@ -49,6 +50,16 @@ export function LiveEnvironment({ projectId, projectName, workspaceName, spaceId
   const [logSelection, setLogSelection] = useState<{ runId: string; script: { id: string; label: string } } | null>(null);
   const [unsent, setUnsent] = useState<{ machine: string; result: Extract<RuntimeSyncRequestResult, { method: 'diff' }> } | null>(null);
   const lfsTransition = useLfsTransition();
+  const refreshError = read.value && read.error ? rpcErrorMessage(read.error, 'environment.get') : null;
+  const directoryError = read.value && machinesQuery.state === 'failure' ? rpcErrorMessage(machinesQuery.error, 'Load machine directory') : null;
+  const runtimeError = read.value && !runtimeContext && runtime.state === 'failure' ? rpcErrorMessage(runtime.error, 'Load workspace machines') : null;
+  useToasts([
+    refreshError === null ? null : { key: `environment-read:${refreshError}`, tone: 'error', persistent: true, message: `Environment refresh failed; showing the last accepted state. ${refreshError}`, action: { label: 'Retry environment', onClick: () => void query.refetch() } },
+    directoryError === null ? null : { key: `environment-machine-directory:${directoryError}`, tone: 'error', persistent: true, message: directoryError },
+    runtimeError === null ? null : { key: `environment-workspace-machines:${runtimeError}`, tone: 'error', persistent: true, message: runtimeError, action: { label: 'Retry machines', onClick: () => void runtime.refetch() } },
+    actionError === null ? null : { key: `environment-action:${actionError}`, tone: 'error', message: <span className="whitespace-pre-wrap">{actionError}</span>, onDismiss: () => setActionError(null) },
+    notice === null ? null : { key: `environment-notice:${notice}`, tone: 'info', message: notice, onDismiss: () => setNotice(null) },
+  ]);
   if (!read.value) return read.error ? <div className="flex flex-col gap-2 p-4"><p role="alert" className="text-caption text-destructive">{rpcErrorMessage(read.error, 'environment.get')}</p><Button variant="ghost" size="compact" onClick={() => void query.refetch()}>Retry environment</Button></div> : <p className="p-4 text-caption text-muted-foreground" role="status">Loading environment…</p>;
   const remote = read.value;
   const bundle = EnvironmentBundleSchema.parse(JSON.parse(remote.bundleJson));
@@ -141,11 +152,6 @@ export function LiveEnvironment({ projectId, projectName, workspaceName, spaceId
   const commitLfs = async () => { if (onAskAgent) await onAskAgent('Help me review and commit the uncommitted Git LFS changes before continuing.'); else onOpenAgent(); };
   return <div className="flex min-h-0 flex-1 flex-col">
     {read.refreshing ? <p role="status" className="sr-only">Refreshing environment…</p> : null}
-    {read.error ? <p role="alert" className="px-4 py-2 text-caption text-destructive">Environment refresh failed; showing the last accepted state. {rpcErrorMessage(read.error, 'environment.get')}<Button variant="ghost" size="compact" onClick={() => void query.refetch()}>Retry environment</Button></p> : null}
-    {machinesQuery.state === 'failure' ? <p role="alert" className="px-4 py-2 text-caption text-destructive">{rpcErrorMessage(machinesQuery.error, 'Load machine directory')}</p> : null}
-    {!runtimeContext && runtime.state === 'failure' ? <p role="alert" className="px-4 py-2 text-caption text-destructive">{rpcErrorMessage(runtime.error, 'Load workspace machines')}<Button variant="ghost" onClick={() => void runtime.refetch()}>Retry machines</Button></p> : null}
-    {actionError ? <p role="alert" tabIndex={0} className="max-h-24 shrink-0 overflow-auto whitespace-pre-wrap break-words px-4 py-2 text-caption text-destructive">{actionError}</p> : null}
-    {notice ? <p role="status" className="px-4 py-2 text-caption text-muted-foreground">{notice}</p> : null}
     <EnvironmentView
       model={model}
       busy={busy}

@@ -7,6 +7,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { SynchronizationContext } from './SynchronizationProvider.js';
 import { liveNotices } from './live-notices.js';
 import { SynchronizationOwner } from './synchronization.js';
+import { Toasts } from './toasts.js';
 import { WorkspaceTerminals, type WorkspaceTerminalOutput, type WorkspaceTerminalView, type WorkspaceTerminalsProps } from './WorkspaceTerminals.js';
 
 vi.mock('./GitSpaceShell.js', () => ({ EmptyState: ({ title, description, action }: { title: ReactNode; description?: ReactNode; action?: ReactNode }) => <div>{title}{description}{action}</div> }));
@@ -125,7 +126,7 @@ async function settle() {
 
 async function render(terminals: Pick<WorkspaceTerminalsProps, 'events' | 'create' | 'stop'>) {
   const props: WorkspaceTerminalsProps = { spaceId: 'space', machines: [{ id: 'machine', label: 'Machine' }], machineId: 'machine', onSelectMachine: vi.fn(), events: terminals.events, live: async () => ({ status: 'ok', value: { cursor: 0, events: [] } }), create: terminals.create, send: vi.fn(async () => undefined), stop: terminals.stop };
-  await act(() => root.render(<SynchronizationContext.Provider value={owner}><WorkspaceTerminals {...props} /></SynchronizationContext.Provider>));
+  await act(() => root.render(<SynchronizationContext.Provider value={owner}><Toasts><WorkspaceTerminals {...props} /></Toasts></SynchronizationContext.Provider>));
   await settle();
 }
 

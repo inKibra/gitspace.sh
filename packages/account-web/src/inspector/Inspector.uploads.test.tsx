@@ -7,6 +7,7 @@ import { rpcErrors } from '@gitspace/protocol/rpc-contract';
 
 /** A small part size from begin, so files of a few parts stay small. */
 const PART = 256 * 1024;
+import { Toasts } from '../toasts.js';
 import { Inspector, type InspectorProps } from './Inspector.js';
 import type { ArtifactUploadClient } from './artifact-upload.js';
 import type { DriveFileView, InspectorDrive } from './DriveSurface.js';
@@ -19,7 +20,7 @@ let container: HTMLDivElement;
 let props: InspectorProps;
 let animationDescriptor: PropertyDescriptor | undefined;
 const unavailable = async (): Promise<never> => { throw new Error('Unexpected action'); };
-async function render() { await act(async () => root.render(<Inspector {...props} />)); }
+async function render() { await act(async () => root.render(<Toasts><Inspector {...props} /></Toasts>)); }
 async function settle() {
   for (let turn = 0; turn < 20; turn += 1) {
     await act(async () => {

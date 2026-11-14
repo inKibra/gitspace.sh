@@ -7,6 +7,7 @@ import { AlertCircle, Archive, ArrowLeft, Expand06, File02, FileCode02, Globe01,
 import { useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { rpcErrorMessage } from '../rpc-error-message.js';
 import { EmptyState, type AgentScopeView, type WorkspaceView } from '../GitSpaceShell.js';
+import { useToasts, type Toast } from '../toasts.js';
 import { OverviewView, type OverviewViewProps } from './OverviewView.js';
 import { UsageView, type UsageStatus, type InspectorProviderUsageState } from './UsageView.js';
 import { AgentSetupView, type InspectorAgentSetupState } from './AgentSetupView.js';
@@ -329,6 +330,11 @@ export function Inspector(props: InspectorProps) {
   };
   const counts: Partial<Record<InspectorPermanentView, number>> = { browser: props.browserCount || undefined, subagents: props.subagents.length, files: props.repositoryEntries.filter((entry) => entry.kind === 'file' && entry.status !== 'clean').length, artifacts: artifacts.length, services: props.runtimeServices === undefined ? props.services.length : undefined, issues: props.issues ? openIssueCount(props.issues.document) : undefined };
   for (const tab of permanentTabs) if (props.sectionErrors?.[tab.id] && !props.sectionErrors[tab.id]!.retained) delete counts[tab.id];
+  useToasts(props.loading || props.error ? [] : permanentTabs.map((tab): Toast | null => {
+    const failure = props.sectionErrors?.[tab.id];
+    if (tab.id === 'agents' || !failure?.retained) return null;
+    return { key: `inspector-refresh:${tab.id}:${failure.message}`, tone: 'warning', persistent: true, message: `${tab.label} refresh failed; showing the last accepted state. ${failure.message}`, action: { label: `Retry ${tab.label}`, onClick: failure.retry } };
+  }));
   const threadPanel = activeThread || threadSelection ? <ThreadPanel
     thread={activeThread}
     selection={threadSelection}
@@ -496,11 +502,7 @@ export function Inspector(props: InspectorProps) {
     if (tab.id === 'agents') return null;
     const kept = keptMounted[tab.id] === true;
     if (kept && tab.id !== view && !opened.has(tab.id)) return null;
-    const failure = props.sectionErrors?.[tab.id];
-    const content = <>
-      {failure?.retained ? <p role="alert" className="px-4 py-2 text-caption text-destructive">{tab.label} refresh failed; showing the last accepted state. {failure.message}<Button variant="ghost" size="compact" onClick={failure.retry}>Retry {tab.label}</Button></p> : null}
-      {renderSurface(tab.id)}
-    </>;
+    const content = renderSurface(tab.id);
     return kept
       ? <div role="tabpanel" id={`inspectorTabs-panel-${index}`} aria-labelledby={`inspectorTabs-tab-${index}`} hidden={view !== tab.id} className={view === tab.id ? 'flex min-h-0 flex-1 flex-col' : 'hidden'} key={tab.id}>{content}</div>
       : <TabsSubtlePanel idPrefix="inspectorTabs" index={index} selectedIndex={tabIndex} className="flex min-h-0 flex-1 flex-col" key={tab.id}>{content}</TabsSubtlePanel>;

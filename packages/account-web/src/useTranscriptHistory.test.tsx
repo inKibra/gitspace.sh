@@ -483,10 +483,11 @@ it('paints the saved transcript on a reload before its first page answers, and s
   expect(requests).toHaveLength(1);
   expect(container.textContent).toContain('Message 3');
   expect(history.saved).toBe(true);
-  expect(container.textContent).toContain('Showing the copy saved in this browser');
+  const savedMark = () => container.querySelector('nav[aria-label="Location"] [role="status"]')?.getAttribute('aria-label') ?? '';
+  expect(savedMark()).toContain('Showing the copy saved in this browser');
   await act(() => pending.finish());
   expect(history.saved).toBe(false);
-  expect(container.textContent).not.toContain('Showing the copy saved in this browser');
+  expect(savedMark()).not.toContain('Showing the copy saved in this browser');
 });
 
 it('replaces saved rows with the server’s in place, without duplicates, and saves the new window', async () => {

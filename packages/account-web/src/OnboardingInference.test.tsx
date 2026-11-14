@@ -8,6 +8,7 @@ import type { InferenceController } from './InferenceContext.js';
 import { InferencePage, onboardingInferenceGate } from './InferencePage.js';
 import type { ProvidersSectionProps } from './ProvidersSection.js';
 import { SettingsPage } from './SettingsPage.js';
+import { Toasts } from './toasts.js';
 
 vi.mock('./rpc-client.js', () => ({ rpcClient: {} }));
 
@@ -27,7 +28,7 @@ function Onboarding({ providers, models, modelsReady, defaultModel }: Scenario) 
   const inference: InferenceController = { state, loading: false, pending: false, error: null, refresh: noop, create: async () => state, update: async () => state, remove: async () => state, assign: async () => state };
   const section: ProvidersSectionProps = { providers, usage: null, usageStatus: 'idle', onShow: () => undefined, onRefreshUsage: noop, onSignIn: noop, onDisableAccount: noop, onEnableAccount: noop, onRemoveAccount: noop, onSetApiKey: noop, login: { flow: null, respond: noop, cancel: noop } };
   const gate = onboardingInferenceGate({ profile: current, models, modelsReady, modelsError: null, providers: section });
-  return <SettingsPage
+  return <Toasts><SettingsPage
     mode="onboarding" settings={settings} machines={[]} runtimeSettings={[]} runtimeGeneration={1}
     inferenceSetup={<InferencePage onboarding initialTab="Providers" inference={inference} selectedProfileId={DEFAULT_INFERENCE_PROFILE_ID} onSelectProfile={() => undefined} projects={[]} schema={schema} schemaLoading={false} schemaError={null} onRefreshSchema={() => undefined} models={models} imageModels={[]} modelsReady={modelsReady} modelsLoading={!modelsReady} modelsError={null} providers={section} />}
     inferenceReady={gate === 'ready'}
@@ -39,7 +40,7 @@ function Onboarding({ providers, models, modelsReady, defaultModel }: Scenario) 
     canConnectBrowser={false} onCreateBrowserInvitation={unused} onBrowserInvitationStatus={unused} onCancelBrowserInvitation={unused} onBrowserConnected={noop}
     projects={[]} onBack={() => undefined} onComplete={noop} runtimeSync={{ status: 'synced', message: null }} deployment={null} onBackToDefault={noop} onCheckCanonical={noop} saving={false} error={null}
     github={null} onStartGitHubApp={unused} onStartGitHubInstall={unused} onRotateGitHubKey={unused} onGitHubAction={unused}
-  />;
+  /></Toasts>;
 }
 
 let root: Root;

@@ -3,6 +3,7 @@ import { act, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ChangeGuideView, EvidenceReference, JournalEntryView } from '@gitspace/protocol';
+import { Toasts } from '../toasts.js';
 import { Inspector, type InspectorProps } from './Inspector.js';
 import { InspectorLayout } from './inspector-shared.js';
 import type { DriveFileView } from './DriveSurface.js';
@@ -24,7 +25,7 @@ function Pane({ inspector }: { inspector: InspectorProps }) {
   const [full, setFull] = useState(false);
   return <InspectorLayout.Provider value={{ full, onFull: setFull }}><Inspector {...inspector} /></InspectorLayout.Provider>;
 }
-async function render(withPane = false) { await act(async () => root.render(withPane ? <Pane inspector={props} /> : <Inspector {...props} />)); }
+async function render(withPane = false) { await act(async () => root.render(<Toasts>{withPane ? <Pane inspector={props} /> : <Inspector {...props} />}</Toasts>)); }
 function button(label: string): HTMLButtonElement | undefined {
   return [...container.querySelectorAll('button')].findLast((node) => node.textContent === label || node.getAttribute('aria-label') === label);
 }

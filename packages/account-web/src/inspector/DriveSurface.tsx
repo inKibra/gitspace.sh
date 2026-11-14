@@ -12,6 +12,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { EmptyState } from '../GitSpaceShell.js';
 import { glyph } from '../glyph.js';
 import { rpcErrorMessage } from '../rpc-error-message.js';
+import { useToasts } from '../toasts.js';
 import { ArtifactActions, type ArtifactActionsHandlers } from './ArtifactActions.js';
 import { ArtifactUploadList, type ArtifactUploads } from './ArtifactUploads.js';
 import { DRIVE_FILE_MAX_BYTES } from '@gitspace/protocol';
@@ -241,6 +242,10 @@ export function DriveSurface({ drive, references, uploads, uploadDisabledReason,
   const [pending, setPending] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  useToasts([
+    error === null ? null : { key: `drive-action:${error}`, tone: 'error', message: error, onDismiss: () => setError(null) },
+    notice === null ? null : { key: `drive-notice:${notice}`, tone: 'info', message: notice, onDismiss: () => setNotice(null) },
+  ]);
   const now = Date.now();
   const writable = root === drive.own;
   const label = root === 'base' ? 'Project drive' : 'This workspace';
@@ -329,8 +334,6 @@ export function DriveSurface({ drive, references, uploads, uploadDisabledReason,
         {actions && writable ? <ArtifactActions selected={selectedReferences} actions={actions} /> : null}
         <Button variant="ghost" size="icon-compact" className="ml-auto" aria-label="Clear selection" onClick={() => setSelected(new Set())}><XClose width={14} height={14} strokeWidth={1.5} /></Button>
       </div> : null}
-      {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}
-      {notice ? <div role="status" className="flex items-center gap-2 text-caption text-muted-foreground"><span className="min-w-0 flex-1 truncate">{notice}</span><Button variant="ghost" size="icon-compact" aria-label="Dismiss" onClick={() => setNotice(null)}><XClose width={14} height={14} strokeWidth={1.5} /></Button></div> : null}
     </div>
     <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-3 pb-6">
       {canUpload && !query ? <Dropzone target={target} dragging={dragging} empty={!files.length} disabledReason={uploadDisabledReason} onFiles={(picked) => uploads.add(picked, folder)} /> : null}

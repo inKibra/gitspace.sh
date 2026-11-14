@@ -206,8 +206,8 @@ export function LaunchSheet({ launch, open, onOpenChange, onRetry, onDiscard }: 
 }
 
 export const LAUNCHED_STORAGE_KEY = 'gitspace.launched';
-/** How long after the reload the `Now running` strip is still worth showing. */
-export const LAUNCHED_BANNER_MAX_AGE_MS = 60_000;
+/** How long after the reload the `Now running` toast is still worth showing. */
+export const LAUNCHED_MARK_MAX_AGE_MS = 60_000;
 export interface LaunchedMark { sha: string; label: string; at: number }
 
 /** The launch this page was reloaded into, when the mark is fresh; anything older or malformed is dropped. */
@@ -219,21 +219,9 @@ export function readLaunchedMark(storage: Pick<Storage, 'getItem' | 'removeItem'
   const mark = parsed !== null && typeof parsed === 'object' && 'sha' in parsed && 'label' in parsed && 'at' in parsed && typeof parsed.sha === 'string' && typeof parsed.label === 'string' && typeof parsed.at === 'number'
     ? { sha: parsed.sha, label: parsed.label, at: parsed.at }
     : null;
-  if (mark === null || now - mark.at > LAUNCHED_BANNER_MAX_AGE_MS) {
+  if (mark === null || now - mark.at > LAUNCHED_MARK_MAX_AGE_MS) {
     storage.removeItem(LAUNCHED_STORAGE_KEY);
     return null;
   }
   return mark;
-}
-
-/** Post-reload strip at the top of the agent canvas: what this page now runs, and the way back. */
-export function LaunchedBanner({ mark, onBackToDefault, onDismiss }: { mark: LaunchedMark; onBackToDefault(): void | Promise<void>; onDismiss(): void }) {
-  const shape = useShape();
-  return <Elevated offset={2} role="status" className={`${shape.container} flex items-center gap-2 px-3 py-2 text-caption`}>
-    <span className="text-muted-foreground"><Rocket02 width={14} height={14} strokeWidth={1.5} /></span>
-    <span className="text-foreground">Now running <strong>{mark.label}</strong></span>
-    <span className="text-muted-foreground">·</span>
-    <Button variant="ghost" size="compact" onClick={() => { void onBackToDefault(); }}>Back to default</Button>
-    <Button variant="ghost" size="icon-compact" aria-label="Dismiss" onClick={onDismiss}><XClose width={14} height={14} strokeWidth={1.5} /></Button>
-  </Elevated>;
 }

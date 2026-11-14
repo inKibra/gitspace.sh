@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { EmptyState, PageCanvas, PageHeader } from './GitSpaceShell.js';
 import { invalidatesRead } from './useRetainedRead.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
+import { useToasts } from './toasts.js';
 
 export interface ProjectSecretMetadata {
   projectId: string;
@@ -108,6 +109,8 @@ export function ProjectSecretsPage(props: ProjectSecretsProps) {
       setAccountSecrets((current) => current.map((secret) => secret.name === updated.name ? updated : secret));
     });
   };
+  // The open dialog shows the same error inline.
+  useToasts([error && draft === null && grantSecret === undefined ? { key: `project-secrets:${error}`, tone: 'error', message: error, onDismiss: () => setError(null) } : null]);
   const secretTable = (secrets: readonly (ProjectSecretMetadata | AccountSecretMetadata)[], target: WriteTarget) => <Table>
     <TableHeader><TableRow><TableHead>Secret</TableHead><TableHead>Access</TableHead><TableHead>Updated</TableHead><TableHead><span className="sr-only">Actions</span></TableHead></TableRow></TableHeader>
     <TableBody>{secrets.map((secret, index) => <TableRow key={secret.name} index={index}>
@@ -127,7 +130,6 @@ export function ProjectSecretsPage(props: ProjectSecretsProps) {
   };
   return <PageCanvas>
     <PageHeader kicker="Account configuration" title="Secrets & values" description="Store credentials once, grant access explicitly, and keep non-sensitive values visible. No running workspace is required." actions={<Button variant="ghost" disabled={saving || loading} onClick={() => { setError(null); void refresh(); }}>Refresh configuration</Button>} />
-    {error ? <p role="alert" className="mb-4 text-body text-destructive">{error}</p> : null}
     <div className="flex flex-col gap-8">
       <section className="flex flex-col gap-3" aria-label="Account secrets">
         <div className="flex items-center justify-between gap-3"><h2 className="text-subtitle font-semibold">Account secrets</h2><Button variant="primary" disabled={saving} onClick={() => openEditor('secret', { scope: 'global' })}>Add account secret</Button></div>

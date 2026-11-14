@@ -122,18 +122,6 @@ describe('GitSpaceShell', () => {
     expect(html).toContain('aria-label="Open terminals"');
   });
 
-  it('links disconnected provider setup to Inference instead of account settings', () => {
-    const rejects = async (): Promise<never> => { throw new Error('not called during server render'); };
-    const sessionControls: NonNullable<GitSpaceShellProps['sessionControls']> = {
-      value: { sessionId: 'session-a', role: null, roleLabel: null, roles: [], provider: 'anthropic', models: [{ provider: 'anthropic', id: 'claude', name: 'Claude', contextWindow: null, unavailable: null }], model: 'claude', thinking: null, fastMode: false, planMode: false, context: null, cost: 0, todos: [], queue: { steering: [], followUp: [] }, pendingAsk: null, goal: null, history: [], historyAnchorId: null },
-      onCycleRole: rejects, onSetModel: rejects, onSetThinking: rejects, onSetFast: rejects, onSetGoal: rejects, onCompact: rejects, onClearQueue: rejects, onRemoveQueuedMessage: rejects, onPromoteQueuedMessage: rejects, onDismissAutomationRun: rejects, onAnswerAsk: rejects, onStop: rejects, onNavigateTree: rejects,
-    };
-    const disconnected = renderToStaticMarkup(<GitSpaceShell {...verticalSliceFixture} sessionControls={sessionControls} providers={[{ id: 'anthropic', name: 'Anthropic', hasAuth: false }]} />);
-    expect(disconnected).toContain('href="/inference?section=providers"');
-    const connected = renderToStaticMarkup(<GitSpaceShell {...verticalSliceFixture} sessionControls={sessionControls} providers={[{ id: 'anthropic', name: 'Anthropic', hasAuth: true }]} />);
-    expect(connected).not.toContain('href="/inference?section=providers"');
-  });
-
   it('shows a question GitSpace asks itself, such as a machine-attach approval, above the composer with only its choices', () => {
     const rejects = async () => { throw new Error('not used'); };
     const pendingAsk: NonNullable<NonNullable<GitSpaceShellProps['sessionControls']>['value']['pendingAsk']> = {

@@ -13,6 +13,7 @@ import { browserPluginsUrl, navigateProductUrl, setProductRoute } from './routes
 import { useInference } from './InferenceContext.js';
 import { ProjectInferenceSelector } from './InferencePage.js';
 import { latestOperation, OperationCardActions, operationActive, OperationProgress, OperationStatusLine } from './OperationProgress.js';
+import { useToasts, type Toast } from './toasts.js';
 
 export interface AccountWorkPagesProps {
   view: 'kanban' | 'projects';
@@ -85,10 +86,13 @@ function WorkspaceStatus({ workspace }: { workspace: AccountWorkspace }) {
 function DirectoryCoverage({ projects, directory, loading, onRefresh }: Pick<AccountWorkPagesProps, 'projects' | 'directory' | 'loading' | 'onRefresh'>) {
   const missing = projects.filter((project) => project.lifecycle !== 'deleting' && !directory[project.id]);
   const errors = projects.filter((project) => directory[project.id]?.error);
+  const missingNames = missing.map((project) => project.name).join(', ');
+  useToasts([
+    missing.length ? { key: `directory-coverage:${missingNames}`, tone: 'warning', persistent: true, message: `Workspace coverage unavailable: ${missingNames}.` } : null,
+    ...errors.map((project): Toast => ({ key: `directory-coverage:${project.id}:${directory[project.id]!.error}`, tone: 'warning', persistent: true, message: `${project.name}: ${directory[project.id]!.error} Saved entries remain visible; coverage may be incomplete.`, action: { label: 'Refresh', onClick: onRefresh } })),
+  ]);
   return <div className="flex flex-col gap-1 px-8 pt-4 text-caption text-muted-foreground" aria-live="polite">
     <div className="flex items-center justify-between gap-3"><span>{loading ? 'Refreshing account directory…' : 'Account-wide saved workspaces and recorded status. Viewing does not open a workspace.'}</span><Button variant="ghost" size="compact" onClick={onRefresh} leadingIcon={glyph(RefreshCcw01)}>Refresh</Button></div>
-    {missing.length ? <p>Workspace coverage unavailable: {missing.map((project) => project.name).join(', ')}.</p> : null}
-    {errors.map((project) => <p key={project.id} role="status">{project.name}: {directory[project.id]!.error} Saved entries remain visible; coverage may be incomplete.</p>)}
   </div>;
 }
 
@@ -226,6 +230,7 @@ function ProjectsView({ projects, workspaces, directory, operations, onOpen, onO
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const pendingRef = useRef(false);
+  useToasts([error && !projectDialog && workspaceDialog === null ? { key: `project-operation:${error}`, tone: 'error', message: error, onDismiss: () => setError(null) } : null]);
   const visible = projects.filter((project) => filter === 'all' || (filter === 'archived' ? project.lifecycle === 'archived' : project.lifecycle !== 'archived' && project.lifecycle !== 'deleting'));
   const run = async (action: () => void | Promise<void>, close?: () => void): Promise<void> => {
     if (pendingRef.current) return;
@@ -324,7 +329,6 @@ function ProjectsView({ projects, workspaces, directory, operations, onOpen, onO
       </div> : null}
       <DialogFooter><Button variant="secondary" onClick={() => setSettingsProjectId(null)}>Done</Button></DialogFooter>
     </DialogContent></Dialog>
-    {error && !projectDialog && workspaceDialog === null ? <p role="alert" className="pt-4 text-caption text-destructive">{error}</p> : null}
     {onCreateProject ? <CreateProjectDialog open={projectDialog} onOpenChange={(open) => { setProjectDialog(open); if (!open) setError(null); }} pending={pending} error={projectDialog ? error : null} onSubmit={(input) => run(() => onCreateProject(input), () => setProjectDialog(false))} /> : null}
     {onCreateWorkspace ? <CreateWorkspaceDialog key={workspaceDialog ?? 'closed'} projectId={workspaceDialog} workspaces={workspaces} onOpenChange={(open) => { if (!open) { setWorkspaceDialog(null); setError(null); } }} pending={pending} error={workspaceDialog ? error : null} onSubmit={(input) => run(() => onCreateWorkspace(input), () => setWorkspaceDialog(null))} /> : null}
   </PageCanvas>;

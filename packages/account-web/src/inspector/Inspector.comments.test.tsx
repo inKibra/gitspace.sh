@@ -3,6 +3,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RepositoryDiffView, ReviewThreadView } from '@gitspace/protocol';
+import { Toasts } from '../toasts.js';
 import { Inspector, type InspectorProps } from './Inspector.js';
 import { RuntimeSubagentRecordSchema } from '@gitspace/protocol-runtime';
 
@@ -35,7 +36,7 @@ let container: HTMLDivElement;
 let props: InspectorProps;
 let animationDescriptor: PropertyDescriptor | undefined;
 const unavailable = async (): Promise<never> => { throw new Error('Unexpected action'); };
-async function render() { await act(async () => root.render(<Inspector {...props} />)); }
+async function render() { await act(async () => root.render(<Toasts><Inspector {...props} /></Toasts>)); }
 async function click(label: string) {
   const button = [...container.querySelectorAll('button')].find((node) => node.textContent === label || (node.getAttribute('role') === 'tab' && node.textContent?.includes(label)));
   expect(button).toBeDefined();
@@ -79,7 +80,7 @@ describe('Inspector review comments', () => {
     expect(container.querySelector('[role="alert"]')?.textContent).toContain('Review unavailable');
     expect(container.querySelector('textarea')?.value).toBe('Keep this context');
     const saved: ReviewThreadView = { projectId: 'project', spaceId: 'space', id: 'thread', revision: 1, anchor: create.mock.calls[0]![0].anchor, anchorState: 'current', staleReason: null, decision: 'pending', resolved: false, messages: [{ id: 'first', authorId: 'reviewer', body: 'Keep this context', createdAt: date }], createdAt: date, updatedAt: date };
-    props.onCreateThread = async () => { props = { ...props, threads: [saved] }; root.render(<Inspector {...props} />); return saved; };
+    props.onCreateThread = async () => { props = { ...props, threads: [saved] }; root.render(<Toasts><Inspector {...props} /></Toasts>); return saved; };
     await render();
     await click('Start thread');
     expect(container.querySelector('textarea')?.getAttribute('aria-label')).toBe('Reply to review thread');
@@ -105,7 +106,7 @@ describe('Inspector independent reads', () => {
   it('keeps Environment usable when Files fails and retries the failed section', async () => {
     const retry = vi.fn(() => {
       props = { ...props, sectionErrors: {}, repositoryEntries: [{ spaceId: 'space', generation: 7, mode: 'current', path: 'file.ts', name: 'file.ts', kind: 'file', status: 'clean', oldPath: null, blobId: null, size: null }] };
-      root.render(<Inspector {...props} />);
+      root.render(<Toasts><Inspector {...props} /></Toasts>);
     });
     props = { ...props, initialView: 'environment', environment: () => <button>Configure environment</button>, sectionErrors: { files: { message: 'Repository read failed (incident repo-123)', retained: false, retry } } };
     await render();
@@ -129,7 +130,7 @@ describe('Inspector independent reads', () => {
       sectionErrors: { files: { message: 'Repository refresh unavailable', retained: true, retry } },
     };
     await render();
-    expect(container.querySelector('[role="alert"]')?.textContent).toContain('Repository refresh unavailable');
+    expect(container.querySelector('section[aria-label="Notifications"] [role="alert"]')?.textContent).toContain('Repository refresh unavailable');
     await click('Retry Files');
     expect(retry).toHaveBeenCalledTimes(1);
     await click('Open file.ts');
@@ -158,7 +159,7 @@ it('does not label committed comparisons as machine-local changes', async () => 
 it('offers a scoped Stop only for active subagents and keeps their inspection read only', async () => {
   const stop = async (id: string) => {
     props = { ...props, subagents: props.subagents.map(agent => agent.type === 'side-agent' && agent.agentId === id ? { ...agent, status: 'done' } : agent) };
-    root.render(<Inspector {...props} />);
+    root.render(<Toasts><Inspector {...props} /></Toasts>);
   };
   props = { ...props, initialView: 'subagents', subagents: [
     { id: 'agent:a', type: 'side-agent', agentId: 'a', label: 'Research A', status: 'running', messages: [{ id: 'a-text', type: 'message', role: 'assistant', text: 'Read-only child transcript' }] },

@@ -8,6 +8,7 @@ import type { ProvidersSectionProps } from './ProvidersSection.js';
 import { useInference, type InferenceController } from './InferenceContext.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
 import { profileSettingViews, updatedProfileSettings } from './inference-settings.js';
+import { useToasts } from './toasts.js';
 
 /** Used on both the profile detail and project settings; no second assignment store. */
 export function ProjectInferenceSelector({ projectId, projectName }: { projectId: string; projectName: string }) {
@@ -115,8 +116,8 @@ export function InferencePage({ inference, selectedProfileId, onSelectProfile, p
       setDialog(null);
     } catch (cause) { setActionError(rpcErrorMessage(cause, 'Manage inference profile')); }
   };
+  useToasts([inference.error ? { key: `inference-profiles:${inference.error}`, tone: 'error', persistent: true, message: inference.error, action: { label: 'Refresh profiles', onClick: () => void inference.refresh(), pending: inference.loading } } : null]);
   const content = <>
-    {inference.error ? <div role="alert" className="flex flex-wrap items-center gap-2 text-caption text-destructive"><span>{inference.error}</span><Button variant="ghost" disabled={inference.loading} onClick={() => void inference.refresh()}>Refresh profiles</Button></div> : null}
     {!state ? <EmptyState icon={inference.loading ? <ThinkingIndicator /> : undefined} title={inference.loading ? 'Loading inference profiles…' : 'Inference profiles are unavailable'} description="Canonical configuration must be ready before profiles can be edited or used." /> : <>
       {!onboarding ? <section aria-label="Inference profiles" className="flex flex-col gap-3">
         <CardGroup orientation="inline" border="outlined" separated>{state.profiles.map((entry, index) => {

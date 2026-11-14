@@ -2,7 +2,7 @@
 // reader compares against ("changes since"), and how each section differs from it. Sections compare by id and content
 // hash; a section without a hash compares by its whole content.
 import type { ChangeGuideRevisionSummary, ChangeGuideSection, ChangeGuideView, RepositoryDiffView } from '@gitspace/protocol';
-import { Badge, Button, Select, SelectContent, SelectItem, SelectTrigger, badgeColors } from '@gitspace/ui';
+import { Badge, Select, SelectContent, SelectItem, SelectTrigger } from '@gitspace/ui';
 import { formatRelativeTime } from '../relative-time.js';
 import { Source } from './Authorship.js';
 
@@ -81,16 +81,6 @@ export function GuideRevisionControls({ revisions, shown, since, reviewerId, onS
         </SelectContent>
       </Select></div>
     </div> : null}
-  </div>;
-}
-
-/** Above an older revision: which one it is, and the way back to the latest. */
-export function OlderRevisionBanner({ shown, latest, onLatest }: { shown: number; latest: number; onLatest(): void }) {
-  return <div role="status" className="flex flex-wrap items-center gap-x-1.5 gap-y-1 border-l-2 py-1 pl-3 text-body" style={{ borderColor: badgeColors.amber }}>
-    <span className="font-medium text-foreground">Viewing r{shown} of {latest}</span>
-    <span className="text-muted-foreground">·</span>
-    <Button variant="tertiary" size="compact" type="button" onClick={onLatest}>Back to latest</Button>
-    <span className="w-full text-caption text-muted-foreground">Read-only: reading, accepting requirements and follow-ups happen on the latest revision.</span>
   </div>;
 }
 

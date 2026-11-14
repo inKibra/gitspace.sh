@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { glyph } from './glyph.js';
 import { formatRelativeTime } from './relative-time.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
+import { useToasts, type Toast } from './toasts.js';
 
 /** A project's repository access while its agent cannot read it. */
 export type BlockedProjectAccess = Exclude<GitHubProjectAccess, { state: 'ready' }>;
@@ -263,26 +264,34 @@ function GitHubAccessCard({ access, copy, onInstall, onOpenSettings, onAttachMac
 }
 
 /**
- * The project page's strip while a machine bridges its private repository to GitHub in place of the App: which machine
+ * The project page's toast while a machine bridges its private repository to GitHub in place of the App: which machine
  * syncs (or that sync is paused while it is offline), and what the App would add, with the next step towards it.
  */
-export function RepositoryBridgeBanner({ access, bridge, onInstall, onOpenSettings }: { access: GitHubBlockedAccess; bridge: GitHubProjectBridge; onInstall(): Promise<string>; onOpenSettings(): void }): ReactElement {
-  const shape = useShape();
+export function useRepositoryBridgeToasts(bridged: { access: GitHubBlockedAccess; bridge: GitHubProjectBridge } | null, onInstall: () => Promise<string>, onOpenSettings: () => void): void {
   const { installing, error, install } = useInstall(onInstall);
-  const { repository, organization } = access;
-  const name = repository.slice(repository.indexOf('/') + 1);
-  const adds = 'for pull requests, checks, automations and syncing without a machine.';
-  const lead = bridge.online ? `Syncs with GitHub through ${bridge.label}, using your own access.` : `GitHub sync paused: ${bridge.label} is offline.`;
-  const hint = access.state === 'needs-app' && access.appName === null ? `Create your GitHub App in Settings → GitHub, then install it on ${organization} ${adds}`
-    : access.state === 'needs-app' ? `Install ${access.appName} on ${organization} ${adds}`
-      : access.state === 'requested' ? `Waiting for an owner of ${organization} to approve ${access.appName}: only an organization owner can approve it.`
-        : `${access.appName} is installed on ${organization}, but ${name} isn't one of its selected repositories. An owner adds it in the App's repository access.`;
-  return <section aria-label="GitHub sync" className={`flex w-full max-w-3xl flex-wrap items-center gap-3 bg-surface-2 px-3 py-2 ${shape.container}`}>
-    <p className="min-w-0 flex-1 text-caption text-muted-foreground">{lead} {hint}</p>
-    {access.state === 'needs-app' && access.appName === null ? <Button variant="secondary" size="compact" type="button" onClick={onOpenSettings}>Open Settings → GitHub</Button>
-      : access.state === 'needs-app' ? <Button variant="secondary" size="compact" type="button" loading={installing} trailingIcon={glyph(LinkExternal01)} onClick={() => void install()}>Install on {organization}</Button>
-        : access.state === 'requested' ? <CopyStepsButton variant="secondary" text={ownerStepsText(access.appName, organization, repository)} />
-          : <Button variant="secondary" size="compact" type="button" trailingIcon={glyph(LinkExternal01)} onClick={() => window.open(githubInstallationUrl(access.installation), '_blank', 'noopener,noreferrer')}>Add {name} on GitHub</Button>}
-    {error ? <p role="alert" className="basis-full text-caption text-destructive">{error}</p> : null}
-  </section>;
+  const [copied, setCopied] = useState<'copied' | 'failed' | null>(null);
+  const bridgeToast = ((): Toast | null => {
+    if (!bridged) return null;
+    const { access, bridge } = bridged;
+    const { repository, organization } = access;
+    const name = repository.slice(repository.indexOf('/') + 1);
+    const adds = 'for pull requests, checks, automations and syncing without a machine.';
+    const lead = bridge.online ? `Syncs with GitHub through ${bridge.label}, using your own access.` : `GitHub sync paused: ${bridge.label} is offline.`;
+    const steps = access.state === 'requested' ? ownerStepsText(access.appName, organization, repository) : null;
+    const hint = access.state === 'needs-app' && access.appName === null ? `Create your GitHub App in Settings → GitHub, then install it on ${organization} ${adds}`
+      : access.state === 'needs-app' ? `Install ${access.appName} on ${organization} ${adds}`
+        : access.state === 'requested' ? `Waiting for an owner of ${organization} to approve ${access.appName}: only an organization owner can approve it.`
+          : `${access.appName} is installed on ${organization}, but ${name} isn't one of its selected repositories. An owner adds it in the App's repository access.`;
+    const action: Toast['action'] = access.state === 'needs-app' && access.appName === null ? { label: 'Open Settings → GitHub', onClick: onOpenSettings }
+      : access.state === 'needs-app' ? { label: `Install on ${organization}`, onClick: () => void install(), pending: installing }
+        : access.state === 'requested' ? { label: copied === 'copied' ? 'Copied' : 'Copy steps for the owner', onClick: () => void navigator.clipboard.writeText(ownerStepsText(access.appName, organization, repository)).then(() => setCopied('copied'), () => setCopied('failed')) }
+          : { label: `Add ${name} on GitHub`, onClick: () => window.open(githubInstallationUrl(access.installation), '_blank', 'noopener,noreferrer') };
+    return {
+      key: `repository-bridge:${repository}:${access.state}:${bridge.label}:${bridge.online}`, tone: bridge.online ? 'info' : 'warning', persistent: true,
+      // A failed copy shows the steps themselves, to select by hand.
+      message: copied === 'failed' && steps !== null ? `${lead} ${hint}\n\nCopying failed. The steps for the owner:\n${steps}` : `${lead} ${hint}`,
+      action,
+    };
+  })();
+  useToasts([bridgeToast, error ? { key: `github-install:${error}`, tone: 'error', message: error } : null]);
 }

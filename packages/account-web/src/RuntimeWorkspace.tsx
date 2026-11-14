@@ -23,7 +23,7 @@ import { rpcErrorMessage } from './rpc-error-message.js';
 import { runtimeScope, runtimeTurns } from './runtime-shell-adapter.js';
 import { workspaceMachines, workspaceMachinesSummary, workspaceStatus } from './workspace-status.js';
 import { RELEASE_TARGETS } from './release.js';
-import { CanonicalLaunchDialog, LaunchMachineDialog, LaunchSheet, LaunchedBanner } from './LaunchSheet.js';
+import { CanonicalLaunchDialog, LaunchMachineDialog, LaunchSheet } from './LaunchSheet.js';
 import { useRuntimeLaunch } from './useRuntimeLaunch.js';
 import type { ResourceRequest } from './ResourceNavigation.js';
 import type { WorkspaceTerminalMachine } from './WorkspaceTerminals.js';
@@ -33,7 +33,8 @@ import { BrowserWatchDialog } from './BrowserWatchDialog.js';
 import { accountLiveKey } from '@gitspace/protocol/live-notice';
 import { useLiveChanges } from './live-notices.js';
 import { useEventRefresh, useProjectChanges } from './SynchronizationProvider.js';
-import { RepositoryAccessCard, RepositoryBridgeBanner, rememberGitHubInstall } from './GitHubAccess.js';
+import { RepositoryAccessCard, rememberGitHubInstall, useRepositoryBridgeToasts } from './GitHubAccess.js';
+import { useToasts } from './toasts.js';
 import { operationActive, OperationStatusLine } from './OperationProgress.js';
 
 export interface RuntimeInspectorContext {
@@ -130,6 +131,11 @@ export function RuntimeWorkspace(props: RuntimeWorkspaceProps) {
     },
   }, [identity, readKey, liveCursor, missing, saved.transcript]);
   const transcript = useTranscriptHistory(transcriptSource);
+  const inspectionError = inspection.state === 'failure' && !missing ? rpcErrorMessage(inspection.error, 'Read workspace') : null;
+  useToasts([
+    runtime.error ? { key: `workspace-runtime:${runtime.error}`, tone: 'error', persistent: true, message: runtime.error, action: { label: 'Reconnect', onClick: runtime.retry } } : null,
+    inspectionError ? { key: `workspace-read:${inspectionError}`, tone: 'error', persistent: true, message: inspectionError, action: { label: 'Retry workspace', onClick: () => void inspection.refetch() } } : null,
+  ]);
   if (missing) return props.notFound ?? <EmptyState title="Workspace not found" description={rpcErrorMessage(inspection.error, 'Read workspace')} />;
   const reads: WorkspaceReads = {
     transcript,
@@ -138,8 +144,6 @@ export function RuntimeWorkspace(props: RuntimeWorkspaceProps) {
     skills: skillValues,
   };
   return <>
-    {runtime.error ? <div role="alert" className="flex items-center gap-2 px-4 py-2 text-caption text-destructive">{runtime.error}<Button variant="ghost" onClick={runtime.retry}>Reconnect</Button></div> : null}
-    {inspection.state === 'failure' ? <div role="alert" className="flex items-center gap-2 px-4 py-2 text-caption text-destructive">{rpcErrorMessage(inspection.error, 'Read workspace')}<Button variant="ghost" onClick={() => void inspection.refetch()}>Retry workspace</Button></div> : null}
     {props.creation}
     {runtime.snapshot && inspectionValue ? <RuntimeWorkspaceShell {...props} snapshot={runtime.snapshot} inspection={inspectionValue} connected={runtime.connected} reads={reads} refreshInspection={async () => { await inspection.refetch(); }} /> : <EmptyState icon={<ThinkingIndicator />} title="Loading workspace…" description="Reading the cloud conversation and workspace state." />}
   </>;
@@ -160,7 +164,7 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, reads, 
   const [launchRequest, setLaunchRequest] = useState<{ source: LaunchSourceView; targets: typeof RELEASE_TARGETS } | null>(null);
   const relationValue = reads.relations.value;
   // A project whose private repository the GitHub App does not reach syncs through the machine attached to its base
-  // workspace under a banner; with no such machine, or while its repository waits for a machine to copy it in (the
+  // workspace under a toast; with no such machine, or while its repository waits for a machine to copy it in (the
   // cloud's import was refused), it shows the ways in instead of a transcript.
   const projectView = inspection.workspace.kind === 'base' && inspection.project.repositoryReference !== null;
   const accessQuery = useResultQuery(rpcClient.github.projectAccess, { projectId: props.projectId }, { enabled: projectView });
@@ -290,13 +294,22 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, reads, 
       if (response.status === 'error') throw response.error;
     },
     watch: (card, onClose) => <BrowserWatchDialog identity={identity} request={sessionCommand} target={{ source: card.source, groupId: card.groupId, targetId: card.targetId, title: card.title, url: card.url, label: card.browser }} focusInChrome={card.source === 'chrome'} takeover onClose={onClose} /> }), [snapshot.questions, sessionCommand, identity]);
+  const deploymentError = deployment.state === 'failure' ? rpcErrorMessage(deployment.error, 'Read deployment status') : null;
+  const relationsError = reads.relations.error !== null ? rpcErrorMessage(reads.relations.error, "Load this project's workspaces") : null;
+  useToasts([
+    actionError ? { key: `workspace-action:${actionError}`, tone: 'error', message: actionError, onDismiss: () => setActionError(null) } : null,
+    status.cloud.conflicts.length ? {
+      key: `merge-conflicts:${status.cloud.conflicts.join('\n')}`, tone: 'error', persistent: true,
+      message: <><strong className="font-medium">Workspace merge conflicts.</strong> Machine changes reached the cloud working copy with conflicts. Resolve these files before continuing.<ul aria-label="Conflicting files" className="mt-1 list-inside list-disc break-all font-mono">{status.cloud.conflicts.map(path => <li key={path}>{path}</li>)}</ul></>,
+    } : null,
+    deploymentError ? { key: `deployment-status:${deploymentError}`, tone: 'error', persistent: true, message: deploymentError, action: { label: 'Retry deployment status', onClick: () => void deployment.refetch() } } : null,
+    launch.launch && !launch.open ? { key: `launch-progress:${launch.launch.launchId}:${launch.launch.status}`, tone: launch.launch.status === 'failed' ? 'error' : 'info', persistent: true, message: launch.launch.status === 'failed' ? launch.launch.error ?? 'The launch did not finish.' : 'A launch is running.', action: { label: 'Show launch progress', onClick: () => launch.setOpen(true) } } : null,
+    launch.mark ? { key: `launched:${launch.mark.sha}`, tone: 'info', persistent: true, message: <>Now running <strong>{launch.mark.label}</strong></>, action: { label: 'Back to default', onClick: () => void perform(launch.backToDefault) }, onDismiss: launch.dismiss } : null,
+    relationsError ? { key: `workspace-relations:${relationsError}`, tone: 'error', persistent: true, message: relationsError, action: { label: 'Retry', onClick: () => void reads.relations.refetch() } } : null,
+    relationValue?.statusError ? { key: `workspace-statuses:${relationValue.statusError}`, tone: 'warning', persistent: true, message: `Workspace statuses are unavailable: ${relationValue.statusError}`, action: { label: 'Retry', onClick: () => void reads.relations.refetch() } } : null,
+  ]);
+  useRepositoryBridgeToasts(bridged, installApp, () => props.onOpenSettings?.('github'));
   return <>
-    {actionError ? <p role="alert" className="px-4 py-2 text-caption text-destructive">{actionError}</p> : null}
-    {status.cloud.conflicts.length ? <section role="alert" aria-label="Workspace merge conflicts" className="shrink-0 bg-surface-2 px-4 py-3 text-caption shadow-surface-1"><h2 className="font-medium text-destructive">Workspace merge conflicts</h2><p className="mt-1 text-muted-foreground">Machine changes reached the cloud working copy with conflicts. Resolve these files before continuing.</p><ul className="mt-2 list-inside list-disc break-all font-mono">{status.cloud.conflicts.map(path => <li key={path}>{path}</li>)}</ul></section> : null}
-    {deployment.state === 'failure' ? <div role="alert" className="flex items-center gap-2 px-4 py-2 text-caption text-destructive">{rpcErrorMessage(deployment.error, 'Read deployment status')}<Button variant="ghost" onClick={() => void deployment.refetch()}>Retry deployment status</Button></div> : null}
-    {launch.launch && !launch.open ? <Button variant="ghost" size="compact" onClick={() => launch.setOpen(true)}>Show launch progress</Button> : null}
-    {reads.relations.error !== null ? <div role="alert" className="flex items-center gap-2 px-4 py-2 text-caption text-destructive">{rpcErrorMessage(reads.relations.error, "Load this project's workspaces")}<Button variant="ghost" onClick={() => void reads.relations.refetch()}>Retry</Button></div> : null}
-    {relationValue?.statusError ? <div role="status" className="flex items-center gap-2 px-4 py-2 text-caption text-muted-foreground">Workspace statuses are unavailable: {relationValue.statusError}<Button variant="ghost" onClick={() => void reads.relations.refetch()}>Retry</Button></div> : null}
     <QuestionCardsContext.Provider value={questionCards}>
     <ComposerStagingProvider>
     <RequirementAcceptance.Provider value={acceptRequirement}>
@@ -322,12 +335,10 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, reads, 
         const { repository, branch, commit } = checked.value.canonical;
         setLaunchRequest({ source: { kind: 'canonical', repository, branch, commit }, targets: RELEASE_TARGETS });
       }), onBackToDefault: () => perform(launch.backToDefault) } : null}
-      launchBanner={launch.mark ? <LaunchedBanner mark={launch.mark} onBackToDefault={() => perform(launch.backToDefault)} onDismiss={launch.dismiss} /> : undefined}
       access={walled ? {
         card: onAttachMachine => <RepositoryAccessCard access={walled} copy={{ machines: inspection.machines.filter(machine => machine.state === 'online'), onCopy: copyThroughMachine }} onOpenSettings={() => props.onOpenSettings?.('github')} onInstall={installApp} onAttachMachine={onAttachMachine} />,
         notice: `The project agent starts once GitSpace can read ${walled.state === 'awaits-copy' ? walled.origin : walled.repository}.`,
       } : undefined}
-      accessBanner={bridged ? <RepositoryBridgeBanner access={bridged.access} bridge={bridged.bridge} onOpenSettings={() => props.onOpenSettings?.('github')} onInstall={installApp} /> : undefined}
       renderEnvironmentStatus={onInspect => <Button variant="ghost" size="compact" className="min-h-10 gap-2 tabular-nums" onClick={onInspect} aria-label={`Environment · ${environment.count} machines · ${environment.label}`}><StatusDot color={environment.color} />Environment · {environment.count} {environment.count === 1 ? 'machine' : 'machines'}</Button>}
       artifactUpload={artifactUploadRpcClient({ spaceId, expectedGeneration: scope.workspace.generation }, () => scope.workspace.generation)}
       sessionCommand={sessionCommand}

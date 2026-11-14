@@ -24,7 +24,6 @@ import {
   SidebarInset,
   SidebarInsetTopbar,
   SidebarProvider,
-  ThinkingIndicator,
   Tooltip,
   useShape,
 } from '@gitspace/ui';
@@ -53,6 +52,7 @@ import { PrChips, StatusBadge } from './sidebar/parts.js';
 import { ProjectGraphsContext } from './sidebar/project-graph.js';
 import { GuideSectionNavigation } from './chat/staging.js';
 import { OutgoingMessages, useOutbox, type OutboxArrivals, type SentMessage } from './chat/outbox.js';
+import { Toasts, useToasts } from './toasts.js';
 
 /**
  * Where a space lives right now. A cloud runtime workspace lives in the cloud and reports its own status (machines are
@@ -155,6 +155,7 @@ export interface GitSpaceShellProps {
   mainAgent: { id: string; title: string; state: AgentSessionRenderState; model: string; recovering?: boolean; controlsAvailable?: boolean; errorMessage?: string | null; failed?: boolean; retry?: { at: string; error: string } | null } | null;
   turns: TurnBlock[];
   transcript?: TranscriptHistory;
+  /** `saved`: the rows shown are this browser's saved copy, not yet replaced by the server's. */
   history?: { loading: boolean; saved?: boolean; error: string | null; onRetry(): void };
   transport: TransportBlock[];
   artifacts: ArtifactView[];
@@ -209,14 +210,10 @@ export interface GitSpaceShellProps {
   providers?: readonly ProviderAuthView[];
   /** Self-development: drives the sidebar's Source pill, launched badges, and launch actions. */
   deployment?: SidebarDeploymentProps | null;
-  /** Strip pinned to the top of the agent canvas (the post-launch `Now running …` notice). */
-  launchBanner?: ReactNode;
   /** Shown in place of the transcript while the project's agent cannot read its repository and no machine bridges it;
    * the composer waits under `access.notice`. `card` gets the action that opens the Inspector's Environment, where a
    * machine is attached. */
   access?: { card(onAttachMachine: () => void): ReactNode; notice: string };
-  /** Strip above the transcript while a machine bridges the project's repository to GitHub in place of the App. */
-  accessBanner?: ReactNode;
 }
 
 export const STATUS_COLOR: Record<WorkspaceStatusColor, string> = { dim: 'var(--muted-foreground)', green: '#22c55e', blue: '#3b82f6', orange: '#f97316', red: '#ef4444' };
@@ -337,35 +334,26 @@ export function EmptyState({ icon, title, description, action }: { icon?: ReactN
   </section>;
 }
 
-/** `saved`: the rows shown are this browser's saved copy, not yet replaced by the server's. */
-export function TranscriptHistoryNotice({ loading, saved = false, error, onRetry }: NonNullable<GitSpaceShellProps['history']>) {
-  if (!loading && !error && !saved) return null;
-  return <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2 sm:px-6">
-    <div className="min-w-0 flex-1">
-      {saved ? <p role="status" className="flex items-center gap-2 text-caption text-muted-foreground">{loading ? <ThinkingIndicator size="compact" /> : null}Showing the copy saved in this browser{loading ? ' · loading the latest…' : ''}</p>
-        : loading ? <p role="status" className="flex items-center gap-2 text-caption text-muted-foreground"><ThinkingIndicator size="compact" />Loading transcript history…</p> : null}
-      {error ? <p role="alert" className="text-caption text-destructive [overflow-wrap:anywhere]">Transcript history could not be loaded: {error}</p> : null}
-    </div>
-    {error ? <Button variant="ghost" className="min-h-10" disabled={loading} onClick={onRetry}>Retry transcript</Button> : null}
-  </div>;
+/** The top bar's mark while the transcript shows this browser's saved copy: a dot, pulsing while the latest loads. */
+function SavedCopyIndicator({ loading }: { loading: boolean }) {
+  return <Tooltip content={`Showing the copy saved in this browser${loading ? ' · loading the latest…' : ''}`} side="bottom">
+    <span role="status" aria-label={`Showing the copy saved in this browser${loading ? ', loading the latest' : ''}`} className="flex shrink-0 items-center gap-1.5 text-caption text-muted-foreground"><StatusDot color="dim" pulse={loading} /><span className="max-lg:hidden">Saved copy</span></span>
+  </Tooltip>;
 }
 
-/** The agent's failed model request and the seconds until it is tried again, counted down each second. */
-function RetryNotice({ retry }: { retry: { at: string; error: string } }) {
+/** The seconds until the agent's failed model request is tried again, counted down each second. */
+function RetryCountdown({ retry }: { retry: { at: string; error: string } }) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
   }, []);
   const seconds = Math.ceil((Date.parse(retry.at) - now) / 1000);
-  return <p role="status" className="flex shrink-0 items-center gap-2 px-4 py-2 text-caption text-muted-foreground [overflow-wrap:anywhere]">
-    <ThinkingIndicator size="compact" showIcon={false} className="shrink-0 p-0" />
-    <span>{seconds > 0 ? `Retrying in ${seconds} s` : 'Retrying now'} · the model request failed: {retry.error}</span>
-  </p>;
+  return <>{seconds > 0 ? `Retrying in ${seconds} s` : 'Retrying now'} · the model request failed: {retry.error}</>;
 }
 
 // ── Agent canvas ──
-function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onRetryControls, onRetryAgent, onContinueAgent, turns, transcript, history, transport, onSend, draft, artifactUpload, sessionCommand, pending, error, providers, skills, banner, access, accessBanner }: {
+function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onRetryControls, onRetryAgent, onContinueAgent, turns, transcript, history, transport, onSend, draft, artifactUpload, sessionCommand, pending, error, providers, skills, access }: {
   workspace: AgentScopeView;
   mainAgent: GitSpaceShellProps['mainAgent'];
   sessionControls?: SessionControlsProps;
@@ -385,9 +373,7 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onR
   error?: string;
   providers?: readonly ProviderAuthView[];
   skills?: readonly SkillView[];
-  banner?: ReactNode;
   access?: { card: ReactNode; notice: string };
-  accessBanner?: ReactNode;
 }) {
   const shape = useShape();
   const running = mainAgent ? mainAgent.state === 'running' || mainAgent.state === 'permission-needed' || mainAgent.state === 'retrying' : false;
@@ -441,6 +427,16 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onR
     setContinueError(null);
     try { await onContinueAgent(); } catch (failure) { setContinueError(rpcErrorMessage(failure, 'Continue')); } finally { setContinuing(false); }
   };
+  useToasts([
+    history?.error ? { key: `transcript-history:${history.error}`, tone: 'error', persistent: true, message: `Transcript history could not be loaded: ${history.error}`, action: { label: 'Retry transcript', onClick: history.onRetry, pending: history.loading } } : null,
+    mainAgent?.errorMessage || mainAgent?.failed ? {
+      key: `agent-failure:${mainAgent.errorMessage ?? ''}`, tone: 'error', persistent: true,
+      message: `Agent failure: ${mainAgent.errorMessage ?? 'No failure reason was recorded for this session.'}${continueError ? ` · ${continueError}` : ''}`,
+      action: mainAgent.failed && onContinueAgent && !running ? { label: 'Continue', onClick: () => void continueRun(), pending: continuing } : undefined,
+    } : null,
+    mainAgent?.retry ? { key: `model-retry:${mainAgent.retry.at}`, tone: 'warning', persistent: true, message: <RetryCountdown retry={mainAgent.retry} /> } : null,
+    controlsError && !access ? { key: `session-controls:${controlsError}`, tone: 'error', persistent: true, message: controlsError, action: onRetryControls ? { label: 'Retry provider catalog and controls', onClick: onRetryControls, pending } : undefined } : null,
+  ]);
   const idleTitle = workspace.closedAt
     ? (workspace.kind === 'project' ? 'Project archived' : 'Workspace archived')
     : mainAgent?.recovering ? 'Agent is recovering'
@@ -497,14 +493,6 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onR
     if (!virtualTranscript && element && following.current && touchStartTop.current === null) element.scrollTop = element.scrollHeight;
   }, [turns, transport, outbox.messages, composerOverlayHeight, virtualTranscript]);
   return <div className="relative flex min-h-0 min-w-0 flex-1 flex-col" style={{ '--composer-overlay-height': `${composerOverlayHeight}px` } as CSSProperties}>
-    {history ? <TranscriptHistoryNotice {...history} /> : null}
-    {mainAgent?.errorMessage || mainAgent?.failed ? <div role="alert" className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2 text-caption text-destructive">
-      <p className="min-w-0 flex-1 whitespace-pre-wrap break-words">Agent failure: {mainAgent.errorMessage ?? 'No failure reason was recorded for this session.'}{continueError ? ` · ${continueError}` : ''}</p>
-      {mainAgent.failed && onContinueAgent && !running ? <Button variant="secondary" size="compact" className="min-h-10" loading={continuing} disabled={continuing} onClick={() => void continueRun()}>Continue</Button> : null}
-    </div> : null}
-    {mainAgent?.retry ? <RetryNotice key={mainAgent.retry.at} retry={mainAgent.retry} /> : null}
-    {controlsError && !onRetryControls && !access ? <p role="alert" className="shrink-0 whitespace-pre-wrap break-words px-4 py-2 text-caption text-destructive">{controlsError}</p> : null}
-    {accessBanner ? <div className="flex shrink-0 justify-center px-6 pt-3">{accessBanner}</div> : null}
     <ScrollArea ref={bindTranscriptViewport} onTouchStartCapture={transcript ? undefined : onTranscriptTouchStart} onTouchEndCapture={transcript ? undefined : onTranscriptTouchEnd} onTouchCancelCapture={transcript ? undefined : onTranscriptTouchEnd} className="min-h-0 flex-1" viewportClassName="h-full">
       {access
         ? <div className="mx-auto flex w-full max-w-3xl flex-col items-center px-6 pb-[calc(var(--composer-overlay-height)+2rem)] pt-10">{access.card}</div>
@@ -512,7 +500,6 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onR
           ? <VirtualTranscript history={transcript} transport={transport} onAnswer={answerInline} tail={<OutgoingMessages outbox={outbox} />} />
           : <TurnTranscript turns={turns} transport={transport} onAnswer={answerInline} tail={<OutgoingMessages outbox={outbox} />} />}
     </ScrollArea>
-    {banner ? <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex justify-center px-6 pt-3"><div className="pointer-events-auto">{banner}</div></div> : null}
     <div ref={composerOverlay} className="pointer-events-none absolute inset-x-0 bottom-0 z-20 flex justify-center px-6 pb-4">
       <div className="w-full max-w-xl">
         {standaloneAsk && pendingAsk && sessionControls
@@ -540,7 +527,7 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onR
                 {!workspace.closedAt ? <Button variant="secondary" size="compact" className="min-h-10" loading={opening || mainAgent?.recovering === true} disabled={opening || mainAgent?.recovering === true || !onRetryAgent} onClick={() => void open()} leadingIcon={glyph(RefreshCcw01)}>{mainAgent?.recovering ? 'Recovering…' : opening ? 'Retrying agent…' : 'Retry agent'}</Button> : null}
                 {openError ? <p role="alert" className="text-caption text-destructive">{openError}</p> : null}
               </div>
-            : <Composer workspace={workspace} draft={draft} artifactUpload={artifactUpload} sessionCommand={sessionCommand} controlsError={onRetryControls ? controlsError : undefined} onRetryControls={onRetryControls} controls={sessionControls} providers={providers} skills={skills} running={running} onSend={onSend} pending={pending} recovering={mainAgent?.recovering} error={error} outbox={outbox} />}
+            : <Composer workspace={workspace} draft={draft} artifactUpload={artifactUpload} sessionCommand={sessionCommand} controls={sessionControls} providers={providers} skills={skills} running={running} onSend={onSend} pending={pending} recovering={mainAgent?.recovering} error={error} outbox={outbox} />}
       </div>
     </div>
   </div>;
@@ -664,7 +651,12 @@ function TerminalResizeHandle({ height, onHeight }: { height: number; onHeight: 
 }
 
 // ── Shell ──
-export function GitSpaceShell({ project, projects, workspace, baseSpace, workspaces, mainAgent, turns, transcript, history, transport, runtimeSummary, machines = [], onSend, draft, artifactUpload, sessionCommand, resolveResourceFile, sessionControls, controlsError, onRetryControls, onRetryAgent, onContinueAgent, onSetWorkspacePhase, onUpdateBase, projectOperation, sendPending = false, sendError, onSelectWorkspace, onSelectProject, onArchiveWorkspace, onCreateProject, onCreateWorkspace, onOpenSettings, onNavigateView, terminals, skills, renderInspector, renderEnvironmentStatus, user, providers, deployment, launchBanner, access, accessBanner }: GitSpaceShellProps) {
+/** The shell brings its own toast area when it is rendered outside the app's. */
+export function GitSpaceShell(props: GitSpaceShellProps) {
+  return <Toasts><Shell {...props} /></Toasts>;
+}
+
+function Shell({ project, projects, workspace, baseSpace, workspaces, mainAgent, turns, transcript, history, transport, runtimeSummary, machines = [], onSend, draft, artifactUpload, sessionCommand, resolveResourceFile, sessionControls, controlsError, onRetryControls, onRetryAgent, onContinueAgent, onSetWorkspacePhase, onUpdateBase, projectOperation, sendPending = false, sendError, onSelectWorkspace, onSelectProject, onArchiveWorkspace, onCreateProject, onCreateWorkspace, onOpenSettings, onNavigateView, terminals, skills, renderInspector, renderEnvironmentStatus, user, providers, deployment, access }: GitSpaceShellProps) {
   const accountSidebar = useContext(AccountSidebarContext);
   const accountDirectory = useContext(AccountDirectoryContext);
   // A link naming a capture (`?capture=<id>`, the extension's "Open in GitSpace") opens the Inspector's Browser tab,
@@ -734,6 +726,7 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
   const projectGraph = useContext(ProjectGraphsContext)[workspace.projectId];
   const pullRequests = workspace.kind === 'workspace' ? projectGraph?.pullRequests[workspace.id] ?? [] : [];
   const [phaseRefusal, setPhaseRefusal] = useState<{ workspaceId: string; message: string } | null>(null);
+  useToasts([phaseRefusal?.workspaceId === workspace.id ? { key: `phase-refusal:${phaseRefusal.message}`, tone: 'error', message: phaseRefusal.message, onDismiss: () => setPhaseRefusal(null) } : null]);
   const recovering = selectedSummary.detail === 'Agent is recovering';
   const inferenceState = useInference()?.state;
   const assignedProfileId = inferenceState?.assignments.find((entry) => entry.projectId === workspace.projectId)?.profileId;
@@ -764,6 +757,7 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
           <span className="flex min-w-0 items-center gap-1.5 text-muted-foreground max-xl:hidden"><GitBranch01 width={14} height={14} strokeWidth={1.5} /><span className="truncate">{workspace.projectName}</span><span>/</span><span className="truncate font-mono text-caption">{workspace.branch}</span></span>
           {workspace.kind === 'workspace' ? <><span className="text-muted-foreground max-xl:hidden">·</span><span className="truncate font-semibold text-foreground">{workspace.name}</span></> : null}
           <span className="max-md:hidden"><StatusBadge color={workspaceStatusColor(selectedSummary)} label={recovering ? 'Recovering agent…' : workspaceStatusLabel(selectedSummary)} /></span>
+          {history?.saved ? <SavedCopyIndicator loading={history.loading} /> : null}
           {workspace.kind === 'workspace' && projectGraph ? pullRequests.length ? <PrChips pulls={pullRequests} full /> : <span className="shrink-0 text-caption text-muted-foreground max-lg:hidden">no PR</span> : null}
         </nav>
         <div className="flex items-center gap-1">
@@ -783,12 +777,11 @@ export function GitSpaceShell({ project, projects, workspace, baseSpace, workspa
             {renderInspector ? <Tooltip content="Inspector" side="bottom"><Button variant="ghost" size="icon-compact" aria-label="Open Inspector" aria-pressed={inspectorOpen} onClick={() => { if (inspectorOpen && inspectorFull) setInspectorFull(false); else setInspectorOpen((value) => !value); }}><LayoutRight width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
         </div>
       </SidebarInsetTopbar>
-      {phaseRefusal?.workspaceId === workspace.id ? <div role="alert" className="flex shrink-0 items-center gap-2 px-4 py-2 text-caption text-destructive"><span className="min-w-0 flex-1 [overflow-wrap:anywhere]">{phaseRefusal.message}</span><Button variant="ghost" size="compact" onClick={() => setPhaseRefusal(null)}>Dismiss</Button></div> : null}
 
       <div className="workspace-workbench" data-terminal-open={terminalOpen && !!terminals || undefined} style={{ '--inspector-width': `${inspectorWidth}px`, '--terminal-height': `${terminalHeight}px` } as CSSProperties}>
             <div className="workspace-content" data-inspector-full={inspectorOpen && inspectorFull && !!renderInspector || undefined}>
               <div className="conversation-stage">
-                <AgentCanvas key={workspace.id} workspace={workspace} mainAgent={mainAgent} sessionControls={sessionControls} controlsError={controlsError} onRetryControls={onRetryControls} onRetryAgent={onRetryAgent} onContinueAgent={onContinueAgent} turns={turns} transcript={transcript} history={history} transport={transport} onSend={onSend} draft={draft} artifactUpload={artifactUpload} sessionCommand={sessionCommand} pending={sendPending} error={sendError} providers={providers} skills={skills} banner={launchBanner} access={access ? { card: access.card(openEnvironment), notice: access.notice } : undefined} accessBanner={accessBanner} />
+                <AgentCanvas key={workspace.id} workspace={workspace} mainAgent={mainAgent} sessionControls={sessionControls} controlsError={controlsError} onRetryControls={onRetryControls} onRetryAgent={onRetryAgent} onContinueAgent={onContinueAgent} turns={turns} transcript={transcript} history={history} transport={transport} onSend={onSend} draft={draft} artifactUpload={artifactUpload} sessionCommand={sessionCommand} pending={sendPending} error={sendError} providers={providers} skills={skills} access={access ? { card: access.card(openEnvironment), notice: access.notice } : undefined} />
               </div>
               {inspectorOpen && renderInspector ? <InspectorResizeHandle width={inspectorWidth} onWidth={updateInspectorWidth} /> : null}
               {/* Opaque in every state: on narrow viewports the pane overlays the conversation, so a transparent loading or error state would still swallow its clicks. */}

@@ -10,6 +10,7 @@ import { useLiveChanges } from '../live-notices.js';
 import { rpcClient } from '../rpc-client.js';
 import { rpcErrorMessage } from '../rpc-error-message.js';
 import { useEventRefresh } from '../SynchronizationProvider.js';
+import { useToasts } from '../toasts.js';
 import { useRetainedRead } from '../useRetainedRead.js';
 import { AutomationCard, type CardHandlers } from './AutomationCard.js';
 import { AutomationEditor } from './AutomationEditor.js';
@@ -166,14 +167,15 @@ export function AutomationsPage({ projects, projectId, runId, onSelectProject, o
   };
 
   const readError = [overviewRead.error ? rpcErrorMessage(overviewRead.error, 'Read automations overview') : null, projectId !== null && listRead.error ? rpcErrorMessage(listRead.error, 'Read automations') : null, projectId !== null && runsRead.error ? rpcErrorMessage(runsRead.error, 'Read runs') : null, projectId !== null && exceptionsRead.error ? rpcErrorMessage(exceptionsRead.error, 'Read workspace exceptions') : null].filter(Boolean).join(' · ');
+  useToasts([
+    readError ? { key: `automations-read:${readError}`, tone: 'error', persistent: true, message: readError, action: { label: 'Retry', onClick: () => void refresh() } } : null,
+    actionError ? { key: `automations-action:${actionError}`, tone: 'error', message: actionError, onDismiss: () => setActionError(null) } : null,
+  ]);
 
   return <PageCanvas>
     <PageHeader kicker={<ProjectPicker projects={projects} project={projectName} onPick={onSelectProject} />} title="Automations"
       description={projectId === null ? 'Every project\'s automations and runs. Choose a project to change its automations, links and trusted authors.' : 'When something happens in this project, start work. Activity on a linked pull request or issue goes to its workspace.'}
       actions={projectId !== null && !empty ? <Button variant="primary" type="button" leadingIcon={PlusGlyph} onClick={() => openEditor(null)}>New automation</Button> : undefined} />
-
-    {readError ? <div role="alert" className="mb-4 flex flex-wrap items-center gap-2 text-caption text-destructive"><span className="min-w-0 [overflow-wrap:anywhere]">{readError}</span><Button variant="ghost" size="compact" type="button" onClick={() => void refresh()}>Retry</Button></div> : null}
-    {actionError ? <div role="alert" className="mb-4 flex flex-wrap items-center gap-2 text-caption text-destructive"><span className="min-w-0 [overflow-wrap:anywhere]">{actionError}</span><Button variant="ghost" size="compact" type="button" onClick={() => setActionError(null)}>Dismiss</Button></div> : null}
 
     {empty ? null : <section aria-label="Automation summary" className={`${shape.container} mb-6 flex flex-col bg-surface-2 shadow-surface-1`}>
       <div className="grid grid-cols-2 divide-border sm:grid-cols-4 sm:divide-x [&>*:nth-child(-n+2)]:border-b [&>*:nth-child(-n+2)]:border-border sm:[&>*:nth-child(-n+2)]:border-b-0">

@@ -8,13 +8,14 @@ import { EmptyState, type AgentScopeView, type WorkspaceView } from '../GitSpace
 import { GuideScrollRoot, type GuideReview } from '../guide/ExhibitDiff.js';
 import type { GuideCaptures } from '../guide/GuideCapture.js';
 import { GuideDocument } from '../guide/GuideDocument.js';
-import { GuideRevisionControls, OlderRevisionBanner, compareSections, type GuideComparison, type GuideDiffTarget, type GuideRevisionHandlers } from '../guide/GuideRevisions.js';
+import { GuideRevisionControls, compareSections, type GuideComparison, type GuideDiffTarget, type GuideRevisionHandlers } from '../guide/GuideRevisions.js';
 import type { GuideWorkspace } from '../guide/GuideSection.js';
 import { rpcErrorMessage } from '../rpc-error-message.js';
 import type { SetWorkspaceRelations } from '../WorkspaceGraph.js';
 import { GuideShareButton, type GuideShareHandlers } from './GuideShare.js';
 import type { InspectorProps } from './Inspector.js';
 import { ic, settle, Padded } from './inspector-shared.js';
+import { useToasts } from '../toasts.js';
 
 /** Where a reader left each guide revision: its open sections and scroll position, kept while the Inspector shows
  * another tab. */
@@ -95,6 +96,12 @@ export function ChangeGuideSurface({ guide, reviewerId, review, goal, onSetAccep
     requestAnimationFrame(restore);
   }, [viewKey]);
   useEffect(() => () => { guideViewCache.set(viewKey, { open: openRef.current, scrollTop: scrollRef.current?.scrollTop ?? 0 }); }, [viewKey]);
+  // An older revision is read-only: reading, accepting requirements and follow-ups happen on the latest revision.
+  useToasts([guide?.sections.length && shown && shown.revision !== latest ? {
+    key: `guide-older-revision:${shown.revision}:${latest}`, tone: 'info', persistent: true,
+    message: `Viewing r${shown.revision} of ${latest} · read-only: reading, accepting requirements and follow-ups happen on the latest revision.`,
+    action: { label: 'Back to latest', onClick: () => setViewing(null) },
+  } : null]);
   if (!guide?.sections.length) return <Padded><EmptyState icon={ic(File02, 22)} title="No Change Guide" description="Ask the canonical agent to delegate a narrator grounded in the Journal and current diff." action={onGenerate ? <Button variant="secondary" size="compact" type="button" onClick={() => settle(onGenerate())}>Generate Change Guide</Button> : undefined} /></Padded>;
   if (!shown) return <Padded>{revisionError ? <p role="alert" className="text-caption text-destructive">{revisionError}</p> : <p className="text-caption text-muted-foreground">Loading revision {shownRevision}…</p>}</Padded>;
   const readOnly = shown.revision !== latest;
@@ -121,7 +128,6 @@ export function ChangeGuideSurface({ guide, reviewerId, review, goal, onSetAccep
       <BlockActionsProvider actions={blockActions}>
         <GuideDocument key={viewKey} guide={shown} kicker={`Change Guide · revision ${shown.revision}`} workspace={workspace} captures={captures} comparison={comparison} focusSection={focus}
           onLoadDiff={(path) => onLoadDiff(path, { revision: shown.revision })}
-          banner={readOnly ? <OlderRevisionBanner shown={shown.revision} latest={latest} onLatest={() => setViewing(null)} /> : null}
           actions={<>
             {list.length > 1 ? <GuideRevisionControls revisions={list} shown={shown.revision} since={since} reviewerId={reviewerId} onShow={(revision) => setViewing(revision === latest ? null : revision)} onSince={setChosenSince} /> : null}
             {shares && !readOnly ? <GuideShareButton revision={shown.revision} shares={shares} /> : null}

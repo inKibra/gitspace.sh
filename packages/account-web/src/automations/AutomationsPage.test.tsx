@@ -3,6 +3,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { AUTOMATION_DEFAULT_SETTINGS, automationErrors, parseAutomationSchedule, type AutomationException, type AutomationLinkView, type AutomationRecordedEvent, type AutomationRunView, type AutomationSettings, type AutomationView } from '@gitspace/protocol/automations-contract';
+import { Toasts } from '../toasts.js';
 import { AutomationsPage, type AutomationWorkspace } from './AutomationsPage.js';
 
 const rpc = vi.hoisted(() => ({ approve: vi.fn(), create: vi.fn(), update: vi.fn(), test: vi.fn(), runOnEvent: vi.fn(), link: vi.fn(), updateSettings: vi.fn(), setException: vi.fn(), retryRun: vi.fn() }));
@@ -77,7 +78,7 @@ afterEach(async () => {
 
 async function renderProject(automations: readonly AutomationView[], { links = [], settings = AUTOMATION_DEFAULT_SETTINGS, modelRoles = ['default', 'deep', 'fast', 'taste'], runId = null }: { links?: readonly AutomationLinkView[]; settings?: AutomationSettings; modelRoles?: readonly string[]; runId?: string | null } = {}): Promise<void> {
   queries.set('list', { automations, settings, links, modelRoles, github });
-  await act(() => root.render(<AutomationsPage projects={[{ id: 'project', name: 'GitSpace', workspaces }]} projectId="project" runId={runId} onSelectProject={() => undefined} onCloseRun={() => undefined} onOpenWorkspace={() => undefined} />));
+  await act(() => root.render(<Toasts><AutomationsPage projects={[{ id: 'project', name: 'GitSpace', workspaces }]} projectId="project" runId={runId} onSelectProject={() => undefined} onCloseRun={() => undefined} onOpenWorkspace={() => undefined} /></Toasts>));
 }
 
 function button(label: string): HTMLButtonElement {

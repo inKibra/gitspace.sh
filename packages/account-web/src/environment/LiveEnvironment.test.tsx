@@ -7,6 +7,7 @@ import { RuntimeGitCheckpointSchema } from '@gitspace/protocol-runtime/workspace
 import { browserOriginHash, emptyLifecycleState, executionHash, projectEnvironmentState, type LifecycleState } from '@gitspace/protocol-environment';
 import { emptyWorkspaceStatus } from '@gitspace/protocol-workspace';
 import type { WorkspaceEnvironmentView } from '@gitspace/protocol/rpc-contract';
+import { Toasts } from '../toasts.js';
 import { LiveEnvironment } from './LiveEnvironment.js';
 
 const rpc = vi.hoisted(() => ({
@@ -81,7 +82,7 @@ let root: Root;
 let container: HTMLDivElement;
 let animationDescriptor: PropertyDescriptor | undefined;
 const openTerminal = vi.fn();
-const render = (runtime: RuntimeSnapshot) => act(() => root.render(<LiveEnvironment projectId="project" projectName="Golconda" workspaceName="Work" spaceId="workspace" workspace onOpenAgent={() => {}} runtimeContext={{ snapshot: runtime, onOpenTerminal: openTerminal }} />));
+const render = (runtime: RuntimeSnapshot) => act(() => root.render(<Toasts><LiveEnvironment projectId="project" projectName="Bakery" workspaceName="Work" spaceId="workspace" workspace onOpenAgent={() => {}} runtimeContext={{ snapshot: runtime, onOpenTerminal: openTerminal }} /></Toasts>));
 const buttons = (text: string) => [...document.querySelectorAll<HTMLButtonElement>('button')].filter(button => button.textContent === text);
 const click = async (text: string, scope: ParentNode = document) => {
   const button = [...scope.querySelectorAll<HTMLButtonElement>('button')].find(item => item.textContent === text);

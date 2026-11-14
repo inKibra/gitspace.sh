@@ -9,6 +9,7 @@ import type { ResourceRequest } from './ResourceNavigation.js';
 import { Inspector } from './inspector/Inspector.js';
 import type { InspectorArtifactContent } from './inspector/inspector-shared.js';
 import { loadInspectorResource } from './resource-content.js';
+import { Toasts } from './toasts.js';
 
 let root: Root;
 let container: HTMLDivElement;
@@ -37,7 +38,7 @@ afterEach(async () => {
 function Harness({ read }: { read: (uri: string) => Promise<InspectorArtifactContent> }) {
   const [request, setRequest] = useState<ResourceRequest>();
   const unavailable = async (): Promise<never> => { throw new Error('Unexpected unrelated action'); };
-  return <ResourceNavigation.Provider value={setRequest}>
+  return <Toasts><ResourceNavigation.Provider value={setRequest}>
     <GitSpaceMarkdown>{'[Plan](drive://workspace/PLAN.md) [Output](drive://output.txt) [Missing](drive://workspace/missing.txt) [Unsafe](javascript:alert(1))'}</GitSpaceMarkdown>
     <Inspector
       overview={{ projectId: 'project', spaceId: 'workspace', revision: 0, goal: null, workflow: null, rubric: null, journal: { entries: 0, openPhaseRunId: null, recent: [] }, changeGuide: null, review: { total: 0, unresolved: 0 } }}
@@ -50,7 +51,7 @@ function Harness({ read }: { read: (uri: string) => Promise<InspectorArtifactCon
       onRequestRepositoryFile={unavailable} onRequestRepositoryDiff={unavailable} onLoadGuideDiff={unavailable}
       onCreateThread={unavailable} onReplyThread={unavailable} onResolveThread={unavailable} onMarkGuideSectionRead={unavailable}
     />
-  </ResourceNavigation.Provider>;
+  </ResourceNavigation.Provider></Toasts>;
 }
 
 async function clickLink(label: string) {

@@ -60,6 +60,7 @@ import { latestOperation, useAccountOperations } from './OperationProgress.js';
 import { releaseWorkspaceCaches } from './workspace-cache-actions.js';
 import { useWorkspaceAutomations } from './goal/useWorkspaceAutomations.js';
 import { ACCOUNT_GROUP, openFirstPaintCache, workspaceGroup } from './first-paint-cache.js';
+import { Toasts, useToasts, type Toast } from './toasts.js';
 
 
 
@@ -221,14 +222,14 @@ export function LiveInspector({
     generation: artifactValue.scopes.find((scope) => scope.workspaceId === (artifact.workspaceId ?? projectId))?.generation ?? 0,
   })) : [];
   const artifactUpload = artifactUploadRpcClient(request, (artifact) => artifactValue?.scopes.find((scope) => scope.workspaceId === (artifact.workspaceId ?? projectId))?.generation ?? generation);
+  useToasts([
+    overviewRead.error ? { key: `inspector-overview:${rpcErrorMessage(overviewRead.error, 'inspector.overview')}`, tone: 'warning', persistent: true, message: `Inspector overview refresh failed; showing the last accepted state. ${rpcErrorMessage(overviewRead.error, 'inspector.overview')}`, action: { label: 'Retry overview', onClick: () => void overview.refetch() } } : null,
+    threads.state === 'failure' ? { key: `inspector-threads:${rpcErrorMessage(threads.error, 'inspector.review.list')}`, tone: threadsValue ? 'warning' : 'error', persistent: true, message: `Review threads ${threadsValue ? 'refresh failed; showing the last accepted state.' : 'could not load.'} ${rpcErrorMessage(threads.error, 'inspector.review.list')}`, action: { label: 'Retry review threads', onClick: () => void threads.refetch() } } : null,
+    stackStatus.error ? { key: `stack-status:${stackStatus.error}`, tone: 'error', persistent: true, message: `Stack status could not load. ${stackStatus.error}`, action: { label: 'Retry stack status', onClick: stackStatus.retry } } : null,
+    actionError ? { key: `inspector-action:${actionError}`, tone: 'error', message: actionError, onDismiss: () => setActionError(null) } : null,
+  ]);
 
-  return <><div className="shrink-0">
-    {overviewRead.refreshing ? <p role="status" className="sr-only">Refreshing Inspector…</p> : null}
-    {overviewRead.error ? <p role="alert" className="px-4 py-2 text-caption text-destructive">Inspector overview refresh failed; showing the last accepted state. {rpcErrorMessage(overviewRead.error, 'inspector.overview')}<Button variant="ghost" size="compact" onClick={() => void overview.refetch()}>Retry overview</Button></p> : null}
-    {threads.state === 'failure' ? <p role="alert" className="px-4 py-2 text-caption text-destructive">Review threads {threadsValue ? 'refresh failed; showing the last accepted state.' : 'could not load.'} {rpcErrorMessage(threads.error, 'inspector.review.list')}<Button variant="ghost" size="compact" onClick={() => void threads.refetch()}>Retry review threads</Button></p> : null}
-    {stackStatus.error ? <p role="alert" className="px-4 py-2 text-caption text-destructive">Stack status could not load. {stackStatus.error}<Button variant="ghost" size="compact" onClick={stackStatus.retry}>Retry stack status</Button></p> : null}
-    {actionError ? <p role="alert" className="px-3 py-1 text-caption text-destructive">{actionError}</p> : null}
-  </div><Inspector
+  return <>{overviewRead.refreshing ? <p role="status" className="sr-only">Refreshing Inspector…</p> : null}<Inspector
     overview={overviewValue}
     runtimeAvailable={runtimeAvailable}
     initialView={initialView}
@@ -547,6 +548,11 @@ function AccountFrame({ children }: { children: ReactNode }) {
     else url.searchParams.delete('section');
     navigateProductUrl(url);
   };
+  const projectsError = projects.state === 'failure' ? rpcErrorMessage(projects.error, 'Load project directory') : null;
+  useToasts([
+    projectsError ? { key: `project-directory:${projectsError}`, tone: 'error', persistent: true, message: projectsError, action: { label: 'Retry', onClick: () => void projects.refetch() } } : null,
+    sidebarActionError ? { key: `sidebar-action:${sidebarActionError}`, tone: 'error', message: sidebarActionError, onDismiss: () => setSidebarActionError(null) } : null,
+  ]);
   return <AccountWorkActionsContext.Provider value={actions}><ProjectSettingsContext.Provider value={projectSettings}><AccountSidebarContext.Provider value={setRuntimeSidebar}><AccountDirectoryContext.Provider value={accountDirectory}><ProjectGraphsContext.Provider value={graphs}>
     {graphReaders}
     <SidebarProvider className="gitspace-shell" persist={false} width="19rem">
@@ -570,8 +576,6 @@ function AccountFrame({ children }: { children: ReactNode }) {
       />
       <SidebarInset className="min-w-0 overflow-hidden">
         {!live ? <SidebarInsetTopbar><nav aria-label="Location" className="min-w-0"><span aria-current="page" className="truncate text-body font-medium">{frameView === 'agent' ? projectValues.find((project) => project.id === projectId)?.name ?? 'Your account' : PRODUCT_ROUTE_LABELS[frameView]}</span></nav></SidebarInsetTopbar> : null}
-        {projects.state === 'failure' ? <div role="alert" className="flex items-center gap-2 px-4 py-2 text-caption text-destructive"><span>{rpcErrorMessage(projects.error, 'Load project directory')}</span><Button variant="ghost" size="compact" onClick={() => void projects.refetch()}>Retry</Button></div> : null}
-        {sidebarActionError ? <div role="alert" className="flex items-center gap-2 px-4 py-2 text-caption text-destructive"><span>{sidebarActionError}</span><Button variant="ghost" size="compact" onClick={() => setSidebarActionError(null)}>Dismiss</Button></div> : null}
         {children}
         {lfsTransition.dialog}
       </SidebarInset>
@@ -1094,28 +1098,31 @@ function GitSpaceProduct() {
     providers={providersSection} onboarding={onboarding}
     initialTab={onboarding || location.searchParams.get('section') === 'providers' ? 'Providers' : undefined}
   />;
-  if (route === 'inference') return inferencePage();
   // Account/machine metadata refreshes are not navigation away from an open workspace. A workspace link opens the
   // workspace without waiting for settings; settings that arrive saying setup is unfinished still show setup.
   const onboarded = draft?.onboardingComplete ?? settingsValue?.onboardingComplete;
-  if (!forceOnboarding && route !== 'settings' && (onboarded ?? (route === 'agent' && selectedProjectId.length > 0))) return <>
-    <LiveWorkspace onOpenSettings={(section) => navigateProduct('settings', 'push', section ?? null)} />
-    {settingsQuery.state === 'failure' && !appUpdate.current() ? <div role="alert" className="fixed inset-x-0 top-[var(--app-notice-top)] z-50 mx-auto w-fit max-w-full rounded-lg bg-surface-3 px-3 py-2 text-caption text-foreground shadow-surface-3">Account settings: {rpcErrorMessage(settingsQuery.error, 'settings.get')}<Button variant="ghost" size="compact" onClick={() => void settingsQuery.refetch()}>Retry</Button></div> : null}
-  </>;
-  if (!settingsValue && settingsQuery.state === 'failure') {
-    return <PageCanvas><EmptyState title="GitSpace setup is unavailable" description={rpcErrorMessage(settingsQuery.error, 'settings.get')} action={<Button variant="ghost" onClick={() => void settingsQuery.refetch()}>Retry</Button>} /></PageCanvas>;
-  }
-  if (!settingsValue || !draft) {
-    return <PageCanvas><EmptyState icon={<ThinkingIndicator />} title="Opening your GitSpace account…" description="Loading cloud settings." /></PageCanvas>;
-  }
+  const workspaceOpen = route !== 'inference' && !forceOnboarding && route !== 'settings' && (onboarded ?? (route === 'agent' && selectedProjectId.length > 0));
+  const settingsOpen = route !== 'inference' && !workspaceOpen && !!settingsValue && !!draft;
   const reads = [
     ['Account settings', settingsQuery], ['Runtime settings', runtimeQuery], ['Git identity', gitIdentityQuery], ['Machines', machinesQuery],
     ['Devices', devicesQuery], ['Source', settingsDeploymentQuery], ['Composio setup', composioSetupQuery], ['GitHub', githubQuery],
     ['Projects', productProjectsQuery], ['Models', modelsQuery],
     ['Cloud images', cloudImagesQuery], ['Cloud image default', imageDefaultQuery],
   ] as const;
+  useToasts([
+    // An account settings read that fails because GitSpace was updated is the update toast's to explain.
+    workspaceOpen && settingsQuery.state === 'failure' && !appUpdate.current() ? { key: `account-settings:${rpcErrorMessage(settingsQuery.error, 'settings.get')}`, tone: 'error', persistent: true, message: `Account settings: ${rpcErrorMessage(settingsQuery.error, 'settings.get')}`, action: { label: 'Retry', onClick: () => void settingsQuery.refetch() } } : null,
+    ...reads.map(([label, query]): Toast | null => settingsOpen && query.state === 'failure' ? { key: `settings-read:${label}:${rpcErrorMessage(query.error, label)}`, tone: 'error', persistent: true, message: `${label}: ${rpcErrorMessage(query.error, label)}`, action: { label: 'Retry', onClick: () => void query.refetch() } } : null),
+  ]);
+  if (route === 'inference') return inferencePage();
+  if (workspaceOpen) return <LiveWorkspace onOpenSettings={(section) => navigateProduct('settings', 'push', section ?? null)} />;
+  if (!settingsValue && settingsQuery.state === 'failure') {
+    return <PageCanvas><EmptyState title="GitSpace setup is unavailable" description={rpcErrorMessage(settingsQuery.error, 'settings.get')} action={<Button variant="ghost" onClick={() => void settingsQuery.refetch()}>Retry</Button>} /></PageCanvas>;
+  }
+  if (!settingsValue || !draft) {
+    return <PageCanvas><EmptyState icon={<ThinkingIndicator />} title="Opening your GitSpace account…" description="Loading cloud settings." /></PageCanvas>;
+  }
   const page = (mode: 'settings' | 'onboarding') => <>
-    {reads.map(([label, query]) => query.state === 'failure' ? <p key={label} role="alert" className="px-8 py-1 text-caption text-destructive">{label}: {rpcErrorMessage(query.error, label)}<Button variant="ghost" size="compact" onClick={() => void query.refetch()}>Retry</Button></p> : null)}
     <SettingsPage
     mode={mode}
     settings={draft}
@@ -1400,9 +1407,12 @@ function AccountConfiguration({ view }: { view: ConfigurationView }) {
   const projects = useAccountProjects();
   const read = useRetainedRead(projects, 'projects');
   const values = read.value ?? [];
+  const readError = read.error ? rpcErrorMessage(read.error, 'project.list') : null;
+  useToasts([
+    read.initialLoading ? { key: 'configuration-projects-loading', tone: 'info', persistent: true, message: 'Loading projects for assignments…' } : null,
+    readError ? { key: `configuration-projects:${readError}`, tone: 'error', persistent: true, message: `Project assignments: ${readError}`, action: { label: 'Retry projects', onClick: () => void projects.refetch() } } : null,
+  ]);
   return <>
-    {read.initialLoading ? <p role="status" className="px-8 pt-4 text-caption text-muted-foreground">Loading projects for assignments…</p> : null}
-    {read.error ? <p role="alert" className="px-8 pt-4 text-caption text-destructive">Project assignments: {rpcErrorMessage(read.error, 'project.list')}<Button variant="ghost" onClick={() => void projects.refetch()}>Retry projects</Button></p> : null}
     {view === 'skills' ? <AccountSkills projects={values} />
       : view === 'plugins' ? <AccountPlugins projects={values} />
         : <ProjectSecretsPage {...accountSecretsApi} projects={values} />}
@@ -1511,14 +1521,12 @@ function AccountProductRoute() {
       : route === 'automations' ? <AccountAutomations />
         : route === 'monitoring' ? <MonitoringPage />
           : <GitSpaceProduct />;
-  return <>
-    {page}
-    {updated ? <div role="alert" className="fixed inset-x-0 top-[var(--app-notice-top)] z-50 mx-auto flex w-fit max-w-full items-center gap-2 rounded-lg bg-surface-3 px-3 py-2 text-caption text-foreground shadow-surface-3">GitSpace was updated. Reload to load the new version.<Button variant="primary" size="compact" onClick={() => window.location.reload()}>Reload</Button></div> : null}
-  </>;
+  useToasts([updated ? { key: 'app-updated', tone: 'info', persistent: true, message: 'GitSpace was updated. Reload to load the new version.', action: { label: 'Reload', onClick: () => window.location.reload() } } : null]);
+  return page;
 }
 
 
 export function LiveApp() {
   if (window.location.pathname === '/service-access') return <DeviceGate><ServiceAccessApproval /></DeviceGate>;
-  return <DeviceGate><ResultRpcProvider client={rpcClient}><SynchronizationProvider><InferenceProvider><AccountFrame><AccountProductRoute /></AccountFrame></InferenceProvider></SynchronizationProvider></ResultRpcProvider></DeviceGate>;
+  return <DeviceGate><ResultRpcProvider client={rpcClient}><SynchronizationProvider><InferenceProvider><Toasts><AccountFrame><AccountProductRoute /></AccountFrame></Toasts></InferenceProvider></SynchronizationProvider></ResultRpcProvider></DeviceGate>;
 }

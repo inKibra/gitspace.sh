@@ -29,6 +29,7 @@ import { glyph } from './glyph.js';
 import { EmptyState, PageCanvas, PageHeader } from './GitSpaceShell.js';
 import { ProjectAssignmentMatrix } from './ProjectAssignmentMatrix.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
+import { useToasts } from './toasts.js';
 
 export interface SkillsPageProps {
   projects: readonly { id: string; name: string }[];
@@ -68,6 +69,8 @@ export function SkillsPage(props: SkillsPageProps) {
     }
   };
   const error = actionError ?? props.error;
+  // The open dialog shows the same error inline.
+  useToasts([error && expandedSkill === null ? { key: `skills:${error}`, tone: 'error', message: error, onDismiss: () => setActionError(null) } : null]);
   return <PageCanvas>
     <PageHeader
       kicker="Account configuration"
@@ -101,7 +104,6 @@ export function SkillsPage(props: SkillsPageProps) {
         </CardGroup>
         : <EmptyState icon={<BookOpen01 width={22} height={22} strokeWidth={1.5} />} title="No matching skills" description="Change the filter to see the installed catalog." />}
 
-    {error ? <p role="alert" className="mt-4 text-body text-destructive">{error}</p> : null}
     <p className="mt-6 text-caption text-muted-foreground">Assignments control discovery, not authorization. Tools and project secrets keep their own capability checks.</p>
 
     <Dialog open={expandedSkill !== null} onOpenChange={(open) => { if (!open) setExpanded(null); }}>

@@ -4,7 +4,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { DeploymentStatusView, LaunchProgressView } from '@gitspace/protocol';
 import { deploymentStatusFixture } from './App.js';
-import { LaunchSheet, LaunchedBanner, LAUNCHED_STORAGE_KEY } from './LaunchSheet.js';
+import { LaunchSheet, LAUNCHED_STORAGE_KEY } from './LaunchSheet.js';
 import { useRuntimeLaunch, type RuntimeLaunch } from './useRuntimeLaunch.js';
 
 const rpc = vi.hoisted(() => ({ launch: vi.fn(), backToDefault: vi.fn() }));
@@ -16,7 +16,7 @@ const refresh = vi.fn();
 const reload = vi.fn();
 function View({ status }: { status: DeploymentStatusView }) {
   state = useRuntimeLaunch(status, refresh, reload);
-  return <>{state.launch ? <LaunchSheet launch={state.launch} open={state.open} onOpenChange={state.setOpen} onRetry={() => state.launch!.source.kind === 'release' ? state.backToDefault().catch(() => {}) : state.start(state.launch!.source, 'builder', state.launch!.targets)} onDiscard={() => state.discard(state.launch!.launchId)} /> : null}{state.mark ? <LaunchedBanner mark={state.mark} onBackToDefault={() => state.backToDefault().catch(() => {})} onDismiss={state.dismiss} /> : null}</>;
+  return <>{state.launch ? <LaunchSheet launch={state.launch} open={state.open} onOpenChange={state.setOpen} onRetry={() => state.launch!.source.kind === 'release' ? state.backToDefault().catch(() => {}) : state.start(state.launch!.source, 'builder', state.launch!.targets)} onDiscard={() => state.discard(state.launch!.launchId)} /> : null}{state.mark ? <p>Now running {state.mark.label}</p> : null}</>;
 }
 function initial(): DeploymentStatusView {
   const value = structuredClone(deploymentStatusFixture);

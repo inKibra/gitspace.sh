@@ -22,6 +22,7 @@ import { previewShare } from './share/share-client.js';
 import { StagedChips, stagedMessage, useComposerStaging } from './chat/staging.js';
 import { OutgoingMessages, useOutbox, type Outbox, type OutgoingMessage, type SentMessage } from './chat/outbox.js';
 import { DictationControl } from './chat/dictation.js';
+import { Toasts, useToasts } from './toasts.js';
 
 export type SendBehavior = 'steer' | 'followUp';
 
@@ -116,15 +117,6 @@ function CommandPalette({ draft, commands, onPick }: { draft: string; commands: 
   </Dropdown>;
 }
 
-/** Credentials and connection actions always refer to the canonical profile for the next execution. */
-function ProviderNotice({ provider, profileId }: { provider: ProviderAuthView; profileId?: string }) {
-  const shape = useShape();
-  return <div role="status" className={`${shape.container} flex items-center justify-between gap-3 bg-surface-3 px-3 py-2 text-caption shadow-surface-1`}>
-    <span className="min-w-0 truncate text-foreground">{provider.name} isn’t connected in this inference profile</span>
-    <Button variant="tertiary" size="compact" asChild><a href={`/inference?section=providers${profileId ? `&profile=${encodeURIComponent(profileId)}` : ''}`} onClick={(event) => { if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); const url = setProductRoute(new URL(window.location.href), 'inference'); url.searchParams.set('section', 'providers'); if (profileId) url.searchParams.set('profile', profileId); navigateProductUrl(url); }}>Connect</a></Button>
-  </div>;
-}
-
 export interface ComposerProps {
   workspace: Pick<AgentScopeView, 'id' | 'projectId' | 'kind' | 'phase'>;
   controls?: SessionControlsProps;
@@ -138,8 +130,6 @@ export interface ComposerProps {
   pending: boolean;
   recovering?: boolean;
   error?: string;
-  controlsError?: string;
-  onRetryControls?: () => void;
   /** Runs a command of this workspace's session; with it, a share link of this account in the draft moves out of its
    * text into a tab chip, and the tab is connected to the workspace (`browserShareConnect`) before the message is sent. */
   sessionCommand?: (command: RuntimeSessionCommand) => Promise<RuntimeSessionResult>;
@@ -153,13 +143,13 @@ export function StandaloneComposer({ sent = [], ...props }: Omit<ComposerProps, 
   const queue = props.controls?.value.queue;
   const arrivals = useMemo(() => ({ sent, queue: [...(queue?.steering ?? []), ...(queue?.followUp ?? [])], latest: true }), [sent, queue]);
   const outbox = useOutbox(arrivals);
-  return <>
+  return <Toasts>
     <div className="mx-auto w-full max-w-xl"><OutgoingMessages outbox={outbox} /></div>
     <Composer {...props} outbox={outbox} />
-  </>;
+  </Toasts>;
 }
 
-export function Composer({ workspace, controls, providers, skills = [], running, onSend, draft: workspaceDraft, artifactUpload, pending, recovering = false, error, controlsError, onRetryControls, sessionCommand, outbox }: ComposerProps) {
+export function Composer({ workspace, controls, providers, skills = [], running, onSend, draft: workspaceDraft, artifactUpload, pending, recovering = false, error, sessionCommand, outbox }: ComposerProps) {
   const icons = useIcons();
   const inference = useInference();
   const assignment = inference?.state?.assignments.find((entry) => entry.projectId === workspace.projectId);
@@ -387,18 +377,27 @@ export function Composer({ workspace, controls, providers, skills = [], running,
   const thinkingLevels = ['auto', 'off', 'low', 'medium', 'high', 'xhigh'];
   const streaming = running;
   const selectedProvider = controls?.value.provider ? providers?.find((provider) => provider.id === controls.value.provider) : undefined;
+  const inferenceUnassigned = inference !== null && !profile && !inference.loading;
+  // Credentials and connection actions refer to the canonical profile for the next execution. An inference read error
+  // is also the shell's session-controls error: both report it under the same key, so it shows once.
+  useToasts([
+    inference && inferenceUnassigned ? {
+      key: inference.error ? `session-controls:${inference.error}` : 'inference-assignment', tone: 'error', persistent: true,
+      message: inference.error ?? 'The project’s inference assignment is unavailable. Refresh before sending.',
+      action: { label: 'Refresh profiles', onClick: () => void inference.refresh() },
+    } : null,
+    selectedProvider && !selectedProvider.hasAuth ? {
+      key: `provider-auth:${selectedProvider.id}`, tone: 'warning', persistent: true, message: `${selectedProvider.name} isn’t connected in this inference profile`,
+      action: { label: 'Connect', onClick: () => { const url = setProductRoute(new URL(window.location.href), 'inference'); url.searchParams.set('section', 'providers'); if (profile) url.searchParams.set('profile', profile.id); navigateProductUrl(url); } },
+    } : null,
+  ]);
 
   return <div className="pointer-events-none mx-auto flex w-full max-w-xl flex-col gap-2 [&>*]:pointer-events-auto">
-    {controlsError ? <div role="alert" className="flex max-h-40 min-w-0 flex-col gap-2 overflow-y-auto rounded-lg bg-surface-3 p-3 text-caption shadow-surface-1"><p className="whitespace-pre-wrap break-words text-destructive">{controlsError}</p>{onRetryControls ? <Button variant="ghost" size="compact" className="self-start" disabled={pending} onClick={onRetryControls}>Retry provider catalog and controls</Button> : null}</div> : null}
-    {!controlsError && inference && !profile ? <div className="flex flex-wrap items-center justify-between gap-2 text-caption">
-      <span role="alert" className="text-destructive">{inference.loading ? 'Loading inference profile…' : inference.error ?? 'The project’s inference assignment is unavailable. Refresh before sending.'}<Button variant="ghost" size="compact" disabled={inference.loading} onClick={() => void inference.refresh()}>Refresh profiles</Button></span>
-    </div> : null}
     {invalidModel ? <p role="status" className="text-caption text-muted-foreground">The selected model {selectedModelKey} is no longer available. The next run will use an authorized fallback and record the model change in the conversation.</p> : null}
     {controls && !controls.selectionReadOnly && !controls.value.model && controls.value.models.length > 0 ? <p role="status" className="text-caption text-destructive">No model: {controls.value.roleLabel ?? 'the Default role'} has none in this inference profile. Pick a model before sending.</p> : null}
     {controls ? <PlanSteps controls={controls} /> : null}
     {controls?.onReadHistory && showHistory ? <SessionTreeExplorer key={controls.value.sessionId} historyAnchorId={controls.value.historyAnchorId} onReadHistory={controls.onReadHistory} onNavigate={controls.onNavigateTree} onClose={() => setShowHistory(false)} /> : null}
     {message.startsWith('/') && commands.length ? <CommandPalette draft={message} commands={commands} onPick={(command) => { setMessage(''); command.run(); }} /> : null}
-    {selectedProvider && !selectedProvider.hasAuth ? <ProviderNotice provider={selectedProvider} profileId={profile?.id} /> : null}
     {workspaceDraft?.error ? <p role="alert" className="text-caption text-destructive">{workspaceDraft.error}</p> : null}
     {joined.map((tab) => <p key={`${tab.pairingId}:${tab.targetId}`} role="status" className="flex items-center gap-2 text-caption text-muted-foreground"><span aria-hidden className="size-2 shrink-0 rounded-full bg-foreground/40" />Tab connected: {URL.canParse(tab.url) ? new URL(tab.url).host : tab.url} joined this workspace&apos;s group in {tab.browser}. The agent may use it while it stays there.</p>)}
     {tabs.length ? <ul aria-label="Shared tabs" className="flex flex-col gap-1.5">{tabs.map((link) => {

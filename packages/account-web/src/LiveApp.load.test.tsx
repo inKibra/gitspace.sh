@@ -147,7 +147,7 @@ it('paints the saved transcript on a reload before any request answers', async (
 
   await load();
   await vi.waitFor(() => expect(container.textContent).toContain('Saved reply from last visit'), { timeout: PAGE_LOAD_MS });
-  expect(container.textContent).toContain('Showing the copy saved in this browser');
+  expect(container.querySelector('nav[aria-label="Location"] [role="status"]')?.getAttribute('aria-label')).toContain('Showing the copy saved in this browser');
   expect(container.textContent).not.toContain('Loading workspace…');
   expect(rpc.answers.size).toBe(0);
   expect(transcriptPages()[0]?.input).toMatchObject({ conversationId: 'main' });
