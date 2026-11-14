@@ -13,11 +13,11 @@ import type { TranscriptHistory } from './useTranscriptHistory.js';
 import { Toasts } from './toasts.js';
 import { LAUNCHED_STORAGE_KEY } from './LaunchSheet.js';
 
-const mocks = vi.hoisted((): { setRelations: Mock; refresh: Mock; cancelRun: Mock; session: { result: RuntimeSessionResult | null; run: Mock }; shell: GitSpaceShellProps | null; saved: SpaceView | null; access: unknown; failed: boolean; pending: boolean } => ({ setRelations: vi.fn(), refresh: vi.fn(), cancelRun: vi.fn(), session: { result: null, run: vi.fn() }, shell: null, saved: null, access: undefined, failed: false, pending: false }));
+const mocks = vi.hoisted((): { setRelations: Mock; refresh: Mock; cancelRun: Mock; session: { result: RuntimeSessionResult | null; run: Mock }; shell: GitSpaceShellProps | null; saved: SpaceView | null; access: unknown; deployment: unknown; failed: boolean; pending: boolean } => ({ setRelations: vi.fn(), refresh: vi.fn(), cancelRun: vi.fn(), session: { result: null, run: vi.fn() }, shell: null, saved: null, access: undefined, deployment: undefined, failed: false, pending: false }));
 const createTerminal = vi.hoisted(() => vi.fn(async (_input: { spaceId: string; machineId: string }) => ({ status: 'ok' as const, value: {} })));
 const copyCalls = vi.hoisted(() => ({ seed: vi.fn(async (_input: { projectId: string; machineId: string }) => ({ status: 'ok' as const, value: { baseBranch: 'main', commit: 'c'.repeat(40) } })), attach: vi.fn(async (_input: { projectId: string; workspaceId: string; machineId: string }) => ({ status: 'ok' as const, value: {} })) }));
 vi.mock('./rpc-client.js', () => ({ rpcClient: { deployment: { status: 'deployment' }, github: { projectAccess: 'projectAccess' }, workspace: { setRelations: mocks.setRelations }, terminals: { create: createTerminal }, project: { seed: copyCalls.seed }, runtime: { attachment: { cache: { request: copyCalls.attach } } }, automations: { cancelRun: mocks.cancelRun } } }));
-vi.mock('result-rpc/react', () => ({ useResultQuery: (procedure: string) => ({ state: 'success', value: procedure === 'projectAccess' ? mocks.access : undefined, refetch: mocks.refresh }) }));
+vi.mock('result-rpc/react', () => ({ useResultQuery: (procedure: string) => ({ state: 'success', value: procedure === 'projectAccess' ? mocks.access : procedure === 'deployment' ? mocks.deployment : undefined, refetch: mocks.refresh }) }));
 vi.mock('./InferenceContext.js', () => ({ useInference: () => null }));
 vi.mock('./useCloudSessionControls.js', () => ({ useCloudSessionControls: () => ({ result: mocks.session.result, run: mocks.session.run, error: null }) }));
 vi.mock('./GitSpaceShell.js', () => ({ GitSpaceShell: (props: GitSpaceShellProps) => { mocks.shell = props; return <div>{props.workspaces[0]?.relations.dependsOn.join(',')}{props.renderEnvironmentStatus?.(inspectEnvironment, () => {})}{props.access?.card(inspectEnvironment)}</div>; }, EmptyState: () => null, StatusDot: ({ color }: { color: string }) => <span data-status-color={color} /> }));
@@ -58,7 +58,7 @@ const render = () => root.render(<Toasts><RuntimeWorkspaceShell projectId={proje
 const toasts = () => [...container.querySelectorAll<HTMLElement>('section[aria-label="Notifications"] [data-tone]')];
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
-  mocks.setRelations.mockReset(); mocks.refresh.mockReset(); mocks.cancelRun.mockReset(); refreshInspection.mockReset(); mocks.failed = false; mocks.pending = false; mocks.access = undefined;
+  mocks.setRelations.mockReset(); mocks.refresh.mockReset(); mocks.cancelRun.mockReset(); refreshInspection.mockReset(); mocks.failed = false; mocks.pending = false; mocks.access = undefined; mocks.deployment = undefined;
   mocks.session = { result: null, run: vi.fn() };
   snapshot.documents = {};
   snapshot.conversations = [];
@@ -160,6 +160,20 @@ it('says what this page now runs after a launch reload in a toast whose Back to 
   await act(() => running!.querySelector<HTMLButtonElement>('button[aria-label="Dismiss"]')!.click());
   expect(sessionStorage.getItem(LAUNCHED_STORAGE_KEY)).toBeNull();
   expect(toasts().some(toast => toast.textContent?.includes('Now running'))).toBe(false);
+});
+
+it('says a launch is running only while it runs or after it failed, not for the finished launch the account keeps', async () => {
+  const finished = {
+    desired: { worker: 'a'.repeat(40), machine: 'a'.repeat(40), frontend: 'a'.repeat(40), updatedAt: stamp }, defaultRelease: 'a'.repeat(40),
+    current: { worker: { sha: 'a'.repeat(40), version: 'a'.repeat(40) }, machines: {} }, machineExecution: {}, releases: [], canonical: null,
+    launch: { launchId: 'launch-1', source: { kind: 'canonical', repository: 'https://example.com/r.git', branch: 'main', commit: 'a'.repeat(40) }, targets: ['worker'], sha: 'a'.repeat(40), phase: 'launched', message: '', status: 'succeeded', error: null, startedAt: stamp, updatedAt: stamp },
+  };
+  mocks.deployment = finished;
+  await act(render);
+  expect(toasts().some(toast => toast.textContent?.includes('launch'))).toBe(false);
+  mocks.deployment = { ...finished, launch: { ...finished.launch, launchId: 'launch-2', status: 'failed', error: 'Upload rejected' } };
+  await act(render);
+  expect(toasts().some(toast => toast.textContent?.includes('Upload rejected'))).toBe(true);
 });
 
 it('opens Inspector Environment from the single environment chip instead of a machines dialog', async () => {
