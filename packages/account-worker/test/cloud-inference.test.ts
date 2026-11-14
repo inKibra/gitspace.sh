@@ -420,6 +420,36 @@ describe('Cloud inference credential authority', () => {
     expect(refreshed.credential).toMatchObject({ type: 'oauth', access: 'refreshed-access', email: 'first@example.com' });
   });
 
+  it('starts a ChatGPT sign-in while an earlier one was left unfinished, which ends as replaced', async () => {
+    const vault = env.CREDENTIALS.getByName(await seedVault([]));
+    network.use(http.post('https://auth.openai.com/api/accounts/oauth/token', () => HttpResponse.json({
+      access_token: `header.${btoa(JSON.stringify({ sub: 'user' }))}.signature`, refresh_token: 'refresh', expires_in: 3600,
+      id_token: `header.${btoa(JSON.stringify({ email: 'person@example.com' }))}.signature`, scope: 'openid chatgpt.tokens.use.direct',
+    })));
+    async function untilPrompt(flowId: string) {
+      let pending = await vault.cloudLoginEvents({ profileId: 'default', flowId });
+      for (let attempt = 0; attempt < 20 && !pending.done && !pending.events.some(event => event.type === 'prompt'); attempt += 1) pending = await vault.cloudLoginEvents({ profileId: 'default', flowId });
+      return pending;
+    }
+    // The first dialog was closed without Cancel: its login still waits for the redirect.
+    const abandoned = await vault.cloudLoginStart({ profileId: 'default', providerId: 'openai' });
+    expect((await untilPrompt(abandoned.flowId)).events.some(event => event.type === 'prompt')).toBe(true);
+
+    const { flowId } = await vault.cloudLoginStart({ profileId: 'default', providerId: 'openai' });
+    const pending = await untilPrompt(flowId);
+    const auth = pending.events.find(event => event.type === 'auth');
+    const prompt = pending.events.find(event => event.type === 'prompt');
+    if (!auth || !prompt) throw new Error(`The second sign-in must reach its prompt, got ${JSON.stringify(pending.events)}`);
+    const state = new URL(auth.url).searchParams.get('state');
+    await vault.cloudLoginRespond({ profileId: 'default', flowId, promptId: prompt.promptId, value: `http://127.0.0.1:1455/auth/callback?code=code&state=${state}&client_id=issued` });
+    let done = await vault.cloudLoginEvents({ profileId: 'default', flowId });
+    for (let attempt = 0; attempt < 20 && !done.done; attempt += 1) done = await vault.cloudLoginEvents({ profileId: 'default', flowId });
+    expect(done.events).toContainEqual(expect.objectContaining({ type: 'done', ok: true }));
+    const replaced = await vault.cloudLoginEvents({ profileId: 'default', flowId: abandoned.flowId });
+    expect(replaced.done).toBe(true);
+    expect(replaced.events).toContainEqual({ type: 'done', ok: false, error: 'A newer sign-in replaced this one' });
+  });
+
   it('commits rotated grants once and retains refresh tokens only in the vault', async () => {
     const vault = env.CREDENTIALS.getByName(await seedVault([{ id: 'rotating', provider: 'openai-codex', access: 'old' }]));
     const account = (await vault.cloudCredentialAccounts('default'))[0]!;

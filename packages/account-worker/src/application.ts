@@ -447,7 +447,8 @@ async function openVaultText(sealedValue: string, vaultKey: Uint8Array, context:
   return new TextDecoder().decode(plaintext);
 }
 
-type UpstreamLogin = { abort: AbortController; answer: { promptId: string; resolve(value: string): void } | null };
+/** `settled` resolves once the login's code has returned, so its loopback listener is closed. */
+type UpstreamLogin = { provider: UpstreamOAuthProvider; abort: AbortController; answer: { promptId: string; resolve(value: string): void } | null; settled: Promise<void> };
 type CloudLoginRow = {
   flow_id: string; profile_id: string; provider: string; revision: number; sealed_state: string;
   events_json: string; status: 'pending' | 'busy' | 'done'; expires_at: number;
@@ -2027,13 +2028,19 @@ export class CredentialVaultDO extends BudgetedDurableObject {
   }
 
   private async startUpstreamLogin(profileId: string, provider: UpstreamOAuthProvider): Promise<{ flowId: string }> {
+    // Pi's ChatGPT login listens on a fixed loopback port in this isolate until it returns, so a sign-in left unfinished
+    // (a closed dialog, a reloaded tab) made every later one fail with "Port 1455 is in use". A new sign-in ends them first.
+    const unfinished = [...this.upstreamLogins.values()].filter(login => login.provider === provider);
+    for (const login of unfinished) login.abort.abort(new Error('A newer sign-in replaced this one'));
+    await Promise.all(unfinished.map(login => login.settled));
     const flowId = crypto.randomUUID();
     const deviceId = await this.agentHostId();
     this.ensureCloudLoginStorage();
     this.assertProfileAccess(profileId);
     // Nothing secret persists for these flows: their state lives in this object's memory.
     this.ctx.storage.sql.exec("INSERT INTO cloud_provider_logins VALUES (?, ?, ?, 0, '', '[]', 'pending', ?)", flowId, profileId, provider, Date.now() + 15 * 60_000);
-    const running: UpstreamLogin = { abort: new AbortController(), answer: null };
+    const settled = Promise.withResolvers<void>();
+    const running: UpstreamLogin = { provider, abort: new AbortController(), answer: null, settled: settled.promise };
     this.upstreamLogins.set(flowId, running);
     const append = (event: ProviderLoginEvent) => {
       this.ctx.storage.sql.exec("UPDATE cloud_provider_logins SET events_json = json_insert(events_json, '$[#]', json(?)) WHERE flow_id = ? AND status != 'done'", JSON.stringify(event), flowId);
@@ -2071,6 +2078,7 @@ export class CredentialVaultDO extends BudgetedDurableObject {
         finish({ type: 'done', ok: false, error: reason ?? `Sign-in failed: ${(error instanceof Error ? error.message : String(error)).slice(0, 240)}` });
       } finally {
         this.upstreamLogins.delete(flowId);
+        settled.resolve();
       }
     })();
     // Alarms keep this object resident while the in-memory flow waits on the provider.
