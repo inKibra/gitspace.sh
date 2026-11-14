@@ -49,11 +49,12 @@ it("generates images with the profile's Images service: a FLUX model on Workers 
   const chat = (await runtime.session.catalog()).models[0]!;
   const admitted = async (revision: number, images: string) => {
     profile = { ...profile, revision, settings: { 'modelRoles.default': `openrouter/${chat.id}`, images } };
-    await runtime.admitInference({ conversationId: 'conversation', requestId: `request-${revision}` });
+    const admission = await runtime.admitInference({ conversationId: 'conversation', requestId: `request-${revision}` });
     await runtime.bindInferenceConversation('conversation', new AbortController().signal, [], [`request-${revision}`], { fastMode: false });
+    return admission;
   };
 
-  await admitted(2, 'cloudflare/flux-2-klein-9b');
+  expect(await admitted(2, 'cloudflare/flux-2-klein-9b')).toMatchObject({ withoutTools: [] });
   expect(await runtime.generateImage({ conversationId: 'conversation', args: { prompt: 'a folded map', images: [drawn] } })).toEqual([drawn]);
   expect(sent).toEqual([{ model: '@cf/black-forest-labs/flux-2-klein-9b', prompt: 'a folded map', image: png }]);
   expect(requested).toEqual([]);
@@ -66,5 +67,10 @@ it("generates images with the profile's Images service: a FLUX model on Workers 
   await admitted(4, 'openrouter/black-forest-labs/flux.2-klein-4b');
   expect(await runtime.generateImage({ conversationId: 'conversation', args: { prompt: 'a folded map' } })).toEqual([drawn]);
   expect(requested).toEqual([{ url: 'https://openrouter.ai/api/v1/chat/completions', body: expect.objectContaining({ model: 'black-forest-labs/flux.2-klein-4b' }) }]);
+  expect(run).toHaveBeenCalledTimes(1);
+
+  // Off: the profile's conversations are not offered generate_image, and a call made anyway is refused.
+  expect(await admitted(5, 'off')).toMatchObject({ withoutTools: ['generate_image'] });
+  await expect(runtime.generateImage({ conversationId: 'conversation', args: { prompt: 'a folded map' } })).rejects.toThrow('Image generation is off in this inference profile. Turn it on in Inference → Services.');
   expect(run).toHaveBeenCalledTimes(1);
 });

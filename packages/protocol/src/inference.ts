@@ -40,12 +40,15 @@ const inferenceRootSections: Record<string, InferenceSettingSection> = {
   search: 'Services', dictation: 'Services', images: 'Services',
 };
 /** A service selector (`search`, `dictation`, `images`): `cloudflare/<option>` runs on the platform's Cloudflare account,
- * `<provider>/<modelId>` on one of the profile's own credentials for that pi-ai provider. */
+ * `<provider>/<modelId>` on one of the profile's own credentials for that pi-ai provider. `SERVICE_OFF` turns it off. */
 export function parseServiceSelector(value: string): { provider: string; id: string } | null {
   const slash = value.indexOf('/');
   if (slash <= 0 || slash === value.length - 1) return null;
   return { provider: value.slice(0, slash), id: value.slice(slash + 1) };
 }
+/** The `search`, `dictation` or `images` value that turns the service off: its agent tool (web_search, generate_image) is
+ * not offered to the profile's conversations, and the composer shows no microphone. */
+export const SERVICE_OFF = 'off';
 /** Web search on Cloudflare's Web Search API, by its provider. */
 export const CLOUDFLARE_SEARCH_PROVIDERS: Readonly<Record<string, true>> = { ceramic: true, linkup: true, exa: true };
 /** Profile providers whose models search the web themselves (Anthropic's and OpenAI's keys and subscriptions, a Gemini key). */
@@ -53,23 +56,23 @@ export const SEARCH_MODEL_PROVIDERS: Readonly<Record<string, true>> = { anthropi
 export const DEFAULT_SEARCH_SELECTOR = 'cloudflare/ceramic';
 export const searchSelectorSchema = z.string().refine(value => {
   const selector = parseServiceSelector(value);
-  return selector !== null && (selector.provider === 'cloudflare' ? Object.hasOwn(CLOUDFLARE_SEARCH_PROVIDERS, selector.id) : Object.hasOwn(SEARCH_MODEL_PROVIDERS, selector.provider));
-}, 'Web search is cloudflare/ceramic, cloudflare/linkup, cloudflare/exa, or an anthropic, openai or google model');
+  return value === SERVICE_OFF || (selector !== null && (selector.provider === 'cloudflare' ? Object.hasOwn(CLOUDFLARE_SEARCH_PROVIDERS, selector.id) : Object.hasOwn(SEARCH_MODEL_PROVIDERS, selector.provider)));
+}, 'Web search is off, cloudflare/ceramic, cloudflare/linkup, cloudflare/exa, or an anthropic, openai or google model');
 /** Dictation on Cloudflare Workers AI: `nova-3` transcribes live, `whisper` after recording stops. */
 export const CLOUDFLARE_DICTATION_MODELS: Readonly<Record<string, true>> = { 'nova-3': true, whisper: true };
 export const DEFAULT_DICTATION_SELECTOR = 'cloudflare/nova-3';
 export const dictationSelectorSchema = z.string().refine(value => {
   const selector = parseServiceSelector(value);
-  return selector !== null && (selector.provider === 'cloudflare' ? Object.hasOwn(CLOUDFLARE_DICTATION_MODELS, selector.id) : selector.provider === 'openai');
-}, 'Dictation is cloudflare/nova-3, cloudflare/whisper, or an openai transcription model');
+  return value === SERVICE_OFF || (selector !== null && (selector.provider === 'cloudflare' ? Object.hasOwn(CLOUDFLARE_DICTATION_MODELS, selector.id) : selector.provider === 'openai'));
+}, 'Dictation is off, cloudflare/nova-3, cloudflare/whisper, or an openai transcription model');
 /** Image generation on Cloudflare Workers AI: Black Forest Labs' FLUX models (`@cf/black-forest-labs/<model>`). */
 export const CLOUDFLARE_IMAGE_MODELS: Readonly<Record<string, true>> = { 'flux-2-klein-9b': true, 'flux-2-klein-4b': true, 'flux-2-dev': true, 'flux-1-schnell': true };
 /** The image service when `images` is unset and the profile has no image model of its own. */
 export const DEFAULT_IMAGES_SELECTOR = 'cloudflare/flux-2-klein-9b';
 export const imagesSelectorSchema = z.string().refine(value => {
   const selector = parseServiceSelector(value);
-  return selector !== null && (selector.provider !== 'cloudflare' || Object.hasOwn(CLOUDFLARE_IMAGE_MODELS, selector.id));
-}, 'Images is cloudflare/flux-2-klein-9b, cloudflare/flux-2-klein-4b, cloudflare/flux-2-dev, cloudflare/flux-1-schnell, or a provider/model image model of the profile');
+  return value === SERVICE_OFF || (selector !== null && (selector.provider !== 'cloudflare' || Object.hasOwn(CLOUDFLARE_IMAGE_MODELS, selector.id)));
+}, 'Images is off, cloudflare/flux-2-klein-9b, cloudflare/flux-2-klein-4b, cloudflare/flux-2-dev, cloudflare/flux-1-schnell, or a provider/model image model of the profile');
 const serviceSelectors: Readonly<Record<string, z.ZodType<string>>> = { search: searchSelectorSchema, dictation: dictationSelectorSchema, images: imagesSelectorSchema };
 /** One ownership map shared by migration, editors and isolated runtime composition. */
 export function inferenceSettingSection(path: string): InferenceSettingSection | null {
@@ -169,9 +172,9 @@ export const inferenceSettingMetadata: readonly RuntimeSettingSchemaItem[] = [
   { path: 'enabledModels', tab: 'Models', label: 'Enabled models', kind: 'array', value: [], defaultJson: '[]', credential: false },
   { path: 'visionFallback', tab: 'Models', label: 'Vision fallback', kind: 'string', value: '', defaultJson: '""', credential: false, description: 'Describes images for a model that cannot read them. Not offered as a role.' },
   { path: 'providers.models', tab: 'Providers', label: 'Custom provider models', kind: 'record', value: {}, defaultJson: '{}', credential: false, description: 'Non-secret provider endpoints and model definitions. Store credentials through the profile credential vault.' },
-  { path: 'search', tab: 'Services', label: 'Web search', kind: 'string', value: DEFAULT_SEARCH_SELECTOR, defaultJson: JSON.stringify(DEFAULT_SEARCH_SELECTOR), credential: false, description: 'Runs the agents\' web_search tool.' },
-  { path: 'dictation', tab: 'Services', label: 'Dictation', kind: 'string', value: DEFAULT_DICTATION_SELECTOR, defaultJson: JSON.stringify(DEFAULT_DICTATION_SELECTOR), credential: false, description: 'Transcribes the composer\'s microphone.' },
-  { path: 'images', tab: 'Services', label: 'Images', kind: 'string', value: '', defaultJson: '""', credential: false, description: `Runs the agents' generate_image tool. Unset: the profile's first image model, else ${DEFAULT_IMAGES_SELECTOR}.` },
+  { path: 'search', tab: 'Services', label: 'Web search', kind: 'string', value: DEFAULT_SEARCH_SELECTOR, defaultJson: JSON.stringify(DEFAULT_SEARCH_SELECTOR), credential: false, description: `Runs the agents' web_search tool. ${SERVICE_OFF}: web_search is not offered.` },
+  { path: 'dictation', tab: 'Services', label: 'Dictation', kind: 'string', value: DEFAULT_DICTATION_SELECTOR, defaultJson: JSON.stringify(DEFAULT_DICTATION_SELECTOR), credential: false, description: `Transcribes the composer's microphone. ${SERVICE_OFF}: the composer has no microphone.` },
+  { path: 'images', tab: 'Services', label: 'Images', kind: 'string', value: '', defaultJson: '""', credential: false, description: `Runs the agents' generate_image tool. Unset: the profile's first image model, else ${DEFAULT_IMAGES_SELECTOR}. ${SERVICE_OFF}: generate_image is not offered.` },
 ];
 
 const profileIdSchema = z.string().min(1).max(160).regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/u);

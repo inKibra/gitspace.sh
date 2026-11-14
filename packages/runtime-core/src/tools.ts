@@ -31,6 +31,8 @@ export const MODEL_ONLY_TOOLS: readonly string[] = ['codemode', 'agents', 'check
  * tool. A subagent has no codemode and is offered every tool its definition lists. `environment`, whose runs may post a
  * card for a person's approval that ends the agent's turn, is offered to the model too. */
 export const CODE_ONLY_TOOLS: readonly string[] = ['space_goal', 'space_phase', 'space_workspace', 'space_automations', 'space_artifacts', 'space_workflow', 'space_rubric', 'space_journal', 'space_guide', 'space_review', 'machines', 'workspace_status', 'sync', 'generate_image', 'ast_grep', 'ast_edit', 'ast_resolve', 'history_search', 'history_read', 'report_issue', 'mcp_discover', 'mcp_invoke'];
+/** Tools an inference profile's Services can turn off (`InferenceModelAdmission.withoutTools`). */
+export const SERVICE_TOOLS: Readonly<Record<string, true>> = { web_search: true, generate_image: true };
 /** Nested call errors the harness writes for a call that may have run: the script's call is uncertain, not failed. */
 const UNCERTAIN_NESTED_CODES: Readonly<Record<string, true>> = { interrupted: true, aborted: true, faulted: true, orphaned: true };
 /** A nested call's value as a script receives it: content, as a model-issued call's result holds it (one text item, one

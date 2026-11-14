@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { Message, Models } from '@earendil-works/pi-ai';
 import { DEFAULT_WEB_SEARCH_DESCRIPTION_CHARS, DEFAULT_WEB_SEARCH_LIMIT, createAIWebSearch, type WebSearchProvider } from 'agents/websearch';
-import { DEFAULT_IMAGES_SELECTOR, DEFAULT_SEARCH_SELECTOR, MODEL_ROLE_LABELS, applyInferenceSettings, inferenceProfileSchema, modelRoleThinkingSchema, parseServiceSelector, type InferenceProfile } from '@gitspace/protocol/inference';
+import { DEFAULT_IMAGES_SELECTOR, DEFAULT_SEARCH_SELECTOR, MODEL_ROLE_LABELS, SERVICE_OFF, applyInferenceSettings, inferenceProfileSchema, modelRoleThinkingSchema, parseServiceSelector, type InferenceProfile } from '@gitspace/protocol/inference';
 import { RuntimeGenerateImageArgumentsSchema, RuntimeJsonSchema, RuntimeWebSearchArgumentsSchema, type RuntimeSnapshot, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 import { ModelSelectionIntentSchema, type ModelSelectionIntent, type SessionControlView } from '@gitspace/protocol-runtime/session-controls';
 import {
@@ -22,6 +22,8 @@ const CLOUDFLARE_SEARCH: Readonly<Record<string, WebSearchProvider>> = { ceramic
 /** A Cloudflare search answers in seconds; a model's searches and its answer take longer. */
 const CLOUDFLARE_SEARCH_TIMEOUT_MS = 30_000;
 const MODEL_SEARCH_TIMEOUT_MS = 120_000;
+/** The agent tool each Service runs, by its setting: `SERVICE_OFF` there and the profile's conversations are not offered it. */
+const SERVICE_TOOLS: Readonly<Record<string, string>> = { search: 'web_search', images: 'generate_image' };
 const admissionSchema = z.object({ requestId: z.string(), conversationId: z.string(), profile: inferenceProfileSchema, assignmentRevision: z.number().int().nonnegative().nullable(), selection: ModelSelectionIntentSchema, model: StoredPiModelSchema, thinking: modelRoleThinkingSchema.optional(), role: z.string().optional() });
 type Admission = z.infer<typeof admissionSchema>;
 const pinSchema = z.object({ credentialId: z.string() });
@@ -179,7 +181,9 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
         await ctx.storage.put(admissionKey, admission);
       }
       await admit(input.conversationId, admission);
-      return { provider: admission.model.provider, modelId: admission.model.id, ...(admission.thinking === undefined ? {} : { thinking: admission.thinking }), ...(admission.role === undefined ? {} : { role: admission.role }) };
+      const settings = admission.profile.settings;
+      const withoutTools = Object.entries(SERVICE_TOOLS).flatMap(([service, tool]) => settings[service] === SERVICE_OFF ? [tool] : []);
+      return { provider: admission.model.provider, modelId: admission.model.id, ...(admission.thinking === undefined ? {} : { thinking: admission.thinking }), ...(admission.role === undefined ? {} : { role: admission.role }), withoutTools };
     },
     bindInferenceConversation,
     refuseRequest(signal: AbortSignal, reason: string) { refusals.set(signal, reason); },
@@ -198,6 +202,7 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
     async generateImage(input: { args: z.infer<typeof RuntimeGenerateImageArgumentsSchema>; conversationId: string; signal?: AbortSignal }): Promise<RuntimeToolResult['content']> {
       const admission = input.signal ? scopes.get(input.signal)?.admission ?? await active(input.conversationId) : await active(input.conversationId);
       const configured = admission.profile.settings.images;
+      if (configured === SERVICE_OFF) throw new Error('Image generation is off in this inference profile. Turn it on in Inference → Services.');
       const selected = input.args.model ?? (typeof configured === 'string' ? configured : undefined);
       const target = selected === undefined ? null : parseServiceSelector(selected);
       let selector = selected ?? DEFAULT_IMAGES_SELECTOR;
@@ -229,6 +234,7 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
     async webSearch(input: RuntimeWebSearchInput): Promise<RuntimeWebSearchResult> {
       const admission = input.signal ? scopes.get(input.signal)?.admission ?? await active(input.conversationId) : await active(input.conversationId);
       const configured = admission.profile.settings.search;
+      if (configured === SERVICE_OFF) throw new Error('Web search is off in this inference profile. Turn it on in Inference → Services.');
       const selector = typeof configured === 'string' ? configured : DEFAULT_SEARCH_SELECTOR;
       const target = parseServiceSelector(selector);
       const limit = input.args.limit ?? DEFAULT_WEB_SEARCH_LIMIT;

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { AvailableModel, ComposioSetupRpcView, DeploymentStatusView, DeviceCapability, DeviceView, RuntimeSettingValue, UserSettings } from '@gitspace/protocol';
-import { BUILT_IN_MODEL_ROLES, DEFAULT_IMAGES_SELECTOR, MIN_CONTEXT_LIMIT, MODEL_ROLE_LABELS, SEARCH_MODEL_PROVIDERS, contextLimitsSchema, inferenceSettingSection, parseModelRoleSelector } from '@gitspace/protocol/inference';
+import { BUILT_IN_MODEL_ROLES, DEFAULT_IMAGES_SELECTOR, MIN_CONTEXT_LIMIT, MODEL_ROLE_LABELS, SEARCH_MODEL_PROVIDERS, SERVICE_OFF, contextLimitsSchema, inferenceSettingSection, parseModelRoleSelector } from '@gitspace/protocol/inference';
 import { cloudImageOperationActive, cloudImageOperationCancellable, cloudImageSelectionSchema, type CloudImageChoice, type CloudImageSelection, type CloudImageState } from '@gitspace/protocol/cloud-image';
 import { rpcErrors } from '@gitspace/protocol/rpc-contract';
 import type { MachineDiscardConfirmation, MachineDiscardRequired } from '@gitspace/protocol/machine-discard';
@@ -242,6 +242,8 @@ function RoleModelPicker({ role, label, value, models, modelsReady, disabled, on
     </Select>
   </span>;
 }
+/** Every service's first choice: the service off (no web_search, no microphone, no generate_image). */
+const OFF_OPTION: ModelOption = { value: SERVICE_OFF, label: 'Off' };
 /** Cloudflare's Web Search API, run on GitSpace's account, by provider. Exa does not offer zero data retention. */
 const CLOUDFLARE_SEARCH_OPTIONS: readonly ModelOption[] = [
   { value: 'cloudflare/ceramic', label: 'Cloudflare · Ceramic' },
@@ -388,14 +390,14 @@ export function RuntimeSettingsEditor({ runtimeSettings, runtimeGeneration, onSe
   } else if (tab === 'Services') {
     content = <Group title={<>Services · <span className="tabular-nums">generation {runtimeGeneration}</span></>}>
       <SettingRows>
-        {searchItem ? <SettingRow title="Web search" description="Runs the agents' web_search tool: Cloudflare's Web Search API on GitSpace's account, or a model of this profile's Anthropic, OpenAI or Gemini credentials searching on that account.">
-          <ServicePicker label="Web search" value={search} options={[...CLOUDFLARE_SEARCH_OPTIONS, ...modelOptions(models.filter((model) => Object.hasOwn(SEARCH_MODEL_PROVIDERS, model.provider)))]} modelsReady={modelsReady} disabled={saving} onChange={(value) => settle(onSetRuntimeSetting(searchItem.path, value))} />
+        {searchItem ? <SettingRow title="Web search" description="Runs the agents' web_search tool: Cloudflare's Web Search API on GitSpace's account, or a model of this profile's Anthropic, OpenAI or Gemini credentials searching on that account. Off, agents are not given web_search.">
+          <ServicePicker label="Web search" value={search} options={[OFF_OPTION, ...CLOUDFLARE_SEARCH_OPTIONS, ...modelOptions(models.filter((model) => Object.hasOwn(SEARCH_MODEL_PROVIDERS, model.provider)))]} modelsReady={modelsReady} disabled={saving} onChange={(value) => settle(onSetRuntimeSetting(searchItem.path, value))} />
         </SettingRow> : null}
-        {dictationItem ? <SettingRow title="Dictation" description="Transcribes the composer's microphone: Cloudflare Workers AI on GitSpace's account, or OpenAI with this profile's OpenAI API key.">
-          <ServicePicker label="Dictation" value={dictation} options={[...CLOUDFLARE_DICTATION_OPTIONS, ...(openAiKey ? OPENAI_DICTATION_OPTIONS : [])]} modelsReady={providers !== undefined && !providers.loading} disabled={saving} onChange={(value) => settle(onSetRuntimeSetting(dictationItem.path, value))} />
+        {dictationItem ? <SettingRow title="Dictation" description="Transcribes the composer's microphone: Cloudflare Workers AI on GitSpace's account, or OpenAI with this profile's OpenAI API key. Off, the composer has no microphone.">
+          <ServicePicker label="Dictation" value={dictation} options={[OFF_OPTION, ...CLOUDFLARE_DICTATION_OPTIONS, ...(openAiKey ? OPENAI_DICTATION_OPTIONS : [])]} modelsReady={providers !== undefined && !providers.loading} disabled={saving} onChange={(value) => settle(onSetRuntimeSetting(dictationItem.path, value))} />
         </SettingRow> : null}
-        {imagesItem ? <SettingRow title="Images" description="Runs the agents' generate_image tool: Cloudflare Workers AI on GitSpace's account, or an image model of this profile's credentials. Unset, the profile's first image model, else Cloudflare · FLUX.2 [klein] 9B.">
-          <ServicePicker label="Images" value={images} options={[...CLOUDFLARE_IMAGE_OPTIONS, ...modelOptions(imageModels)]} modelsReady={modelsReady} disabled={saving} onChange={(value) => settle(onSetRuntimeSetting(imagesItem.path, value))} />
+        {imagesItem ? <SettingRow title="Images" description="Runs the agents' generate_image tool: Cloudflare Workers AI on GitSpace's account, or an image model of this profile's credentials. Unset, the profile's first image model, else Cloudflare · FLUX.2 [klein] 9B. Off, agents are not given generate_image.">
+          <ServicePicker label="Images" value={images} options={[OFF_OPTION, ...CLOUDFLARE_IMAGE_OPTIONS, ...modelOptions(imageModels)]} modelsReady={modelsReady} disabled={saving} onChange={(value) => settle(onSetRuntimeSetting(imagesItem.path, value))} />
         </SettingRow> : null}
       </SettingRows>
     </Group>;

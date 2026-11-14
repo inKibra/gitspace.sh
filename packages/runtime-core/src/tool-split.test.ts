@@ -58,3 +58,52 @@ test('a main conversation calls code-only tools from codemode, and a subagent is
     expect((await child.agent(context)).tools.map(tool => tool.name).sort()).toEqual(['history_search', 'read']);
   } finally { await harness.close(context); }
 }, 10_000);
+
+test("a profile's Services turned off take web_search and generate_image from the conversation's tools until an admission turns them on", async () => {
+  const offered: string[][] = [];
+  const models = Object.assign(createModels(), { getModel: () => model,
+    streamSimple(_model: Model<Api>, request: Context) {
+      offered.push(getCurrentTools(request.messages).map(tool => tool.name));
+      const message = reply([{ type: 'text', text: 'Done.' }]);
+      const stream = createAssistantMessageEventStream();
+      stream.push({ type: 'done', reason: 'stop', message });
+      stream.end(message);
+      return stream;
+    } });
+  const { harness, root, configureModel } = await createRuntimeHarness({
+    identity: RuntimeIdentitySchema.parse({ projectId: 'project', workspaceId: 'workspace' }), storage: new MemoryStorage(), models, model: { provider: 'test', modelId: model.id },
+    tools: { images: { store: async image => image, load: async image => image }, invoke: unused, prepareBrowser: unused, takeoverTab: unused, lifecycleApproval: async () => null, instructions: async () => '', preflight: async () => {}, results: { put: unused, text: unused } },
+    operations: { execute: unused, reconcile: async () => null, cancel: unused, jobScope: () => ({ projectId: 'project', workspaceId: 'workspace' }), controlJob: unused, observeProcess: unused, stopProcess: unused, wakeAt: async () => {} },
+    retainedRules: { loadRules: async () => [] }, editTool: () => 'edit',
+    onReport: error => { throw error; }, admitInference: unused, bindInferenceConversation: async () => {}, refuseRequest: () => {},
+    unfinished: { begin: () => 0, end: () => {} },
+  });
+  const turn = async (requestId: string) => {
+    await root.submit({ type: 'input', content: 'Look it up.', requestId }, context);
+    await root.waitForIdle(context);
+    return { model: offered.at(-1) ?? [], scripts: (await root.agent(context)).callable.map(tool => tool.name) };
+  };
+  try {
+    // Unset: the default services, every tool offered.
+    await configureModel(root.id, { provider: 'test', modelId: model.id, withoutTools: [] });
+    const unset = await turn('unset');
+    expect(unset.model).toEqual(expect.arrayContaining(['web_search', 'web_fetch']));
+    expect(unset.scripts).toContain('generate_image');
+
+    await configureModel(root.id, { provider: 'test', modelId: model.id, withoutTools: ['web_search', 'generate_image'] });
+    const off = await turn('off');
+    expect(off.model).not.toContain('web_search');
+    expect(off.model).toContain('web_fetch');
+    expect(off.scripts).not.toContain('web_search');
+    expect(off.scripts).not.toContain('generate_image');
+
+    // A model picked by hand carries no admission: the services stay off.
+    await configureModel(root.id, { provider: 'test', modelId: model.id });
+    expect((await turn('picked')).model).not.toContain('web_search');
+
+    await configureModel(root.id, { provider: 'test', modelId: model.id, withoutTools: [] });
+    const on = await turn('on');
+    expect(on.model).toContain('web_search');
+    expect(on.scripts).toContain('generate_image');
+  } finally { await harness.close(context); }
+}, 10_000);

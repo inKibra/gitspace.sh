@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { DEFAULT_DICTATION_SELECTOR, DEVICE_SOCKET_PROTOCOL, parseServiceSelector, socketProtocolProof } from '@gitspace/protocol';
+import { DEFAULT_DICTATION_SELECTOR, DEVICE_SOCKET_PROTOCOL, SERVICE_OFF, parseServiceSelector, socketProtocolProof } from '@gitspace/protocol';
 import {
   DICTATION_FRAME_MAX_BYTES, DICTATION_MAX_BYTES, DICTATION_MAX_MS, DICTATION_SAMPLE_RATE, RuntimeDictationClientMessageSchema, RuntimeDictationQuerySchema,
   RuntimeIdentitySchema, type RuntimeDictationServerMessage,
@@ -19,6 +19,7 @@ import { requireWorkspaceAccess } from './runtime-access.js';
  * - `openai/<model>`: OpenAI's `POST /v1/audio/transcriptions` with an API key of the profile, read from the vault here;
  *   no key reaches the browser.
  * Both bill per audio minute; a recording stops at `DICTATION_MAX_MS` (`DICTATION_MAX_BYTES` of audio).
+ * `off` (`SERVICE_OFF`) refuses a recording with an error; the composer shows no microphone.
  */
 
 /** The Workers AI models dictation uses. */
@@ -184,6 +185,7 @@ async function transcriber(socket: WebSocket, env: Env, models: DictationModels,
   const vault = env.CREDENTIALS.getByName(env.ACCOUNT_ID);
   const { profile } = await vault.resolveCloudInference(projectId);
   const value = profile.settings.dictation ?? DEFAULT_DICTATION_SELECTOR;
+  if (value === SERVICE_OFF) throw new Error('Dictation is off in this inference profile. Turn it on in Inference → Services.');
   const selector = typeof value === 'string' ? parseServiceSelector(value) : null;
   if (selector?.provider === 'cloudflare' && selector.id === 'nova-3') return novaTranscriber(socket, await models.live());
   if (selector?.provider === 'cloudflare' && selector.id === 'whisper') return batchTranscriber(socket, wav => models.whisper(wav));

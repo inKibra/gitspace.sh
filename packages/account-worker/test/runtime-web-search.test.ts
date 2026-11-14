@@ -45,10 +45,11 @@ it("searches with the profile's search selector: Cloudflare's Web Search API, or
   const environment = { ACCOUNT_ID: 'account', CREDENTIALS: { getByName: () => vault }, AI: { websearch } } as unknown as Env;
   const runtime = await createCloudRuntimeInference(state, environment, RuntimeIdentitySchema.parse({ projectId: 'project', workspaceId: 'workspace' }), [], run);
   const chat = (await runtime.session.catalog()).models[0]!;
-  const admitted = async (revision: number, search: string) => {
-    profile = { ...profile, revision, settings: { 'modelRoles.default': `anthropic/${chat.id}`, search } };
-    await runtime.admitInference({ conversationId: 'conversation', requestId: `request-${revision}` });
+  const admitted = async (revision: number, search?: string) => {
+    profile = { ...profile, revision, settings: { 'modelRoles.default': `anthropic/${chat.id}`, ...(search === undefined ? {} : { search }) } };
+    const admission = await runtime.admitInference({ conversationId: 'conversation', requestId: `request-${revision}` });
     await runtime.bindInferenceConversation('conversation', new AbortController().signal, [], [`request-${revision}`], { fastMode: false });
+    return admission;
   };
 
   await admitted(2, 'cloudflare/linkup');
@@ -69,4 +70,13 @@ it("searches with the profile's search selector: Cloudflare's Web Search API, or
 
   reply = 'refused';
   await expect(runtime.webSearch({ conversationId: 'conversation', args: { query: 'claude shannon' } })).rejects.toThrow(`Web search uses anthropic/${chat.id}: 400 web search is not enabled for this organization. Change it in Inference → Services.`);
+
+  // Off: the profile's conversations are not offered web_search, and a call made anyway is refused.
+  expect(await admitted(4, 'off')).toMatchObject({ withoutTools: ['web_search'] });
+  await expect(runtime.webSearch({ conversationId: 'conversation', args: { query: 'claude shannon' } })).rejects.toThrow('Web search is off in this inference profile. Turn it on in Inference → Services.');
+
+  // Unset: web_search is offered and searches with Cloudflare's default provider.
+  expect(await admitted(5)).toMatchObject({ withoutTools: [] });
+  expect(await runtime.webSearch({ conversationId: 'conversation', args: { query: 'claude shannon', limit: 1 } })).toMatchObject({ provider: 'cloudflare/ceramic' });
+  expect(websearch).toHaveBeenLastCalledWith(expect.objectContaining({ query: 'claude shannon', limit: 1, provider: 'ceramic' }));
 });

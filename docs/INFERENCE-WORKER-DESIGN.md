@@ -44,6 +44,10 @@ flowchart LR
   reference. The profile's Images service (`images`) picks who draws: `cloudflare/<model>` runs a FLUX model on the
   worker's AI binding (`workers-ai-images.ts`), `<provider>/<model>` one of the profile's image models; unset, the
   profile's first image model, else `cloudflare/flux-2-klein-9b`.
+- **Services off:** `search`, `dictation` and `images` each take `off` (`SERVICE_OFF`). An admission names the tools
+  its profile turns off (`withoutTools`: `web_search` for search, `generate_image` for images), and the harness
+  configures the conversation without them, so the model is not offered them from its next turn; `web_fetch` stays.
+  Dictation off, the composer shows no microphone and the dictation socket refuses a recording.
 
 ## The attempt boundary
 

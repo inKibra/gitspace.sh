@@ -11,6 +11,8 @@ import { StandaloneComposer as Composer, type ComposerProps } from './Composer.j
 import { currentDevice } from './device-session.js';
 import type { GitSpaceShellProps, SessionControlsProps } from './GitSpaceShell.js';
 import type { ArtifactUploadClient } from './inspector/artifact-upload.js';
+import { InferenceContext, type InferenceController } from './InferenceContext.js';
+import { INFERENCE_PROFILE_VERSION, type InferenceProfile, type InferenceState } from '@gitspace/protocol/inference';
 
 vi.mock('./device-session.js', () => ({ currentDevice: vi.fn(), deviceRejected: vi.fn() }));
 
@@ -467,4 +469,24 @@ it('says plainly when the microphone is blocked, and opens no dictation', async 
 
   expect(container.querySelector('[role=alert]')?.textContent).toBe('Microphone access is blocked. Allow the microphone for this site in your browser, then try again.');
   expect(DictationSocket.all).toEqual([]);
+});
+
+it("shows no microphone when the project's inference profile turns dictation off", async () => {
+  microphone(async () => ({ getTracks: () => [{ stop() {} }] }));
+  const stamp = '2026-01-01T00:00:00.000Z';
+  const composer = (settings: InferenceProfile['settings']) => {
+    const state: InferenceState = { version: INFERENCE_PROFILE_VERSION, revision: 1, profiles: [{ version: INFERENCE_PROFILE_VERSION, id: 'profile', name: 'Profile', revision: 1, settings, createdAt: stamp, updatedAt: stamp }], assignments: [{ projectId: verticalSliceFixture.workspace.projectId, profileId: 'profile', revision: 1 }] };
+    const inference: InferenceController = { state, loading: false, pending: false, error: null, refresh: async () => undefined, create: async () => state, update: async () => state, remove: async () => state, assign: async () => state };
+    root.render(<InferenceContext.Provider value={inference}>
+      <Composer workspace={verticalSliceFixture.workspace} running={false} pending={false} onSend={async () => undefined} />
+    </InferenceContext.Provider>);
+  };
+
+  await act(() => composer({ dictation: 'off' }));
+  expect(container.querySelector('button[aria-label="Dictate"]')).toBeNull();
+  expect(container.querySelector('button[aria-label="Attach files"]')).not.toBeNull();
+
+  // Unset, dictation runs on the default provider.
+  await act(() => composer({}));
+  expect(container.querySelector('button[aria-label="Dictate"]')).not.toBeNull();
 });

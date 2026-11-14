@@ -1,4 +1,5 @@
 import type { SkillView } from '@gitspace/protocol';
+import { SERVICE_OFF } from '@gitspace/protocol/inference';
 import { automationEventCount, parseAutomationMessage, type AutomationMessage } from '@gitspace/protocol/automations-contract';
 import { captureMention, captureMentionIds, parseBrowserShareLink, withoutCaptureSummaries, type RuntimeBrowserCaptureView, type RuntimeBrowserConnectedTab, type RuntimeBrowserSharePreview } from '@gitspace/protocol-runtime';
 import { CHAT_ATTACHMENT_ACCEPT, chatAttachmentTag } from '@gitspace/protocol-runtime/chat-attachments';
@@ -452,7 +453,7 @@ export function Composer({ workspace, controls, providers, skills = [], running,
       onStop={controls ? () => runControl(controls.onStop()) : undefined}
       leftSlot={({ openFilePicker, insertText }) => <>
         <Button variant="ghost" size="icon-compact" type="button" aria-label="Attach files" onClick={() => openFilePicker()}><Attachment01 width={16} height={16} strokeWidth={1.5} /></Button>
-        {onSend ? <DictationControl identity={{ projectId: workspace.projectId, workspaceId: workspace.id }} insertText={insertText} disabled={recovering} /> : null}
+        {onSend && profile?.settings.dictation !== SERVICE_OFF ? <DictationControl identity={{ projectId: workspace.projectId, workspaceId: workspace.id }} insertText={insertText} disabled={recovering} /> : null}
         {controls?.selectionReadOnly ? <span className="text-caption text-muted-foreground" title="This child’s admitted selection is read-only">{controls.value.roleLabel ?? controls.value.role ?? 'No role'} · {selectedModelKey} · {controls.value.thinking ?? 'auto'}</span> : controls ? <>
           <ModelCombobox size="compact" variant="borderless" side="top" icon={glyph(CpuChip01)} ariaLabel="Model" value={selectedModelKey}
             options={[...(invalidModel ? [{ value: selectedModelKey, label: `${selectedModelKey} · unavailable` }] : []), ...modelOptions(controls.value.models, true)]}

@@ -64,3 +64,11 @@ it('only marks a configured model unavailable after its catalog has loaded', asy
   expect(container.querySelector('[role="alert"]')).not.toBeNull();
   expect(container.querySelector<HTMLInputElement>('[aria-label="Model for Default"]')?.disabled).toBe(false);
 });
+
+it('shows a service stored as off as Off, a choice of every Services row', async () => {
+  const item = (path: string, value: string): RuntimeSettingView => ({ path, label: path, tab: 'services', description: null, kind: 'string', valueJson: JSON.stringify(value), options: [], credential: false });
+  await act(() => root.render(<RuntimeSettingsEditor sections={['Services']} tab="Services" runtimeSettings={[item('search', 'off'), item('dictation', 'off'), item('images', 'off')]} runtimeGeneration={1} models={[]} modelsReady saving={false} onSetRuntimeSetting={async () => undefined} />));
+  for (const label of ['Web search', 'Dictation', 'Images']) expect(container.querySelector<HTMLInputElement>(`[aria-label="${label}"]`)?.value).toBe('Off');
+  // Off is a choice, not a model this profile cannot run.
+  expect(container.querySelector('[role="alert"]')).toBeNull();
+});

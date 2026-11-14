@@ -96,12 +96,12 @@ describe('inference profile configuration boundaries', () => {
 
   it('stores each service as one selector its service can run', () => {
     const accepts = (settings: Record<string, string>) => inferenceSettingsSchema.safeParse(settings).success;
-    for (const search of ['cloudflare/ceramic', 'cloudflare/linkup', 'cloudflare/exa', 'anthropic/claude-haiku-4-5', 'openai/gpt-5-mini', 'google/gemini-2.5-flash']) expect(accepts({ search })).toBe(true);
+    for (const search of ['off', 'cloudflare/ceramic', 'cloudflare/linkup', 'cloudflare/exa', 'anthropic/claude-haiku-4-5', 'openai/gpt-5-mini', 'google/gemini-2.5-flash']) expect(accepts({ search })).toBe(true);
     for (const search of ['cloudflare/bing', 'cloudflare/', 'xai/grok-4', 'claude-haiku-4-5', '/model']) expect(accepts({ search })).toBe(false);
     expect(accepts({ 'search.provider': 'cloudflare/ceramic' })).toBe(false);
-    for (const dictation of ['cloudflare/nova-3', 'cloudflare/whisper', 'openai/gpt-4o-transcribe']) expect(accepts({ dictation })).toBe(true);
+    for (const dictation of ['off', 'cloudflare/nova-3', 'cloudflare/whisper', 'openai/gpt-4o-transcribe']) expect(accepts({ dictation })).toBe(true);
     for (const dictation of ['cloudflare/flux', 'cloudflare/ceramic', 'anthropic/claude-haiku-4-5', 'whisper']) expect(accepts({ dictation })).toBe(false);
-    for (const images of ['cloudflare/flux-2-klein-9b', 'cloudflare/flux-2-klein-4b', 'cloudflare/flux-2-dev', 'cloudflare/flux-1-schnell', 'openrouter/google/gemini-2.5-flash-image', 'openai/gpt-image-1']) expect(accepts({ images })).toBe(true);
+    for (const images of ['off', 'cloudflare/flux-2-klein-9b', 'cloudflare/flux-2-klein-4b', 'cloudflare/flux-2-dev', 'cloudflare/flux-1-schnell', 'openrouter/google/gemini-2.5-flash-image', 'openai/gpt-image-1']) expect(accepts({ images })).toBe(true);
     for (const images of ['cloudflare/stable-diffusion-xl', 'cloudflare/', 'flux-2-klein-9b', '/gpt-image-1', '']) expect(accepts({ images })).toBe(false);
   });
 });

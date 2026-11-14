@@ -2,7 +2,7 @@ import { Harness, createRegistry, defineExtension, hook, GenerationTask, Compact
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import type { Message, Models } from '@earendil-works/pi-ai';
 import { utf8ByteLength } from '@earendil-works/chord/output';
-import { BROWSER_TOOL_NAME, CODE_ONLY_TOOLS, createRuntimeTools, runtimeToolParameters, type ToolServices } from './tools.js';
+import { BROWSER_TOOL_NAME, CODE_ONLY_TOOLS, SERVICE_TOOLS, createRuntimeTools, runtimeToolParameters, type ToolServices } from './tools.js';
 import { createOperationalTasks, type OperationalServices } from './tasks.js';
 import { QuestionsDoc, WorkspaceDoc } from './documents.js';
 import { expireLegacyQuestions } from './questions.js';
@@ -22,8 +22,9 @@ import { fitRequestImages, imageLimits, SUBAGENT_REQUEST_IMAGE_BYTES, SUBAGENT_R
 import { boardAfterCompaction, boardForTurn, PROJECT_BOARD_INSTRUCTION } from './project-board.js';
 import { messageAttachments, withAttachmentRenditions, type AttachmentRendition } from './inference/attachments.js';
 import type { ChatAttachment } from '@gitspace/protocol-runtime/chat-attachments';
-/** `role` is the profile role the model came from, when it came from one. */
-export type InferenceModelAdmission = ModelRef & { thinking?: ModelRoleSelector['thinking']; role?: string };
+/** `role` is the profile role the model came from, when it came from one. `withoutTools` are the tools the profile's
+ * Services turn off (`SERVICE_TOOLS`): the conversation is not offered them. */
+export type InferenceModelAdmission = ModelRef & { thinking?: ModelRoleSelector['thinking']; role?: string; withoutTools?: readonly string[] };
 export type RuntimeHarnessOptions = {
   identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>;
   storage: Storage;
@@ -297,16 +298,22 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
   const root = await harness.root(BACKGROUND_CONTEXT, { agent: { ...(options.model ? { model: options.model } : {}), tools: modelTools(options.model), modelTools: codeOnly } });
   // Pi stores tool names; a renamed or newly added tool would otherwise never reach an existing workspace.
   const rootAgent = await root.agent(BACKGROUND_CONTEXT);
-  const rootTools = modelTools(rootAgent.model ?? options.model);
+  // An admission names the service tools its profile turns off (`withoutTools`); opening keeps the root without the
+  // service tools it was last configured without.
+  const rootTools = modelTools(rootAgent.model ?? options.model).filter(tool => !Object.hasOwn(SERVICE_TOOLS, tool.name) || rootAgent.callable.some(item => item.name === tool.name));
   const offered = rootTools.filter(tool => !CODE_ONLY_TOOLS.includes(tool.name));
   const callable = rootTools.filter(tool => tool.callers?.includes('tools') ?? true);
   if (names(rootAgent.tools) !== names(offered) || names(rootAgent.callable) !== names(callable)) await root.configure({ tools: rootTools, modelTools: codeOnly }, BACKGROUND_CONTEXT);
-  const configureModel = async (conversationId: ConversationId, model: ModelRef) => {
+  const configureModel = async (conversationId: ConversationId, model: InferenceModelAdmission) => {
     const conversation = await harness.conversation(conversationId, BACKGROUND_CONTEXT);
     if (!conversation) throw new Error('Conversation not found');
     const child = (await harness.snapshot(AgentDefinitionContextDoc, conversationId, BACKGROUND_CONTEXT))?.child;
+    // Configured without an admission (a model picked by hand), a conversation stays without the service tools it was
+    // last configured without.
+    const current = model.withoutTools ? [] : (await conversation.agent(BACKGROUND_CONTEXT)).callable;
+    const offered = modelTools(model).filter(tool => !Object.hasOwn(SERVICE_TOOLS, tool.name) || (model.withoutTools ? !model.withoutTools.includes(tool.name) : current.some(item => item.name === tool.name)));
     // Definitions name the browser by its dispatch name, not the model alias.
-    const selected = child ? modelTools(model).filter(tool => child.tools.includes(tool.name === BROWSER_TOOL_NAME ? 'browser' : tool.name)) : modelTools(model);
+    const selected = child ? offered.filter(tool => child.tools.includes(tool.name === BROWSER_TOOL_NAME ? 'browser' : tool.name)) : offered;
     await conversation.configure({ model: { provider: model.provider, modelId: model.modelId }, tools: selected, modelTools: child ? null : codeOnly, extensions: child ? { add: [childExtension] } : { remove: [childExtension] } }, BACKGROUND_CONTEXT);
   };
   const lifecycle = createConversationLifecycle({ harness, storage: options.storage, admitInference: options.admitInference, configureModel, report: options.onReport });

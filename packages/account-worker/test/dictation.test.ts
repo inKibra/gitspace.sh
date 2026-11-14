@@ -122,3 +122,10 @@ test('uploads a finished recording as WAV to OpenAI with the profile\'s API key 
   expect(new DataView(wav.buffer).getUint32(24, true)).toBe(16_000);
   expect(wav.subarray(44)).toEqual(Uint8Array.from([...audio()[0]!, ...audio()[1]!]));
 });
+
+test('refuses a recording when the profile turns dictation off', async () => {
+  const query = await workspace('off');
+  const unused = async (): Promise<never> => { throw new Error('No provider runs while dictation is off'); };
+  const browser = await dictate(query, { live: unused, whisper: unused });
+  expect(await browser.done).toEqual([{ type: 'error', message: expect.stringContaining('Dictation is off in this inference profile. Turn it on in Inference → Services.') }]);
+});
