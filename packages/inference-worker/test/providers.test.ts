@@ -40,15 +40,20 @@ beforeAll(async () => {
       },
       {
         name: 'reader', modules: true, compatibilityDate: '2026-02-01',
+        // An image whose hash is all "e" fails its first two reads as R2 does; one of all "d" always fails. `/reads`
+        // answers how often each reference was read.
         script: `import { WorkerEntrypoint } from 'cloudflare:workers';
+          const reads = new Map();
           export class Reader extends WorkerEntrypoint {
             async read(reference) {
+              reads.set(reference, (reads.get(reference) ?? 0) + 1);
               const [, , workspace, size] = reference.split(':');
               if (workspace !== ${JSON.stringify(workspaceId)}) throw new Error('Image ' + reference + " is not this workspace's");
+              if (reference.includes('${'d'.repeat(64)}') || (reference.includes('${'e'.repeat(64)}') && reads.get(reference) <= 2)) throw new Error('get: We encountered an internal error. Please try again. (10001)');
               return new Response(Uint8Array.from({ length: Number(size) }, (_, index) => (index * 7 + Number(size)) % 256)).body;
             }
           }
-          export default { fetch: () => new Response('reader') };`,
+          export default { fetch: () => Response.json(Object.fromEntries(reads)) };`,
       },
     ],
   });
@@ -117,10 +122,36 @@ it('sends a Bedrock request through the AWS SDK with the images written in and b
   expect(events.at(-1)).toMatchObject({ type: 'error' });
 });
 
-it('refuses a request naming another workspace\'s image with the reason, as the provider would', async () => {
+/** How often the reader was asked for each reference. */
+async function reads(): Promise<Record<string, number>> {
+  return (await (await mf.getWorker('reader')).fetch('http://reader/')).json();
+}
+
+it('refuses a request naming another workspace\'s image at once with the provider\'s 400, without retrying the read', async () => {
   const foreign = imageReference({ workspaceId: 'ws-other', size: 10, width: 1, height: 1, sha256: 'f'.repeat(64) });
   const received = await events(model('anthropic', 'claude-opus-5-5'), oauth, [foreign]);
   const error = received.find(event => event.type === 'error');
   expect(sent).toEqual([]);
   expect(JSON.stringify(error)).toContain("is not this workspace's");
+  expect(received).toContainEqual(expect.objectContaining({ type: 'response', status: 400 }));
+  expect((await reads())[foreign]).toBe(1);
+});
+
+it('reads an image again when storage fails it, and sends it on the next attempt without reading it at all', async () => {
+  const flaky = imageReference({ workspaceId, size: 700, width: 4, height: 4, sha256: 'e'.repeat(64) });
+  await events(model('anthropic', 'claude-opus-5-5'), oauth, [flaky]);
+  expect(text(sent.at(-1)!)).toContain(`"data":"${base64(700)}"`);
+  expect((await reads())[flaky]).toBe(3);
+  await events(model('anthropic', 'claude-opus-5-5'), oauth, [flaky]);
+  expect(text(sent.at(-1)!)).toContain(`"data":"${base64(700)}"`);
+  expect((await reads())[flaky]).toBe(3);
+});
+
+it('answers a storage failure that outlasts its retries as a retryable 503 naming it, not an invalid request', async () => {
+  const down = imageReference({ workspaceId, size: 40, width: 4, height: 4, sha256: 'd'.repeat(64) });
+  const received = await events(model('anthropic', 'claude-opus-5-5'), oauth, [down]);
+  expect(sent).toEqual([]);
+  expect(received).toContainEqual(expect.objectContaining({ type: 'response', status: 503 }));
+  expect(JSON.stringify(received.find(event => event.type === 'error'))).toContain('(10001)');
+  expect((await reads())[down]).toBe(3);
 });
