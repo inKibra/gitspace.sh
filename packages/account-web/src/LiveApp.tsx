@@ -179,6 +179,14 @@ export function LiveInspector({
     return () => controller.abort();
   }, [captureRecords]);
 
+  // Above the loading return: a hook after it runs on some renders only. With no accepted overview the error is the
+  // Inspector's own card, not a "refresh failed" toast.
+  useToasts([
+    overviewRead.error && overviewRead.value ? { key: `inspector-overview:${rpcErrorMessage(overviewRead.error, 'inspector.overview')}`, tone: 'warning', persistent: true, message: `Inspector overview refresh failed; showing the last accepted state. ${rpcErrorMessage(overviewRead.error, 'inspector.overview')}`, action: { label: 'Retry overview', onClick: () => void overview.refetch() } } : null,
+    threads.state === 'failure' ? { key: `inspector-threads:${rpcErrorMessage(threads.error, 'inspector.review.list')}`, tone: threadsValue ? 'warning' : 'error', persistent: true, message: `Review threads ${threadsValue ? 'refresh failed; showing the last accepted state.' : 'could not load.'} ${rpcErrorMessage(threads.error, 'inspector.review.list')}`, action: { label: 'Retry review threads', onClick: () => void threads.refetch() } } : null,
+    stackStatus.error ? { key: `stack-status:${stackStatus.error}`, tone: 'error', persistent: true, message: `Stack status could not load. ${stackStatus.error}`, action: { label: 'Retry stack status', onClick: stackStatus.retry } } : null,
+    actionError ? { key: `inspector-action:${actionError}`, tone: 'error', message: actionError, onDismiss: () => setActionError(null) } : null,
+  ]);
   if (!overviewRead.value) {
     return overviewRead.error
       ? <div className="flex h-full flex-col items-center justify-center gap-2 p-6" aria-label="Workspace Inspector"><EmptyState title="Inspector could not load" description={rpcErrorMessage(overviewRead.error, 'inspector.overview')} action={<Button variant="ghost" type="button" onClick={() => void overview.refetch()}>Retry Inspector</Button>} /></div>
@@ -222,12 +230,6 @@ export function LiveInspector({
     generation: artifactValue.scopes.find((scope) => scope.workspaceId === (artifact.workspaceId ?? projectId))?.generation ?? 0,
   })) : [];
   const artifactUpload = artifactUploadRpcClient(request, (artifact) => artifactValue?.scopes.find((scope) => scope.workspaceId === (artifact.workspaceId ?? projectId))?.generation ?? generation);
-  useToasts([
-    overviewRead.error ? { key: `inspector-overview:${rpcErrorMessage(overviewRead.error, 'inspector.overview')}`, tone: 'warning', persistent: true, message: `Inspector overview refresh failed; showing the last accepted state. ${rpcErrorMessage(overviewRead.error, 'inspector.overview')}`, action: { label: 'Retry overview', onClick: () => void overview.refetch() } } : null,
-    threads.state === 'failure' ? { key: `inspector-threads:${rpcErrorMessage(threads.error, 'inspector.review.list')}`, tone: threadsValue ? 'warning' : 'error', persistent: true, message: `Review threads ${threadsValue ? 'refresh failed; showing the last accepted state.' : 'could not load.'} ${rpcErrorMessage(threads.error, 'inspector.review.list')}`, action: { label: 'Retry review threads', onClick: () => void threads.refetch() } } : null,
-    stackStatus.error ? { key: `stack-status:${stackStatus.error}`, tone: 'error', persistent: true, message: `Stack status could not load. ${stackStatus.error}`, action: { label: 'Retry stack status', onClick: stackStatus.retry } } : null,
-    actionError ? { key: `inspector-action:${actionError}`, tone: 'error', message: actionError, onDismiss: () => setActionError(null) } : null,
-  ]);
 
   return <>{overviewRead.refreshing ? <p role="status" className="sr-only">Refreshing Inspector…</p> : null}<Inspector
     overview={overviewValue}

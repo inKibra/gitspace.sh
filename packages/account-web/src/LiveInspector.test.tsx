@@ -93,6 +93,16 @@ it('keeps showing the cloud workspace Inspector when a cache machine attaches or
   expect(container.textContent).toContain('Inspector overview for workspace');
 });
 
+it('opens while its overview is still loading and shows it once it arrives', async () => {
+  const key = `overview ${JSON.stringify({ spaceId: 'workspace', expectedGeneration: 0 })}`;
+  queries.set(key, { state: 'pending', fetch: 'idle', refetch: async () => {} });
+  await act(() => render({}));
+  expect(container.textContent).toContain('Loading Inspector authority state');
+  queries.set(key, { state: 'success', value: overview(1), fetch: 'idle', refetch: async () => {} });
+  await act(() => render({}));
+  expect(container.textContent).toContain('Inspector overview for workspace');
+});
+
 it('keeps the loaded environment when the workspace generation changes, since environment.get does not depend on it', async () => {
   queries.set(`overview ${JSON.stringify({ spaceId: 'workspace', expectedGeneration: 1 })}`, { state: 'success', value: overview(2), fetch: 'idle', refetch: async () => {} });
   queries.set('environment', { state: 'success', value: environment, fetch: 'idle', refetch: async () => {} });
