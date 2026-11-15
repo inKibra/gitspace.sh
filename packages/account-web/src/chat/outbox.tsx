@@ -3,6 +3,7 @@
 // stays with its error, an Edit action (its text and files go back into the composer) and a Retry action. The composer
 // sends; the outbox holds the messages and drops each once the transcript or the session's queue shows it.
 import { withoutCaptureSummaries } from '@gitspace/protocol-runtime';
+import { messageComments } from '@gitspace/protocol-runtime/comments';
 import { Button, ChatMessage, useShape } from '@gitspace/ui';
 import { File06 } from '@untitledui/icons';
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -13,6 +14,7 @@ import { GitSpaceMarkdown } from '../GitSpaceMarkdown.js';
 import { formatBytes } from '../inspector/artifact-upload.js';
 import type { WorkspaceDraftCapture } from '../workspace-draft.js';
 import { userMessageMarkdown } from './RichContent.js';
+import { SentComments } from '../comments/CommentLayer.js';
 
 /** A message of the person's that the transcript shows; `truncated`: `text` is the start of it. */
 export interface SentMessage { id: string; text: string; truncated: boolean }
@@ -139,6 +141,7 @@ export function OutgoingMessages({ outbox }: { outbox: Outbox }) {
         {message.captures.map((capture) => <CaptureChip key={capture.id} name={capture.name} detail="Capture" />)}
       </span> : null}
       {message.shown ? <GitSpaceMarkdown>{userMessageMarkdown(message.shown)}</GitSpaceMarkdown> : null}
+      <SentComments comments={messageComments(message.shown)} />
     </ChatMessage>
     {message.status === 'failed'
       ? <div className="flex min-w-0 flex-wrap items-center justify-end gap-x-2 px-1">

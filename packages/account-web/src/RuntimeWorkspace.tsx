@@ -19,6 +19,7 @@ import { SpeechProvider } from './SpeechProvider.js';
 import { useRetainedQueryValue } from './useRetainedRead.js';
 import { rpcClient } from './rpc-client.js';
 import { ComposerStagingProvider, RequirementAcceptance } from './chat/staging.js';
+import { CommentLayerProvider } from './comments/CommentLayer.js';
 import { artifactUploadRpcClient } from './artifact-upload-rpc.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
 import { runtimeScope, runtimeTurns } from './runtime-shell-adapter.js';
@@ -313,11 +314,12 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, reads, 
   useRepositoryBridgeToasts(bridged, installApp, () => props.onOpenSettings?.('github'));
   return <>
     <QuestionCardsContext.Provider value={questionCards}>
+    <CommentLayerProvider conversationId={conversationId} document={snapshot.documents['gitspace.comments']} rows={transcript.rows} latest={!transcript.hasAfter} request={sessionCommand}>
     <ComposerStagingProvider>
     <RequirementAcceptance.Provider value={acceptRequirement}>
     <SpeechProvider projectId={identity.projectId} workspaceId={identity.workspaceId}>
     {/* No onSend, so a closed composer, until the draft binding exists: text typed before it would be replaced by the workspace draft. A session command in flight only holds the send (sendPending); the box stays editable. */}
-    <GitSpaceShell project={{ id: inspection.project.id, name: inspection.project.name, repository: inspection.project.repositoryReference ?? '', connected }} {...scope} mainAgent={{ id: value?.sessionId ?? conversationId ?? 'root', title: conversation?.title ?? 'Workspace agent', state: conversation?.status === 'running' ? 'running' : conversation?.status === 'waiting' ? 'permission-needed' : 'waiting', model: value?.model ?? '', controlsAvailable: true, recovering: !value, failed: conversation?.status === 'failed', errorMessage: conversation?.error ?? null, retry: conversation?.retry ?? null }} turns={turns} transcript={conversationId ? transcript : undefined} history={conversationId ? { loading: transcript.initialLoading, saved: transcript.saved, error: transcript.error, onRetry: transcript.refresh } : undefined} transport={[]} artifacts={[]} sessionControls={controls} skills={reads.skills} providers={reads.providers.value} draft={draft} sendPending={session.pending} onSend={value && draft ? async (text, streamingBehavior, draft, decisions) => { await run({ type: 'prompt', text, streamingBehavior, draftRevision: draft?.draftRevision, draftText: draft?.text, decisions: decisions?.length ? decisions : undefined }); } : undefined}
+    <GitSpaceShell project={{ id: inspection.project.id, name: inspection.project.name, repository: inspection.project.repositoryReference ?? '', connected }} {...scope} mainAgent={{ id: value?.sessionId ?? conversationId ?? 'root', title: conversation?.title ?? 'Workspace agent', state: conversation?.status === 'running' ? 'running' : conversation?.status === 'waiting' ? 'permission-needed' : 'waiting', model: value?.model ?? '', controlsAvailable: true, recovering: !value, failed: conversation?.status === 'failed', errorMessage: conversation?.error ?? null, retry: conversation?.retry ?? null }} turns={turns} transcript={conversationId ? transcript : undefined} history={conversationId ? { loading: transcript.initialLoading, saved: transcript.saved, error: transcript.error, onRetry: transcript.refresh } : undefined} transport={[]} artifacts={[]} sessionControls={controls} skills={reads.skills} providers={reads.providers.value} draft={draft} sendPending={session.pending} onSend={value && draft ? async (text, streamingBehavior, draft, decisions, comments) => { await run({ type: 'prompt', text, streamingBehavior, draftRevision: draft?.draftRevision, draftText: draft?.text, decisions: decisions?.length ? decisions : undefined, comments: comments?.length ? [...comments] : undefined }); } : undefined}
       onRetryAgent={async () => { await run({ type: 'resume' }); }} onContinueAgent={async () => { await run({ type: 'continue' }); }} onOpenSettings={props.onOpenSettings} onSelectProject={props.onSelectProject} onSelectWorkspace={props.onSelectWorkspace}
       controlsError={session.error ?? (reads.providers.error !== null ? rpcErrorMessage(reads.providers.error, 'Load provider authentication') : inference?.error) ?? undefined}
       onRetryControls={() => { void run({ type: 'control' }).catch(() => {}); void reads.providers.refetch(); void inference?.refresh(); }}
@@ -360,6 +362,7 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, reads, 
     </SpeechProvider>
     </RequirementAcceptance.Provider>
     </ComposerStagingProvider>
+    </CommentLayerProvider>
     </QuestionCardsContext.Provider>
     {launchRequest?.source.kind === 'workspace' ? <LaunchMachineDialog key={launchRequest.source.workspaceId} projectId={props.projectId} workspaceId={launchRequest.source.workspaceId} machines={inspection.machines} onClose={() => setLaunchRequest(null)} onLaunch={async machineId => { await launch.start(launchRequest.source, machineId, launchRequest.targets); setLaunchRequest(null); }} /> : null}
     {launchRequest?.source.kind === 'canonical' ? <CanonicalLaunchDialog canonical={launchRequest.source} machines={inspection.machines} onClose={() => setLaunchRequest(null)} onLaunch={async machineId => { await launch.start(launchRequest.source, machineId, launchRequest.targets); setLaunchRequest(null); }} /> : null}

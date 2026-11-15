@@ -84,7 +84,7 @@ it('uploads an image and a PDF to the day\'s uploads folder and sends one messag
   expect(uploads.begin.mock.calls.map(([input]) => [input.fileName, input.folder])).toEqual([['shot.png', 'uploads/2026-11-13'], ['report (1).pdf', 'uploads/2026-11-13']]);
   expect(onSend).toHaveBeenCalledOnce();
   const [text, ...rest] = onSend.mock.calls[0]!;
-  expect(rest).toEqual(['followUp', undefined, undefined]);
+  expect(rest).toEqual(['followUp', undefined, undefined, []]);
   expect(text.startsWith('Compare these\n\n')).toBe(true);
   expect(chatAttachments(text)).toEqual([
     { name: 'shot.png', url: 'drive://workspace/uploads/2026-11-13/shot.png', type: 'image/png', size: 4, hash: 'sha256:df3f619804a92fdb4057192dc43dd748ea778adc52bc498ce80524c014b81119' },

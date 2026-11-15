@@ -8,6 +8,7 @@ import { dayBreaks, DayDivider, fullTime, itemAt } from './chat/time.js';
 import { QuestionCardsContext } from './QuestionCards.js';
 import { useTranscriptHistory, type TranscriptHistory } from './useTranscriptHistory.js';
 import { TranscriptContentCache } from './transcriptContentCache.js';
+import { CommentMarginLayout } from './comments/CommentMargin.js';
 
 export interface VirtualTranscriptProps {
   history: TranscriptHistory;
@@ -444,7 +445,7 @@ function TranscriptWindow({ history, transport, onAnswer, inline = false, viewKe
     }
     return <MeasuredRow key={row.id} row={row} top={rowTop} gap={gap} onMeasure={onMeasure} onNode={onNode}>{body}</MeasuredRow>;
   });
-  return <div ref={root} data-virtual-transcript className={`${inline ? 'min-w-0 w-full px-3 py-2' : 'mx-auto min-w-0 w-full max-w-3xl px-6 pb-[calc(var(--composer-overlay-height,0px)+1.5rem)] pt-6'} [overflow-anchor:none]`}>
+  const column = <div ref={root} data-virtual-transcript className={`${inline ? 'min-w-0 w-full px-3 py-2' : 'mx-auto min-w-0 w-full max-w-3xl px-6 pb-[calc(var(--composer-overlay-height,0px)+1.5rem)] pt-6'} [overflow-anchor:none]`}>
     {transport.length ? <div className="mb-6 flex min-w-0 flex-col gap-1">{transport.map((block) => <TransportNotice block={block} key={block.id} />)}</div> : null}
     {inline && history.error ? <div role="alert" className="flex min-w-0 items-center gap-2 text-body text-destructive [overflow-wrap:anywhere]">{history.error}<Button variant="ghost" className="min-h-10 shrink-0" disabled={history.loading} onClick={history.refresh}>Retry history</Button></div> : null}
     <div className="flex h-12 items-center justify-center text-caption text-muted-foreground">
@@ -459,6 +460,8 @@ function TranscriptWindow({ history, transport, onAnswer, inline = false, viewKe
       <Button variant="secondary" className="pointer-events-auto min-h-10 -translate-y-full shadow-surface-3" onClick={jumpToLatest}>{history.total > seenTotal.current ? 'New activity · Jump to latest' : history.hasAfter ? 'Newer activity · Jump to latest' : 'Jump to latest'}</Button>
     </div> : null}
   </div>;
+  // The main chat keeps its comments in a margin beside the column.
+  return inline ? column : <CommentMarginLayout columnMax={768}>{column}</CommentMarginLayout>;
 }
 
 function ExecutionHistory({ block, parent, state, onStateChange, onAnswer }: {

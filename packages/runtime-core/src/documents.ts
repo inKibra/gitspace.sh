@@ -3,6 +3,7 @@ import { defineDoc, type CheckpointInfo } from '@earendil-works/pi-durable';
 import type { JsonValue } from '@earendil-works/chord/json';
 import type { RuntimeAttachment } from '@gitspace/protocol-runtime';
 import type { AskAnswerer } from '@gitspace/blocks';
+import type { CommentAnchor, StagedComment } from '@gitspace/protocol-runtime/comments';
 /** A document stores a complete base after 32 deltas, so a load replays at most 32 changes; with no base, a load
  * replays every change the document ever had. Older revisions stay stored either way. */
 export function boundedReplay(_value: unknown, _ops: unknown, info: CheckpointInfo): boolean {
@@ -25,6 +26,15 @@ export const QuestionsDoc = defineDoc<{ items: Question[] }>({ kind: 'gitspace.q
 /** The newest entry whose replies' required block asks are posted as questions (`repairBlockAsks`), session-wide; null
  * until the workspace's first open sets it to its newest entry. */
 export const BlockAsksDoc = defineDoc<{ through: number | null }>({ kind: 'gitspace.block-asks', version: 1, scope: 'session', initial: () => ({ through: null }), checkpointWhen: boundedReplay });
+/** The comments people staged for their next message, oldest first (comments.ts). */
+export const StagedCommentsDoc = defineDoc<{ items: StagedComment[] }>({ kind: 'gitspace.staged-comments', version: 1, scope: 'session', initial: () => ({ items: [] }), checkpointWhen: boundedReplay });
+/**
+ * The comment lookup, derived from the transcript and written only by `repairCommentLookup`: each sent comment's anchor
+ * and the person's message row carrying it, and each agent message row with Reply blocks and the comments they answer.
+ * `through`: the newest entry read; null until the first scan, which reads every entry. `revision` moves when a
+ * comment or a reply joins.
+ */
+export const CommentLookupDoc = defineDoc<{ through: number | null; revision: number; comments: Record<string, { conversationId: string; message: string; anchor: CommentAnchor }>; replies: Record<string, string[]> }>({ kind: 'gitspace.comment-lookup', version: 1, scope: 'session', initial: () => ({ through: null, revision: 0, comments: {}, replies: {} }), checkpointWhen: boundedReplay });
 export const EnvironmentDoc = defineDoc<{ profile: string | null; runs: JsonValue[] }>({ kind: 'gitspace.environment', version: 1, scope: 'session', initial: () => ({ profile: null, runs: [] }), checkpointWhen: boundedReplay });
 export const JobsDoc = defineDoc<{ jobs: JsonValue[]; processes: JsonValue[] }>({ kind: 'gitspace.jobs', version: 1, scope: 'session', initial: () => ({ jobs: [], processes: [] }), checkpointWhen: boundedReplay });
 export const QaDoc = defineDoc<{ items: JsonValue[] }>({ kind: 'gitspace.qa', version: 1, scope: 'session', initial: () => ({ items: [] }), checkpointWhen: boundedReplay });

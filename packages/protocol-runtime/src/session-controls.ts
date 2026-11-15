@@ -8,6 +8,7 @@ import { RuntimeBrowserStatusSchema, RuntimeBrowserArtifactPageSchema, RuntimeBr
 import { RuntimeBrowserConnectedTabSchema, RuntimeBrowserShareExpirySchema, RuntimeBrowserShareSchema } from './browser-share.js';
 import { RuntimeBrowserCommentAnchorSchema, RuntimeBrowserCommentPageSchema, RuntimeBrowserCommentSourceSchema, RuntimeBrowserCommentStatusSchema, RuntimeBrowserCommentTextSchema, RuntimeBrowserCommentThreadSchema, RuntimeBrowserCommentThreadViewSchema } from './browser-comments.js';
 import { RuntimeBrowserCaptureShareExpirySchema, RuntimeBrowserCaptureShareSchema } from './browser-capture-share.js';
+import { CommentAnchorSchema, CommentIdSchema, CommentLookupSchema, CommentNoteSchema, STAGED_COMMENTS_MAX } from './comments.js';
 export { SessionUsageReportSchema, UsageTotalsSchema, type SessionUsageReport, type UsageTotals } from './usage.js';
 
 export const ModelSelectionIntentSchema = z.discriminatedUnion('kind', [
@@ -55,9 +56,9 @@ export const RuntimeMessageDecisionSchema = z.object({
 }).strict();
 export type RuntimeMessageDecision = z.infer<typeof RuntimeMessageDecisionSchema>;
 /** A staged choice's data in a sent message: the `~~~json` block right under its "Decided: …", "Answered: …",
- * "Review batch: …" or "Message: …" line. The agent reads it; anything shown to people replaces each match with `$1`,
- * the line alone. */
-export const STAGED_CHOICE_DATA = /^((?:Decided|Answered|Review batch|Message): [^\n]*)\n~~~json\n[\s\S]*?\n~~~$/gmu;
+ * "Review batch: …", "Message: …" or "Comment on …" line. The agent reads it; anything shown to people replaces each
+ * match with `$1`, the line alone. */
+export const STAGED_CHOICE_DATA = /^((?:(?:Decided|Answered|Review batch|Message): |Comment on )[^\n]*)\n~~~json\n[\s\S]*?\n~~~$/gmu;
 export const RuntimeSessionCommandSchema = z.union([
   z.object({ type: z.literal('browserStatus'), machineId: z.string().optional() }),
   z.object({ type: z.literal('browserRevoke'), machineId: z.string().optional(), groupId: z.string().uuid() }),
@@ -106,7 +107,14 @@ export const RuntimeSessionCommandSchema = z.union([
   z.object({ type: z.literal('browserTabGroup'), pairingId: z.string().uuid() }),
   z.object({ type: z.literal('browserArtifact'), machineId: z.string().optional(), artifactId: z.string(), offset: z.number().int().nonnegative(), limit: z.number().int().min(1).max(65536) }),
   z.object({ type: z.enum(simple) }),
-  z.object({ type: z.literal('prompt'), text: z.string(), draftRevision: z.number().int().nonnegative().optional(), draftText: z.string().optional(), streamingBehavior: z.enum(['steer', 'followUp']).optional(), decisions: z.array(RuntimeMessageDecisionSchema).max(32).optional() }),
+  /** `comments`: the staged comments (`stageComment`) the message carries; they leave the staged comments once it is in the conversation's inbox. */
+  z.object({ type: z.literal('prompt'), text: z.string(), draftRevision: z.number().int().nonnegative().optional(), draftText: z.string().optional(), streamingBehavior: z.enum(['steer', 'followUp']).optional(), decisions: z.array(RuntimeMessageDecisionSchema).max(32).optional(), comments: z.array(CommentIdSchema).max(STAGED_COMMENTS_MAX).optional() }),
+  /** Comments (comments.ts): stage one on what the agent wrote, change a staged one's note, or take one back; the
+   * lookup's sent comments on some turns and the replies to them. */
+  z.object({ type: z.literal('stageComment'), anchor: CommentAnchorSchema, note: CommentNoteSchema }),
+  z.object({ type: z.literal('editComment'), id: CommentIdSchema, note: CommentNoteSchema }),
+  z.object({ type: z.literal('unstageComment'), id: CommentIdSchema }),
+  z.object({ type: z.literal('commentLookup'), turnIds: z.array(z.string().min(1)).max(256) }),
   z.object({ type: z.literal('setWorkspacePhase'), phase: z.enum(['plan', 'code', 'review', 'ship']) }),
   z.object({ type: z.literal('cycleRole'), direction: z.enum(['forward', 'backward']) }),
   z.object({ type: z.literal('setModel'), provider: z.string(), model: z.string() }),
@@ -130,7 +138,7 @@ export const RuntimeSessionResultSchema = z.object({ control: SessionControlSche
   browserShares: z.array(RuntimeBrowserShareSchema).max(100).optional(), browserShare: RuntimeBrowserShareSchema.optional(), browserConnectedTab: RuntimeBrowserConnectedTabSchema.optional(),
   browserComments: z.array(RuntimeBrowserCommentThreadViewSchema).max(500).optional(), browserComment: RuntimeBrowserCommentThreadSchema.optional(),
   browserCaptureShares: z.array(RuntimeBrowserCaptureShareSchema).max(100).optional(), browserCaptureShare: RuntimeBrowserCaptureShareSchema.optional(), browserGroupId: z.string().uuid().optional(),
-  setup: AgentSetupSchema.optional(), historyPage: SessionHistoryPageSchema.optional(), transcriptPage: transcriptPageSchema.optional(), transcriptContent: transcriptContentPageSchema.optional(), usage: SessionUsageReportSchema.optional() });
+  setup: AgentSetupSchema.optional(), historyPage: SessionHistoryPageSchema.optional(), transcriptPage: transcriptPageSchema.optional(), transcriptContent: transcriptContentPageSchema.optional(), usage: SessionUsageReportSchema.optional(), commentLookup: CommentLookupSchema.optional() });
 export type RuntimeSessionCommand = z.infer<typeof RuntimeSessionCommandSchema>;
 export type RuntimeSessionInput = z.infer<typeof RuntimeSessionInputSchema>;
 export type RuntimeSessionResult = z.infer<typeof RuntimeSessionResultSchema>;

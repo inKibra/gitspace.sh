@@ -4,9 +4,10 @@ import type { Message, Models } from '@earendil-works/pi-ai';
 import { utf8ByteLength } from '@earendil-works/chord/output';
 import { BROWSER_TOOL_NAME, CODE_ONLY_TOOLS, SERVICE_TOOLS, createRuntimeTools, runtimeToolParameters, type ToolServices } from './tools.js';
 import { createOperationalTasks, type OperationalServices } from './tasks.js';
-import { BlockAsksDoc, QuestionsDoc, WorkspaceDoc } from './documents.js';
+import { BlockAsksDoc, CommentLookupDoc, QuestionsDoc, WorkspaceDoc } from './documents.js';
 import { expireLegacyQuestions, repairBlockAsks } from './questions.js';
 import { requiredBlockAsks } from '@gitspace/protocol/gitspace-ui';
+import { carriesComments, repairCommentLookup } from './comments.js';
 import { sessionControlsExtension, SessionControlsDoc } from './session-controls.js';
 import { createBackgroundAgentTask, createSubagentReplyExtension } from './background-agents.js';
 import { createRetainedRulesExtension, type RetainedRuleServices } from './retained-rules.js';
@@ -298,10 +299,18 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
     blockAsks = blockAsks.then(() => repairBlockAsks(harness, options.storage)).catch(options.onReport);
     return blockAsks;
   };
+  // A stored message with comments or replies joins the comment lookup in the commit after the one that stored it, and
+  // again on open for any a reset between the two left out (`repairCommentLookup`). Repairs run one at a time.
+  let lookup = Promise.resolve();
+  const repairLookup = (): Promise<void> => {
+    lookup = lookup.then(() => repairCommentLookup(harness, options.storage)).catch(options.onReport);
+    return lookup;
+  };
   harness.observeCommits({ end() {}, advance(publication) {
     const asking = publication.changes.some(change => change.type === 'entry' && AssistantEntry.is(change.value)
       && (change.value.model ?? []).some(message => message.role === 'assistant' && message.content.some(part => part.type === 'text' && requiredBlockAsks(part.text).length > 0)));
     if (asking) void repairAsks();
+    if (publication.changes.some(change => change.type === 'entry' && carriesComments(change.value))) void repairLookup();
   } });
   const modelTools = (model?: ModelRef) => tools.filter(tool => tool.name !== ((!model || options.editTool(model) === 'edit') ? 'apply_patch' : 'edit'));
   // A main conversation's model reaches the code-only tools through codemode; a subagent, which has no codemode, is
@@ -335,8 +344,10 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
     const workspace = await tx.doc(WorkspaceDoc);
     if (options.workspacePhase !== undefined) workspace.phase = options.workspacePhase;
     await tx.doc(QuestionsDoc);
-    // Replies from before block asks existed ask nothing: the first open starts the block-ask scans at the newest entry.
+    // Replies from before block asks existed ask nothing, and messages from before comments existed carry none: the
+    // first open starts the block-ask scans and the comment lookup's at the newest entry.
     const blockAsks = await tx.doc(BlockAsksDoc);
+    const comments = await tx.doc(CommentLookupDoc);
     let newest = 0;
     // Subagents spawned before roles were validated stored a role label ("Deep") where admission needs its id
     // ("deep"); every resume of such a conversation failed. Rewrites only those values. Remove once every workspace has opened.
@@ -350,7 +361,7 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
     do {
       const page = await tx.scanConversations({}, 128, cursor);
       for (const record of page.items) {
-        if (blockAsks.through === null) newest = Math.max(newest, Number(await tx.latestEntryId(record.id) ?? 0));
+        if (blockAsks.through === null || comments.through === null) newest = Math.max(newest, Number(await tx.latestEntryId(record.id) ?? 0));
         const controls = await tx.doc(SessionControlsDoc, record.id);
         relabel(controls.selection);
         if (controls.role !== null && roleIds[controls.role]) controls.role = roleIds[controls.role]!;
@@ -362,8 +373,10 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
       cursor = page.next;
     } while (cursor);
     blockAsks.through ??= newest;
+    comments.through ??= newest;
   }, BACKGROUND_CONTEXT);
   await expireLegacyQuestions(harness);
   await repairAsks();
+  await repairLookup();
   return { harness, root, registry, configureModel, lifecycle, backgroundAgentTask };
 }

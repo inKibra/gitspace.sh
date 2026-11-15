@@ -1,0 +1,166 @@
+// Comments on what an agent wrote (docs/BLOCK-DOCUMENTS-DESIGN.md §4): the comments people stage for their next
+// message, and the lookup derived from the transcript. A sent comment lives in the person's message only (its line and
+// data, `commentsMessage`), and a reply in the agent's message (a Reply block); the lookup holds pointers to them, is
+// updated after each commit that stores either, and can be rebuilt from the transcript at any time.
+import { AssistantEntry, UserEntry, type Conversation, type Cursor, type EntryRecord, type Harness, type Storage } from '@earendil-works/pi-durable';
+import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
+import { PI_ENTRY_ORDINALS, openerAt, piMessageRowId, piSessionId, turnRowId, userRowId } from '@gitspace/blocks';
+import { blockReplies } from '@gitspace/protocol/gitspace-ui';
+import { STAGED_COMMENTS_MAX, messageComments, type CommentAnchor, type CommentLookup, type StagedComment } from '@gitspace/protocol-runtime/comments';
+import { CommentLookupDoc, StagedCommentsDoc } from './documents.js';
+import { turnOpeners } from './transcript-rows.js';
+
+/** Entries one scan reads. */
+const SCAN_ENTRIES = 64;
+
+/** The text of a person's input entry. */
+function inputText(entry: EntryRecord): string {
+  const message = entry.model?.[0];
+  if (message?.role !== 'user') return '';
+  return typeof message.content === 'string' ? message.content : message.content.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n');
+}
+
+/** Whether a stored entry adds to the lookup: a person's message with comments, or an agent's message with Replies. */
+export function carriesComments(entry: EntryRecord): boolean {
+  if (UserEntry.is(entry)) return messageComments(inputText(entry)).length > 0;
+  return AssistantEntry.is(entry) && (entry.model ?? []).some(message => message.role === 'assistant' && message.content.some(part => part.type === 'text' && blockReplies(part.text).length > 0));
+}
+
+/** The conversation's latest turn: the turn its newest input opened; null before its first input. */
+export async function latestTurn(conversation: Conversation): Promise<string | null> {
+  let cursor: Cursor | undefined;
+  do {
+    const page = await conversation.entries({}, SCAN_ENTRIES, cursor, BACKGROUND_CONTEXT);
+    const input = page.items.find(entry => UserEntry.is(entry));
+    if (input) return turnRowId(piSessionId(String(conversation.id)), Number(input.id) * PI_ENTRY_ORDINALS);
+    cursor = page.next;
+  } while (cursor);
+  return null;
+}
+
+/** Stages a comment on the latest turn of the conversation its anchor names. */
+export async function stageComment(harness: Harness, conversation: Conversation, anchor: CommentAnchor, note: string, deviceId: string | null): Promise<StagedComment> {
+  if (anchor.document.conversationId !== String(conversation.id)) throw new Error('The comment names another conversation');
+  if (anchor.document.turnId !== await latestTurn(conversation)) throw new Error('Comments go on the latest turn');
+  const comment: StagedComment = { id: `cm-${crypto.randomUUID().replaceAll('-', '').slice(0, 12)}`, anchor, note, stagedAt: new Date().toISOString(), deviceId };
+  await harness.commit(async tx => {
+    const staged = await tx.doc(StagedCommentsDoc);
+    if (staged.items.length >= STAGED_COMMENTS_MAX) throw new Error(`At most ${STAGED_COMMENTS_MAX} comments wait for a message`);
+    staged.items.push(comment);
+  }, BACKGROUND_CONTEXT);
+  return comment;
+}
+
+/** Changes a staged comment's note. */
+export async function editStagedComment(harness: Harness, id: string, note: string): Promise<void> {
+  await harness.commit(async tx => {
+    const comment = (await tx.doc(StagedCommentsDoc)).items.find(item => item.id === id);
+    if (!comment) throw new Error('The comment is no longer staged');
+    comment.note = note;
+  }, BACKGROUND_CONTEXT);
+}
+
+/** Takes staged comments back (or out, once a message carries them). */
+export async function unstageComments(harness: Harness, ids: readonly string[]): Promise<void> {
+  await harness.commit(async tx => {
+    const staged = await tx.doc(StagedCommentsDoc);
+    staged.items = staged.items.filter(item => !ids.includes(item.id));
+  }, BACKGROUND_CONTEXT);
+}
+
+/** The staged comments `ids` names, in staging order; each must still be staged. */
+export async function stagedComments(harness: Harness, ids: readonly string[]): Promise<StagedComment[]> {
+  const items = (await harness.snapshot(StagedCommentsDoc, BACKGROUND_CONTEXT))?.items ?? [];
+  const found = items.filter(item => ids.includes(item.id));
+  if (found.length !== new Set(ids).size) throw new Error('A comment in this message is no longer staged');
+  return found;
+}
+
+/**
+ * Adds to the lookup every comment and reply stored after `CommentLookupDoc.through` (every one when it is null), moves
+ * `through` to the newest entry read, and drops the sent comments from the staged ones, in one commit. A person's
+ * message row is `userRowId` of the turn its input opened; an agent message row is `piMessageRowId`, as the transcript
+ * reader names them. A failed or aborted reply, and a reply before its conversation's first input, answer nothing.
+ */
+export async function repairCommentLookup(harness: Harness, storage: Storage): Promise<void> {
+  const through = (await harness.snapshot(CommentLookupDoc, BACKGROUND_CONTEXT))?.through ?? null;
+  let newest = through ?? 0;
+  const comments: Record<string, { conversationId: string; message: string; anchor: CommentAnchor }> = {};
+  const replies: Record<string, string[]> = {};
+  let conversations: Cursor | undefined;
+  do {
+    const page = await storage.scanConversations({}, SCAN_ENTRIES, conversations, BACKGROUND_CONTEXT);
+    for (const conversation of page.items) {
+      const conversationId = String(conversation.id);
+      let openers: readonly number[] | undefined;
+      let cursor: Cursor | undefined;
+      scan: do {
+        const entries = await storage.scanEntries({ conversationId: conversation.id }, SCAN_ENTRIES, cursor, BACKGROUND_CONTEXT);
+        for (const entry of entries.items) {
+          const entryId = Number(entry.id);
+          // Newest first: an entry at or below the last scan ends this conversation's scan.
+          if (through !== null && entryId <= through) break scan;
+          newest = Math.max(newest, entryId);
+          if (String(entry.conversationId) !== conversationId || !carriesComments(entry)) continue;
+          openers ??= await turnOpeners(storage, conversation.id, BACKGROUND_CONTEXT);
+          const opener = openerAt(openers, entryId);
+          if (opener === undefined) continue;
+          const turn = turnRowId(piSessionId(conversationId), opener * PI_ENTRY_ORDINALS);
+          if (UserEntry.is(entry)) {
+            for (const comment of messageComments(inputText(entry))) comments[comment.id] = { conversationId, message: userRowId(turn), anchor: comment.anchor };
+            continue;
+          }
+          for (const [index, message] of (entry.model ?? []).entries()) {
+            if (message.role !== 'assistant' || message.stopReason === 'error' || message.stopReason === 'aborted') continue;
+            for (const [part, content] of message.content.entries()) {
+              const answered = content.type === 'text' ? blockReplies(content.text).map(reply => reply.comment) : [];
+              if (answered.length > 0) replies[piMessageRowId(conversationId, opener, entryId, index, part)] = answered;
+            }
+          }
+        }
+        cursor = entries.next;
+      } while (cursor);
+    }
+    conversations = page.next;
+  } while (conversations);
+  if (through !== null && newest === through) return;
+  const sent = Object.keys(comments);
+  await harness.commit(async tx => {
+    const lookup = await tx.doc(CommentLookupDoc);
+    if (sent.length > 0 || Object.keys(replies).length > 0) lookup.revision++;
+    Object.assign(lookup.comments, comments);
+    Object.assign(lookup.replies, replies);
+    lookup.through = Math.max(lookup.through ?? 0, newest);
+    if (sent.length > 0) {
+      const staged = await tx.doc(StagedCommentsDoc);
+      staged.items = staged.items.filter(item => !sent.includes(item.id));
+    }
+  }, BACKGROUND_CONTEXT);
+}
+
+/** Rebuilds the lookup from the whole transcript. */
+export async function rebuildCommentLookup(harness: Harness, storage: Storage): Promise<void> {
+  await harness.commit(async tx => {
+    const lookup = await tx.doc(CommentLookupDoc);
+    lookup.through = null;
+    lookup.comments = {};
+    lookup.replies = {};
+  }, BACKGROUND_CONTEXT);
+  await repairCommentLookup(harness, storage);
+}
+
+/** The lookup's comments on the turns `turnIds` and the replies to them, with the comments the replies in those turns
+ * answer. */
+export async function commentLookup(harness: Harness, turnIds: readonly string[]): Promise<CommentLookup> {
+  const lookup = await harness.snapshot(CommentLookupDoc, BACKGROUND_CONTEXT);
+  if (!lookup) return { comments: [], replies: [] };
+  const turns = new Set(turnIds);
+  const local = new Map(Object.entries(lookup.replies).filter(([row]) => turnIds.some(turn => row.startsWith(`${turn}:`))));
+  const answered = new Set([...local.values()].flat());
+  const comments = Object.entries(lookup.comments).filter(([id, comment]) => turns.has(comment.anchor.document.turnId) || answered.has(id));
+  const ids = new Set(comments.map(([id]) => id));
+  return {
+    comments: comments.map(([id, comment]) => ({ id, ...comment })),
+    replies: Object.entries(lookup.replies).flatMap(([row, answers]) => answers.flatMap(comment => ids.has(comment) || local.has(row) ? [{ row, comment }] : [])),
+  };
+}

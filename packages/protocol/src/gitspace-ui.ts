@@ -3,6 +3,7 @@
 // A gitspace-ui spec has json-render's shape { root, elements, state }; the catalog is plain zod so the protocol needs no
 // json-render dependency.
 import { z } from 'zod';
+import { CommentIdSchema } from '@gitspace/protocol-runtime/comments';
 
 export interface UiBlockIssue {
   path: string;
@@ -442,6 +443,14 @@ const components = {
     }),
     description: 'A narrated walkthrough played like a short video: one frame at a time, each with a voice line (`say`) the person hears and reads as a subtitle. It shows frame 1 as a still with a play button and never plays by itself; the person steps through, changes speed or mutes. A frame lasts its speech, its `hold`, or 4 s without a voice. Each frame shows one thing: Markdown, Svg, Mermaid, CallDiff, StateFlow, Image, Video or any component except a Sequence, or a block of this document by { "ref": "<id>" }. Write 2 to 30 frames, one point each, in the order you would explain it.',
   },
+  Reply: {
+    props: z.strictObject({
+      comment: CommentIdSchema.describe('The id in the comment\'s data ("cm-…")'),
+      quote: z.string().min(1).max(140).nullish().describe('A few words of what the comment is on, quoted'),
+      text: z.string().min(1).max(4000).describe('Your answer, in Markdown'),
+    }),
+    description: 'Your answer to one comment the person sent: shown in the chat linked to the comment, and under the comment where it is. One Reply per comment, as the root of its own block.',
+  },
 } satisfies Record<string, UiComponent>;
 
 const actions = {
@@ -721,6 +730,29 @@ export function requiredBlockAsks(markdown: string): RequiredBlockAsk[] {
     }
   }
   return asks;
+}
+
+/** A Reply element's answer: the comment it names and its text (null when the text is an expression). */
+export interface BlockReply { comment: string; text: string | null }
+
+/** The Reply elements of the gitspace-ui blocks in Markdown, in order; a block that fails the checks answers nothing. */
+export function blockReplies(markdown: string): BlockReply[] {
+  const replies: BlockReply[] = [];
+  for (const block of extractBlocks(markdown)) {
+    if (block.kind !== 'gitspace-ui' || !block.closed) continue;
+    let spec: unknown;
+    try {
+      spec = JSON.parse(block.body);
+    } catch {
+      continue;
+    }
+    if (!isRecord(spec) || !isRecord(spec.elements) || checkSpec(spec).issues.length > 0) continue;
+    for (const element of Object.values(spec.elements)) {
+      if (!isRecord(element) || element.type !== 'Reply' || !isRecord(element.props) || typeof element.props.comment !== 'string') continue;
+      replies.push({ comment: element.props.comment, text: typeof element.props.text === 'string' ? element.props.text : null });
+    }
+  }
+  return replies;
 }
 
 const ELEMENT_FIELDS = new Set(['type', 'props', 'children', 'slots', 'visible', 'repeat', 'on', 'watch', 'id', 'ask']);
@@ -1475,7 +1507,7 @@ export const UI_BLOCK_EXAMPLES: readonly UiBlockExample[] = [
 export const UI_BLOCK_BRIEF = 'Drawing: GitSpace renders blocks you write in Markdown, in chat and in every Markdown field (goal, journal, Change Guide). Draw when a picture says it better than prose: results and measurements (Stats tiles, a Chart, a MetricDelta, a RunTag naming the run), options compared (a Table, Tradeoffs), values over time (a line Chart), how code or data flows or what a change rewires (a FlowMap, drawn as the Change Guide draws a change; a CallDiff, a StateFlow), a plan to tick off (a Checklist), a choice for the person (a card that stages it in their message bar; give it an id and a required ask when you need the answer), before and after (BeforeAfter), a change explained in order as a short narrated video (a Sequence of frames, each with a voice line). Use ```svg for layout, geometry, mockups or anything the components cannot express, and ```mermaid only for the most basic flows or when the work is already about Mermaid. Before you write a block, read skill://gitspace-ui: it has the format, every component and worked examples. GitSpace rejects an invalid block with the path that failed; fix it and write again.';
 
 /** The skill's description: what an agent sees in a skill list, so it names the moments to read the skill. */
-export const UI_SKILL_DESCRIPTION = 'Draw what you show as blocks GitSpace renders: cards, charts, tables, FlowMaps, checklists, SVG. Read before you report numbers or a measurement, compare options, explain how code or data flows, lay out a plan, show a before and after, or ask the person to choose.';
+export const UI_SKILL_DESCRIPTION = 'Draw what you show as blocks GitSpace renders: cards, charts, tables, FlowMaps, checklists, SVG. Read before you report numbers or a measurement, compare options, explain how code or data flows, lay out a plan, show a before and after, ask the person to choose, or answer the comments a person sent on your message.';
 
 /** The agent's instructions for writing blocks; the body of the `gitspace-ui` skill. */
 export function uiBlockPrompt(): string {
@@ -1522,7 +1554,7 @@ Each passes GitSpace's checks; copy their shape.
 ${examples}
 
 ## Spec
-- "root": the key of the root element: a Card, an AskCard when the block is one question for the person, or a Sequence.
+- "root": the key of the root element: a Card, an AskCard when the block is one question for the person, a Sequence, or a Reply answering a comment.
 - "elements": element key → { "type", "props", "children": [keys], "slots"?: { "<slot>": [keys] }, "visible"?, "repeat"?, "on"?, "id"?, "ask"? }. Every element has "children" ([] for a leaf). "visible", "repeat", "on", "id" and "ask" sit beside "props", never inside it. Put default-slot children in "children", never in slots.default.
 - "state": the data the block reads. Seed every path a $state or repeat reads. At most ${MAX_ELEMENTS} elements and ${MAX_SPEC_BYTES / 1024} KiB.
 
@@ -1536,6 +1568,9 @@ A Sequence plays like a short video: frame 1 shows as a still with a play button
 - \`say\`: one or two plain sentences (at most 400 characters) saying what to look at in the frame, not what the frame already reads. \`caption\` only when the subtitle should differ.
 - \`hold\`: seconds for a frame with no voice line or one that needs looking at longer; without a voice a frame lasts 4 s.
 - A frame whose content fails the checks shows as an error in its place; fix it like any block.
+
+## Comments
+A person comments on your latest turn: a passage of a message, a paragraph, a block, an item in a block (a row, a step, a line, a frame) or a tool call. Their next message carries each comment as a line "Comment on “<quote>”: <note>" and its data { "comment": { "id", "note", "anchor" } }; the anchor says where it is and quotes what they saw. Answer every comment with its own Reply block, { "comment": "<id>", "quote": "<a few words of what it is on>", "text": "<your answer>" }, as the root of its block, then go on with the work. The person reads the Reply under their comment.
 
 ## Components
 Props marked ? may be omitted or null; the rest are required.

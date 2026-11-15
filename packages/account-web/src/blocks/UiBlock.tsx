@@ -2,7 +2,9 @@
 // block keeps its own json-render state, seeded from the spec's `state`; its actions run the surface's BlockActions. It
 // opens in the lightbox, drawn again at the dialog's width from the same state. An element with an id may be drawn
 // again by a BlockRef or a Sequence frame of the same document. An element with an ask shows it above the block; a
-// required ask in a stored chat message is a workspace question, answered through the block's own choice.
+// required ask in a stored chat message is a workspace question, answered through the block's own choice. A block of a
+// stored chat message takes comments (comments/CommentLayer.tsx) on itself, its items and text selected in it, unless
+// it asks a question.
 import { askAnswerParts, questionState, type RuntimeQuestion } from '@gitspace/protocol-runtime';
 import { blockAskQuestionId, gitspaceUiCatalog, parseBlockRef, validateUiSpec } from '@gitspace/protocol/gitspace-ui';
 import { Badge } from '@gitspace/ui';
@@ -18,6 +20,7 @@ import { BlockAnswersQuestion, BlockDocument, BlockRendering, OtherDocumentRef, 
 import { BlockErrorCard } from './BlockFrames.js';
 import { BLOCK_COMPONENTS, blockCatalog, blockFunctions } from './registry.js';
 import { SvgBlock } from './SvgBlock.js';
+import { BlockCommentButton, BlockMarker, CommentBlock, blockKey, type CommentBlockValue } from '../comments/CommentLayer.js';
 
 const NO_REFS: readonly string[] = [];
 
@@ -115,17 +118,30 @@ function DrawnBlock({ spec, refs }: { spec: Spec; refs: readonly string[] }) {
   }, [store]);
   const rendering = useMemo((): BlockRenderingValue => ({ spec, registry, drawRef: (reference) => <RefBlock reference={reference} refs={refs} within={spec} /> }), [spec, registry, refs]);
   const title = spec.elements[spec.root]?.props.title;
+  // What comments on this block and its items name. A block drawn again by ref is a copy inside another block, whose
+  // items take no comments of their own; a question (an AskCard, or an element with a required ask) takes none: it is
+  // answered by answering it.
+  const comments = useMemo((): CommentBlockValue | null => {
+    if (refs.length > 0 || messageId === null) return null;
+    const root = spec.elements[spec.root];
+    return {
+      key: blockKey(messageId, root, root && 'id' in root && typeof root.id === 'string' ? root.id : null),
+      kind: root?.type ?? 'Block', title: typeof title === 'string' && title ? title : null,
+      asks: Object.values(spec.elements).some((element) => element.type === 'AskCard' || ('ask' in element && typeof element.ask === 'object' && element.ask !== null && 'required' in element.ask && element.ask.required === true)),
+    };
+  }, [spec, refs, messageId, title]);
   return <JSONUIProvider registry={registry} store={store} handlers={handlers} functions={blockFunctions}>
-    <BlockRendering.Provider value={rendering}><BlockAnswersQuestion.Provider value={answersQuestion}>
-      <Lightbox label={typeof title === 'string' && title ? title : 'Block'} mode="fill" className="my-2"
+    <BlockRendering.Provider value={rendering}><BlockAnswersQuestion.Provider value={answersQuestion}><CommentBlock.Provider value={comments}>
+      <Lightbox label={typeof title === 'string' && title ? title : 'Block'} mode="fill" className="my-2" actions={<BlockCommentButton />}
         expanded={<div className="mx-auto flex w-full min-w-0 max-w-5xl flex-col gap-1.5"><Renderer spec={spec} registry={registry} /><Notices /></div>}>
-        <div data-gitspace-block="gitspace-ui" className="flex min-w-0 flex-col gap-1.5">
+        <div data-gitspace-block="gitspace-ui" data-comment-block={comments?.key} data-comment-kind={comments?.kind} data-comment-ask={comments?.asks ? '' : undefined} className="flex min-w-0 flex-col gap-1.5">
           {asks.length > 0 ? <AskMarkers asks={asks} asked={asked} /> : null}
           <Renderer spec={spec} registry={registry} />
           <Notices />
+          <BlockMarker />
         </div>
       </Lightbox>
-    </BlockAnswersQuestion.Provider></BlockRendering.Provider>
+    </CommentBlock.Provider></BlockAnswersQuestion.Provider></BlockRendering.Provider>
   </JSONUIProvider>;
 }
 

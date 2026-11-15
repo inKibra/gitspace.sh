@@ -165,8 +165,9 @@ export interface GitSpaceShellProps {
   runtimeSummary?: SidebarSpaceSummary;
   machines?: Array<{ id: string; label: string }>;
   /** `text` names each attachment with an `<attachment … />` tag (`chatAttachmentTag`); the files are already in the
-   * drive. `decisions`: the decisions staged in the composer that go with the message. */
-  onSend?: (text: string, behavior?: SendBehavior, draft?: Pick<WorkspaceDraftCapture, 'draftRevision' | 'text'>, decisions?: RuntimeMessageDecision[]) => void | Promise<void>;
+   * drive. `decisions`: the decisions staged in the composer that go with the message; `comments`: the ids of the
+   * staged comments that go with it, whose lines and data the workspace adds after `text`. */
+  onSend?: (text: string, behavior?: SendBehavior, draft?: Pick<WorkspaceDraftCapture, 'draftRevision' | 'text'>, decisions?: RuntimeMessageDecision[], comments?: readonly string[]) => void | Promise<void>;
   draft?: WorkspaceDraftBinding;
   /** Present when composer attachments may be uploaded into the session's drive under `uploads/<date>/`. */
   artifactUpload?: ArtifactUploadClient;

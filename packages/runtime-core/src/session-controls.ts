@@ -17,6 +17,8 @@ import type { ConversationLifecycle } from './conversation-lifecycle.js';
 import { closeConversationQuestions } from './questions.js';
 import { AgentDefinitionContextDoc } from './subagent-state.js';
 import { modelRoleThinkingSchema, parseModelRoleSelector } from '@gitspace/protocol/inference';
+import { commentsMessage } from '@gitspace/protocol-runtime/comments';
+import { commentLookup, editStagedComment, stageComment, stagedComments, unstageComments } from './comments.js';
 
 const ThinkingSchema = modelRoleThinkingSchema.unwrap();
 const ThinkingSelectionSchema = z.discriminatedUnion('source', [z.object({ source: z.literal('profile') }), z.object({ source: z.literal('conversation'), thinking: modelRoleThinkingSchema })]);
@@ -196,7 +198,7 @@ export function createSessionControls(services: SessionControlServices) {
   async function execute(id: string | undefined, command: RuntimeSessionCommand, canApprove = false, deviceId?: string): Promise<RuntimeSessionResult> {
     let target = await conversation(id);
     const child = (await harness.snapshot(AgentDefinitionContextDoc, target.id, ctx))?.child;
-    if (child && !['control', 'agentSetup', 'historyAnchorId', 'historyPage', 'transcriptPage', 'transcriptContent', 'usage', 'stop'].includes(command.type)) {
+    if (child && !['control', 'agentSetup', 'historyAnchorId', 'historyPage', 'transcriptPage', 'transcriptContent', 'usage', 'stop', 'commentLookup'].includes(command.type)) {
       throw new Error('Subagents accept inspection and scoped Stop only; target the workspace main conversation for user messages and mutations');
     }
     if (!child && ['agentSetup', 'saveAgentDefinition', 'prompt', 'reloadSettings', 'instructionsChanged', 'inferenceChanged'].includes(command.type)) await loadDefinitions(target);
@@ -304,11 +306,17 @@ export function createSessionControls(services: SessionControlServices) {
         await services.lifecycle.userInput(String(target.id), async () => {
           const requestId = crypto.randomUUID();
           await applyInferenceThinking(target, await admitted(requestId));
-          if (deviceId !== undefined && command.decisions?.length) services.holdDecisions?.(String(target.id), requestId, { deviceId, text: command.text, decisions: command.decisions });
-          await target.submit({ type: 'input', requestId, content: command.text, whenBusy: command.streamingBehavior ?? 'followUp' }, ctx);
+          // The staged comments the message carries go as its lines and data, and leave the staged comments once it is in.
+          const content = command.comments?.length ? commentsMessage(command.text, await stagedComments(harness, command.comments)) : command.text;
+          if (deviceId !== undefined && command.decisions?.length) services.holdDecisions?.(String(target.id), requestId, { deviceId, text: content, decisions: command.decisions });
+          await target.submit({ type: 'input', requestId, content, whenBusy: command.streamingBehavior ?? 'followUp' }, ctx);
+          if (command.comments?.length) await unstageComments(harness, command.comments);
         });
         break;
       }
+      case 'stageComment': await stageComment(harness, target, command.anchor, command.note, deviceId ?? null); break;
+      case 'editComment': await editStagedComment(harness, command.id, command.note); break;
+      case 'unstageComment': await unstageComments(harness, [command.id]); break;
       case 'setModel': { const catalog = await services.catalog(); if (!catalog.models.some(model => model.provider === command.provider && model.id === command.model)) throw new Error('Model is not admitted by the inference profile'); await services.configureModel(target.id, { provider: command.provider, modelId: command.model }); await mutate(draft => { draft.role = null; draft.selection = { kind: 'explicit', provider: command.provider, modelId: command.model }; }); break; }
       case 'setThinking': { const thinking = modelRoleThinkingSchema.parse(command.thinking); await target.configure({ thinkingLevel: thinking }, ctx); await mutate(draft => { draft.thinkingSelection = { source: 'conversation', thinking }; }); break; }
       case 'cycleRole': { const catalog = await services.catalog(); if (!catalog.roles.length) throw new Error('No configured inference roles'); const state = await harness.snapshot(SessionControlsDoc, target.id, ctx); const index = catalog.roles.findIndex(role => role.id === state?.role); const next = index < 0 ? command.direction === 'forward' ? 0 : catalog.roles.length - 1 : (index + (command.direction === 'forward' ? 1 : catalog.roles.length - 1)) % catalog.roles.length; const role = catalog.roles[next]!; await services.configureModel(target.id, { provider: role.provider, modelId: role.model }); await target.configure({ thinkingLevel: modelRoleThinkingSchema.parse(role.thinking) }, ctx); await mutate(draft => selectRole(draft, role.id)); break; }
@@ -415,7 +423,7 @@ export function createSessionControls(services: SessionControlServices) {
         });
         break;
       case 'persist': case 'handoff': await mutate(draft => { draft.revision++; }); break;
-      case 'control': case 'agentSetup': case 'historyAnchorId': case 'historyPage': case 'transcriptPage': case 'transcriptContent': case 'usage': break;
+      case 'control': case 'agentSetup': case 'historyAnchorId': case 'historyPage': case 'transcriptPage': case 'transcriptContent': case 'usage': case 'commentLookup': break;
     }
     const result: RuntimeSessionResult = { control: await control(target) };
     if (command.type === 'agentSetup' || command.type === 'saveAgentDefinition') {
@@ -426,6 +434,7 @@ export function createSessionControls(services: SessionControlServices) {
     if (command.type === 'transcriptPage') result.transcriptPage = await services.history.transcriptPage(target.id, command.request);
     if (command.type === 'transcriptContent') result.transcriptContent = await services.history.transcriptContent(target.id, command.request);
     if (command.type === 'usage') result.usage = await services.history.usage(target.id, harness);
+    if (command.type === 'commentLookup') result.commentLookup = await commentLookup(harness, command.turnIds);
     return result;
   }
   return { execute, control, conversation, loadDefinitions };

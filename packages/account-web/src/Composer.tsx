@@ -3,6 +3,7 @@ import { SERVICE_OFF } from '@gitspace/protocol/inference';
 import { automationEventCount, parseAutomationMessage, type AutomationMessage } from '@gitspace/protocol/automations-contract';
 import { captureMention, captureMentionIds, parseBrowserShareLink, withoutCaptureSummaries, type RuntimeBrowserCaptureView, type RuntimeBrowserConnectedTab, type RuntimeBrowserSharePreview } from '@gitspace/protocol-runtime';
 import { CHAT_ATTACHMENT_ACCEPT, chatAttachmentTag } from '@gitspace/protocol-runtime/chat-attachments';
+import { commentsMessage, type SentComment } from '@gitspace/protocol-runtime/comments';
 import type { RuntimeMessageDecision, RuntimeSessionCommand, RuntimeSessionResult } from '@gitspace/protocol-runtime/session-controls';
 import { Button, Dropdown, DropdownContent, DropdownMenu, DropdownTrigger, InputMessage, MenuItem, Select, SelectContent, SelectItem, SelectTrigger, ThinkingStep, ThinkingSteps, ThinkingStepsContent, ThinkingStepsHeader, badgeColors, useIcons, useShape, type IconName, type QueuedMessage } from '@gitspace/ui';
 import { Attachment01, CpuChip01, DotsHorizontal, XClose, Zap } from '@untitledui/icons';
@@ -19,7 +20,7 @@ import { useInference } from './InferenceContext.js';
 import type { WorkspaceDraftBinding } from './workspace-draft.js';
 import { uploadArtifactFile, uploadRejection, type ArtifactUploadClient } from './inspector/artifact-upload.js';
 import { previewShare } from './share/share-client.js';
-import { StagedChips, stagedMessage, useComposerStaging } from './chat/staging.js';
+import { StagedChips, useComposerStaging } from './chat/staging.js';
 import { OutgoingMessages, useOutbox, type Outbox, type OutgoingMessage, type SentMessage } from './chat/outbox.js';
 import { DictationControl } from './chat/dictation.js';
 import { Toasts, useToasts } from './toasts.js';
@@ -241,9 +242,11 @@ export function Composer({ workspace, controls, providers, skills = [], running,
         attached.push(chatAttachmentTag({ name: file.name, url: artifact.url, type: file.type, size: file.size, hash: artifact.hash }));
       }
       let body = '';
-      const deliver = async (message: string, decisions?: RuntimeMessageDecision[]) => {
-        body = [[...lead, message].join('\n'), ...attached].join('\n\n');
-        await onSend(body, 'followUp', outgoing.draft, decisions);
+      // The workspace adds the staged comments' lines and data after the message; the outbox matches the whole.
+      const deliver = async (message: string, decisions?: RuntimeMessageDecision[], comments: readonly SentComment[] = []) => {
+        const sent = [[...lead, message].join('\n'), ...attached].join('\n\n');
+        body = commentsMessage(sent, comments);
+        await onSend(sent, 'followUp', outgoing.draft, decisions, comments.map((comment) => comment.id));
       };
       if (staging) await staging.deliver(outgoing.text, deliver);
       else await deliver(outgoing.text);
@@ -264,7 +267,7 @@ export function Composer({ workspace, controls, providers, skills = [], running,
     setJoined([]);
     const outgoing = outbox.add({
       text,
-      shown: staging ? stagedMessage(text, staging.chips) : text,
+      shown: staging ? staging.message(text) : text,
       files: draftAttachments,
       // A pasted share that ended is not connected.
       tabs: (sessionCommand ? tabs : []).flatMap((link) => {

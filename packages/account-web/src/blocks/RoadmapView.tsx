@@ -7,6 +7,7 @@ import { useActions } from '@json-render/react';
 import { useEffect, useState } from 'react';
 import type { z } from 'zod';
 import { RefChip } from './references.js';
+import { ItemComment, commentItem } from '../comments/CommentLayer.js';
 
 type RoadmapProps = z.output<typeof gitspaceUiCatalog.components.Roadmap.props>;
 type Phase = RoadmapProps['phases'][number];
@@ -69,10 +70,10 @@ export function RoadmapView({ phases }: RoadmapProps) {
               {phase.note ? <span className="text-caption leading-snug text-muted-foreground">{phase.note}</span> : null}
             </div>
             {phase.items.length ? <ul className="flex flex-col gap-1.5">
-              {phase.items.map((item, itemIndex) => <li key={itemIndex} className="flex min-w-0 items-start gap-2">
+              {phase.items.map((item, itemIndex) => <li key={itemIndex} className="group/item flex min-w-0 items-start gap-2" {...commentItem(`phases/${index}/items/${itemIndex}`, `item “${item.label}”`)}>
                 <span className="mt-[5px] flex size-3 shrink-0 items-center justify-center"><Mark status={item.status ?? 'todo'} /></span>
                 <span className="flex min-w-0 flex-col gap-1">
-                  <span className={`text-caption leading-snug ${item.status === 'done' ? 'text-muted-foreground' : 'text-foreground'}`}>{item.label}</span>
+                  <span className={`text-caption leading-snug ${item.status === 'done' ? 'text-muted-foreground' : 'text-foreground'}`}>{item.label} <ItemComment path={`phases/${index}/items/${itemIndex}`} label={`item “${item.label}”`} quote={item.label} /></span>
                   {item.refs?.length ? <span className="flex flex-wrap gap-1">{item.refs.map((reference, refIndex) => <RefChip key={refIndex} reference={reference} />)}</span> : null}
                   {item.decide ? <span className="flex flex-col gap-1 rounded-md p-1.5" style={{ background: `color-mix(in oklab, ${badgeColors.orange} 8%, transparent)` }}>
                     <span className="text-[11px] leading-snug text-foreground/80">{item.decide.question}</span>

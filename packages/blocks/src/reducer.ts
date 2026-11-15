@@ -5,7 +5,7 @@ import type { z } from 'zod';
 import type { TranscriptItem } from './history.js';
 import { executionIdentity, executionSettled, extractExecutions, mergeExecution } from './execution.js';
 import { parseConversationEvents } from './conversation-events.js';
-import { messageRowId, turnRowId } from './row-ids.js';
+import { messageRowId, turnRowId, userRowId } from './row-ids.js';
 
 export interface TranscriptEventInput {
   sessionId: string;
@@ -475,7 +475,7 @@ export class TranscriptProjector {
         // Saved transcripts omit turn markers: the next user opens a new turn.
         if (this.#current?.hasContent) this.#commit('done');
         const turn = this.#ensureTurn(event);
-        this.#write({ id: `${turn.id}:user`, type: 'message', role: 'user', text, ...(images.length ? { images } : {}), ...createdAt(event) });
+        this.#write({ id: userRowId(turn.id), type: 'message', role: 'user', text, ...(images.length ? { images } : {}), ...createdAt(event) });
         return;
       }
       const turn = this.#ensureTurn(event);

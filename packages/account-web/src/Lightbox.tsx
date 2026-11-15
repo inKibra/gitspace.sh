@@ -2,11 +2,13 @@
 // controls, or its expand button (shown on hover and focus), opens a dialog titled with the visual's label; Esc, the
 // close button and the backdrop close it. A diagram or map ('zoom') shows at its natural size in a view that pans and
 // zooms: drag to pan, wheel or pinch to zoom, buttons and keys to zoom, fit it to the screen or show it at 100%. A
-// block ('fill') draws again at the dialog's size.
+// block ('fill') draws again at the dialog's size. Where the visual is a block of a message, its comments are in a
+// panel beside it (comments/LightboxComments.tsx).
 import { Button, Dialog, DialogContent, DialogTitle } from '@gitspace/ui';
 import { Maximize01, ZoomIn, ZoomOut } from '@untitledui/icons';
 import { useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type PointerEvent, type ReactNode } from 'react';
 import { useBoxSize, type BoxSize } from './use-box-size.js';
+import { LightboxComments } from './comments/LightboxComments.js';
 
 const MIN_SCALE = 0.1;
 const MAX_SCALE = 8;
@@ -16,6 +18,8 @@ const ZOOM_STEP = 1.25;
 const PAN_STEP = 48;
 /** How far, in pixels, a press moves before it pans instead of pressing what is under it. */
 const DRAG_SLOP = 4;
+/** How long a press waits to see whether it is the first click of a double or triple click (selecting text). */
+const PRESS_OPEN_MS = 300;
 /** Pressing one of these inside a visual does what it does instead of opening the lightbox. */
 const CONTROLS = 'a, button, input, select, textarea, label, summary, [role="button"], [role="tab"], [role="checkbox"], [role="radio"], [role="switch"], [role="option"], [role="slider"], [contenteditable="true"]';
 
@@ -155,13 +159,21 @@ export function Lightbox({ label, mode, children, expanded, actions, className =
   className?: string;
 }) {
   const [open, setOpen] = useState(false);
+  const pending = useRef<number | null>(null);
+  useEffect(() => () => { if (pending.current !== null) window.clearTimeout(pending.current); }, []);
+  // A press opens the visual once it is clearly a single click: a double or triple click selects text (to comment on
+  // it) and cancels it, as does a selection made by the time it would open.
   const press = (event: MouseEvent<HTMLDivElement>): void => {
+    if (pending.current !== null) { window.clearTimeout(pending.current); pending.current = null; }
     const target = event.target;
     // A press inside the dialog reaches here through React's tree, not the page's; it is the dialog's own.
     if (event.defaultPrevented || !(target instanceof Element) || !event.currentTarget.contains(target)) return;
     const control = target.closest(CONTROLS);
-    if ((control && event.currentTarget.contains(control)) || window.getSelection()?.toString()) return;
-    setOpen(true);
+    if ((control && event.currentTarget.contains(control)) || window.getSelection()?.toString() || event.detail > 1) return;
+    pending.current = window.setTimeout(() => {
+      pending.current = null;
+      if (!window.getSelection()?.toString()) setOpen(true);
+    }, PRESS_OPEN_MS);
   };
   const shown = typeof expanded === 'function' ? expanded(() => setOpen(false)) : expanded ?? children;
   return <div data-lightbox={label} className={`group/lightbox relative min-w-0 ${className}`}>
@@ -173,7 +185,7 @@ export function Lightbox({ label, mode, children, expanded, actions, className =
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogContent size="lg" data-lightbox-dialog={mode} className="flex h-[calc(100dvh-2rem)] !max-w-[calc(100vw-2rem)] flex-col gap-2 overflow-hidden p-4">
         <DialogTitle className="pr-10">{label}</DialogTitle>
-        {mode === 'zoom' ? <PanZoom label={label}>{shown}</PanZoom> : <div className="min-h-0 flex-1 overflow-auto">{shown}</div>}
+        <LightboxComments>{mode === 'zoom' ? <PanZoom label={label}>{shown}</PanZoom> : <div className="min-h-0 flex-1 overflow-auto">{shown}</div>}</LightboxComments>
       </DialogContent>
     </Dialog>
   </div>;

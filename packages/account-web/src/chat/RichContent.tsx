@@ -1,6 +1,7 @@
 import type { MessageImage, RichContentBlock } from '@gitspace/blocks';
 import type { ChatAttachment } from '@gitspace/protocol-runtime/chat-attachments';
 import { STAGED_CHOICE_DATA } from '@gitspace/protocol-runtime/session-controls';
+import { withoutComments } from '@gitspace/protocol-runtime/comments';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow, useShape } from '@gitspace/ui';
 import { File06, Link03 } from '@untitledui/icons';
 import { GitSpaceMarkdown } from '../GitSpaceMarkdown.js';
@@ -48,11 +49,12 @@ export function MessageFiles({ attachments }: { attachments: readonly ChatAttach
     </ResourceLink>)}</span>;
 }
 
-/** A user message as Markdown: a staged choice shows as its line only (its data is for the agent). Messages sent before
- * attachments carried their hash name an uploaded file by a tag without one, shown as a link to its drive file, and a
- * small text file as a tag around its text, shown as a titled block. */
+/** A user message as Markdown: a staged choice shows as its line only (its data is for the agent), and its comments
+ * not at all (they show as a list under it, `SentComments`). Messages sent before attachments carried their hash name
+ * an uploaded file by a tag without one, shown as a link to its drive file, and a small text file as a tag around its
+ * text, shown as a titled block. */
 export function userMessageMarkdown(text: string): string {
-  return text
+  return withoutComments(text)
     .replace(STAGED_CHOICE_DATA, '$1')
     .replace(/<attachment name="([^"]*)" url="([^"]*)"[^>]*\/>/gu, (_match, name: string, url: string) => `📎 [${name.replace(/[[\]]/gu, '\\$&')}](${url})`)
     .replace(/<attachment name="([^"]*)">\n([\s\S]*?)\n<\/attachment>/gu, (_match, name: string, content: string) => {

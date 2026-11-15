@@ -24,6 +24,7 @@ import { ImageView, VideoView } from './MediaBlocks.js';
 import { RoadmapView } from './RoadmapView.js';
 import { SequenceView } from './SequenceView.js';
 import { StateFlowView } from './StateFlowView.js';
+import { ItemComment, ReplyView, commentItem } from '../comments/CommentLayer.js';
 
 /** The protocol catalog as a json-render catalog: its components' zod props type the renderers, its actions the handlers. */
 export const blockCatalog = defineCatalog(schema, gitspaceUiCatalog);
@@ -74,9 +75,10 @@ function ChecklistRow({ index, label, note, checked, bindingPath, onChanged }: {
     previous.current = checked;
     onChanged();
   }, [checked, onChanged]);
-  return <div className="flex items-center gap-2">
+  return <div className="group/item flex items-center gap-2" {...commentItem(`items/${index}`, `item “${label}”`)}>
     <CheckboxItem className="min-w-0 flex-1" index={index} label={label} checked={value ?? false} onToggle={() => setValue(!(value ?? false))} />
     {note ? <span className="shrink-0 pr-2 text-caption text-muted-foreground">{note}</span> : null}
+    <ItemComment path={`items/${index}`} label={`item “${label}”`} quote={label} />
   </div>;
 }
 
@@ -212,9 +214,11 @@ export const BLOCK_COMPONENTS: Components<typeof blockCatalog> = {
   Table: ({ props }) => <div className="flex flex-col gap-1 overflow-x-auto">
     <Table size="compact">
       <TableHeader><TableRow>{props.columns.map((column) => <TableHead key={column.key} className={column.align === 'right' ? 'text-right' : undefined}><InlineText text={column.label} /></TableHead>)}</TableRow></TableHeader>
-      <TableBody>{props.rows.map((row, index) => <TableRow key={index} index={index}>{props.columns.map((column) => {
+      <TableBody>{props.rows.map((row, index) => <TableRow key={index} index={index} className="group/item" {...commentItem(`rows/${index}`, `row ${index + 1}`)}>{props.columns.map((column, position) => {
         const value = row[column.key];
-        return <TableCell key={column.key} className={`${column.align === 'right' ? 'text-right' : ''} ${column.mono ? 'font-mono tabular-nums' : ''}`}>{typeof value === 'number' ? value.toLocaleString('en-US') : <InlineText text={value ?? ''} />}</TableCell>;
+        // The last cell carries the row's comment icon.
+        const handle = position === props.columns.length - 1 ? <> <ItemComment path={`rows/${index}`} label={`row ${index + 1}`} quote={props.columns.map((each) => row[each.key]).filter((cell) => cell !== undefined && cell !== '').join(' · ')} /></> : null;
+        return <TableCell key={column.key} className={`${column.align === 'right' ? 'text-right' : ''} ${column.mono ? 'font-mono tabular-nums' : ''}`}>{typeof value === 'number' ? value.toLocaleString('en-US') : <InlineText text={value ?? ''} />}{handle}</TableCell>;
       })}</TableRow>)}</TableBody>
     </Table>
     {props.caption ? <span className="text-caption text-muted-foreground">{props.caption}</span> : null}
@@ -295,6 +299,7 @@ export const BLOCK_COMPONENTS: Components<typeof blockCatalog> = {
   Image: ({ props }) => <ImageView {...props} />,
   Video: ({ props }) => <VideoView {...props} />,
   Sequence: ({ props }) => <SequenceView {...props} />,
+  Reply: ({ props }) => <ReplyView comment={props.comment} quote={props.quote ?? null} text={props.text} />,
 };
 
 /** The items of `args.items` whose `args.field` is true. */

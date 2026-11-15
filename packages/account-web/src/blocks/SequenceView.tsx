@@ -12,6 +12,8 @@ import type { z } from 'zod';
 import { SpeechContext } from '../speech.js';
 import { BlockRendering, SequenceFrame, conforms } from './BlockDocument.js';
 import { BlockErrorCard } from './BlockFrames.js';
+import { ItemComment, commentItem } from '../comments/CommentLayer.js';
+import { LightboxComments, LightboxPlaceReport } from '../comments/LightboxComments.js';
 
 type SequenceProps = z.output<typeof gitspaceUiCatalog.components.Sequence.props>;
 type Frame = SequenceProps['frames'][number];
@@ -47,7 +49,7 @@ export function SequenceView(props: SequenceProps) {
     <Dialog open={expanded !== null} onOpenChange={(open) => { if (!open) setExpanded(null); }}>
       <DialogContent size="lg" className="flex h-[calc(100dvh-2rem)] !max-w-[calc(100vw-2rem)] flex-col gap-2 overflow-hidden p-4">
         <DialogTitle className="pr-10">{props.title}</DialogTitle>
-        <div className="min-h-0 flex-1 overflow-auto">{expanded ? <SequencePlayer {...props} large startAt={expanded.index} autoPlay={expanded.playing} /> : null}</div>
+        <LightboxComments><div className="min-h-0 flex-1 overflow-auto">{expanded ? <SequencePlayer {...props} large startAt={expanded.index} autoPlay={expanded.playing} /> : null}</div></LightboxComments>
       </DialogContent>
     </Dialog>
   </>;
@@ -66,6 +68,9 @@ function SequencePlayer({ title, frames, large, startAt, autoPlay, onExpand }: S
   const voiced = speech?.voice != null && !muted;
   const rate = Number.parseFloat(speed);
   const frame = frames[index];
+  // In a lightbox, a new comment goes on the frame showing.
+  const report = useContext(LightboxPlaceReport);
+  useEffect(() => { report?.({ at: { kind: 'frame', index }, label: `Frame ${index + 1}`, quote: frame?.caption ?? frame?.say ?? null }); }, [report, index, frame]);
 
   // Another player started: this one pauses.
   useEffect(() => {
@@ -168,8 +173,9 @@ function SequencePlayer({ title, frames, large, startAt, autoPlay, onExpand }: S
         <span className="rounded-md bg-background/90 px-2 py-0.5 text-caption text-muted-foreground">Play · {frames.length} frames · {voiced ? 'with voice' : 'captions only'}</span>
       </div>}
     </div>
-    <p aria-live="polite" data-sequence-caption="" className="min-h-10 text-center text-body leading-snug">
+    <p aria-live="polite" data-sequence-caption="" className="group/item min-h-10 text-center text-body leading-snug" {...commentItem(`frames/${index}`, `frame ${index + 1}`)}>
       <span className={started ? 'text-foreground' : 'text-muted-foreground'}>{caption}</span>
+      {' '}<ItemComment path={`frames/${index}`} label={`frame ${index + 1}`} quote={caption || null} />
     </p>
     <div className="flex flex-wrap items-center gap-1">
       <button type="button" aria-label="Previous frame" className="rounded p-1 text-muted-foreground hover:text-foreground disabled:opacity-40" disabled={index === 0} onClick={() => go(index - 1)}><ChevronLeft width={14} height={14} /></button>

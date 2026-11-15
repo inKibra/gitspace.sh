@@ -5,6 +5,7 @@ import { badgeColors } from '@gitspace/ui';
 import { ChevronLeft, ChevronRight, PauseCircle, PlayCircle, RefreshCcw01 } from '@untitledui/icons';
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import type { z } from 'zod';
+import { ItemComment, commentItem } from '../comments/CommentLayer.js';
 
 type StateFlowProps = z.output<typeof gitspaceUiCatalog.components.StateFlow.props>;
 type Service = StateFlowProps['services'][number];
@@ -90,8 +91,8 @@ export function StateFlowView(props: StateFlowProps) {
 
   return <figure className="flex flex-col gap-3 rounded-lg bg-surface-1 p-3 shadow-surface-1">
     {title ? <figcaption className="text-caption text-muted-foreground">{title}</figcaption> : null}
-    <p className="min-h-10 text-caption leading-snug text-foreground/90">
-      {current ? <>{current.change && current.change !== 'same' ? <span className="font-semibold" style={{ color: TONE[current.change] }}>{current.change === 'added' ? 'Added: ' : 'Removed: '}</span> : null}{current.caption}</> : <span className="text-muted-foreground">Press play to walk through it.</span>}
+    <p className="group/item min-h-10 text-caption leading-snug text-foreground/90" {...(current ? commentItem(`steps/${step}`, `step ${step + 1}`) : {})}>
+      {current ? <>{current.change && current.change !== 'same' ? <span className="font-semibold" style={{ color: TONE[current.change] }}>{current.change === 'added' ? 'Added: ' : 'Removed: '}</span> : null}{current.caption} <ItemComment path={`steps/${step}`} label={`step ${step + 1}`} quote={current.caption} /></> : <span className="text-muted-foreground">Press play to walk through it.</span>}
     </p>
     <div className="flex items-center gap-1">
       <button type="button" aria-label="Restart" className="rounded p-1 text-muted-foreground hover:text-foreground" onClick={() => { setStep(-1); setPlaying(false); }}><RefreshCcw01 width={14} height={14} /></button>

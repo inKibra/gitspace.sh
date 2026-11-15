@@ -1,4 +1,5 @@
 import type { ExecutionBlock, TranscriptItem } from '@gitspace/blocks';
+import { messageComments } from '@gitspace/protocol-runtime/comments';
 import { parseAutomationMessage } from '@gitspace/protocol/automations-contract';
 import { captureMention, captureSummariesIn } from '@gitspace/protocol-runtime';
 import { chatAttachments, withoutChatAttachments } from '@gitspace/protocol-runtime/chat-attachments';
@@ -19,6 +20,7 @@ import { ToolGroup } from './ToolGroup.js';
 import { AgentMessageActions } from './staging.js';
 import type { TurnTranscriptProps } from './TurnTranscript.js';
 import { fullTime, ItemTime } from './time.js';
+import { CommentMessage, SentComments } from '../comments/CommentLayer.js';
 
 export interface TranscriptReadingPosition {
   generation: string | null;
@@ -89,12 +91,13 @@ export function TranscriptItemView({ item, active, onAnswer, state, onStateChang
         from={item.role}
         title={item.role === 'assistant' ? fullTime(item.at) : undefined}
         data-pending={item.pending || undefined}
-      >{sent === null || mentioned === null ? <AgentMessageActions><MessageBlockDocument messageId={item.id} text={item.text} pending={item.pending ?? false}><GitSpaceMarkdown streaming={item.pending}>{item.text}</GitSpaceMarkdown></MessageBlockDocument></AgentMessageActions> : <>
+      >{sent === null || mentioned === null ? <AgentMessageActions><MessageBlockDocument messageId={item.id} text={item.text} pending={item.pending ?? false}><CommentMessage row={item.id}><GitSpaceMarkdown streaming={item.pending}>{item.text}</GitSpaceMarkdown></CommentMessage></MessageBlockDocument></AgentMessageActions> : <>
         {sent.tabs.length || mentioned.captures.length ? <span className="flex flex-wrap gap-1.5 pb-1.5">
           {sent.tabs.map((tab, index) => <TabChip key={`${tab.url}:${index}`} host={URL.canParse(tab.url) ? new URL(tab.url).host : tab.url} detail={tab.browser} />)}
           {mentioned.captures.map(capture => <CaptureChip key={capture.captureId} name={capture.name ?? 'Capture not found'} detail={capture.name ? 'Capture' : null} />)}
         </span> : null}
         <GitSpaceMarkdown>{userMessageMarkdown(sent.text)}</GitSpaceMarkdown>
+        <SentComments comments={messageComments(item.text)} />
       </>}</ChatMessage>;
       // The person's message shows when it was sent under its bubble.
       return item.role === 'user' && item.at ? <div className="flex min-w-0 flex-col items-end gap-0.5">{message}<ItemTime at={item.at} className="px-1" /></div> : message;

@@ -81,3 +81,17 @@ body { overflow: hidden; }
   .inspector-resize-handle { display: none; }
   .inspector-pane { position: absolute; inset: 0 0 0 auto; width: min(92vw, 420px); z-index: 25; box-shadow: var(--shadow-5); }
 }
+
+/* ── Passages with comments (CSS Custom Highlight API, comments/CommentMargin.tsx) ── */
+::highlight(gitspace-comment-staged) { background-color: color-mix(in oklab, #f59e0b 30%, transparent); }
+::highlight(gitspace-comment-sent) { background-color: color-mix(in oklab, var(--muted-foreground) 18%, transparent); text-decoration: underline dotted; }
+::highlight(gitspace-comment-active) { background-color: color-mix(in oklab, #f59e0b 55%, transparent); }
+/* The item, block or tool row whose comment is hovered or open in the margin. */
+[data-comment-active] { box-shadow: inset 0 0 0 2px color-mix(in oklab, #f59e0b 70%, transparent); border-radius: 4px; }
+/* A paragraph, heading or list item commented on as a whole: a tint, and a bar in the gutter left of it, never on its
+ * text. */
+[data-comment-marked] { position: relative; border-radius: 2px; background-color: color-mix(in oklab, var(--muted-foreground) 8%, transparent); }
+[data-comment-marked]::before { content: ''; position: absolute; left: -10px; top: 1px; bottom: 1px; width: 3px; border-radius: 2px; background: color-mix(in oklab, var(--muted-foreground) 45%, transparent); pointer-events: none; }
+[data-comment-marked="staged"] { background-color: color-mix(in oklab, #f59e0b 10%, transparent); }
+[data-comment-marked="staged"]::before { background: #f59e0b; }
+[data-comment-marked][data-comment-active] { box-shadow: none; background-color: color-mix(in oklab, #f59e0b 22%, transparent); }

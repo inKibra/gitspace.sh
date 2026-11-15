@@ -1,7 +1,8 @@
 // Image and Video blocks: a picture or a clip from the drive (drive://…), resolved to a signed file URL through the
 // surface's ResourceFiles as files in a message are, or from a browser capture (capture:<id>), read from the
 // workspace's captures as the capture player reads them. A video plays inline with its controls, only between `start`
-// and `end` when they are set, and opens full-screen; inside a playing Sequence frame it plays along, muted.
+// and `end` when they are set, and opens full-screen with its comment panel, where a new comment goes on the moment
+// showing; inside a playing Sequence frame it plays along, muted.
 import type { RuntimeBrowserCaptureView } from '@gitspace/protocol-runtime';
 import type { gitspaceUiCatalog } from '@gitspace/protocol/gitspace-ui';
 import { Button, Dialog, DialogContent, DialogTitle, useShape } from '@gitspace/ui';
@@ -13,6 +14,7 @@ import { QuestionCardsContext, type QuestionCards } from '../QuestionCards.js';
 import { useResourceFile } from '../resource-files.js';
 import { TranscriptImage } from '../resource-media.js';
 import { SequenceFrame } from './BlockDocument.js';
+import { LightboxComments, LightboxPlaceReport, type LightboxPlace } from '../comments/LightboxComments.js';
 
 type ImageProps = z.output<typeof gitspaceUiCatalog.components.Image.props>;
 type VideoProps = z.output<typeof gitspaceUiCatalog.components.Video.props>;
@@ -103,6 +105,12 @@ function clipUrl(url: string, start: number | null | undefined, end: number | nu
   return `${url}#t=${start ?? 0}${end == null ? '' : `,${end}`}`;
 }
 
+/** A video's moment as a lightbox comment place: "0:42". */
+function momentOf(seconds: number): LightboxPlace {
+  const whole = Math.floor(seconds);
+  return { at: { kind: 'time', seconds: whole }, label: `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, '0')}`, quote: null };
+}
+
 export function VideoView({ src, alt, caption, poster, start, end }: VideoProps) {
   const shape = useShape();
   const video = useRef<HTMLVideoElement>(null);
@@ -113,6 +121,10 @@ export function VideoView({ src, alt, caption, poster, start, end }: VideoProps)
   const frame = useContext(SequenceFrame);
   const playing = frame?.playing ?? null;
   const url = media && media.kind !== 'frames' ? clipUrl(media.url, start, end) : null;
+  // Drawn again in a block's lightbox, the clip tells the comment panel which moment is showing; inside a Sequence the
+  // frame is the place.
+  const lightboxReport = useContext(LightboxPlaceReport);
+  const report = frame ? null : lightboxReport;
   // In a Sequence, the clip plays while its frame plays; the voice line carries the sound.
   useEffect(() => {
     const element = video.current;
@@ -129,6 +141,7 @@ export function VideoView({ src, alt, caption, poster, start, end }: VideoProps)
     {media?.kind === 'frames' ? <CaptureFrames label={alt} data={media.data} index={media.index} lengthMs={media.lengthMs} startMs={(start ?? 0) * 1000} endMs={end == null ? null : end * 1000} playing={playing} />
       : url ? <div className="group/video relative w-fit max-w-full">
         <video ref={video} aria-label={alt} controls playsInline preload="metadata" poster={posterUrl} src={url}
+          onLoadedMetadata={report ? (event) => report(momentOf(event.currentTarget.currentTime)) : undefined} onTimeUpdate={report ? (event) => report(momentOf(event.currentTarget.currentTime)) : undefined}
           className={`${shape.container} block max-h-80 min-w-64 max-w-full bg-black shadow-surface-1`} />
         <Button variant="secondary" size="icon-compact" type="button" aria-label={`Open ${alt} full-screen`} aria-haspopup="dialog" onClick={() => { video.current?.pause(); setOpen(true); }}
           className="absolute left-2 top-2 opacity-0 transition-opacity focus-visible:opacity-100 group-hover/video:opacity-100 [@media(hover:none)]:opacity-100"><Maximize01 width={14} height={14} /></Button>
@@ -137,10 +150,18 @@ export function VideoView({ src, alt, caption, poster, start, end }: VideoProps)
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogContent size="lg" className="flex max-h-[calc(100dvh-2rem)] !max-w-[calc(100vw-2rem)] flex-col gap-2 overflow-hidden bg-surface-1 p-4">
         <DialogTitle className="self-start pr-10">{alt}</DialogTitle>
-        {url ? <video aria-label={alt} autoPlay controls playsInline poster={posterUrl} src={url} className={`${shape.container} mx-auto block max-h-[calc(100dvh-7rem)] max-w-full bg-black`} /> : null}
+        {url ? <LightboxComments><LightboxVideo alt={alt} url={url} poster={posterUrl} /></LightboxComments> : null}
       </DialogContent>
     </Dialog>
   </figure>;
+}
+
+/** The full-screen copy of a video, telling the comment panel which moment is showing. */
+function LightboxVideo({ alt, url, poster }: { alt: string; url: string; poster: string | undefined }) {
+  const shape = useShape();
+  const report = useContext(LightboxPlaceReport);
+  return <video aria-label={alt} autoPlay controls playsInline poster={poster} src={url} className={`${shape.container} mx-auto block max-h-[calc(100dvh-7rem)] max-w-full bg-black`}
+    onLoadedMetadata={(event) => report?.(momentOf(event.currentTarget.currentTime))} onTimeUpdate={(event) => report?.(momentOf(event.currentTarget.currentTime))} />;
 }
 
 /** A capture recorded as screencast frames, played by the capture player's frames reader between start and end. */

@@ -19,6 +19,11 @@ export function messageRowId(turnId: string, messageOrdinal: number, part: numbe
   return `${turnId}:message:${messageOrdinal}:${part}`;
 }
 
+/** The row of the person's message that opened a turn. */
+export function userRowId(turnId: string): string {
+  return `${turnId}:user`;
+}
+
 /** The newest turn opener (ascending entry ids where inputs were placed) at or below `entry`; undefined before the first. */
 export function openerAt(openers: readonly number[], entry: number): number | undefined {
   let low = 0;

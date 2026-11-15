@@ -6,8 +6,9 @@ import { AssistantEntry, GenerationTask, LiveDoc } from '@earendil-works/pi-dura
 import { appendNotice, CacheNoticesDoc, noticeInvalidBlocks } from './notices.js';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { diffRevisions } from '@earendil-works/chord/delta';
-import { createRuntimeHarness, createConversationTools, AgentDefinitionContextDoc, SubagentRunQueueDoc, type SubagentMetadata, ProcessExitsDoc, QuestionsDoc, WorkspaceDoc, answerPlan, questionRefusal, recordMachineReconnection, recordProcessExit, type PlanDecision, type QuestionClosure, type ToolServices, type RuntimeHarnessOptions } from '@gitspace/runtime-core';
+import { createRuntimeHarness, createConversationTools, AgentDefinitionContextDoc, CommentLookupDoc, StagedCommentsDoc, SubagentRunQueueDoc, type SubagentMetadata, ProcessExitsDoc, QuestionsDoc, WorkspaceDoc, answerPlan, questionRefusal, recordMachineReconnection, recordProcessExit, type PlanDecision, type QuestionClosure, type ToolServices, type RuntimeHarnessOptions } from '@gitspace/runtime-core';
 import { RuntimeApprovalAnswerSchema, RuntimeLifecycleApprovalAnswerSchema, RuntimeSnapshotSchema, RuntimeWatchEventSchema, RuntimeToolResultSchema, WORKSPACE_TOOL_RESULTS_MAX_BYTES, questionState, receiptDigest, type RuntimeToolResult, type RuntimeSnapshot, type RuntimeWatchEvent, type RuntimeSubmitInput, type RuntimeCancelInput, type RuntimeAnswerInput, type RuntimeGitCheckpoint, type RuntimeWorkspaceStatus } from '@gitspace/protocol-runtime';
+import type { CommentsDocument } from '@gitspace/protocol-runtime/comments';
 import { DurableObjectSqliteDatabase } from './sqlite.js';
 import { AttachmentStore, isAttachmentOnline, isAttachmentReady, type AttachmentServices } from './attachments.js';
 import { applyInferenceThinking, createSessionControls, SessionControlsDoc, type SessionControlServices } from '@gitspace/runtime-core/session-controls';
@@ -540,7 +541,10 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
     const qa = RuntimeQaDocumentSchema.parse({ items: await options.qa.list() });
     const committedCode = await cloudFiles.snapshot();
     const status = workspaceStatus(committedCode ?? null);
-    const next = RuntimeSnapshotSchema.parse({ version: 1, ...options.identity, cursor: snapshot.cursor + 1, conversations, tasks, attachments: attachments.list(), questions: questions?.items ?? [], documents: { 'gitspace.workspace': workspace ?? null, 'gitspace.agents': subagents, 'gitspace.qa': qa, 'gitspace.code': committedCode ?? null, 'gitspace.status': status, 'gitspace.draft': drafts.snapshot(), 'gitspace.browsers': options.browsers ? await options.browsers() : null } });
+    // The staged comments, and the lookup's revision: a reader asks the lookup again (`commentLookup`) when it moves.
+    const [staged, lookup] = await Promise.all([harness.snapshot(StagedCommentsDoc, BACKGROUND_CONTEXT), harness.snapshot(CommentLookupDoc, BACKGROUND_CONTEXT)]);
+    const comments: CommentsDocument = { staged: staged?.items ?? [], lookupRevision: lookup?.revision ?? 0 };
+    const next = RuntimeSnapshotSchema.parse({ version: 1, ...options.identity, cursor: snapshot.cursor + 1, conversations, tasks, attachments: attachments.list(), questions: questions?.items ?? [], documents: { 'gitspace.workspace': workspace ?? null, 'gitspace.agents': subagents, 'gitspace.qa': qa, 'gitspace.code': committedCode ?? null, 'gitspace.status': status, 'gitspace.draft': drafts.snapshot(), 'gitspace.comments': comments, 'gitspace.browsers': options.browsers ? await options.browsers() : null } });
     const ops = diffRevisions(snapshot, next);
     // An unchanged projection publishes nothing: no replica rewrite, no cursor advance, no browser notice.
     if (ops.length === 0) return;

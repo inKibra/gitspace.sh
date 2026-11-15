@@ -11,6 +11,7 @@ import type { z } from 'zod';
 import { ResourceNavigation } from '../ResourceNavigation.js';
 import { formatChartValue } from './ChartView.js';
 import { RefChip } from './references.js';
+import { ItemComment, commentItem } from '../comments/CommentLayer.js';
 
 type Props<K extends keyof typeof gitspaceUiCatalog.components> = z.output<(typeof gitspaceUiCatalog.components)[K]['props']>;
 type Change = 'added' | 'removed' | 'changed' | 'same';
@@ -64,10 +65,12 @@ export function CallDiffView({ title, language, lines }: Props<'CallDiff'>) {
           {line.note ? <span className="pl-3 text-muted-foreground"># {line.note}</span> : null}
           {line.path ? <span className="pl-2 text-muted-foreground/70">↗</span> : null}
         </div>;
-        return <div key={index} className="flex min-w-max items-stretch">
+        // The comment icon stays at the visible right edge while the line scrolls sideways.
+        return <div key={index} className="group/item flex min-w-max items-stretch" {...commentItem(`lines/${index}`, `line ${index + 1}`)}>
           {line.path && open
             ? <button type="button" className="block flex-1 cursor-pointer text-left hover:brightness-95" title={line.path} onClick={() => open({ uri: `repo://${line.path}` })}>{row}</button>
             : <div className="flex-1">{row}</div>}
+          <span className="sticky right-0 flex items-center bg-surface-1 px-1" style={tone ? { boxShadow: `inset 0 0 0 999px ${tint(tone, 12)}` } : undefined}><ItemComment path={`lines/${index}`} label={`line ${index + 1}`} quote={line.code} /></span>
         </div>;
       })}
     </div>

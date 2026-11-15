@@ -4,7 +4,7 @@
 import type { ToolCallBlock, TranscriptItem } from '@gitspace/blocks';
 import { RuntimeBrowserExecutionSchema, RuntimeCodemodeDetailsSchema, type RuntimeCodemodeCall } from '@gitspace/protocol-runtime';
 import { Badge, Button, TabsSubtle, TabsSubtleItem, Tooltip, badgeColors, useShape } from '@gitspace/ui';
-import { Check, ChevronDown, ChevronRight, Clock, File02, Loading02, SlashCircle01, XClose } from '@untitledui/icons';
+import { Annotation, Check, ChevronDown, ChevronRight, Clock, File02, Loading02, SlashCircle01, XClose } from '@untitledui/icons';
 import { useEffect, useMemo, useState } from 'react';
 import { z } from 'zod';
 import { PierreViewer } from '../inspector/FilesSurface.js';
@@ -15,6 +15,7 @@ import { RichContent } from './RichContent.js';
 import { isJsonValue, type JsonValue } from './staging.js';
 import type { ItemInteractionProps, TranscriptItemState } from './TranscriptItemView.js';
 import { fullTime } from './time.js';
+import { CallComment, useCallCommentCount } from '../comments/CommentLayer.js';
 
 const EDIT_TOOLS: Record<string, true> = { edit: true, write: true, apply_patch: true };
 /** A `write` call's diff shows at most this many of its lines. */
@@ -303,9 +304,11 @@ export function ToolGroup({ calls, state, onStateChange }: { calls: readonly Gro
   const stopped = calls.filter((call) => call.block.status === 'interrupted').length;
   const images = calls.flatMap(({ block }) => [...block.input ?? [], ...block.result ?? []].filter((content) => content.type === 'image'));
   const label = calls.length === 1 ? '1 tool call' : `${calls.length} tool calls`;
+  const callIds = useMemo(() => calls.map((call) => call.block.id), [calls]);
+  const comments = useCallCommentCount(callIds);
   const at = (ms: number): string => span ? `${((ms - span.start) / span.scale) * 100}%` : '0%';
   const Chevron = open ? ChevronDown : ChevronRight;
-  return <div role="group" aria-label={label} data-tool-group className={`min-w-0 overflow-hidden border bg-surface-2 ${running ? 'border-[#3b82f6]/40' : 'border-border'} ${shape.container}`}>
+  return <div role="group" aria-label={label} data-tool-group data-comment-calls={callIds.join(' ')} className={`min-w-0 overflow-hidden border bg-surface-2 ${running ? 'border-[#3b82f6]/40' : 'border-border'} ${shape.container}`}>
     <button type="button" aria-expanded={open} onClick={() => update({ open: !open })} title={span ? `Started ${fullTime(span.start)}` : undefined} className="flex min-h-10 w-full min-w-0 items-center gap-2 px-3 py-2 text-left outline-none hover:bg-surface-1 focus-visible:ring-1 focus-visible:ring-[color:var(--focus-ring,#6B97FF)]">
       <Chevron width={16} height={16} strokeWidth={1.5} className="shrink-0 text-muted-foreground" />
       <span className="shrink-0 text-body text-foreground">{label}</span>
@@ -317,6 +320,7 @@ export function ToolGroup({ calls, state, onStateChange }: { calls: readonly Gro
       {failed ? <Badge size="compact" variant="dot" color="red">{failed} failed</Badge> : null}
       {stopped ? <Badge size="compact" variant="dot" color="amber">{stopped} stopped</Badge> : null}
       {running ? <Badge size="compact" variant="dot" color="blue">running</Badge> : null}
+      {comments ? <span className="flex shrink-0 items-center gap-0.5 text-caption tabular-nums text-muted-foreground" title={`${comments} comment${comments === 1 ? '' : 's'} on these calls`}><Annotation width={13} height={13} />{comments}</span> : null}
       {span ? <MiniWaterfall calls={calls} timings={timings} span={span} /> : null}
     </button>
     {files.length ? <div role="list" aria-label="Files these calls edited" className="flex min-w-0 flex-wrap items-center gap-1.5 px-3 pb-2 pl-9 text-caption text-muted-foreground">
@@ -362,7 +366,7 @@ function CallRow({ call, timing, edit, span, at, selected, onSelect }: { call: G
   const took = timing.start === null || end === null ? '—' : active(block) ? `${duration(end - timing.start)}…` : duration(end - timing.start);
   const file = edit?.files.length === 1 ? edit.files[0]! : null;
   const browser = browserOf(block);
-  return <li className={`border-b border-border last:border-b-0 ${block.status === 'error' ? 'bg-[#ef4444]/[0.04]' : ''}`} data-call={block.id}>
+  return <li className={`group/item relative border-b border-border last:border-b-0 ${block.status === 'error' ? 'bg-[#ef4444]/[0.04]' : ''}`} data-call={block.id}>
     <button type="button" onClick={onSelect} aria-expanded={selected} title={timing.start === null ? undefined : `Started ${fullTime(timing.start)}${timing.end === null ? '' : ` · ended ${fullTime(timing.end)}`}`} className={`relative grid h-7 w-full grid-cols-[minmax(0,17rem)_minmax(0,1fr)_4rem] items-center text-left outline-none hover:bg-surface-1 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[color:var(--focus-ring,#6B97FF)] ${selected ? 'bg-surface-1' : ''}`}>
       {block.status === 'error' ? <span aria-hidden className="absolute inset-y-0 left-0 w-0.5" style={{ background: badgeColors.red }} /> : null}
       <span className="flex h-full min-w-0 items-center gap-1.5 border-r border-border px-3">
@@ -382,6 +386,7 @@ function CallRow({ call, timing, edit, span, at, selected, onSelect }: { call: G
       </span>
       <span className="px-2 text-right font-mono text-[11px] tabular-nums text-muted-foreground" data-call-took>{took}</span>
     </button>
+    <CallComment id={block.id} tool={block.tool} target={block.target ?? ''} />
     {selected ? <CallDetail call={call} timing={timing} edit={edit} end={end} browser={browser} /> : null}
   </li>;
 }
