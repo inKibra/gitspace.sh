@@ -1,29 +1,50 @@
 // A gitspace-ui block: a json-render spec checked with GitSpace's validator, then drawn with the block registry. Each
 // block keeps its own json-render state, seeded from the spec's `state`; its actions run the surface's BlockActions. It
-// opens in the lightbox, drawn again at the dialog's width from the same state.
-import { gitspaceUiCatalog, validateUiSpec, type UiBlockIssue } from '@gitspace/protocol/gitspace-ui';
+// opens in the lightbox, drawn again at the dialog's width from the same state. An element with an id may be drawn
+// again by a BlockRef or a Sequence frame of the same document. An element with an ask shows it above the block; a
+// required ask in a stored chat message is a workspace question, answered through the block's own choice.
+import { askAnswerParts, questionState, type RuntimeQuestion } from '@gitspace/protocol-runtime';
+import { blockAskQuestionId, gitspaceUiCatalog, parseBlockRef, validateUiSpec } from '@gitspace/protocol/gitspace-ui';
+import { Badge } from '@gitspace/ui';
 import { createStateStore, type Spec, type StateStore } from '@json-render/core';
 import { JSONUIProvider, Renderer, defineRegistry, useStateValue, type Actions } from '@json-render/react';
-import { InfoCircle } from '@untitledui/icons';
-import { useEffect, useMemo, useRef } from 'react';
+import { InfoCircle, MessageQuestionCircle } from '@untitledui/icons';
+import { useContext, useEffect, useMemo, useRef } from 'react';
 import type { z } from 'zod';
 import { Lightbox } from '../Lightbox.js';
+import { CLOSED_REASON, QuestionCardsContext } from '../QuestionCards.js';
 import { useBlockActions, type BlockActionName, type BlockActions, type BlockState } from './BlockActions.js';
+import { BlockAnswersQuestion, BlockDocument, BlockRendering, OtherDocumentRef, blockingIssues, conforms, type BlockRenderingValue } from './BlockDocument.js';
 import { BlockErrorCard } from './BlockFrames.js';
 import { BLOCK_COMPONENTS, blockCatalog, blockFunctions } from './registry.js';
 import { SvgBlock } from './SvgBlock.js';
 
-/** The validator checked the shape `Renderer` reads: { root, elements, state? } with catalog components only. */
-function conforms(spec: unknown, issues: readonly UiBlockIssue[]): spec is Spec {
-  return issues.length === 0;
-}
+const NO_REFS: readonly string[] = [];
 
 export function UiBlock({ spec, source }: { spec: unknown; source?: string }) {
   const json = useMemo(() => source ?? JSON.stringify(spec, null, 2), [spec, source]);
   const issues = useMemo(() => validateUiSpec(spec), [spec]);
-  if (!conforms(spec, issues)) return <BlockErrorCard issues={issues} source={json} sourceLabel="JSON" />;
+  // A Sequence draws around a frame that fails the checks: that frame shows its own error card.
+  if (!conforms(spec, blockingIssues(issues))) return <BlockErrorCard issues={issues} source={json} sourceLabel="JSON" />;
   // A changed spec is a new block, with its state seeded again.
-  return <DrawnBlock key={json} spec={spec} />;
+  return <DrawnBlock key={json} spec={spec} refs={NO_REFS} />;
+}
+
+/** An element of the document drawn again by ref, with its own state; a block never draws itself inside itself. The
+ * block the ref is in is part of the document also where no surface names the document. */
+function RefBlock({ reference, refs, within }: { reference: string; refs: readonly string[]; within: Spec }) {
+  const target = parseBlockRef(reference);
+  const listed = useContext(BlockDocument).targets.get(target?.id ?? '');
+  const chain = useMemo(() => [...refs, reference], [refs, reference]);
+  const spec = useMemo(() => {
+    if (listed) return { ...listed.spec, root: listed.key };
+    const own = Object.entries(within.elements).find(([, element]) => 'id' in element && element.id === target?.id);
+    return own ? { ...within, root: own[0] } : null;
+  }, [listed, within, target?.id]);
+  if (target !== null && target.document !== null) return <OtherDocumentRef document={target.document} id={target.id} />;
+  const problem = refs.includes(reference) ? `block "${reference}" would draw itself` : spec === null ? `no block with id "${reference}" in this document` : null;
+  if (problem !== null || spec === null) return <BlockErrorCard issues={[{ path: '', message: problem ?? '' }]} source={JSON.stringify({ ref: reference }, null, 2)} sourceLabel="JSON" />;
+  return <DrawnBlock spec={spec} refs={chain} />;
 }
 
 /** The body of a ```gitspace-ui or ```svg fence. */
@@ -43,26 +64,93 @@ function JsonFence({ body }: { body: string }) {
   return <UiBlock spec={parsed.spec} source={body} />;
 }
 
-function DrawnBlock({ spec }: { spec: Spec }) {
-  const actions = useBlockActions();
+/** What an element of the block asks of the person. */
+interface BlockAsk { id: string | null; required: boolean; prompt: string | null }
+
+/** The workspace question a required ask of this block posted, and the ask: found once the message is stored. */
+interface AskQuestion { ask: BlockAsk & { id: string }; question: RuntimeQuestion }
+
+function DrawnBlock({ spec, refs }: { spec: Spec; refs: readonly string[] }) {
+  const surface = useBlockActions();
+  const { messageId } = useContext(BlockDocument);
+  const cards = useContext(QuestionCardsContext);
+  // A block drawn again by ref shows its content only; its asks belong to where it was written.
+  const asks = useMemo((): BlockAsk[] => refs.length > 0 ? [] : Object.values(spec.elements).flatMap((element) => 'ask' in element && typeof element.ask === 'object' && element.ask !== null ? [{
+    id: 'id' in element && typeof element.id === 'string' ? element.id : null,
+    required: 'required' in element.ask && element.ask.required === true,
+    prompt: 'prompt' in element.ask && typeof element.ask.prompt === 'string' ? element.ask.prompt : null,
+  }] : []), [spec, refs]);
+  const asked = useMemo((): AskQuestion | null => {
+    if (messageId === null || !cards) return null;
+    for (const ask of asks) {
+      if (!ask.required || ask.id === null) continue;
+      const question = cards.questions.find((candidate) => candidate.id === blockAskQuestionId(messageId, ask.id ?? ''));
+      if (question) return { ask: { ...ask, id: ask.id }, question };
+    }
+    return null;
+  }, [asks, messageId, cards]);
+  // While its question is open, the block's choice answers it as the person answers any question; elsewhere the
+  // choice stages in the composer.
+  const answersQuestion = asked !== null && cards !== null && questionState(asked.question) === 'open';
+  const actions = useMemo((): BlockActions | null => {
+    if (!answersQuestion || !asked || !cards) return surface;
+    const answer = async (label: string, block: BlockState): Promise<void> => {
+      await cards.request({ type: 'answerAsk', id: asked.question.id, answers: [{ id: asked.ask.id, selectedOptions: [label], customInput: null }] });
+      block.setAnswered(label);
+    };
+    return { ...surface, stage: (params, block) => answer(params.label, block), answer_question: (params, block) => answer(params.label, block), record_decision: (params, block) => answer(params.choice, block) };
+  }, [surface, asked, cards, answersQuestion]);
   const actionsRef = useRef(actions);
   useEffect(() => { actionsRef.current = actions; }, [actions]);
   const store = useMemo(() => createStateStore(structuredClone(spec.state ?? {})), [spec]);
+  // An answered question shows answered in the block, also when the block is drawn again after a reload.
+  const answered = asked && questionState(asked.question) === 'answered' ? askAnswerParts(asked.question.answer).map((part) => part.selectedOptions[0] ?? part.customInput).find((label) => label) ?? null : null;
+  useEffect(() => {
+    if (answered !== null && !store.get('/answered')) store.set('/answered', answered);
+  }, [answered, store]);
   // json-render keeps the handlers it mounted with, so they read the surface's current actions through the ref.
   const { registry, handlers } = useMemo(() => {
     const defined = defineRegistry(blockCatalog, { components: BLOCK_COMPONENTS, actions: blockActions(store, () => actionsRef.current) });
     return { registry: defined.registry, handlers: defined.handlers(() => undefined, store.getSnapshot) };
   }, [store]);
+  const rendering = useMemo((): BlockRenderingValue => ({ spec, registry, drawRef: (reference) => <RefBlock reference={reference} refs={refs} within={spec} /> }), [spec, registry, refs]);
   const title = spec.elements[spec.root]?.props.title;
   return <JSONUIProvider registry={registry} store={store} handlers={handlers} functions={blockFunctions}>
-    <Lightbox label={typeof title === 'string' && title ? title : 'Block'} mode="fill" className="my-2"
-      expanded={<div className="mx-auto flex w-full min-w-0 max-w-5xl flex-col gap-1.5"><Renderer spec={spec} registry={registry} /><Notices /></div>}>
-      <div data-gitspace-block="gitspace-ui" className="flex min-w-0 flex-col gap-1.5">
-        <Renderer spec={spec} registry={registry} />
-        <Notices />
-      </div>
-    </Lightbox>
+    <BlockRendering.Provider value={rendering}><BlockAnswersQuestion.Provider value={answersQuestion}>
+      <Lightbox label={typeof title === 'string' && title ? title : 'Block'} mode="fill" className="my-2"
+        expanded={<div className="mx-auto flex w-full min-w-0 max-w-5xl flex-col gap-1.5"><Renderer spec={spec} registry={registry} /><Notices /></div>}>
+        <div data-gitspace-block="gitspace-ui" className="flex min-w-0 flex-col gap-1.5">
+          {asks.length > 0 ? <AskMarkers asks={asks} asked={asked} /> : null}
+          <Renderer spec={spec} registry={registry} />
+          <Notices />
+        </div>
+      </Lightbox>
+    </BlockAnswersQuestion.Provider></BlockRendering.Provider>
   </JSONUIProvider>;
+}
+
+/**
+ * What a block asks of the person, above it. A required ask reads "Needs your answer" while its workspace question is
+ * open (or, with no question, until the block's own choice is answered or sent), and why when the question closed
+ * unanswered. An optional ask is a quiet invitation.
+ */
+function AskMarkers({ asks, asked }: { asks: readonly BlockAsk[]; asked: AskQuestion | null }) {
+  const answered = useStateValue<unknown>('/answered');
+  const sent = useStateValue<unknown>('/sent');
+  const staged = useStateValue<unknown>('/staged');
+  const [anySent, anyStaged] = [sent, staged].map((value) => typeof value === 'object' && value !== null && Object.values(value).some((entry) => entry !== null && entry !== undefined && entry !== ''));
+  const local = answered || anySent ? 'answered' : anyStaged ? 'staged' : 'open';
+  return <div className="flex flex-col gap-1">{asks.map((ask, index) => {
+    if (!ask.required) return ask.prompt ? <p key={index} className="flex items-center gap-1.5 px-1 text-caption text-muted-foreground"><MessageQuestionCircle width={13} height={13} className="shrink-0" />{ask.prompt}</p> : null;
+    const question = asked?.ask.id === ask.id ? asked.question : null;
+    const state = question ? questionState(question) : local;
+    if (state === 'answered' || answered) return null;
+    if (question?.closed) return <div key={index} data-block-ask="closed" className="flex flex-wrap items-center gap-2 px-1"><Badge size="compact" variant="dot" color="gray">{CLOSED_REASON[question.closed.reason]}</Badge></div>;
+    return <div key={index} data-block-ask={state} className="flex flex-wrap items-center gap-2 px-1">
+      <Badge size="compact" variant="dot" color={state === 'open' ? 'orange' : 'amber'}>{state === 'open' ? 'Needs your answer' : 'Answer in your message · send it to finish'}</Badge>
+      {ask.prompt && state === 'open' ? <span className="text-caption text-foreground">{ask.prompt}</span> : null}
+    </div>;
+  })}</div>;
 }
 
 interface Notice { id: string; text: string }

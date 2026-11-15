@@ -7,6 +7,7 @@ import { GitSpaceMarkdown } from '../GitSpaceMarkdown.js';
 import { formatBytes } from '../inspector/artifact-upload.js';
 import { ResourceLink } from '../ResourceNavigation.js';
 import { ResourceMedia, TranscriptImage } from '../resource-media.js';
+import { VideoView } from '../blocks/MediaBlocks.js';
 
 export function RichContent({ block }: { block: RichContentBlock }) {
   switch (block.type) {
@@ -33,12 +34,13 @@ export function MessageAttachments({ images }: { images: MessageImage[] }) {
   />)}</>;
 }
 
-/** A message's attached files: an image as its thumbnail from the drive, any other file as a chip with its name, type
- * and size that opens the drive file. */
+/** A message's attached files: an image as its thumbnail from the drive, a video played inline as a Video block plays,
+ * any other file as a chip with its name, type and size that opens the drive file. */
 export function MessageFiles({ attachments }: { attachments: readonly ChatAttachment[] }) {
   const shape = useShape();
   return <span role="group" aria-label="Attachments" className="flex min-w-0 flex-wrap justify-end gap-1.5">{attachments.map((attachment, index) => attachment.type.startsWith('image/')
     ? <ResourceMedia key={`${attachment.url}:${index}`} uri={attachment.url} alt={attachment.name} />
+    : attachment.type.startsWith('video/') ? <VideoView key={`${attachment.url}:${index}`} src={attachment.url} alt={attachment.name} />
     : <ResourceLink key={`${attachment.url}:${index}`} href={attachment.url} className={`${shape.container} inline-flex min-w-0 max-w-full items-center gap-2 bg-surface-2 px-3 py-2 text-foreground shadow-surface-1 hover:bg-surface-3`}>
       <File06 width={16} height={16} strokeWidth={1.5} className="shrink-0 text-muted-foreground" />
       <span className="min-w-0 text-body [overflow-wrap:anywhere]">{attachment.name}</span>

@@ -77,7 +77,7 @@ import {
   GoalRecordViewCodec,
 } from './inspector-contract.js';
 import { SkillUpdateCodec, SkillViewCodec } from './skills-contract.js';
-import { InferenceStateCodec, InferenceCreateInputCodec, InferenceUpdateInputCodec, InferenceDeleteInputCodec, InferenceAssignInputCodec } from './inference.js';
+import { InferenceStateCodec, InferenceCreateInputCodec, InferenceUpdateInputCodec, InferenceDeleteInputCodec, InferenceAssignInputCodec, SpeechClipCodec, SpeechClipInputCodec } from './inference.js';
 import {
   ComposioPluginAuthorizationViewCodec,
   ComposioPluginCatalogViewCodec,
@@ -835,6 +835,10 @@ export const inferenceDeleteContract = gitspaceRpc.procedure()
 export const inferenceAssignContract = gitspaceRpc.procedure()
   .input(InferenceAssignInputCodec).output(InferenceStateCodec)
   .errors({ SettingsConflict: rpcErrors.settingsConflict, OperationFailed: rpcErrors.operationFailed }).mutation();
+/** A spoken clip of a narration line or a voice sample (`speechClipInputSchema`). */
+export const speechClipContract = gitspaceRpc.procedure()
+  .input(SpeechClipInputCodec).output(SpeechClipCodec)
+  .errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
 
 export const updateMachineNotesContract = gitspaceRpc
   .procedure()
@@ -2560,6 +2564,7 @@ export const gitspaceContract = gitspaceRpc.contract({
     state: settingsStateContract,
   },
   inference: { list: inferenceListContract, create: inferenceCreateContract, update: inferenceUpdateContract, delete: inferenceDeleteContract, assign: inferenceAssignContract },
+  speech: { clip: speechClipContract },
   providers: {
     list: listProvidersContract,
     login: {

@@ -88,6 +88,7 @@ describe('gitspace-ui blocks in Markdown', () => {
     'A plan to tick off': ['Before the release', '1 of 3 checks done', 'Smoke run on the release'],
     'Before and after': ['The board in the transcript', 'A notice'],
     'A layout or anything the components cannot express': ['Workspace board', 'Composer'],
+    'A walkthrough to play': ['Where a reply is cached now', '3 frames', 'captions only', 'Replies are cached in one Durable Object now', '11 ms'],
   };
   it.each(UI_BLOCK_EXAMPLES.filter((example) => example.fence !== 'mermaid'))('draws the skill example "$title" as an agent writes it', async (example) => {
     await render(<GitSpaceMarkdown>{fence(example.fence, example.body)}</GitSpaceMarkdown>);

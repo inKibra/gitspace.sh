@@ -22,6 +22,9 @@ export const PlanDoc = defineDoc<{ text: string; status: 'draft' | 'proposed' | 
  * person's place; absent, a person answered. `closed`: it closed unanswered and takes no answer. */
 export type Question = { id: string; conversationId: string; kind: 'ask' | 'approval' | 'takeover' | 'lifecycle-approval'; prompt: string; choices: string[]; answer: JsonValue | null; askedAt?: string; answeredAt?: string; answeredBy?: AskAnswerer; closed?: RuntimeQuestionClosed; tool?: RuntimeQuestionTool; takeover?: RuntimeTakeoverQuestion; lifecycle?: RuntimeLifecycleApprovalQuestion };
 export const QuestionsDoc = defineDoc<{ items: Question[] }>({ kind: 'gitspace.questions', version: 1, scope: 'session', initial: () => ({ items: [] }), checkpointWhen: boundedReplay });
+/** The newest entry whose replies' required block asks are posted as questions (`repairBlockAsks`), session-wide; null
+ * until the workspace's first open sets it to its newest entry. */
+export const BlockAsksDoc = defineDoc<{ through: number | null }>({ kind: 'gitspace.block-asks', version: 1, scope: 'session', initial: () => ({ through: null }), checkpointWhen: boundedReplay });
 export const EnvironmentDoc = defineDoc<{ profile: string | null; runs: JsonValue[] }>({ kind: 'gitspace.environment', version: 1, scope: 'session', initial: () => ({ profile: null, runs: [] }), checkpointWhen: boundedReplay });
 export const JobsDoc = defineDoc<{ jobs: JsonValue[]; processes: JsonValue[] }>({ kind: 'gitspace.jobs', version: 1, scope: 'session', initial: () => ({ jobs: [], processes: [] }), checkpointWhen: boundedReplay });
 export const QaDoc = defineDoc<{ items: JsonValue[] }>({ kind: 'gitspace.qa', version: 1, scope: 'session', initial: () => ({ items: [] }), checkpointWhen: boundedReplay });

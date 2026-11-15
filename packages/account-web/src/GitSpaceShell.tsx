@@ -50,6 +50,8 @@ import { ResourceFiles, type ResourceFile } from './resource-files.js';
 import type { WorkspaceDraftBinding, WorkspaceDraftCapture } from './workspace-draft.js';
 import { PrChips, StatusBadge } from './sidebar/parts.js';
 import { ProjectGraphsContext } from './sidebar/project-graph.js';
+import { githubRepositoryOf } from '@gitspace/protocol/github';
+import { BlockReferences, type BlockReferenceTargets } from './blocks/references.js';
 import { GuideSectionNavigation } from './chat/staging.js';
 import { OutgoingMessages, useOutbox, type OutboxArrivals, type SentMessage } from './chat/outbox.js';
 import { Toasts, useToasts } from './toasts.js';
@@ -725,6 +727,15 @@ function Shell({ project, projects, workspace, baseSpace, workspaces, mainAgent,
   }, [accountSidebar, projects, baseSpace, workspaces, workspace.id, selectedSummary]);
   const projectGraph = useContext(ProjectGraphsContext)[workspace.projectId];
   const pullRequests = workspace.kind === 'workspace' ? projectGraph?.pullRequests[workspace.id] ?? [] : [];
+  const referenceTargets = useMemo((): BlockReferenceTargets => {
+    const repository = githubRepositoryOf(project.repository);
+    return {
+      workspaces: Object.fromEntries(workspaces.filter((item) => item.projectId === workspace.projectId).map((item) => [item.id, { name: item.name, color: workspaceStatusColor(item), label: workspaceStatusLabel(item) }])),
+      pullRequests: Object.fromEntries(Object.values(projectGraph?.pullRequests ?? {}).flat().map((pr) => [pr.number, pr])),
+      repositoryUrl: repository ? `https://github.com/${repository}` : null,
+      openWorkspace: onSelectWorkspace ?? null,
+    };
+  }, [project.repository, workspaces, workspace.projectId, projectGraph, onSelectWorkspace]);
   const [phaseRefusal, setPhaseRefusal] = useState<{ workspaceId: string; message: string } | null>(null);
   useToasts([phaseRefusal?.workspaceId === workspace.id ? { key: `phase-refusal:${phaseRefusal.message}`, tone: 'error', message: phaseRefusal.message, onDismiss: () => setPhaseRefusal(null) } : null]);
   const recovering = selectedSummary.detail === 'Agent is recovering';
@@ -750,7 +761,7 @@ function Shell({ project, projects, workspace, baseSpace, workspaces, mainAgent,
   };
   useLayoutEffect(() => { accountSidebar?.(sidebar); });
   useLayoutEffect(() => () => { accountSidebar?.(null); }, [accountSidebar]);
-  const content = <ResourceFiles.Provider value={resolveResourceFile ?? null}><ResourceNavigation.Provider value={renderInspector ? (request) => { setResourceRequest({ spaceId: workspace.id, request }); setInspectorSection(undefined); setInspectorOpen(true); } : null}><GuideSectionNavigation.Provider value={renderInspector ? (id) => { setGuideSection((current) => ({ spaceId: workspace.id, id, serial: (current?.serial ?? 0) + 1 })); setInspectorSection(undefined); setInspectorOpen(true); } : null}>
+  const content = <BlockReferences.Provider value={referenceTargets}><ResourceFiles.Provider value={resolveResourceFile ?? null}><ResourceNavigation.Provider value={renderInspector ? (request) => { setResourceRequest({ spaceId: workspace.id, request }); setInspectorSection(undefined); setInspectorOpen(true); } : null}><GuideSectionNavigation.Provider value={renderInspector ? (id) => { setGuideSection((current) => ({ spaceId: workspace.id, id, serial: (current?.serial ?? 0) + 1 })); setInspectorSection(undefined); setInspectorOpen(true); } : null}>
     <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
       <SidebarInsetTopbar className="pr-3">
         <nav aria-label="Location" className="flex min-w-0 flex-1 items-center gap-2 text-body">
@@ -804,6 +815,6 @@ function Shell({ project, projects, workspace, baseSpace, workspaces, mainAgent,
       setCreateError(null);
       try { await onCreateWorkspace(input); setNewWorkspaceFor(null); } catch (failure) { setCreateError(rpcErrorMessage(failure, 'Create workspace')); } finally { createPendingRef.current = false; setCreatePending(false); }
     }} /> : null}
-  </GuideSectionNavigation.Provider></ResourceNavigation.Provider></ResourceFiles.Provider>;
+  </GuideSectionNavigation.Provider></ResourceNavigation.Provider></ResourceFiles.Provider></BlockReferences.Provider>;
   return accountSidebar ? content : <SidebarProvider className="gitspace-shell" persist={false} width="19rem"><AppSidebar {...sidebar} /><SidebarInset className="overflow-hidden">{content}</SidebarInset></SidebarProvider>;
 }

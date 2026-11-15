@@ -1,9 +1,10 @@
-import { CompactionEntry, ToolTask, type Conversation, type ConversationId, type ConversationRecord, type Cursor, type EntryRecord, type Storage, type TaskQuery } from '@earendil-works/pi-durable';
+import { CompactionEntry, ToolTask, type Conversation, type ConversationId, type Cursor, type EntryRecord, type Storage, type TaskQuery } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
-import { TranscriptProjector, WORKSPACE_REPORT_ENTRY, previewTranscriptItem, transcriptContentRequestSchema, transcriptPageRequestSchema, TRANSCRIPT_CONTENT_CHARACTERS, TRANSCRIPT_PAGE_BYTES, TRANSCRIPT_PAGE_ROWS, type TranscriptContentPage, type TranscriptContentRequest, type TranscriptEventInput, type TranscriptItem, type TranscriptPage, type TranscriptPageRequest, type TranscriptRow } from '@gitspace/blocks';
+import { PI_ENTRY_ORDINALS as ENTRY_ORDINALS, TranscriptProjector, WORKSPACE_REPORT_ENTRY, openerAt, piSessionId, previewTranscriptItem, transcriptContentRequestSchema, transcriptPageRequestSchema, turnRowId, TRANSCRIPT_CONTENT_CHARACTERS, TRANSCRIPT_PAGE_BYTES, TRANSCRIPT_PAGE_ROWS, type TranscriptContentPage, type TranscriptContentRequest, type TranscriptEventInput, type TranscriptItem, type TranscriptPage, type TranscriptPageRequest, type TranscriptRow } from '@gitspace/blocks';
 import type { RuntimeToolResult } from '@gitspace/protocol-runtime';
 import type { TranscriptEvent } from '@gitspace/protocol-runtime/session-controls';
 import type { RuntimeTranscriptRange } from '@gitspace/runtime-core/history';
+import { turnOpeners } from '@gitspace/runtime-core/transcript-rows';
 import { z } from 'zod';
 
 export type RuntimeTranscriptEvent = TranscriptEvent & { sessionId: string };
@@ -11,8 +12,6 @@ export type RuntimeTranscriptFormat = 'json' | 'ndjson';
 export type ExecutorResultReader = (reference: { attemptId: string; sha256: string }, conversationId: string) => RuntimeToolResult | undefined;
 
 const ctx = BACKGROUND_CONTEXT;
-/** Event and row ordinals are `entryId * 1024 + n`; ordinals of one entry never collide with the next. */
-const ENTRY_ORDINALS = 1024;
 const SCAN_ENTRIES = 64;
 /** Transcript generation; v2 names every turn by the input that opened it, so a row's ID is the same in every window
  * (v1 named a turn after the first entry a window happened to start with). */
@@ -61,21 +60,6 @@ function inTurn(event: TranscriptEvent, entry: EntryRecord): TranscriptEvent {
 
 /** The entries that open the conversation's turns (where its inputs were placed), ascending, and the same as a set. */
 type Openers = { readonly ids: readonly number[]; readonly set: ReadonlySet<number> };
-
-/** The newest opener at or below `entry`; undefined before the first. */
-function openerAt(openers: readonly number[], entry: number): number | undefined {
-  let low = 0;
-  let high = openers.length - 1;
-  let found: number | undefined;
-  while (low <= high) {
-    const middle = (low + high) >> 1;
-    const value = openers[middle];
-    if (value === undefined) break;
-    if (value <= entry) { found = value; low = middle + 1; }
-    else high = middle - 1;
-  }
-  return found;
-}
 
 /** The position a turn row's ID names: the event it came from, or its turn's input for the turn's user message. */
 function positionOf(rowId: string): number | undefined {
@@ -285,25 +269,9 @@ export function createTranscriptReader(storage: Storage, withdrawn: WithdrawnNot
     return found;
   }
 
-  /** Where each of the conversation's turns opens: the entries its inputs were placed at, and its fork ancestors'
-   * through the fork. */
+  /** Where each of the conversation's turns opens, ascending, and the same as a set. */
   async function openersOf(conversationId: ConversationId): Promise<Openers> {
-    const ids: number[] = [];
-    let current: ConversationId | undefined = conversationId;
-    let through = Number.POSITIVE_INFINITY;
-    while (current !== undefined) {
-      let cursor: Cursor | undefined;
-      do {
-        const page = await storage.scanSubmissions({ conversationId: current }, SCAN_ENTRIES, cursor, ctx);
-        for (const record of page.items) if (record.type === 'input' && record.entry !== undefined && Number(record.entry) <= through) ids.push(Number(record.entry));
-        cursor = page.next;
-      } while (cursor);
-      const parent: ConversationRecord['parent'] = (await storage.conversation(current, ctx))?.parent;
-      if (!parent) break;
-      through = Math.min(through, Number(parent.at));
-      current = parent.conversationId;
-    }
-    ids.sort((left, right) => left - right);
+    const ids = await turnOpeners(storage, conversationId, ctx);
     return { ids, set: new Set(ids) };
   }
 
@@ -345,7 +313,7 @@ export function createTranscriptReader(storage: Storage, withdrawn: WithdrawnNot
 
   /** Projects `view`; `running`: the conversation is working, so its newest input's turn runs. */
   async function project(conversationId: ConversationId, view: Window, openers: Openers, running: boolean): Promise<Projection> {
-    const sessionId = `pi:${conversationId}`;
+    const sessionId = piSessionId(String(conversationId));
     const projection: Projection = { rows: new Map(), turns: new Map(), hidden: new Set(), executions: new Map() };
     const bindings = new Map<string, string>();
     let entryId = 0;
@@ -396,7 +364,7 @@ export function createTranscriptReader(storage: Storage, withdrawn: WithdrawnNot
     const lastTurn = [...projection.turns.keys()].at(-1);
     const newest = openers.ids.at(-1);
     if (lastTurn !== undefined && projection.turns.get(lastTurn) !== 'error') {
-      projection.turns.set(lastTurn, running && newest !== undefined && lastTurn === `${sessionId}:turn:${newest * ENTRY_ORDINALS}` ? 'running' : 'done');
+      projection.turns.set(lastTurn, running && newest !== undefined && lastTurn === turnRowId(sessionId, newest * ENTRY_ORDINALS) ? 'running' : 'done');
     }
     return projection;
   }

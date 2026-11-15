@@ -18,6 +18,12 @@ import { useBlockActions } from './BlockActions.js';
 import { SvgBlock } from './SvgBlock.js';
 import { ChartView } from './ChartView.js';
 import { ChangeMapView } from '../guide/ChangeMap.js';
+import { BlockAnswersQuestion, BlockRefView } from './BlockDocument.js';
+import { BudgetView, CallDiffView, CheckGridView, LogTableView, MetricDeltaView, RankView, SchemaDiffView, TimelineView, TradeoffsView, WorkspaceGraphView } from './ExplainViews.js';
+import { ImageView, VideoView } from './MediaBlocks.js';
+import { RoadmapView } from './RoadmapView.js';
+import { SequenceView } from './SequenceView.js';
+import { StateFlowView } from './StateFlowView.js';
 
 /** The protocol catalog as a json-render catalog: its components' zod props type the renderers, its actions the handlers. */
 export const blockCatalog = defineCatalog(schema, gitspaceUiCatalog);
@@ -165,7 +171,9 @@ interface AskOption { value: string; label: string; description?: string | null 
 
 function AskCardView({ questionId, question, prompt, options, value, staged, sent, answered, onPick }: { questionId: string; question: string; prompt: string; options: readonly AskOption[]; value: string; staged: string | null; sent: string | null; answered: string | null; onPick: (value: string) => void }) {
   const shape = useShape();
-  const canAnswer = useBlockActions() !== null;
+  const answersQuestion = useContext(BlockAnswersQuestion);
+  const surface = useBlockActions();
+  const canAnswer = answersQuestion || surface !== null;
   const done = sent ?? answered ?? staged;
   if (done) {
     const status = sent ? 'sent with your message · the agent continues' : answered ? 'answered · the agent continues' : 'staged · in your message';
@@ -181,7 +189,7 @@ function AskCardView({ questionId, question, prompt, options, value, staged, sen
       renderTitle={(title) => <div className="max-h-80 overflow-y-auto"><GitSpaceMarkdown>{title}</GitSpaceMarkdown></div>}
       onComplete={(answers) => { const picked = answers[questionId]?.selectedIds[0]; if (picked) onPick(picked); }}
     />
-    <span className="px-1 text-caption text-muted-foreground">{canAnswer ? 'Picking an answer puts it in your message bar; it goes with what you write.' : 'Answering is not available here.'}</span>
+    <span className="px-1 text-caption text-muted-foreground">{answersQuestion ? 'Picking an answer answers the question; the agent continues with it.' : canAnswer ? 'Picking an answer puts it in your message bar; it goes with what you write.' : 'Answering is not available here.'}</span>
   </div>;
 }
 
@@ -271,6 +279,22 @@ export const BLOCK_COMPONENTS: Components<typeof blockCatalog> = {
     paths: props.paths,
     steps: (props.steps ?? []).map((step) => ({ ...step, sectionId: '' })),
   }} />,
+  Roadmap: ({ props }) => <RoadmapView phases={props.phases} />,
+  CallDiff: ({ props }) => <CallDiffView {...props} />,
+  StateFlow: ({ props }) => <StateFlowView {...props} />,
+  MetricDelta: ({ props }) => <MetricDeltaView {...props} />,
+  LogTable: ({ props }) => <LogTableView {...props} />,
+  Timeline: ({ props }) => <TimelineView {...props} />,
+  Tradeoffs: ({ props }) => <TradeoffsView {...props} />,
+  CheckGrid: ({ props }) => <CheckGridView {...props} />,
+  SchemaDiff: ({ props }) => <SchemaDiffView {...props} />,
+  WorkspaceGraph: ({ props }) => <WorkspaceGraphView {...props} />,
+  Rank: ({ props }) => <RankView {...props} />,
+  Budget: ({ props }) => <BudgetView {...props} />,
+  BlockRef: ({ props }) => <BlockRefView id={props.id} />,
+  Image: ({ props }) => <ImageView {...props} />,
+  Video: ({ props }) => <VideoView {...props} />,
+  Sequence: ({ props }) => <SequenceView {...props} />,
 };
 
 /** The items of `args.items` whose `args.field` is true. */

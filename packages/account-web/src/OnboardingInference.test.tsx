@@ -100,6 +100,13 @@ it('enables Continue once Default resolves to an available model, with or withou
   expect(status()).toBe('');
 });
 
+it('asks for a narration voice after Inference', async () => {
+  await openInferenceStep({ providers: [connected], models: [claude], modelsReady: true, defaultModel: 'anthropic/claude-sonnet' });
+  await act(async () => button('Continue')!.click());
+  expect(container.textContent).toContain('Pick a narration voice');
+  expect(container.textContent).toContain('Agents can narrate walkthroughs; pick the voice you’ll hear.');
+});
+
 it('switches to the Models tab from the status line', async () => {
   await openInferenceStep({ providers: [connected], models: [claude], modelsReady: true, defaultModel: 'openai/gpt-4' });
   expect(selectedTab()).toContain('Providers');

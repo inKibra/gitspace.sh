@@ -37,6 +37,7 @@ import { ensureAccountGitSpaceProject } from './gitspace-project.js';
 import { environmentCloudProcedures } from './account-environment-rpc.js';
 import { configurationCloudProcedures } from './account-configuration-rpc.js';
 import { runtimeCloudProcedures } from './account-runtime-rpc.js';
+import { speechCloudProcedures } from './speech.js';
 import { providerCloudProcedures } from './account-provider-rpc.js';
 import { githubCloudProcedures } from './account-github-rpc.js';
 import { storageIncidentProcedures } from './storage-quarantine.js';
@@ -447,6 +448,7 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
   return server.router({
     runtime: runtimeCloudProcedures(env, userId, deviceId),
     inference: { list: inferenceList, create: inferenceCreate, update: inferenceUpdate, delete: inferenceDelete, assign: inferenceAssign },
+    speech: speechCloudProcedures(env, userId, deviceId),
     secrets: configuration.secrets, configuration: configuration.configuration, skills: configuration.skills, automations: configuration.automations,
     settings: { get: getSettings, update: updateSettings, reserveHandle, git: { get: getGit }, runtime: { get: getRuntime, set: setRuntime }, state: settingsState },
     machines, machine: { createSandbox, updateNotes, updateAgentAttach, sleep, resume, destroy, image: { list: images, set: setImage, retry: retryImage, cancel: cancelImage, recover: recoverImage, defaults: { get: imageDefault, set: setImageDefault } } }, project: { list: projects, create: createProject, ensureGitSpace, remote: { refresh: refreshRemote, checkInterval, setCheckInterval }, ...lifecycle.project },

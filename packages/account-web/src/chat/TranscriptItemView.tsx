@@ -7,6 +7,7 @@ import { AlertCircle, GitBranch01, Link03, ShieldTick } from '@untitledui/icons'
 import type { ReactNode } from 'react';
 import { connectedTabsIn, TabChip } from '../connected-tab.js';
 import { CaptureChip } from '../capture-chip.js';
+import { MessageBlockDocument } from '../blocks/BlockDocument.js';
 import { GitSpaceMarkdown } from '../GitSpaceMarkdown.js';
 import { glyph } from '../glyph.js';
 import { AskBlockView, AskTakeoverCall, EnvironmentCall } from './AskCards.js';
@@ -88,7 +89,7 @@ export function TranscriptItemView({ item, active, onAnswer, state, onStateChang
         from={item.role}
         title={item.role === 'assistant' ? fullTime(item.at) : undefined}
         data-pending={item.pending || undefined}
-      >{sent === null || mentioned === null ? <AgentMessageActions><GitSpaceMarkdown streaming={item.pending}>{item.text}</GitSpaceMarkdown></AgentMessageActions> : <>
+      >{sent === null || mentioned === null ? <AgentMessageActions><MessageBlockDocument messageId={item.id} text={item.text} pending={item.pending ?? false}><GitSpaceMarkdown streaming={item.pending}>{item.text}</GitSpaceMarkdown></MessageBlockDocument></AgentMessageActions> : <>
         {sent.tabs.length || mentioned.captures.length ? <span className="flex flex-wrap gap-1.5 pb-1.5">
           {sent.tabs.map((tab, index) => <TabChip key={`${tab.url}:${index}`} host={URL.canParse(tab.url) ? new URL(tab.url).host : tab.url} detail={tab.browser} />)}
           {mentioned.captures.map(capture => <CaptureChip key={capture.captureId} name={capture.name ?? 'Capture not found'} detail={capture.name ? 'Capture' : null} />)}

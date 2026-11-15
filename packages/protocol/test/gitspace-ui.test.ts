@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { extractBlocks, parseSvg, UI_BLOCK_EXAMPLES, uiBlockPrompt, validateMarkdownBlocks, validateSvg, validateUiSpec } from '../src/gitspace-ui.js';
+import { extractBlocks, parseSvg, requiredBlockAsks, UI_BLOCK_EXAMPLES, uiBlockPrompt, validateMarkdownBlocks, validateSvg, validateUiSpec } from '../src/gitspace-ui.js';
 
 const fence = '```';
 
@@ -195,5 +195,45 @@ describe('Markdown blocks', () => {
     spec.elements.card.children = ['a/b~c', 'missing'];
     const markdown = `One:\n${fence}svg\n<svg><path d="M0 0" stroke="var(--border)"/></svg>\n${fence}\nTwo:\n${fence}gitspace-ui\n${JSON.stringify(spec)}\n${fence}\nThree:\n${fence}gitspace-ui\n{"root":\n${fence}\n`;
     expect(paths(validateMarkdownBlocks(markdown))).toEqual(['block 2/elements/card/children/1', 'block 2/elements/a~1b~0c/props/size', 'block 3']);
+  });
+});
+
+describe('Block ids, refs, Sequences and asks', () => {
+  const markdownFence = (spec: unknown): string => `${fence}gitspace-ui\n${JSON.stringify(spec)}\n${fence}`;
+  const text = (key: string, extra: Record<string, unknown> = {}): Record<string, unknown> => ({ type: 'Text', props: { text: key }, children: [], ...extra });
+  const stack = (children: string[], elements: Record<string, unknown>): Record<string, unknown> => ({ root: 'page', elements: { page: { type: 'Stack', props: {}, children }, ...elements }, state: {} });
+  const sequence = (frames: unknown[]): Record<string, unknown> => ({ type: 'Sequence', props: { title: 'Walk', frames }, children: [] });
+
+  it('reports an id used twice within a block and across the blocks of one Markdown document', () => {
+    expect(paths(validateUiSpec(stack(['a', 'b'], { a: text('a', { id: 'same' }), b: text('b', { id: 'same' }) })))).toEqual(['/elements/b/id']);
+    const first = markdownFence(stack(['a'], { a: text('a', { id: 'shared' }) }));
+    const second = markdownFence(stack(['b'], { b: text('b', { id: 'shared' }) }));
+    expect(validateMarkdownBlocks(`${first}\n\n${second}`)).toEqual([{ path: 'block 2/elements/b/id', message: 'id "shared" is also used by block 1; an id is used once in a document' }]);
+    expect(validateMarkdownBlocks(`${first}\n\n${markdownFence(stack(['b'], { b: text('b', { id: 'other' }) }))}`)).toEqual([]);
+  });
+
+  it('refuses a Sequence frame holding a Sequence, an ask or an id, and frames that are not 2 to 30', () => {
+    const inner = sequence([{ content: { type: 'Text', props: { text: 'x' }, children: [] } }, { content: { type: 'Text', props: { text: 'y' }, children: [] } }]);
+    expect(paths(validateUiSpec({ root: 'walk', elements: { walk: sequence([{ content: inner }, { content: { type: 'Text', props: { text: 'ok' }, children: [] }, say: 'Fine.' }]) } }))).toContain('/elements/walk/props/frames/0/content/type');
+    expect(paths(validateUiSpec({ root: 'walk', elements: { walk: sequence([{ content: { type: 'Card', props: {}, children: ['nested'] } }, { content: { ref: 'x' } }]), nested: inner } })))
+      .toContain('/elements/walk/props/frames/0/content/children/0');
+    const asking = validateUiSpec({ root: 'walk', elements: { walk: sequence([{ content: { type: 'Text', props: { text: 'a' }, children: [], ask: { required: false } } }, { content: { type: 'Text', props: { text: 'b' }, children: [], id: 'b' } }]) } });
+    expect(paths(asking)).toEqual(['/elements/walk/props/frames/0/content/ask', '/elements/walk/props/frames/1/content/id']);
+    expect(paths(validateUiSpec({ root: 'walk', elements: { walk: sequence([{ content: { type: 'Text', props: { text: 'only' }, children: [] } }]) } }))).toEqual(['/elements/walk/props/frames']);
+  });
+
+  it('reports a ref to an id the document does not have, and accepts refs to other documents', () => {
+    const walk = sequence([{ content: { ref: 'stats' } }, { content: { ref: 'missing' } }]);
+    const markdown = `${markdownFence(stack(['s'], { s: { type: 'Stats', id: 'stats', props: { tiles: [] }, children: [] } }))}\n${markdownFence({ root: 'walk', elements: { walk, again: { type: 'BlockRef', props: { id: 'gone' }, children: [] }, away: { type: 'BlockRef', props: { id: 'guide:3#overview' }, children: [] } } })}`;
+    expect(paths(validateMarkdownBlocks(markdown))).toEqual(['block 2/elements/walk/props/frames/1/content/ref', 'block 2/elements/again/props/id']);
+  });
+
+  it('requires an id on an element with a required ask, and reads the choices its block offers', () => {
+    expect(paths(validateUiSpec({ root: 'card', elements: { card: { type: 'Card', props: {}, children: [], ask: { required: true } } } }))).toEqual(['/elements/card/ask']);
+    const choice = UI_BLOCK_EXAMPLES.find((example) => example.title === 'A choice for the person');
+    expect(requiredBlockAsks(`Pick one:\n${fence}gitspace-ui\n${choice?.body ?? ''}\n${fence}`)).toEqual([{ id: 'cache-choice', prompt: 'Which cache keeps the replies?', choices: ['Workers KV', 'Durable Object'] }]);
+    const card = { type: 'AskCard', id: 'q', ask: { required: true }, props: { questionId: 'q', question: 'Ship it?', prompt: 'Ship?', options: [{ value: 'y', label: 'Yes' }, { value: 'n', label: 'No' }], value: '' }, children: [] };
+    expect(requiredBlockAsks(markdownFence({ root: 'q', elements: { q: card } }))).toEqual([{ id: 'q', prompt: 'Ship it?', choices: ['Yes', 'No'] }]);
+    expect(requiredBlockAsks(markdownFence({ root: 'q', elements: { q: { ...card, ask: { required: false } } } }))).toEqual([]);
   });
 });

@@ -377,7 +377,7 @@ function CommentDraft({ draft, as, style, onCancel, onSend }: { draft: Draft; as
 /** Screencast frames from `frames.bin` at the player's playhead (`time`), read with byte ranges a few frames ahead of it;
  * while `playing`, each frame shows until the next one's recorded time (`onTime`), the last one until `length`, where
  * playback ends. */
-function FramesPlayer({ indexUrl, dataUrl, label, time, length, playing, onTime, onLength, onEnded }: { indexUrl: string; dataUrl: string; label: string; time: number; length: number; playing: boolean; onTime(ms: number): void; onLength(ms: number): void; onEnded(): void }) {
+export function FramesPlayer({ indexUrl, dataUrl, label, time, length, playing, onTime, onLength, onEnded }: { indexUrl: string; dataUrl: string; label: string; time: number; length: number; playing: boolean; onTime(ms: number): void; onLength(ms: number): void; onEnded(): void }) {
   const [frames, setFrames] = useState<Frames | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [, setLoaded] = useState(0);

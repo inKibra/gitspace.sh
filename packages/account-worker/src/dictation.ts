@@ -156,28 +156,38 @@ function batchTranscriber(socket: WebSocket, transcribe: (wav: Uint8Array<ArrayB
   };
 }
 
-/** A recording's text from OpenAI with the profile's API keys, in order, the next after one is refused or limited. */
-export async function openAiTranscription(vault: DurableObjectStub<CredentialVaultDO>, profileId: string, model: string, wav: Uint8Array<ArrayBuffer>): Promise<string> {
+/** OpenAI's answer to `send` with the profile's API keys, in order, the next after one is refused or limited. `service`
+ * names what the key is for in refusals ("transcription", "speech"). */
+export async function openAiKeyRequest(vault: DurableObjectStub<CredentialVaultDO>, profileId: string, service: string, send: (key: string) => Promise<Response>): Promise<Response> {
   const accounts = (await vault.cloudCredentialAccounts(profileId, 'openai')).filter(account => account.type === 'api_key');
-  if (!accounts.length) throw new Error('OpenAI transcription needs an OpenAI API key in this inference profile');
+  const missing = `OpenAI ${service} needs an OpenAI API key in this inference profile`;
+  if (!accounts.length) throw new Error(missing);
   const now = Date.now();
   let refusal = '';
   for (const account of [...accounts].sort((left, right) => Number((left.cooldownUntil ?? 0) > now) - Number((right.cooldownUntil ?? 0) > now))) {
     const resolved = await vault.cloudResolveCredential({ profileId, credentialId: account.id });
     if (resolved.credential.type !== 'api_key') continue;
+    const response = await send(resolved.credential.key);
+    if (response.ok) return response;
+    const text = await response.text();
+    let detail = text.slice(0, 500);
+    try { detail = OpenAiError.parse(JSON.parse(text)).error.message; } catch { /* the body is not OpenAI's error object; its text says why */ }
+    refusal = `OpenAI ${service} failed (${response.status}): ${detail}`;
+    if (response.status !== 401 && response.status !== 403 && response.status !== 429) break;
+  }
+  throw new Error(refusal || missing);
+}
+
+/** A recording's text from OpenAI with the profile's API keys (`openAiKeyRequest`). */
+export async function openAiTranscription(vault: DurableObjectStub<CredentialVaultDO>, profileId: string, model: string, wav: Uint8Array<ArrayBuffer>): Promise<string> {
+  const response = await openAiKeyRequest(vault, profileId, 'transcription', key => {
     const body = new FormData();
     body.set('file', new Blob([wav], { type: 'audio/wav' }), 'dictation.wav');
     body.set('model', model);
     body.set('response_format', 'json');
-    const response = await fetch(OPENAI_TRANSCRIPTIONS_URL, { method: 'POST', headers: { authorization: `Bearer ${resolved.credential.key}` }, body });
-    if (response.ok) return OpenAiTranscription.parse(await response.json()).text;
-    const text = await response.text();
-    let detail = text.slice(0, 500);
-    try { detail = OpenAiError.parse(JSON.parse(text)).error.message; } catch { /* the body is not OpenAI's error object; its text says why */ }
-    refusal = `OpenAI transcription failed (${response.status}): ${detail}`;
-    if (response.status !== 401 && response.status !== 403 && response.status !== 429) break;
-  }
-  throw new Error(refusal || 'OpenAI transcription needs an OpenAI API key in this inference profile');
+    return fetch(OPENAI_TRANSCRIPTIONS_URL, { method: 'POST', headers: { authorization: `Bearer ${key}` }, body });
+  });
+  return OpenAiTranscription.parse(await response.json()).text;
 }
 
 /** The provider the project's profile names for dictation. */

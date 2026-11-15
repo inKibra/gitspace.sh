@@ -9,6 +9,7 @@
     "./session-controls": "./src/session-controls.ts",
     "./retained-rules": "./src/retained-rules.ts",
     "./history": "./src/history.ts",
+    "./transcript-rows": "./src/transcript-rows.ts",
     "./image-requests": "./src/inference/image-requests.ts"
   },
   "scripts": {

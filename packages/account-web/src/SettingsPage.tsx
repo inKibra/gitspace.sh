@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { AvailableModel, ComposioSetupRpcView, DeploymentStatusView, DeviceCapability, DeviceView, RuntimeSettingValue, UserSettings } from '@gitspace/protocol';
-import { BUILT_IN_MODEL_ROLES, DEFAULT_IMAGES_SELECTOR, MIN_CONTEXT_LIMIT, MODEL_ROLE_LABELS, SEARCH_MODEL_PROVIDERS, SERVICE_OFF, contextLimitsSchema, inferenceSettingSection, parseModelRoleSelector } from '@gitspace/protocol/inference';
+import { BUILT_IN_MODEL_ROLES, DEFAULT_IMAGES_SELECTOR, DEFAULT_INFERENCE_PROFILE_ID, MIN_CONTEXT_LIMIT, MODEL_ROLE_LABELS, SEARCH_MODEL_PROVIDERS, SERVICE_OFF, contextLimitsSchema, inferenceSettingSection, parseModelRoleSelector } from '@gitspace/protocol/inference';
 import { cloudImageOperationActive, cloudImageOperationCancellable, cloudImageSelectionSchema, type CloudImageChoice, type CloudImageSelection, type CloudImageState } from '@gitspace/protocol/cloud-image';
 import { rpcErrors } from '@gitspace/protocol/rpc-contract';
 import type { MachineDiscardConfirmation, MachineDiscardRequired } from '@gitspace/protocol/machine-discard';
@@ -49,7 +49,7 @@ import {
   useShape,
   type IconComponent,
 } from '@gitspace/ui';
-import { ArrowLeft, Check, CpuChip01, GitBranch01, GitPullRequest, Globe02, Key01, LinkExternal01, Monitor01, Rocket02, Server01, Settings02, Terminal, User01, Zap } from '@untitledui/icons';
+import { ArrowLeft, Check, CpuChip01, GitBranch01, GitPullRequest, Globe02, Key01, LinkExternal01, Monitor01, Rocket02, Server01, Settings02, Terminal, User01, VolumeMax, Zap } from '@untitledui/icons';
 import { glyph } from './glyph.js';
 import { EmptyState, PageCanvas, PageHeader } from './GitSpaceShell.js';
 import { ProvidersSection, type ProvidersSectionProps } from './ProvidersSection.js';
@@ -58,9 +58,10 @@ import { desiredLabel, machineRollup, ompRollup, RELEASE_STATUS_COLOR, RELEASE_T
 import { AddMachinePanel } from './AddMachinePanel.js';
 import { navigateProductUrl } from './routes.js';
 import { ConnectBrowserDialog, type BrowserConnectionActions } from './ConnectBrowserDialog.js';
+import { SpeechServicePicker, VoiceSetup } from './SpeechSettings.js';
 
 // Onboarding embeds the same Default profile surface used by Inference.
-type Section = 'profile' | 'runtime' | 'runtime-providers' | 'git' | 'github' | 'machines' | 'connections' | 'hostnames' | 'source' | 'defaults';
+type Section = 'profile' | 'runtime' | 'runtime-providers' | 'voice' | 'git' | 'github' | 'machines' | 'connections' | 'hostnames' | 'source' | 'defaults';
 const SETTINGS_TABS = ['Models', 'Providers', 'Services', 'Advanced'] as const;
 export type SettingsTab = (typeof SETTINGS_TABS)[number];
 export interface SettingsMachineView { id: string; label: string; state: 'provisioning' | 'online' | 'sleeping' | 'offline' | 'resuming' | 'deleting' | 'error'; kind: 'physical' | 'sandbox'; provider: 'physical' | 'cloudflare-sandbox'; notes: string; desiredState: 'online' | 'offline' | 'removed'; lifecycleRevision: number; operationId: string | null; error: string | null; agentsMayAttach?: boolean }
@@ -135,7 +136,7 @@ export interface SettingsPageProps extends BrowserConnectionActions, McpAccessAc
   error: string | null;
 }
 
-const ICONS = { user: glyph(User01), bot: glyph(Zap), cpu: glyph(CpuChip01), git: glyph(GitBranch01), github: glyph(GitPullRequest), server: glyph(Server01), monitor: glyph(Monitor01), globe: glyph(Globe02), settings: glyph(Settings02), key: glyph(Key01), rocket: glyph(Rocket02) };
+const ICONS = { user: glyph(User01), bot: glyph(Zap), cpu: glyph(CpuChip01), voice: glyph(VolumeMax), git: glyph(GitBranch01), github: glyph(GitPullRequest), server: glyph(Server01), monitor: glyph(Monitor01), globe: glyph(Globe02), settings: glyph(Settings02), key: glyph(Key01), rocket: glyph(Rocket02) };
 
 // ── Composition helpers ──
 // A settings list is an inline, outlined, separated CardGroup; each row is a
@@ -301,7 +302,7 @@ function ContextLimitSlider({ label, modelWindow, value, disabled, onCommit }: {
       }} />
   </span>;
 }
-export function RuntimeSettingsEditor({ runtimeSettings, runtimeGeneration, onSetRuntimeSetting, saving, providers, models = [], imageModels = [], modelsReady = false, sections, tab, onTabChange }: Pick<SettingsPageProps, 'runtimeSettings' | 'runtimeGeneration' | 'onSetRuntimeSetting' | 'saving'> & { providers?: ProvidersSectionProps; models?: readonly AvailableModel[]; imageModels?: readonly AvailableModel[]; modelsReady?: boolean; sections: readonly SettingsTab[]; tab: SettingsTab; onTabChange?(tab: SettingsTab): void }) {
+export function RuntimeSettingsEditor({ runtimeSettings, runtimeGeneration, onSetRuntimeSetting, saving, providers, models = [], imageModels = [], modelsReady = false, profileId = DEFAULT_INFERENCE_PROFILE_ID, sections, tab, onTabChange }: Pick<SettingsPageProps, 'runtimeSettings' | 'runtimeGeneration' | 'onSetRuntimeSetting' | 'saving'> & { providers?: ProvidersSectionProps; models?: readonly AvailableModel[]; imageModels?: readonly AvailableModel[]; modelsReady?: boolean; /** The profile being edited: its credentials speak voice samples. */ profileId?: string; sections: readonly SettingsTab[]; tab: SettingsTab; onTabChange?(tab: SettingsTab): void }) {
   const rolesItem = runtimeSettings.find((item) => item.path === 'modelRoles');
   const roles = rolesItem ? parseValue(rolesItem) as Record<string, string> : {};
   const limitsItem = runtimeSettings.find((item) => item.path === 'contextLimits');
@@ -326,6 +327,8 @@ export function RuntimeSettingsEditor({ runtimeSettings, runtimeGeneration, onSe
   // Unset, images go to the profile's first image model, else Cloudflare's default.
   const firstImageModel = imageModels[0];
   const images = (imagesItem ? String(parseValue(imagesItem) ?? '') : '') || (firstImageModel ? `${firstImageModel.provider}/${firstImageModel.id}` : DEFAULT_IMAGES_SELECTOR);
+  const speechItem = runtimeSettings.find((item) => item.path === 'speech');
+  const speech = speechItem ? String(parseValue(speechItem) ?? '') : '';
   const openAiKey = providers?.providers.some((provider) => provider.credentialProvider === 'openai' && provider.accounts.some((account) => account.type === 'api_key' && !account.disabled)) ?? false;
   // A role added here shows once named and is stored when a model is chosen for it.
   const [addedRoles, setAddedRoles] = useState<readonly string[]>([]);
@@ -398,6 +401,9 @@ export function RuntimeSettingsEditor({ runtimeSettings, runtimeGeneration, onSe
         </SettingRow> : null}
         {imagesItem ? <SettingRow title="Images" description="Runs the agents' generate_image tool: Cloudflare Workers AI on GitSpace's account, or an image model of this profile's credentials. Unset, the profile's first image model, else Cloudflare · FLUX.2 [klein] 9B. Off, agents are not given generate_image.">
           <ServicePicker label="Images" value={images} options={[OFF_OPTION, ...CLOUDFLARE_IMAGE_OPTIONS, ...modelOptions(imageModels)]} modelsReady={modelsReady} disabled={saving} onChange={(value) => settle(onSetRuntimeSetting(imagesItem.path, value))} />
+        </SettingRow> : null}
+        {speechItem ? <SettingRow title="Speech" description="Narrates walkthroughs: Deepgram Aura-2 on Cloudflare Workers AI on GitSpace's account, or OpenAI with this profile's OpenAI API key. A player can switch to another voice in one browser. Off, walkthroughs show captions only.">
+          <SpeechServicePicker value={speech} profileId={profileId} openAiKey={openAiKey} disabled={saving} onChange={(value) => settle(onSetRuntimeSetting(speechItem.path, value))} />
         </SettingRow> : null}
       </SettingRows>
     </Group>;
@@ -1360,7 +1366,7 @@ function DefaultsSettings({ settings, machines, onChange }: Pick<SettingsPagePro
   const update = (value: Partial<UserSettings['defaults']>) => onChange(replace(settings, 'defaults', { ...settings.defaults, ...value }));
   return <>
     <Group title="Placement"><SettingRows><SettingRow title="Default machine" description="New spaces open here when available."><Select value={settings.defaults.machineId ?? ''} onValueChange={(value) => update({ machineId: value || null })}><SelectTrigger aria-label="Default machine" />{selectOptions([{ value: '', label: 'Automatic' }, ...machines.map((machine) => ({ value: machine.id, label: machine.label }))])}</Select></SettingRow></SettingRows></Group>
-    <Group title="Setup"><SettingRows><SettingRow title="Run setup again" description="Walk through profile, runtime, providers, Git, machine, and defaults from the start."><Button variant="secondary" size="compact" asChild><a href="/settings?mode=onboarding" onClick={(event) => { if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); const url = new URL(window.location.href); url.searchParams.set('mode', 'onboarding'); navigateProductUrl(url); }}>Open setup</a></Button></SettingRow></SettingRows></Group>
+    <Group title="Setup"><SettingRows><SettingRow title="Run setup again" description="Walk through profile, machine, inference, voice, runtime, Git, and defaults from the start."><Button variant="secondary" size="compact" asChild><a href="/settings?mode=onboarding" onClick={(event) => { if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); const url = new URL(window.location.href); url.searchParams.set('mode', 'onboarding'); navigateProductUrl(url); }}>Open setup</a></Button></SettingRow></SettingRows></Group>
   </>;
 }
 
@@ -1368,6 +1374,7 @@ const sectionInfo: Array<{ id: Section; label: string; icon: (typeof ICONS)[keyo
   { id: 'profile', label: 'Profile', icon: ICONS.user, kicker: 'Account', title: 'Your GitSpace profile', description: 'Cloud-owned identity and namespace shared by every machine.' },
   { id: 'runtime', label: 'Runtime', icon: ICONS.bot, kicker: 'Runtime', title: 'Shared Advanced settings', description: 'Shared runtime configuration for every inference profile. Manage Models, Agents, and Providers under Navigate → Inference.' },
   { id: 'runtime-providers', label: 'Inference', icon: ICONS.cpu, kicker: 'Default inference', title: 'Set up Default inference', description: 'Connect providers and configure the Default profile. The same profile is available under Navigate → Inference after setup.' },
+  { id: 'voice', label: 'Voice', icon: ICONS.voice, kicker: 'Voice', title: 'Pick a narration voice', description: 'The voice you hear when an agent narrates a walkthrough, saved to the Default profile’s Speech service.' },
   { id: 'git', label: 'Git', icon: ICONS.git, kicker: 'Git', title: 'Shared Git identity', description: 'One GitSpace SSH identity and commit attribution shared by your enrolled machines.' },
   { id: 'github', label: 'GitHub', icon: ICONS.github, kicker: 'GitHub', title: 'Your GitHub App', description: 'An App of your own that GitHub installs on your repositories; it links your projects and sends their webhooks here.' },
   { id: 'machines', label: 'Machines', icon: ICONS.server, kicker: 'Machines', title: 'Machines', description: 'Live fleet state and placement notes from GitSpace Cloud.' },
@@ -1376,8 +1383,8 @@ const sectionInfo: Array<{ id: Section; label: string; icon: (typeof ICONS)[keyo
   { id: 'source', label: 'Source', icon: ICONS.rocket, kicker: 'Source', title: 'What GitSpace runs', description: 'The account-owned worker, machine runtime, and frontend. Launch any target independently from the GitSpace project; return to stable here.' },
   { id: 'defaults', label: 'Defaults', icon: ICONS.settings, kicker: 'Defaults', title: 'Workspace defaults', description: 'Cloud-owned defaults for new work.' },
 ];
-// The settings tab strip; the providers step only exists as an onboarding step.
-const settingsTabs = sectionInfo.filter((item) => item.id !== 'runtime-providers');
+// The settings tab strip; the providers and voice steps only exist as onboarding steps (Inference edits both after setup).
+const settingsTabs = sectionInfo.filter((item) => item.id !== 'runtime-providers' && item.id !== 'voice');
 export function requestedSettingsSection(search: string): { section: Section } {
   const requested = new URLSearchParams(search).get('section');
   const section = settingsTabs.find((item) => item.id === requested)?.id ?? 'profile';
@@ -1390,6 +1397,7 @@ function SaveState({ saving, error }: Pick<SettingsPageProps, 'saving' | 'error'
 function SettingsContent({ section, ...props }: { section: Section } & SettingsPageProps) {
   if (section === 'runtime') return <RuntimeSettingsEditor {...props} sections={['Advanced']} tab="Advanced" />;
   if (section === 'runtime-providers') return <>{props.inferenceSetup}</>;
+  if (section === 'voice') return <VoiceSetup />;
   if (section === 'git') return <GitSettings {...props} />;
   if (section === 'github') return <GitHubSettings {...props} />;
   if (section === 'machines') return <MachineSettings {...props} />;
@@ -1416,7 +1424,7 @@ function SettingsShell(props: SettingsPageProps) {
 }
 function OnboardingShell(props: SettingsPageProps) {
   const [step, setStep] = useState(0);
-  const steps: Array<{ label: string; section: Section }> = [{ label: 'Profile', section: 'profile' }, { label: 'Machine', section: 'machines' }, { label: 'Inference', section: 'runtime-providers' }, { label: 'Advanced', section: 'runtime' }, { label: 'Git', section: 'git' }, { label: 'Defaults', section: 'defaults' }];
+  const steps: Array<{ label: string; section: Section }> = [{ label: 'Profile', section: 'profile' }, { label: 'Machine', section: 'machines' }, { label: 'Inference', section: 'runtime-providers' }, { label: 'Voice', section: 'voice' }, { label: 'Advanced', section: 'runtime' }, { label: 'Git', section: 'git' }, { label: 'Defaults', section: 'defaults' }];
   const current = steps[step]!;
   const last = step === steps.length - 1;
   const profileIncomplete = step === 0 && (!props.settings.profile.displayName.trim() || !props.settings.profile.handle);

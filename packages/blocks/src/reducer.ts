@@ -5,6 +5,7 @@ import type { z } from 'zod';
 import type { TranscriptItem } from './history.js';
 import { executionIdentity, executionSettled, extractExecutions, mergeExecution } from './execution.js';
 import { parseConversationEvents } from './conversation-events.js';
+import { messageRowId, turnRowId } from './row-ids.js';
 
 export interface TranscriptEventInput {
   sessionId: string;
@@ -227,7 +228,7 @@ export class TranscriptProjector {
 
   #ensureTurn(event: TranscriptEventInput): ProjectionTurn {
     if (!this.#current) {
-      this.#current = { id: `${this.sessionId}:turn:${event.ordinal}`, hasContent: false, pending: 0, failed: false };
+      this.#current = { id: turnRowId(this.sessionId, event.ordinal), hasContent: false, pending: 0, failed: false };
       this.store.turn(this.#current.id, 'running');
     }
     return this.#current;
@@ -382,7 +383,7 @@ export class TranscriptProjector {
       const part = record(rawPart);
       if (!part || typeof part.type !== 'string') continue;
       if (part.type === 'text' && typeof part.text === 'string') {
-        const id = `${turn.id}:message:${message.ordinal}:${index}`;
+        const id = messageRowId(turn.id, message.ordinal, index);
         const previous = this.store.read(id);
         if (previous?.type === 'message' || (final ? part.text.trim() : part.text)) {
           const at = previous?.type === 'message' ? previous.at : message.at;
@@ -414,7 +415,7 @@ export class TranscriptProjector {
     if (!this.#message || !this.#current) return;
     for (const [index, type] of this.#message.parts) {
       if (type !== 'message') continue;
-      const id = `${this.#current.id}:message:${this.#message.ordinal}:${index}`;
+      const id = messageRowId(this.#current.id, this.#message.ordinal, index);
       const previous = this.store.read(id);
       if (previous?.type === 'message' && previous.pending) this.#write({ ...previous, pending: false }, previous);
     }

@@ -1,10 +1,12 @@
-import type { ConversationId, Cursor, Harness, ToolExecutionResult, Tx } from '@earendil-works/pi-durable';
+import { AssistantEntry, type ConversationId, type Cursor, type Harness, type Storage, type ToolExecutionResult, type Tx } from '@earendil-works/pi-durable';
 import type { JsonValue } from '@earendil-works/chord/json';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { z } from 'zod';
 import { RuntimeApprovalAnswerSchema, RuntimeLifecycleApprovalAnswerSchema, RuntimeTakeoverQuestionSchema, TAKEOVER_ANSWERS, askAnswerParts, questionState, type RuntimeQuestionClosed } from '@gitspace/protocol-runtime';
-import type { AskAnswerer } from '@gitspace/blocks';
-import { QuestionsDoc, type Question } from './documents.js';
+import { openerAt, piMessageRowId, type AskAnswerer } from '@gitspace/blocks';
+import { blockAskQuestionId, requiredBlockAsks } from '@gitspace/protocol/gitspace-ui';
+import { BlockAsksDoc, QuestionsDoc, type Question } from './documents.js';
+import { turnOpeners } from './transcript-rows.js';
 import { withdrawPlan } from './plan.js';
 import type { ConversationEvent } from './conversation-lifecycle.js';
 
@@ -53,6 +55,64 @@ export function questionPosted(id: string, what: string): ToolExecutionResult {
     details: { questionId: id },
     control: { terminate: true },
   };
+}
+
+/** Entries one scan for block asks reads. */
+const SCAN_ENTRIES = 64;
+
+/**
+ * Posts the questions the required asks (`requiredBlockAsks`) of stored replies make, for every reply stored after
+ * `BlockAsksDoc.through`, and moves `through` to the newest entry it read, in one commit. A reply is stored in pi's own
+ * commit, so this runs after it (from the harness's commit observer) and again when the workspace opens: a reset
+ * between the two commits is repaired on the next open. Each question is posted once per message row and element id
+ * (`blockAskQuestionId`), under the ID the transcript reader gives that row (`piMessageRowId`), and posting again
+ * finds it (`postQuestion`). A failed or aborted reply, and a reply before its conversation's first input (whose row ID
+ * depends on the page it is read in), post nothing. The workspace's first open sets `through` to its newest entry.
+ */
+export async function repairBlockAsks(harness: Harness, storage: Storage): Promise<void> {
+  const through = (await harness.snapshot(BlockAsksDoc, BACKGROUND_CONTEXT))?.through ?? 0;
+  let newest = through;
+  const posts: Omit<Question, 'askedAt' | 'answer'>[] = [];
+  let conversations: Cursor | undefined;
+  do {
+    const page = await storage.scanConversations({}, SCAN_ENTRIES, conversations, BACKGROUND_CONTEXT);
+    for (const conversation of page.items) {
+      const conversationId = String(conversation.id);
+      let openers: readonly number[] | undefined;
+      let cursor: Cursor | undefined;
+      scan: do {
+        const entries = await storage.scanEntries({ conversationId: conversation.id }, SCAN_ENTRIES, cursor, BACKGROUND_CONTEXT);
+        for (const entry of entries.items) {
+          const entryId = Number(entry.id);
+          // Newest first: an entry at or below the last scan ends this conversation's scan.
+          if (entryId <= through) break scan;
+          newest = Math.max(newest, entryId);
+          if (String(entry.conversationId) !== conversationId || !AssistantEntry.is(entry)) continue;
+          for (const [index, message] of (entry.model ?? []).entries()) {
+            if (message.role !== 'assistant' || message.stopReason === 'error' || message.stopReason === 'aborted') continue;
+            for (const [part, content] of message.content.entries()) {
+              if (content.type !== 'text') continue;
+              const asks = requiredBlockAsks(content.text);
+              if (asks.length === 0) continue;
+              openers ??= await turnOpeners(storage, conversation.id, BACKGROUND_CONTEXT);
+              const opener = openerAt(openers, entryId);
+              if (opener === undefined) continue;
+              const row = piMessageRowId(conversationId, opener, entryId, index, part);
+              for (const ask of asks) posts.push({ id: blockAskQuestionId(row, ask.id), conversationId, kind: 'ask', prompt: ask.prompt, choices: ask.choices });
+            }
+          }
+        }
+        cursor = entries.next;
+      } while (cursor);
+    }
+    conversations = page.next;
+  } while (conversations);
+  if (newest === through) return;
+  await harness.commit(async tx => {
+    for (const question of posts) await postQuestion(tx, question);
+    const doc = await tx.doc(BlockAsksDoc);
+    doc.through = Math.max(doc.through ?? 0, newest);
+  }, BACKGROUND_CONTEXT);
 }
 
 function shownPrompt(prompt: string): string {

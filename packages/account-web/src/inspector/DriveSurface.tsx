@@ -249,7 +249,8 @@ export function DriveSurface({ drive, references, uploads, uploadDisabledReason,
   const now = Date.now();
   const writable = root === drive.own;
   const label = root === 'base' ? 'Project drive' : 'This workspace';
-  const files = useMemo(() => drive.files.filter((file) => file.scope === root), [drive.files, root]);
+  // Dot folders hold what GitSpace keeps for itself, such as narration clips (`.speech/`); they are not listed.
+  const files = useMemo(() => drive.files.filter((file) => file.scope === root && !file.path.startsWith('.')), [drive.files, root]);
   const captures = useMemo(() => captureFolders(files, root === drive.own ? drive.captures : new Map()), [files, root, drive.own, drive.captures]);
   const items = useMemo(() => {
     const listed = query ? filterDrive(files, captures, query) : listFolder(files, captures, folder);

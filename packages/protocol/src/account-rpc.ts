@@ -51,6 +51,7 @@ export const ACCOUNT_RPC_AUTHORITY = {
   'inference.update': 'cloud',
   'inference.delete': 'cloud',
   'inference.assign': 'cloud',
+  'speech.clip': 'cloud',
   'providers.list': 'cloud',
   'providers.login.start': 'cloud',
   'providers.login.events': 'cloud',

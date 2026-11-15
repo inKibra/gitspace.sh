@@ -69,6 +69,37 @@ const gap = z.enum(['sm', 'md', 'lg']);
 const cell = z.union([z.string(), z.number()]);
 const pane = z.strictObject({ label: z.string(), title: z.string().nullish(), body: z.string().describe('Markdown') });
 const option = z.strictObject({ value: z.string(), label: z.string(), description: z.string().nullish() });
+/** Something in the project a block names, drawn as a live chip: a pull request with its state and checks, an issue, or a
+ * workspace with its status, each opening it. */
+const reference = z.union([
+  z.strictObject({ pr: z.number().int().positive() }),
+  z.strictObject({ issue: z.number().int().positive() }),
+  z.strictObject({ workspace: z.string().min(1).max(200).describe('A workspace id in this project') }),
+]);
+export type UiReference = z.infer<typeof reference>;
+/** An element's `id`: a BlockRef or a Sequence frame names it to draw that element again. Unique within its document. */
+const BLOCK_ID = /^[A-Za-z0-9][\w.-]{0,63}$/u;
+const BLOCK_ID_RULE = 'an id is 1 to 64 letters, digits, ".", "_" or "-", starting with a letter or digit';
+/** A reference to a block element: its id in this document, or `<document>#<id>` for an element of another document. */
+const BLOCK_REF = /^(?:([\w.:/-]{1,200})#)?([A-Za-z0-9][\w.-]{0,63})$/u;
+const BLOCK_REF_RULE = 'a ref is the "id" of a block element in this document, or "<document>#<id>" for another document';
+const blockRef = z.string().regex(BLOCK_REF, BLOCK_REF_RULE);
+/** An element's `ask`: what it asks of the person. A required ask is an open question until they answer it through the
+ * block's own choice; an optional one is only an invitation. */
+const askSchema = z.strictObject({
+  required: z.boolean().describe('true: an open question the person must answer; false: only an invitation'),
+  prompt: z.string().min(1).max(300).nullish().describe('One line: what you ask'),
+});
+export type UiAsk = z.infer<typeof askSchema>;
+/** Where a picture or clip lives: a drive file or a browser capture. */
+const mediaSource = z.string().regex(/^(?:drive:\/\/(?:workspace|base)\/\S+|capture:[\w-]{1,128})$/u, 'src is a drive file (drive://workspace/… or drive://base/…) or a browser capture (capture:<id>)');
+const FRAME_CONTENT_SHAPE = 'content is one element { "type", "props", "children" } as in "elements", or { "ref": "<block id>" }';
+
+/** A block reference split: `document` is null for an element of the same document. Null when `ref` is not one. */
+export function parseBlockRef(ref: string): { document: string | null; id: string } | null {
+  const match = BLOCK_REF.exec(ref);
+  return match ? { document: match[1] ?? null, id: match[2] } : null;
+}
 
 const components = {
   Card: {
@@ -219,6 +250,198 @@ const components = {
     }),
     description: 'How code or data flows between parts of a system, drawn as the Change Guide draws a change: areas grouped by package, paths between them marked added, removed or unchanged, and optional steps that light the paths in order. Use it for how a request travels, what a change rewires, or an architecture.',
   },
+  Roadmap: {
+    props: z.strictObject({
+      phases: z.array(z.strictObject({
+        title: z.string().min(1).max(60),
+        when: z.string().max(40).nullish().describe('When it lands: a version, "next release", a date'),
+        status: z.enum(['done', 'active', 'next', 'later', 'blocked']),
+        note: z.string().max(120).nullish().describe('One short line: what the phase achieves'),
+        items: z.array(z.strictObject({
+          label: z.string().min(1).max(80).describe('A few words; the refs carry the detail'),
+          status: z.enum(['done', 'active', 'todo', 'blocked', 'needs-you']).nullish(),
+          refs: z.array(reference).max(6).nullish(),
+          decide: z.strictObject({ question: z.string().min(1).max(120), options: z.array(z.string().min(1).max(40)).min(2).max(4) }).nullish()
+            .describe('A call the person makes on this item: each option stages "Decided: <option>" in their message bar'),
+        })).max(10),
+      })).min(1).max(8),
+    }),
+    description: 'Work in phases, in order: shipped, now, next, later. Each phase has a status, a short note and items; each item has a status and refs ({ "pr": 1434 }, { "issue": 1452 }, { "workspace": "<id>" }) drawn as live chips that open them, and a `decide` when the person must make a call on it. Use it for a release plan, a migration in stages, or work grouped by stage.',
+  },
+  CallDiff: {
+    props: z.strictObject({
+      title: z.string().max(120).nullish(),
+      language: z.enum(['typescript', 'tsx', 'javascript', 'python', 'go', 'rust', 'java', 'kotlin', 'swift', 'ruby', 'sql', 'shell']).nullish().describe('Highlights the code; typescript when omitted'),
+      lines: z.array(z.strictObject({
+        depth: z.number().int().min(0).max(12).describe('Nesting: a call inside the call above is one deeper'),
+        code: z.string().min(1).max(200).describe('One line of code: an assignment, a call, a return'),
+        change: z.enum(['added', 'removed', 'same']),
+        note: z.string().max(120).nullish().describe('Why this line matters, shown as a comment'),
+        path: z.string().max(300).nullish().describe('The repository file it lives in; the line opens it'),
+      })).min(1).max(60),
+    }),
+    description: 'A call stack before and after a change: the calls one request makes, nested by depth, with removed calls red and added ones green, each with a short note. Use it to show what a change does to a code path, in place of a long diff.',
+  },
+  StateFlow: {
+    props: z.strictObject({
+      title: z.string().max(120).nullish(),
+      services: z.array(z.strictObject({
+        id: z.string().min(1).max(64),
+        name: z.string().min(1).max(60),
+        role: z.string().max(80).nullish(),
+        parent: z.string().nullish().describe('A service id this one is drawn inside'),
+        change: z.enum(['added', 'removed', 'same']).nullish(),
+        state: z.array(z.strictObject({ key: z.string().min(1).max(40), value: z.string().max(60) })).max(4).nullish().describe('What it holds before the first step'),
+      })).min(1).max(12),
+      steps: z.array(z.strictObject({
+        from: z.string(),
+        to: z.string(),
+        label: z.string().min(1).max(60).describe('The call or message that travels, e.g. create(alice)'),
+        change: z.enum(['added', 'removed', 'same']).nullish(),
+        caption: z.string().max(240),
+        sets: z.array(z.strictObject({ service: z.string(), key: z.string(), value: z.string().max(60) })).max(6).nullish().describe('State that changes when this step lands'),
+      })).min(1).max(16),
+    }),
+    description: 'Services and the state each holds, played one step at a time: a call travels from service to service and the state it changes updates. Removed services and calls are struck through, added ones green. Use it for how state moves through a system and what a change does to it.',
+  },
+  MetricDelta: {
+    props: z.strictObject({
+      metrics: z.array(z.strictObject({
+        label: z.string().min(1).max(60),
+        before: z.number(),
+        after: z.number(),
+        unit: z.enum(['ms', 'seconds', 'count', 'percent', 'bytes', 'usd', 'tokens']),
+        better: z.enum(['lower', 'higher']),
+        trend: z.array(z.number()).max(40).nullish().describe('Recent values, oldest first, drawn as a sparkline'),
+      })).min(1).max(8),
+    }),
+    description: 'Numbers that changed: before → after with the change in percent, green when it moved the better way and red when it got worse, with an optional sparkline.',
+  },
+  LogTable: {
+    props: z.strictObject({
+      title: z.string().max(120).nullish(),
+      lines: z.array(z.strictObject({
+        at: z.string().max(40).nullish().describe('A time as the log shows it'),
+        level: z.enum(['debug', 'info', 'warn', 'error']),
+        source: z.string().max(40).nullish(),
+        text: z.string().min(1).max(400),
+        repeat: z.number().int().min(2).nullish().describe('How many times this line repeated'),
+        highlight: z.boolean().nullish().describe('The line that matters'),
+      })).min(1).max(80),
+    }),
+    description: 'Log lines as an investigation reads them: level colors, repeats folded into a count, and the lines that matter highlighted.',
+  },
+  Timeline: {
+    props: z.strictObject({
+      title: z.string().max(120).nullish(),
+      events: z.array(z.strictObject({
+        at: z.string().describe('ISO time'),
+        kind: z.enum(['deploy', 'error', 'alert', 'fix', 'note']),
+        label: z.string().min(1).max(60),
+        detail: z.string().max(240).nullish(),
+      })).min(1).max(40),
+    }),
+    description: 'Events on a time axis, colored by kind: deploys, errors, alerts and fixes. Use it for an incident, a release day or a run.',
+  },
+  Tradeoffs: {
+    props: z.strictObject({
+      question: z.string().min(1).max(160),
+      options: z.array(z.strictObject({ id: z.string().min(1).max(40), label: z.string().min(1).max(60) })).min(2).max(5),
+      criteria: z.array(z.strictObject({ label: z.string().min(1).max(60), scores: z.array(z.number().int().min(0).max(3)).describe('One per option: 0 poor to 3 strong'), note: z.string().max(120).nullish() })).min(1).max(8),
+      recommended: z.string().nullish().describe('The option id you recommend'),
+    }),
+    description: 'Options scored against criteria as a colored grid, the recommended one marked. The person picks an option; it stages as their decision.',
+  },
+  CheckGrid: {
+    props: z.strictObject({
+      title: z.string().max(120).nullish(),
+      columns: z.array(z.string().min(1).max(30)).min(1).max(12),
+      rows: z.array(z.strictObject({ label: z.string().min(1).max(60), cells: z.array(z.enum(['pass', 'fail', 'running', 'skip', 'none'])) })).min(1).max(40),
+    }),
+    description: 'Checks as a grid: suites or jobs by platform, branch or run, each cell pass, fail, running or skipped.',
+  },
+  SchemaDiff: {
+    props: z.strictObject({
+      title: z.string().max(120).nullish(),
+      tables: z.array(z.strictObject({
+        name: z.string().min(1).max(60),
+        renamedFrom: z.string().max(60).nullish(),
+        change: z.enum(['added', 'removed', 'changed', 'same']),
+        rows: z.string().max(40).nullish().describe('Its size, e.g. "1.2M rows"'),
+        cost: z.enum(['none', 'lock', 'rewrite', 'backfill']).nullish().describe('What the migration does to it: an exclusive lock, a full rewrite, or a backfill of rows'),
+        columns: z.array(z.strictObject({
+          name: z.string().min(1).max(60),
+          type: z.string().max(40),
+          change: z.enum(['added', 'removed', 'changed', 'same']),
+          renamedFrom: z.string().max(60).nullish(),
+          typeFrom: z.string().max(40).nullish().describe('The type before, when it changed'),
+          key: z.enum(['primary', 'unique']).nullish(),
+          nullable: z.boolean().nullish(),
+          references: z.string().max(120).nullish().describe('table.column a foreign key points at'),
+          note: z.string().max(120).nullish(),
+        })).max(30),
+        indexes: z.array(z.strictObject({ name: z.string().min(1).max(80), columns: z.array(z.string()).min(1).max(8), change: z.enum(['added', 'removed', 'same']), unique: z.boolean().nullish() })).max(12).nullish(),
+      })).min(1).max(12),
+    }),
+    description: 'Tables a migration adds, removes or changes: columns with types (old type struck beside the new), renames, keys and foreign keys (drawn as links between tables), indexes, row counts, and what it costs (lock, rewrite, backfill).',
+  },
+  WorkspaceGraph: {
+    props: z.strictObject({
+      workspaces: z.array(z.strictObject({ workspace: z.string().min(1), dependsOn: z.array(z.string()).max(8).nullish(), note: z.string().max(80).nullish() })).min(1).max(20),
+    }),
+    description: 'Workspaces and what each depends on, laid out left to right in dependency order, each with its live status; a workspace opens on click.',
+  },
+  Rank: {
+    props: z.strictObject({
+      question: z.string().min(1).max(160),
+      items: z.array(z.strictObject({ id: z.string().min(1).max(40), label: z.string().min(1).max(80) })).min(2).max(12),
+    }),
+    description: 'Items the person puts in order by dragging; the order stages as their decision.',
+  },
+  Budget: {
+    props: z.strictObject({
+      label: z.string().min(1).max(60),
+      unit: z.enum(['usd', 'tokens', 'count']),
+      limit: z.number().positive(),
+      days: z.array(z.strictObject({ day: z.string().max(20), used: z.number().nonnegative() })).min(1).max(31),
+    }),
+    description: 'Spend against a limit: the total used and left, and use per day as bars, the days over the daily pace marked.',
+  },
+  BlockRef: {
+    props: z.strictObject({ id: blockRef.describe('The "id" of a block element in this document, or "<document>#<id>"') }),
+    description: 'Draws again the block element whose "id" this is, from the same document (this message, this Change Guide, this goal), with its own state. Use it to show a block again next to a new point, never to copy it.',
+  },
+  Image: {
+    props: z.strictObject({
+      src: mediaSource,
+      alt: z.string().min(1).max(200).describe('What the image shows, for someone who cannot see it'),
+      caption: z.string().max(300).nullish(),
+    }),
+    description: 'A picture from the drive or a browser capture, inline; it opens full size.',
+  },
+  Video: {
+    props: z.strictObject({
+      src: mediaSource,
+      alt: z.string().min(1).max(200).describe('What the clip shows'),
+      caption: z.string().max(300).nullish(),
+      poster: mediaSource.nullish().describe('An image shown before the clip plays'),
+      start: z.number().min(0).nullish().describe('Seconds: play from here'),
+      end: z.number().positive().nullish().describe('Seconds: stop here'),
+    }),
+    description: 'A clip from the drive or a browser capture, played inline with its controls; `start` and `end` play only that part. It opens full-screen.',
+  },
+  Sequence: {
+    props: z.strictObject({
+      title: z.string().min(1).max(120),
+      frames: z.array(z.strictObject({
+        content: z.record(z.string(), z.unknown()).describe('One element { "type", "props", "children" } as in "elements" (its children name keys in "elements"), or { "ref": "<block id>" } to show a block of this document again'),
+        say: z.string().min(1).max(400).nullish().describe('The voice line: one or two plain sentences saying what to look at'),
+        caption: z.string().min(1).max(400).nullish().describe('The subtitle; the say line when omitted'),
+        hold: z.number().min(0.5).max(60).nullish().describe('Seconds the frame stays at least'),
+      })).min(2).max(30),
+    }),
+    description: 'A narrated walkthrough played like a short video: one frame at a time, each with a voice line (`say`) the person hears and reads as a subtitle. It shows frame 1 as a still with a play button and never plays by itself; the person steps through, changes speed or mutes. A frame lasts its speech, its `hold`, or 4 s without a voice. Each frame shows one thing: Markdown, Svg, Mermaid, CallDiff, StateFlow, Image, Video or any component except a Sequence, or a block of this document by { "ref": "<id>" }. Write 2 to 30 frames, one point each, in the order you would explain it.',
+  },
 } satisfies Record<string, UiComponent>;
 
 const actions = {
@@ -334,13 +557,47 @@ export function extractBlocks(markdown: string): UiBlock[] {
   return blocks;
 }
 
-/** Validates every block in Markdown. Issue paths start with `block <n>` (1-based, counting only these fences). */
+/** Validates every block in Markdown. Issue paths start with `block <n>` (1-based, counting only these fences). The
+ * Markdown is one document: an element id is used once in it, and a ref to an element of this document names one. */
 export function validateMarkdownBlocks(markdown: string): UiBlockIssue[] {
   const issues: UiBlockIssue[] = [];
+  const owners = new Map<string, number>();
+  const refs: { ref: string; block: number; path: string }[] = [];
   extractBlocks(markdown).forEach((block, index) => {
-    for (const found of validateBlock(block)) issues.push({ path: `block ${index + 1}${found.path}`, message: found.message });
+    const checked = checkBlock(block);
+    for (const found of checked.issues) issues.push({ path: `block ${index + 1}${found.path}`, message: found.message });
+    for (const [id, path] of checked.ids) {
+      const owner = owners.get(id);
+      if (owner === undefined) owners.set(id, index);
+      else if (owner !== index) issues.push({ path: `block ${index + 1}${path}`, message: `id "${id}" is also used by block ${owner + 1}; an id is used once in a document` });
+    }
+    for (const found of checked.refs) refs.push({ ...found, block: index });
   });
+  for (const { ref, block, path } of refs) {
+    const target = parseBlockRef(ref);
+    if (target !== null && target.document === null && !owners.has(target.id)) {
+      issues.push({ path: `block ${block + 1}${path}`, message: `no block element with id "${target.id}" in this document${owners.size > 0 ? `; its ids are ${[...owners.keys()].join(', ')}` : ''}` });
+    }
+  }
   return issues;
+}
+
+/** The ids, refs and issues of one fenced block. */
+interface CheckedBlock {
+  issues: UiBlockIssue[];
+  ids: ReadonlyMap<string, string>;
+  refs: readonly { ref: string; path: string }[];
+}
+
+function checkBlock(block: UiBlock): CheckedBlock {
+  if (block.kind !== 'gitspace-ui' || !block.closed) return { issues: validateBlock(block), ids: new Map(), refs: [] };
+  let spec: unknown;
+  try {
+    spec = JSON.parse(block.body);
+  } catch {
+    return { issues: validateBlock(block), ids: new Map(), refs: [] };
+  }
+  return checkSpec(spec);
 }
 
 function validateBlock(block: UiBlock): UiBlockIssue[] {
@@ -365,19 +622,28 @@ function validateMermaid(source: string): UiBlockIssue[] {
 interface SpecCheck {
   state: unknown;
   issues: UiBlockIssue[];
+  /** Element id → the path that declared it. */
+  ids: Map<string, string>;
+  /** The block refs the spec draws: BlockRef ids and Sequence frame refs. */
+  refs: { ref: string; path: string }[];
 }
 
 /** Validates a gitspace-ui spec. Issue paths are JSON pointers into the spec. */
 export function validateUiSpec(spec: unknown): UiBlockIssue[] {
-  if (!isRecord(spec)) return [{ path: '', message: 'a gitspace-ui spec is one JSON object { "root", "elements", "state" }' }];
+  return checkSpec(spec).issues;
+}
+
+function checkSpec(spec: unknown): SpecCheck {
+  const check: SpecCheck = { state: {}, issues: [], ids: new Map(), refs: [] };
+  if (!isRecord(spec)) return { ...check, issues: [{ path: '', message: 'a gitspace-ui spec is one JSON object { "root", "elements", "state" }' }] };
   let bytes: number;
   try {
     bytes = byteLength(JSON.stringify(spec));
   } catch {
-    return [{ path: '', message: 'the spec is not JSON' }];
+    return { ...check, issues: [{ path: '', message: 'the spec is not JSON' }] };
   }
-  if (bytes > MAX_SPEC_BYTES) return [{ path: '', message: `the spec is ${bytes} bytes; the limit is ${MAX_SPEC_BYTES}` }];
-  const check: SpecCheck = { state: spec.state ?? {}, issues: [] };
+  if (bytes > MAX_SPEC_BYTES) return { ...check, issues: [{ path: '', message: `the spec is ${bytes} bytes; the limit is ${MAX_SPEC_BYTES}` }] };
+  check.state = spec.state ?? {};
   for (const key of Object.keys(spec)) {
     if (key !== 'root' && key !== 'elements' && key !== 'state') check.issues.push({ path: pointer('', key), message: `unknown field "${key}"; a spec has root, elements and state` });
   }
@@ -386,30 +652,134 @@ export function validateUiSpec(spec: unknown): UiBlockIssue[] {
   if (typeof root !== 'string') check.issues.push({ path: '/root', message: 'root is the key of the root element' });
   if (!isRecord(elements)) {
     check.issues.push({ path: '/elements', message: 'elements is an object mapping each element key to its element' });
-    return check.issues;
+    return check;
   }
   const keys = Object.keys(elements);
   if (keys.length > MAX_ELEMENTS) {
     check.issues.push({ path: '/elements', message: `the spec has ${keys.length} elements; the limit is ${MAX_ELEMENTS}` });
-    return check.issues;
+    return check;
   }
   if (typeof root === 'string' && !Object.hasOwn(elements, root)) check.issues.push({ path: '/root', message: `no element "${root}" in elements` });
   for (const key of keys) validateElement(elements, key, check);
   if (typeof root === 'string' && Object.hasOwn(elements, root)) findCycles(elements, root, check.issues);
+  return check;
+}
+
+/** A required ask of a block element: the element's id, what it asks, and the choices the block offers for it. */
+export interface RequiredBlockAsk { id: string; prompt: string; choices: string[] }
+
+/** Actions whose button stages or gives the person's answer: its label is one of the block's choices. */
+const CHOICE_ACTIONS: Record<string, true> = { stage: true, answer_question: true, record_decision: true };
+
+/** The durable question a required block ask posts: one per message and element id. */
+export function blockAskQuestionId(messageId: string, blockId: string): string {
+  return `block-ask:${messageId}:${blockId}`;
+}
+
+/** The required asks of the gitspace-ui blocks in Markdown, in order; a block that fails the checks asks nothing. */
+export function requiredBlockAsks(markdown: string): RequiredBlockAsk[] {
+  const asks: RequiredBlockAsk[] = [];
+  for (const block of extractBlocks(markdown)) {
+    if (block.kind !== 'gitspace-ui' || !block.closed) continue;
+    let spec: unknown;
+    try {
+      spec = JSON.parse(block.body);
+    } catch {
+      continue;
+    }
+    if (!isRecord(spec) || !isRecord(spec.elements) || checkSpec(spec).issues.length > 0) continue;
+    const { elements, state = {} } = spec;
+    for (const element of Object.values(elements)) {
+      if (!isRecord(element) || typeof element.id !== 'string' || !isRecord(element.ask) || element.ask.required !== true) continue;
+      const choices: string[] = [];
+      let asked: string | null = null;
+      const seen = new Set<string>();
+      const visit = (node: Record<string, unknown>): void => {
+        const props = isRecord(node.props) ? node.props : {};
+        if (asked === null && node.type === 'AskCard' && typeof props.question === 'string') asked = props.question;
+        const options = isRecord(props.options) && typeof props.options.$state === 'string' ? readState(state, props.options.$state) : props.options;
+        if (Array.isArray(options)) {
+          for (const choice of options) if (isRecord(choice) && typeof choice.label === 'string') choices.push(choice.label);
+        }
+        // A button that stages a literal label gives that label; one whose label is computed from a pick adds nothing.
+        const press = isRecord(node.on) ? node.on.press : undefined;
+        const params = isRecord(press) && typeof press.action === 'string' && CHOICE_ACTIONS[press.action] && isRecord(press.params) ? press.params : null;
+        const given = params === null ? null : typeof params.label === 'string' ? params.label : typeof params.choice === 'string' ? params.choice : null;
+        if (node.type === 'Button' && given !== null) choices.push(given);
+        for (const child of childReferences(node)) {
+          const next = elements[child.key];
+          if (seen.has(child.key) || !isRecord(next)) continue;
+          seen.add(child.key);
+          visit(next);
+        }
+      };
+      visit(element);
+      const props = isRecord(element.props) ? element.props : {};
+      const titled = typeof props.question === 'string' ? props.question : typeof props.title === 'string' ? props.title : null;
+      const prompt = typeof element.ask.prompt === 'string' ? element.ask.prompt : asked ?? titled ?? `Answer the block "${element.id}"`;
+      asks.push({ id: element.id, prompt, choices: [...new Set(choices)] });
+    }
+  }
+  return asks;
+}
+
+const ELEMENT_FIELDS = new Set(['type', 'props', 'children', 'slots', 'visible', 'repeat', 'on', 'watch', 'id', 'ask']);
+
+/** Issue paths inside a Sequence frame's content. A renderer draws the rest of the Sequence and an error card in that
+ * frame, so one bad frame does not hide the walkthrough. */
+export const SEQUENCE_FRAME_CONTENT_PATH = /^\/elements\/[^/]+\/props\/frames\/\d+\/content(?:\/|$)/u;
+
+function validateElement(elements: Record<string, unknown>, key: string, check: SpecCheck): void {
+  checkElement(elements, elements[key], pointer('/elements', key), check);
+}
+
+/**
+ * Checks one Sequence frame's content as validateUiSpec checks it, against the spec's elements and state. A renderer
+ * draws the error card in the frame's place when this has issues. Issue paths start at the content.
+ */
+export function validateFrameContent(content: unknown, elements: Record<string, unknown>, state: unknown): UiBlockIssue[] {
+  if (!isRecord(content)) return [{ path: '', message: FRAME_CONTENT_SHAPE }];
+  const check: SpecCheck = { state, issues: [], ids: new Map(), refs: [] };
+  checkFrameContent(elements, content, '', check);
   return check.issues;
 }
 
-const ELEMENT_FIELDS = new Set(['type', 'props', 'children', 'slots', 'visible', 'repeat', 'on', 'watch']);
+function checkFrameContent(elements: Record<string, unknown>, content: Record<string, unknown>, path: string, check: SpecCheck): void {
+  if (Object.hasOwn(content, 'ref')) {
+    if (Object.keys(content).length !== 1) check.issues.push({ path, message: 'a ref frame is { "ref": "<block id>" } with nothing else' });
+    if (typeof content.ref === 'string' && BLOCK_REF.test(content.ref)) check.refs.push({ ref: content.ref, path: pointer(path, 'ref') });
+    else check.issues.push({ path: pointer(path, 'ref'), message: BLOCK_REF_RULE });
+    return;
+  }
+  if (content.type === 'Sequence') check.issues.push({ path: pointer(path, 'type'), message: 'a Sequence frame cannot hold another Sequence' });
+  if (content.ask !== undefined) check.issues.push({ path: pointer(path, 'ask'), message: 'an ask belongs on a block element, not inside a Sequence frame' });
+  if (content.id !== undefined) check.issues.push({ path: pointer(path, 'id'), message: 'an id belongs on a block element; give it there and show it here with { "ref": "<id>" }' });
+  const nested = childReferences(content).find((child) => {
+    const element = elements[child.key];
+    return isRecord(element) && element.type === 'Sequence';
+  });
+  if (nested !== undefined) check.issues.push({ path: `${path}${nested.path}`, message: 'a Sequence frame cannot hold another Sequence' });
+  checkElement(elements, content, path, check);
+}
 
-function validateElement(elements: Record<string, unknown>, key: string, check: SpecCheck): void {
-  const path = pointer('/elements', key);
-  const element = elements[key];
+function checkElement(elements: Record<string, unknown>, element: unknown, path: string, check: SpecCheck): void {
   if (!isRecord(element)) {
     check.issues.push({ path, message: 'an element is an object { type, props, children }' });
     return;
   }
   for (const field of Object.keys(element)) {
     if (!ELEMENT_FIELDS.has(field)) check.issues.push({ path: pointer(path, field), message: `unknown element field "${field}"; an element has ${[...ELEMENT_FIELDS].join(', ')}` });
+  }
+  if (element.id !== undefined) {
+    const idPath = pointer(path, 'id');
+    const declared = typeof element.id === 'string' ? check.ids.get(element.id) : undefined;
+    if (typeof element.id !== 'string' || !BLOCK_ID.test(element.id)) check.issues.push({ path: idPath, message: BLOCK_ID_RULE });
+    else if (declared !== undefined) check.issues.push({ path: idPath, message: `id "${element.id}" is already used at ${declared}; an id is used once in a document` });
+    else check.ids.set(element.id, idPath);
+  }
+  if (element.ask !== undefined) {
+    checkValue(askSchema, element.ask, pointer(path, 'ask'), check);
+    if (isRecord(element.ask) && element.ask.required === true && element.id === undefined) check.issues.push({ path: pointer(path, 'ask'), message: 'a required ask needs an "id" on its element, so GitSpace can track the answer' });
   }
   const type = element.type;
   const component = typeof type === 'string' ? componentByType.get(type) : undefined;
@@ -420,7 +790,16 @@ function validateElement(elements: Record<string, unknown>, key: string, check: 
   if (!isRecord(element.props)) check.issues.push({ path: propsPath, message: 'props is an object' });
   else if (component !== undefined) {
     checkObject(component.props.shape, element.props, propsPath, check, `prop of ${String(type)}`);
-    if (type === 'Svg' && typeof element.props.svg === 'string') {
+    const { frames, start, end, id } = element.props;
+    if (type === 'Sequence' && Array.isArray(frames)) {
+      frames.forEach((frame, index) => {
+        if (isRecord(frame) && isRecord(frame.content)) checkFrameContent(elements, frame.content, pointer(pointer(pointer(propsPath, 'frames'), index), 'content'), check);
+      });
+    } else if (type === 'BlockRef' && typeof id === 'string' && BLOCK_REF.test(id)) {
+      check.refs.push({ ref: id, path: pointer(propsPath, 'id') });
+    } else if (type === 'Video' && typeof start === 'number' && typeof end === 'number' && end <= start) {
+      check.issues.push({ path: pointer(propsPath, 'end'), message: `end (${end} s) is not after start (${start} s)` });
+    } else if (type === 'Svg' && typeof element.props.svg === 'string') {
       for (const found of validateSvg(element.props.svg)) check.issues.push({ path: `${pointer(propsPath, 'svg')}${found.path}`, message: found.message });
     } else if (type === 'Svg' && element.props.svg !== undefined) {
       check.issues.push({ path: pointer(propsPath, 'svg'), message: 'svg is one literal <svg> string, never an expression' });
@@ -622,7 +1001,7 @@ function checkValue(schema: z.core.$ZodType, value: unknown, path: string, check
   else if (inner instanceof z.ZodUnion) {
     let best: UiBlockIssue[] | undefined;
     for (const candidate of inner.options) {
-      const attempt: SpecCheck = { state: check.state, issues: [] };
+      const attempt: SpecCheck = { ...check, issues: [] };
       checkValue(candidate, value, path, attempt);
       if (best === undefined || attempt.issues.length < best.length) best = attempt.issues;
     }
@@ -1020,7 +1399,7 @@ export const UI_BLOCK_EXAMPLES: readonly UiBlockExample[] = [
     body: spec({
       root: 'card',
       elements: {
-        card: { type: 'Card', props: { title: 'Which cache keeps the replies?' }, children: ['options'], slots: { footer: ['pick'] } },
+        card: { type: 'Card', id: 'cache-choice', ask: { required: true, prompt: 'Which cache keeps the replies?' }, props: { title: 'Which cache keeps the replies?' }, children: ['options'], slots: { footer: ['pick'] } },
         options: { type: 'RadioGroup', props: { label: null, value: { $bindState: '/choice' }, options: { $state: '/options' } }, children: [] },
         pick: { type: 'Button', props: { label: 'Add to message', variant: 'primary', disabled: { $cond: { $state: '/choice', eq: '' }, $then: true, $else: false } }, on: { press: { action: 'stage', params: { kind: 'decision', label: { $computed: 'lookup', args: { items: { $state: '/options' }, key: 'value', value: { $state: '/choice' }, field: 'label' } }, payload: { choice: { $state: '/choice' } } } } }, children: [] },
       },
@@ -1067,10 +1446,33 @@ export const UI_BLOCK_EXAMPLES: readonly UiBlockExample[] = [
     fence: 'mermaid',
     body: 'flowchart LR\n  push[Push to develop] --> launch[Launch] --> live[Live]',
   },
+  {
+    title: 'A walkthrough to play',
+    when: 'A change or an incident explained in order, as a short narrated video: a Sequence. One point per frame, a plain voice line each; give a block you show again an "id" and name it with { "ref" }.',
+    fence: 'gitspace-ui',
+    body: spec({
+      root: 'page',
+      elements: {
+        page: { type: 'Stack', props: { gap: 'md' }, children: ['times', 'walk'] },
+        times: { type: 'Stats', id: 'read-times', props: { tiles: [{ label: 'Read', value: '11 ms', detail: 'was 4 ms', tone: 'bad' }, { label: 'Stale replies', value: '0', detail: 'was 3 a day', tone: 'good' }] }, children: [] },
+        walk: {
+          type: 'Sequence', id: 'cache-walkthrough', ask: { required: false, prompt: 'Tell me which frame is unclear and I redraw it.' }, children: [], props: {
+            title: 'Where a reply is cached now',
+            frames: [
+              { content: { type: 'Markdown', props: { content: '**Replies are cached in a Durable Object**, not in Workers KV.' }, children: [] }, say: 'Replies are cached in one Durable Object now, not in Workers KV.' },
+              { content: { type: 'Mermaid', props: { source: 'flowchart LR\n  worker --> cache[(Durable Object)] --> reply' }, children: [] }, say: 'The worker asks the object first; only a miss goes to the model.', hold: 5 },
+              { content: { ref: 'read-times' }, say: 'Reads are seven milliseconds slower, and no reply is stale any more.' },
+            ],
+          },
+        },
+      },
+      state: {},
+    }),
+  },
 ];
 
 /** Every agent's instruction about blocks, main agents and subagents alike; the `gitspace-ui` skill has the format. */
-export const UI_BLOCK_BRIEF = 'Drawing: GitSpace renders blocks you write in Markdown, in chat and in every Markdown field (goal, journal, Change Guide). Draw when a picture says it better than prose: results and measurements (Stats tiles, a Chart, a RunTag naming the run), options compared (a Table), values over time (a line Chart), how code or data flows or what a change rewires (a FlowMap, drawn as the Change Guide draws a change), a plan to tick off (a Checklist), a choice for the person (a card that stages it in their message bar), before and after (BeforeAfter). Use ```svg for layout, geometry, mockups or anything the components cannot express, and ```mermaid only for the most basic flows or when the work is already about Mermaid. Before you write a block, read skill://gitspace-ui: it has the format, every component and worked examples. GitSpace rejects an invalid block with the path that failed; fix it and write again.';
+export const UI_BLOCK_BRIEF = 'Drawing: GitSpace renders blocks you write in Markdown, in chat and in every Markdown field (goal, journal, Change Guide). Draw when a picture says it better than prose: results and measurements (Stats tiles, a Chart, a MetricDelta, a RunTag naming the run), options compared (a Table, Tradeoffs), values over time (a line Chart), how code or data flows or what a change rewires (a FlowMap, drawn as the Change Guide draws a change; a CallDiff, a StateFlow), a plan to tick off (a Checklist), a choice for the person (a card that stages it in their message bar; give it an id and a required ask when you need the answer), before and after (BeforeAfter), a change explained in order as a short narrated video (a Sequence of frames, each with a voice line). Use ```svg for layout, geometry, mockups or anything the components cannot express, and ```mermaid only for the most basic flows or when the work is already about Mermaid. Before you write a block, read skill://gitspace-ui: it has the format, every component and worked examples. GitSpace rejects an invalid block with the path that failed; fix it and write again.';
 
 /** The skill's description: what an agent sees in a skill list, so it names the moments to read the skill. */
 export const UI_SKILL_DESCRIPTION = 'Draw what you show as blocks GitSpace renders: cards, charts, tables, FlowMaps, checklists, SVG. Read before you report numbers or a measurement, compare options, explain how code or data flows, lay out a plan, show a before and after, or ask the person to choose.';
@@ -1094,7 +1496,14 @@ export function uiBlockPrompt(): string {
 - Values over time or over a sequence: a Chart with kind "line". Parts of a total: kind "stacked".
 - How code or data flows, what a change rewires, an architecture: a FlowMap.
 - A plan or checks the person goes through: a Checklist.
-- A choice the person makes for you: a card whose button stages the choice; an AskCard for one question.
+- A choice the person makes for you: a card whose button stages the choice; an AskCard for one question. Give it an "id" and a required "ask" when you need the answer before you go on.
+- Numbers that moved: MetricDelta. A spend against a limit: Budget.
+- A call path a change rewires, line by line: CallDiff. State moving between services, step by step: StateFlow. A migration's tables: SchemaDiff.
+- An investigation: LogTable for the log lines, Timeline for the events. Checks by platform or run: CheckGrid.
+- Options scored against criteria for the person to pick: Tradeoffs. Items the person puts in order: Rank.
+- Work in phases with its PRs and issues: Roadmap. Workspaces and what each waits on: WorkspaceGraph.
+- A change or an incident explained in order, to be played like a short narrated video: a Sequence.
+- A picture or a clip from the drive or a browser capture: Image, Video.
 - Before and after: BeforeAfter.
 - Layout, geometry, a UI mockup, or a drawing the components cannot express: ${fence}svg.
 - ${fence}mermaid only for the most basic flow (a handful of boxes in a line), or when the work is already about Mermaid. Anything more is a FlowMap or SVG.
@@ -1113,9 +1522,20 @@ Each passes GitSpace's checks; copy their shape.
 ${examples}
 
 ## Spec
-- "root": the key of the root element: a Card, or an AskCard when the block is one question for the person.
-- "elements": element key → { "type", "props", "children": [keys], "slots"?: { "<slot>": [keys] }, "visible"?, "repeat"?, "on"? }. Every element has "children" ([] for a leaf). "visible", "repeat" and "on" sit beside "props", never inside it. Put default-slot children in "children", never in slots.default.
+- "root": the key of the root element: a Card, an AskCard when the block is one question for the person, or a Sequence.
+- "elements": element key → { "type", "props", "children": [keys], "slots"?: { "<slot>": [keys] }, "visible"?, "repeat"?, "on"?, "id"?, "ask"? }. Every element has "children" ([] for a leaf). "visible", "repeat", "on", "id" and "ask" sit beside "props", never inside it. Put default-slot children in "children", never in slots.default.
 - "state": the data the block reads. Seed every path a $state or repeat reads. At most ${MAX_ELEMENTS} elements and ${MAX_SPEC_BYTES / 1024} KiB.
+
+## Ids, refs and asks
+- "id": a name for an element (1 to 64 letters, digits, ".", "_", "-"), used once in its document: one chat message, one Change Guide, one goal. A BlockRef { "id" } or a Sequence frame { "ref": "<id>" } draws that element again, with its own state, so you never copy a block to show it twice. A ref to another document's element is "<document>#<id>".
+- "ask": { "required": true | false, "prompt"?: "<one line>" } says the element asks the person something. A required ask is an open question: it needs an "id", shows in the workspace's questions and "Needs you", and the person answers through the block's own choice (an AskCard option, or a button that stages); the answer arrives as your next message. An optional ask is only an invitation and creates no question. Ask only on blocks in your chat messages.
+
+## Sequences
+A Sequence plays like a short video: frame 1 shows as a still with a play button, and play reads each frame's \`say\` aloud and shows it as the subtitle, then moves on. Write it as you would explain it out loud:
+- One point per frame, 2 to 30 frames. A frame's \`content\` is one element (with "children" naming keys in "elements" when it has any) or { "ref": "<id>" } to show a block of this document again. A frame holds no Sequence, and no "id" or "ask".
+- \`say\`: one or two plain sentences (at most 400 characters) saying what to look at in the frame, not what the frame already reads. \`caption\` only when the subtitle should differ.
+- \`hold\`: seconds for a frame with no voice line or one that needs looking at longer; without a voice a frame lasts 4 s.
+- A frame whose content fails the checks shows as an error in its place; fix it like any block.
 
 ## Components
 Props marked ? may be omitted or null; the rest are required.

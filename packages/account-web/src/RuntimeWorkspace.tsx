@@ -15,6 +15,7 @@ import { useTranscriptHistory, type TranscriptHistory, type TranscriptHistorySou
 import { forgetFirstPaintGroup, savedCopy, schemaForm, touchFirstPaintGroup, useSavedCopy, workspaceGroup } from './first-paint-cache.js';
 import { savedTranscriptSchema } from './transcriptHistoryCache.js';
 import { useInference } from './InferenceContext.js';
+import { SpeechProvider } from './SpeechProvider.js';
 import { useRetainedQueryValue } from './useRetainedRead.js';
 import { rpcClient } from './rpc-client.js';
 import { ComposerStagingProvider, RequirementAcceptance } from './chat/staging.js';
@@ -314,6 +315,7 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, reads, 
     <QuestionCardsContext.Provider value={questionCards}>
     <ComposerStagingProvider>
     <RequirementAcceptance.Provider value={acceptRequirement}>
+    <SpeechProvider projectId={identity.projectId} workspaceId={identity.workspaceId}>
     {/* No onSend, so a closed composer, until the draft binding exists: text typed before it would be replaced by the workspace draft. A session command in flight only holds the send (sendPending); the box stays editable. */}
     <GitSpaceShell project={{ id: inspection.project.id, name: inspection.project.name, repository: inspection.project.repositoryReference ?? '', connected }} {...scope} mainAgent={{ id: value?.sessionId ?? conversationId ?? 'root', title: conversation?.title ?? 'Workspace agent', state: conversation?.status === 'running' ? 'running' : conversation?.status === 'waiting' ? 'permission-needed' : 'waiting', model: value?.model ?? '', controlsAvailable: true, recovering: !value, failed: conversation?.status === 'failed', errorMessage: conversation?.error ?? null, retry: conversation?.retry ?? null }} turns={turns} transcript={conversationId ? transcript : undefined} history={conversationId ? { loading: transcript.initialLoading, saved: transcript.saved, error: transcript.error, onRetry: transcript.refresh } : undefined} transport={[]} artifacts={[]} sessionControls={controls} skills={reads.skills} providers={reads.providers.value} draft={draft} sendPending={session.pending} onSend={value && draft ? async (text, streamingBehavior, draft, decisions) => { await run({ type: 'prompt', text, streamingBehavior, draftRevision: draft?.draftRevision, draftText: draft?.text, decisions: decisions?.length ? decisions : undefined }); } : undefined}
       onRetryAgent={async () => { await run({ type: 'resume' }); }} onContinueAgent={async () => { await run({ type: 'continue' }); }} onOpenSettings={props.onOpenSettings} onSelectProject={props.onSelectProject} onSelectWorkspace={props.onSelectWorkspace}
@@ -355,6 +357,7 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, reads, 
       }}
       renderInspector={(onClose, initialView, resourceRequest, openTerminal, guideSection) => props.renderInspector({ snapshot, conversationId, sessionId: value?.sessionId ?? conversationId ?? null, controls: value, turns, scope: scope.workspace, workspaces: scope.workspaces, onClose, onAskAgent: ask, onCompose: draft ? text => draft.onChange(/\S$/u.test(draft.text) ? `${draft.text} ${text}` : `${draft.text}${text}`) : undefined, onSetRelations: relationsEditable ? setRelations : undefined, initialView, resourceRequest, guideSection, onOpenTerminal: (machineId, name) => { selectTerminalMachine(machineId); openTerminal(name); } })}
     />
+    </SpeechProvider>
     </RequirementAcceptance.Provider>
     </ComposerStagingProvider>
     </QuestionCardsContext.Provider>

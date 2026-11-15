@@ -37,17 +37,17 @@ const namedEntryMaps: Record<string, true> = {
 
 const inferenceRootSections: Record<string, InferenceSettingSection> = {
   modelRoles: 'Models', contextLimits: 'Models', enabledModels: 'Models', visionFallback: 'Models', providers: 'Providers',
-  search: 'Services', dictation: 'Services', images: 'Services',
+  search: 'Services', dictation: 'Services', images: 'Services', speech: 'Services',
 };
-/** A service selector (`search`, `dictation`, `images`): `cloudflare/<option>` runs on the platform's Cloudflare account,
+/** A service selector (`search`, `dictation`, `images`, `speech`): `cloudflare/<option>` runs on the platform's Cloudflare account,
  * `<provider>/<modelId>` on one of the profile's own credentials for that pi-ai provider. `SERVICE_OFF` turns it off. */
 export function parseServiceSelector(value: string): { provider: string; id: string } | null {
   const slash = value.indexOf('/');
   if (slash <= 0 || slash === value.length - 1) return null;
   return { provider: value.slice(0, slash), id: value.slice(slash + 1) };
 }
-/** The `search`, `dictation` or `images` value that turns the service off: its agent tool (web_search, generate_image) is
- * not offered to the profile's conversations, and the composer shows no microphone. */
+/** The `search`, `dictation`, `images` or `speech` value that turns the service off: its agent tool (web_search, generate_image) is
+ * not offered to the profile's conversations, the composer shows no microphone, and walkthroughs play captions only. */
 export const SERVICE_OFF = 'off';
 /** Web search on Cloudflare's Web Search API, by its provider. */
 export const CLOUDFLARE_SEARCH_PROVIDERS: Readonly<Record<string, true>> = { ceramic: true, linkup: true, exa: true };
@@ -73,7 +73,76 @@ export const imagesSelectorSchema = z.string().refine(value => {
   const selector = parseServiceSelector(value);
   return value === SERVICE_OFF || (selector !== null && (selector.provider !== 'cloudflare' || Object.hasOwn(CLOUDFLARE_IMAGE_MODELS, selector.id)));
 }, 'Images is off, cloudflare/flux-2-klein-9b, cloudflare/flux-2-klein-4b, cloudflare/flux-2-dev, cloudflare/flux-1-schnell, or a provider/model image model of the profile');
-const serviceSelectors: Readonly<Record<string, z.ZodType<string>>> = { search: searchSelectorSchema, dictation: dictationSelectorSchema, images: imagesSelectorSchema };
+/** One voice a speech model speaks with: `id` is what the request names, `description` one line for a picker. */
+export interface SpeechVoice { id: string; label: string; description?: string }
+/** Deepgram Aura-2 English on Cloudflare Workers AI (`@cf/deepgram/aura-2-en`), by speaker: the model's `speaker` enum,
+ * described from Deepgram's voice table (expressed gender, accent, characteristics). */
+export const AURA_2_EN_VOICES: readonly SpeechVoice[] = [
+  { id: 'amalthea', label: 'Amalthea', description: 'Feminine, Filipino: engaging, natural, cheerful' },
+  { id: 'andromeda', label: 'Andromeda', description: 'Feminine, American: casual, expressive, comfortable' },
+  { id: 'apollo', label: 'Apollo', description: 'Masculine, American: confident, comfortable, casual' },
+  { id: 'arcas', label: 'Arcas', description: 'Masculine, American: natural, smooth, clear' },
+  { id: 'aries', label: 'Aries', description: 'Masculine, American: warm, energetic, caring' },
+  { id: 'asteria', label: 'Asteria', description: 'Feminine, American: clear, confident, knowledgeable' },
+  { id: 'athena', label: 'Athena', description: 'Feminine, American, mature: calm, smooth, professional' },
+  { id: 'atlas', label: 'Atlas', description: 'Masculine, American, mature: enthusiastic, confident, friendly' },
+  { id: 'aurora', label: 'Aurora', description: 'Feminine, American: cheerful, expressive, energetic' },
+  { id: 'callista', label: 'Callista', description: 'Feminine, American: clear, energetic, professional' },
+  { id: 'cora', label: 'Cora', description: 'Feminine, American: smooth, melodic, caring' },
+  { id: 'cordelia', label: 'Cordelia', description: 'Feminine, American, young: approachable, warm, polite' },
+  { id: 'delia', label: 'Delia', description: 'Feminine, American, young: casual, friendly, breathy' },
+  { id: 'draco', label: 'Draco', description: 'Masculine, British: warm, trustworthy, baritone' },
+  { id: 'electra', label: 'Electra', description: 'Feminine, American: professional, engaging, knowledgeable' },
+  { id: 'harmonia', label: 'Harmonia', description: 'Feminine, American: empathetic, clear, calm' },
+  { id: 'helena', label: 'Helena', description: 'Feminine, American: caring, natural, friendly, raspy' },
+  { id: 'hera', label: 'Hera', description: 'Feminine, American: smooth, warm, professional' },
+  { id: 'hermes', label: 'Hermes', description: 'Masculine, American: expressive, engaging, professional' },
+  { id: 'hyperion', label: 'Hyperion', description: 'Masculine, Australian: caring, warm, empathetic' },
+  { id: 'iris', label: 'Iris', description: 'Feminine, American, young: cheerful, positive, approachable' },
+  { id: 'janus', label: 'Janus', description: 'Feminine, American Southern: smooth, trustworthy' },
+  { id: 'juno', label: 'Juno', description: 'Feminine, American: natural, engaging, melodic, breathy' },
+  { id: 'jupiter', label: 'Jupiter', description: 'Masculine, American: expressive, knowledgeable, baritone' },
+  { id: 'luna', label: 'Luna', description: 'Feminine, American, young: friendly, natural, engaging' },
+  { id: 'mars', label: 'Mars', description: 'Masculine, American: smooth, patient, baritone' },
+  { id: 'minerva', label: 'Minerva', description: 'Feminine, American: positive, friendly, natural' },
+  { id: 'neptune', label: 'Neptune', description: 'Masculine, American: professional, patient, polite' },
+  { id: 'odysseus', label: 'Odysseus', description: 'Masculine, American: calm, smooth, professional' },
+  { id: 'ophelia', label: 'Ophelia', description: 'Feminine, American: expressive, enthusiastic, cheerful' },
+  { id: 'orion', label: 'Orion', description: 'Masculine, American: approachable, calm, polite' },
+  { id: 'orpheus', label: 'Orpheus', description: 'Masculine, American: professional, clear, trustworthy' },
+  { id: 'pandora', label: 'Pandora', description: 'Feminine, British: smooth, calm, melodic' },
+  { id: 'phoebe', label: 'Phoebe', description: 'Feminine, American: energetic, warm, casual' },
+  { id: 'pluto', label: 'Pluto', description: 'Masculine, American: smooth, calm, empathetic, baritone' },
+  { id: 'saturn', label: 'Saturn', description: 'Masculine, American: knowledgeable, confident, baritone' },
+  { id: 'thalia', label: 'Thalia', description: 'Feminine, American: clear, confident, energetic' },
+  { id: 'theia', label: 'Theia', description: 'Feminine, Australian: expressive, polite, sincere' },
+  { id: 'vesta', label: 'Vesta', description: 'Feminine, American: natural, patient, empathetic' },
+  { id: 'zeus', label: 'Zeus', description: 'Masculine, American: deep, trustworthy, smooth' },
+];
+/** Speech on Cloudflare Workers AI, by model (`@cf/deepgram/<model>`), with the voices each speaks. */
+export const CLOUDFLARE_SPEECH_MODELS: Readonly<Record<string, readonly SpeechVoice[]>> = { 'aura-2-en': AURA_2_EN_VOICES };
+/** The voices of OpenAI's `POST /v1/audio/speech`, run with an OpenAI API key of the profile. */
+export const OPENAI_SPEECH_VOICES: readonly SpeechVoice[] = ['alloy', 'ash', 'ballad', 'cedar', 'coral', 'echo', 'fable', 'marin', 'nova', 'onyx', 'sage', 'shimmer', 'verse']
+  .map(id => ({ id, label: id[0]!.toUpperCase() + id.slice(1) }));
+/** The speech service when `speech` is unset: Aura-2's Athena, calm and smooth, made for storytelling. */
+export const DEFAULT_SPEECH_SELECTOR = 'cloudflare/aura-2-en:athena';
+/** A speech selector (`<provider>/<model>:<voice>`) as its parts; null when it is not one. */
+export function parseSpeechSelector(value: string): { provider: string; model: string; voice: string } | null {
+  const selector = parseServiceSelector(value);
+  const colon = selector ? selector.id.lastIndexOf(':') : -1;
+  if (!selector || colon <= 0 || colon === selector.id.length - 1) return null;
+  return { provider: selector.provider, model: selector.id.slice(0, colon), voice: selector.id.slice(colon + 1) };
+}
+/** The voices a speech selector's model speaks; empty for a provider speech does not run on. */
+export function speechVoices(provider: string, model: string): readonly SpeechVoice[] {
+  if (provider === 'cloudflare') return Object.hasOwn(CLOUDFLARE_SPEECH_MODELS, model) ? CLOUDFLARE_SPEECH_MODELS[model]! : [];
+  return provider === 'openai' ? OPENAI_SPEECH_VOICES : [];
+}
+export const speechSelectorSchema = z.string().refine(value => {
+  const selector = parseSpeechSelector(value);
+  return value === SERVICE_OFF || (selector !== null && speechVoices(selector.provider, selector.model).some(voice => voice.id === selector.voice));
+}, 'Speech is off, cloudflare/aura-2-en:<voice> with an Aura-2 voice, or openai/<tts model>:<voice>');
+const serviceSelectors: Readonly<Record<string, z.ZodType<string>>> = { search: searchSelectorSchema, dictation: dictationSelectorSchema, images: imagesSelectorSchema, speech: speechSelectorSchema };
 /** One ownership map shared by migration, editors and isolated runtime composition. */
 export function inferenceSettingSection(path: string): InferenceSettingSection | null {
   const dot = path.indexOf('.');
@@ -175,6 +244,7 @@ export const inferenceSettingMetadata: readonly RuntimeSettingSchemaItem[] = [
   { path: 'search', tab: 'Services', label: 'Web search', kind: 'string', value: DEFAULT_SEARCH_SELECTOR, defaultJson: JSON.stringify(DEFAULT_SEARCH_SELECTOR), credential: false, description: `Runs the agents' web_search tool. ${SERVICE_OFF}: web_search is not offered.` },
   { path: 'dictation', tab: 'Services', label: 'Dictation', kind: 'string', value: DEFAULT_DICTATION_SELECTOR, defaultJson: JSON.stringify(DEFAULT_DICTATION_SELECTOR), credential: false, description: `Transcribes the composer's microphone. ${SERVICE_OFF}: the composer has no microphone.` },
   { path: 'images', tab: 'Services', label: 'Images', kind: 'string', value: '', defaultJson: '""', credential: false, description: `Runs the agents' generate_image tool. Unset: the profile's first image model, else ${DEFAULT_IMAGES_SELECTOR}. ${SERVICE_OFF}: generate_image is not offered.` },
+  { path: 'speech', tab: 'Services', label: 'Speech', kind: 'string', value: DEFAULT_SPEECH_SELECTOR, defaultJson: JSON.stringify(DEFAULT_SPEECH_SELECTOR), credential: false, description: `Narrates walkthroughs in the voice it names. ${SERVICE_OFF}: walkthroughs show captions only.` },
 ];
 
 const profileIdSchema = z.string().min(1).max(160).regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/u);
@@ -216,6 +286,23 @@ export const inferenceDeleteInputSchema = z.strictObject({ profileId: profileIdS
 export type InferenceDeleteInput = z.infer<typeof inferenceDeleteInputSchema>;
 export const inferenceAssignInputSchema = z.strictObject({ projectId: z.string().min(1).max(160), profileId: profileIdSchema, expectedRevision: revisionSchema });
 export type InferenceAssignInput = z.infer<typeof inferenceAssignInputSchema>;
+/** The most characters one speech clip speaks: a walkthrough frame's line. */
+export const SPEECH_TEXT_MAX = 400;
+/** `speech.clip`: `text` spoken in `voice` (a speech selector; unset, the profile's `speech`). With `workspace` the clip
+ * is narration, kept in that workspace's drive, and refused when the profile's Speech is off; without one it is a
+ * settings sample of `voice`, answered inline and not kept. `profileId` names the profile (unset: the workspace
+ * project's, else Default). */
+export const speechClipInputSchema = z.strictObject({
+  workspace: z.strictObject({ projectId: z.string().min(1).max(160), workspaceId: z.string().min(1).max(160) }).nullable(),
+  profileId: profileIdSchema.optional(),
+  text: z.string().trim().min(1).max(SPEECH_TEXT_MAX),
+  voice: speechSelectorSchema.refine(value => value !== SERVICE_OFF, 'A clip is spoken in a voice, not off').optional(),
+}).refine(value => value.workspace !== null || value.voice !== undefined, 'A sample names its voice');
+export type SpeechClipInput = z.infer<typeof speechClipInputSchema>;
+/** A spoken clip: `url` plays it (a signed drive link, or a `data:` URL for a sample); `duration` says whether
+ * `durationMs` was read from the audio's frames or estimated from its size and bitrate. */
+export const speechClipSchema = z.strictObject({ url: z.string().min(1), durationMs: z.number().int().nonnegative(), duration: z.enum(['measured', 'estimated']) });
+export type SpeechClipResult = z.infer<typeof speechClipSchema>;
 
 /** Private machine/OMP IPC only: never send this bearer through browser state or events. */
 export const inferenceExecutionContextSchema = z.strictObject({
@@ -243,3 +330,5 @@ export const InferenceCreateInputCodec = wire.serializable((value): value is Inf
 export const InferenceUpdateInputCodec = wire.serializable((value): value is InferenceUpdateInput => inferenceUpdateInputSchema.safeParse(value).success, { id: 'gitspace/inference-update/v1', jsonSchema: inferenceUpdateInputSchema });
 export const InferenceDeleteInputCodec = wire.serializable((value): value is InferenceDeleteInput => inferenceDeleteInputSchema.safeParse(value).success, { id: 'gitspace/inference-delete/v1', jsonSchema: inferenceDeleteInputSchema });
 export const InferenceAssignInputCodec = wire.serializable((value): value is InferenceAssignInput => inferenceAssignInputSchema.safeParse(value).success, { id: 'gitspace/inference-assign/v1', jsonSchema: inferenceAssignInputSchema });
+export const SpeechClipInputCodec = wire.serializable((value): value is SpeechClipInput => speechClipInputSchema.safeParse(value).success, { id: 'gitspace/speech-clip-input/v1', jsonSchema: speechClipInputSchema });
+export const SpeechClipCodec = wire.serializable((value): value is SpeechClipResult => speechClipSchema.safeParse(value).success, { id: 'gitspace/speech-clip/v1', jsonSchema: speechClipSchema });

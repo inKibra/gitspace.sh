@@ -5,6 +5,7 @@ import { createModels, type AssistantMessage } from '@earendil-works/pi-ai';
 import { RuntimeTranscriptSchema } from '@gitspace/protocol-runtime';
 import { formatConversationEvents, type TranscriptRow } from '@gitspace/blocks';
 import { createTranscriptReader, transcriptResponse, type WithdrawnNotices } from '../src/transcript.js';
+import { QuestionsDoc, repairBlockAsks } from '@gitspace/runtime-core';
 
 const context = BACKGROUND_CONTEXT;
 const none: WithdrawnNotices = { has: () => false, add: () => {} };
@@ -302,4 +303,24 @@ test('the reply the model is writing shows as pending text and thinking while it
     release.resolve();
     await harness.close(context);
   }
+});
+
+test('a required block ask\'s question names the row the transcript reader shows its message as', async () => {
+  await fixture(async (harness, storage, root) => {
+    const block = { root: 'ship', elements: { ship: { type: 'Card', id: 'ship', ask: { required: true, prompt: 'Ship it?' }, props: { title: 'Ship it?' }, children: ['go'] }, go: { type: 'Button', props: { label: 'Ship it' }, on: { press: { action: 'stage', params: { kind: 'answer', label: 'Ship it' } } }, children: [] } }, state: {} };
+    await turn(root, 0, 1);
+    // A scan before the reply: the reply below is stored after the newest entry it read.
+    await repairBlockAsks(harness, storage);
+    await root.commit(async tx => {
+      await input(tx, root, [{ role: 'user', content: 'Ready?', timestamp: 2 }]);
+      await tx.appendEntry(root.id, { kind: 'pi.assistant', model: [assistant([{ type: 'thinking', thinking: 'Ask first.' }, { type: 'text', text: `One question:\n\`\`\`gitspace-ui\n${JSON.stringify(block)}\n\`\`\`` }], 3)] });
+    }, context);
+    await repairBlockAsks(harness, storage);
+    const questions = (await harness.snapshot(QuestionsDoc, context))?.items ?? [];
+    const page = await createTranscriptReader(storage, none).page(root.id, { generation: null, before: null, after: null, around: null });
+    const row = page.rows.find(candidate => candidate.item.type === 'message' && candidate.item.role === 'assistant' && candidate.item.text.includes('gitspace-ui'));
+    expect(row).toBeDefined();
+    // `blockAskQuestionId(<message row id>, <element id>)`: the row id is the one this reader gives the message.
+    expect(questions.map(question => question.id)).toEqual([`block-ask:${row?.item.id ?? ''}:ship`]);
+  });
 });

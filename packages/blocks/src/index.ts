@@ -5,3 +5,4 @@ export * from './execution.js';
 export * from './provider-error.js';
 export * from './conversation-events.js';
 export * from './approval.js';
+export * from './row-ids.js';
