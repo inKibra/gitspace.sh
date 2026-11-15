@@ -65,6 +65,9 @@ export const AutomationEventSchema = z.object({
   /** A review's id, or the review a review comment belongs to: an empty review that only wraps comments folds into
    * them. Absent on events recorded before batches. */
   reviewId: z.number().int().nullable().default(null),
+  /** The commit a check suite ran on, or a pull request's head commit when the event was sent: a batch drops check
+   * results for an earlier commit than the pull request's head. Absent on events recorded before it. */
+  headSha: z.string().nullable().default(null),
 });
 export type AutomationEvent = z.infer<typeof AutomationEventSchema>;
 
@@ -73,7 +76,7 @@ const LabelsSchema = z.array(z.object({ name: z.string() })).optional();
 const PullRequestSchema = z.object({
   number: z.number().int().positive(), title: z.string(), html_url: z.string(), body: z.string().nullish(),
   draft: z.boolean().optional(), merged: z.boolean().nullish(), user: UserSchema,
-  base: z.object({ ref: z.string() }), head: z.object({ ref: z.string() }), labels: LabelsSchema,
+  base: z.object({ ref: z.string() }), head: z.object({ ref: z.string(), sha: z.string() }), labels: LabelsSchema,
 });
 const IssueSchema = z.object({
   number: z.number().int().positive(), title: z.string(), html_url: z.string(), body: z.string().nullish(), user: UserSchema,
@@ -151,7 +154,7 @@ export function automationEvent(input: { event: string; deliveryId: string; payl
     fromApp: slug !== null && sender !== null && sender.toLowerCase() === `${slug.toLowerCase()}[bot]`,
     baseBranch: null, headBranch: null, branch: null, draft: null, labels: null, label: common.label?.name ?? null, changedFiles: null,
     conclusion: null, reviewState: null, mentionsBot: false, merged: null, closes: [],
-    tag: null, prerelease: null, environment: null, deploymentState: null, watchKey: null, reviewId: null,
+    tag: null, prerelease: null, environment: null, deploymentState: null, watchKey: null, reviewId: null, headSha: null,
   };
   const fieldsOf = (subject: AutomationSubject | undefined, specific: Record<string, string>): Record<string, string> => ({
     action: action ?? '', 'sender.login': sender ?? '', 'repository.full_name': common.repository.full_name,
@@ -169,7 +172,7 @@ export function automationEvent(input: { event: string; deliveryId: string; payl
       const body = text(pull.body);
       return {
         ...shared, actor: action !== null && SENDER_ACTIONS[action] ? sender : author, author, subjects: [subject],
-        baseBranch: pull.base.ref, headBranch: pull.head.ref, draft: pull.draft ?? false, labels: (pull.labels ?? []).map(label => label.name),
+        baseBranch: pull.base.ref, headBranch: pull.head.ref, headSha: pull.head.sha, draft: pull.draft ?? false, labels: (pull.labels ?? []).map(label => label.name),
         merged: pull.merged ?? false, closes: [...new Set([...body.matchAll(CLOSES)].map(match => Number(match[1])).filter(number => number > 0))],
         fields: fieldsOf(subject, { ...pullRequestFields(pull), 'pull_request.body': body }),
       };
@@ -182,7 +185,7 @@ export function automationEvent(input: { event: string; deliveryId: string; payl
       const subject = pullRequestSubject(pull);
       const body = text(review.body);
       return {
-        ...shared, actor: reviewer, author: reviewer, subjects: [subject], baseBranch: pull.base.ref, headBranch: pull.head.ref,
+        ...shared, actor: reviewer, author: reviewer, subjects: [subject], baseBranch: pull.base.ref, headBranch: pull.head.ref, headSha: pull.head.sha,
         reviewState: review.state.toLowerCase(), mentionsBot: mentions(body, slug), reviewId: review.id ?? null,
         fields: fieldsOf(subject, { ...pullRequestFields(pull), 'review.html_url': review.html_url, 'review.user.login': reviewer ?? '', 'review.state': review.state.toLowerCase(), 'review.body': body }),
       };
@@ -195,7 +198,7 @@ export function automationEvent(input: { event: string; deliveryId: string; payl
       const subject = pullRequestSubject(pull);
       const body = text(comment.body);
       return {
-        ...shared, actor: commenter, author: commenter, subjects: [subject], baseBranch: pull.base.ref, headBranch: pull.head.ref, mentionsBot: mentions(body, slug), reviewId: comment.pull_request_review_id ?? null,
+        ...shared, actor: commenter, author: commenter, subjects: [subject], baseBranch: pull.base.ref, headBranch: pull.head.ref, headSha: pull.head.sha, mentionsBot: mentions(body, slug), reviewId: comment.pull_request_review_id ?? null,
         fields: fieldsOf(subject, { ...pullRequestFields(pull), 'comment.html_url': comment.html_url, 'comment.user.login': commenter ?? '', 'comment.body': body, 'comment.path': comment.path ?? '', 'comment.line': String(comment.line ?? comment.original_line ?? '') }),
       };
     }
@@ -247,7 +250,7 @@ export function automationEvent(input: { event: string; deliveryId: string; payl
       const branch: AutomationSubject[] = suite.head_branch === null ? [] : [{ kind: 'branch', number: null, branch: suite.head_branch, title: suite.head_branch, url: `${common.repository.html_url}/tree/${suite.head_branch}` }];
       const subjects = [...pulls, ...branch];
       return {
-        ...shared, actor: null, author: null, subjects, branch: suite.head_branch, conclusion: suite.conclusion,
+        ...shared, actor: null, author: null, subjects, branch: suite.head_branch, conclusion: suite.conclusion, headSha: suite.head_sha,
         fields: fieldsOf(subjects[0], { 'check_suite.head_branch': suite.head_branch ?? '', 'check_suite.head_sha': suite.head_sha, 'check_suite.conclusion': suite.conclusion ?? '' }),
       };
     }
@@ -347,7 +350,7 @@ export function watchedEvent(input: { repository: string; item: WatchedItem; del
     deliveryId: input.deliveryId, receivedAt: input.receivedAt, repository: input.repository, fromApp: input.fromApp, subjects: [],
     baseBranch: null, headBranch: null, branch: null, draft: null, labels: null, label: null, changedFiles: null,
     conclusion: null, reviewState: null, mentionsBot: false, merged: null, closes: [],
-    tag: null, prerelease: null, environment: null, deploymentState: null, reviewId: null,
+    tag: null, prerelease: null, environment: null, deploymentState: null, reviewId: null, headSha: null,
   };
   const common = { 'repository.full_name': input.repository };
   switch (item.on) {

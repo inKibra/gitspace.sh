@@ -58,6 +58,7 @@ import { profileModelRoles } from '@gitspace/runtime-core/inference';
 import { z } from 'zod';
 import { AutomationEventSchema, automationEventName, automationMessageEvent, describeAutomationEvent, foldsIntoComments, globMatches, triggerMatches, watchedEvent, type AutomationEvent } from './automation-events.js';
 import { completedOperation, createCloudWorkspace, restoreCloudWorkspace, retryCloudWorkspaceCreation } from './cloud-workspace-lifecycle.js';
+import type { PullRequestCheckSuite, PullRequestSettling } from './github-app.js';
 import { notifyBrowsers } from './live-notices.js';
 import { BudgetedDurableObject } from './storage-quarantine.js';
 
@@ -70,9 +71,13 @@ const INDEXED_RUNS = 20;
  * these delays, then fails. */
 const SUBMIT_RETRY_MS: readonly number[] = [30_000, 2 * 60_000, 10 * 60_000];
 /** GitHub events for the same automation and pull request or issue collect into one run: it is delivered once no
- * further event arrived for `BATCH_QUIET_MS`, at most `BATCH_MAX_MS` after its first. */
+ * further event arrived for `BATCH_QUIET_MS`, at most `BATCH_MAX_MS` after its first. A pull request's batch then
+ * settles (`settle`): it may wait for check suites or a review bot, reading GitHub again every `SETTLE_RECHECK_MS`. */
 const BATCH_QUIET_MS = 90_000;
 const BATCH_MAX_MS = 10 * 60_000;
+const SETTLE_RECHECK_MS = 30_000;
+/** The events a review bot still working on a pull request holds: its reviews and comments. */
+const FEEDBACK_EVENTS: Readonly<Record<string, true>> = { pull_request_review: true, pull_request_review_comment: true, issue_comment: true };
 /** Workspace agents post on GitHub as the person (they run `gh` signed in as them) or as this account's GitHub App, so
  * what either authored is never delivered to a workspace: it may be an agent's own post. */
 const OWN_ACCOUNT_SKIP = 'Skipped: posted from your account while agents post as you';
@@ -104,6 +109,15 @@ function utcLabel(at: number): string {
 const TimelineSchema = z.array(z.object({ at: z.number(), label: z.string() }));
 type Timeline = z.infer<typeof TimelineSchema>;
 const ChecksSchema = z.array(z.object({ label: z.string(), passed: z.boolean().nullable() }));
+/** What a pull request's batch last read from GitHub before delivery (`settle`): its head commit's check suites (null
+ * while it holds no check results, or holds ones collected since), the review bots it waited for, and what it waits for
+ * now (null once settled). */
+const SettleSchema = z.object({
+  suites: z.array(z.object({ app: z.string(), status: z.string(), conclusion: z.string().nullable(), runs: z.number().int() })).nullable(),
+  bots: z.array(z.string()),
+  waiting: z.string().nullable(),
+});
+type Settle = z.infer<typeof SettleSchema>;
 
 /** A run as the account index keeps it, times in epoch milliseconds. Runs indexed before GitHub events existed have no
  * event, subject or checks. */
@@ -437,11 +451,17 @@ interface RunRow extends Record<string, SqlStorageValue> {
   batch_key: string | null;
   /** The run's GitHub events (`AutomationEventSchema`), oldest first; null for a schedule or manual run. */
   events_json: string | null;
-  /** When a waiting batch is delivered: 90 s after its latest event, at most 10 minutes after its first. */
+  /** When a waiting batch is delivered: 90 s after its latest event, at most 10 minutes after its first; a pull
+   * request's batch held for check suites or a review bot, when it reads GitHub again. Null once it settled. */
   deliver_at: number | null;
   /** How a `message` run meets the agent's running turn, from its action's `when`: `steer` joins it at its next tool
    * boundary, `followUp` waits for it to end. Null for other runs, and on runs recorded before it (they steer). */
   when_busy: 'steer' | 'followUp' | null;
+  /** The commit a batch's check results ran on, from its first one: a check result for another commit opens a batch of
+   * its own. It stays when a push drops those results. Null for a batch without check results, and for other runs. */
+  head_sha: string | null;
+  /** What a pull request's batch read from GitHub before delivery (`SettleSchema`); null until it is read. */
+  settle_json: string | null;
 }
 
 interface LinkRow extends Record<string, SqlStorageValue> {
@@ -587,7 +607,9 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
           batch_key TEXT,
           events_json TEXT,
           deliver_at INTEGER,
-          when_busy TEXT
+          when_busy TEXT,
+          head_sha TEXT,
+          settle_json TEXT
         );
         CREATE INDEX IF NOT EXISTS automation_runs_automation ON automation_runs(automation_id, created_at);
         CREATE INDEX IF NOT EXISTS automation_runs_state ON automation_runs(state, created_at);
@@ -632,9 +654,9 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
 
   /** Objects written before GitHub events: their automations kept a schedule and a message target in columns, and their
    * runs table refused event triggers. Objects written before phases lack the automations' phases and the runs' phase;
-   * those written before batches lack the runs' batch key, events and delivery time, and those written before `when`
-   * the runs' `when_busy`. Automations written before the People and Bots conditions hold one `author` condition, which
-   * becomes them. */
+   * those written before batches lack the runs' batch key, events and delivery time, those written before `when` the
+   * runs' `when_busy`, and those written before settling the runs' head commit and settle record. Automations written
+   * before the People and Bots conditions hold one `author` condition, which becomes them. */
   private migrate(): void {
     const sql = this.ctx.storage.sql;
     const columns = (table: string) => sql.exec<{ name: string }>(`PRAGMA table_info(${table})`).toArray().map(column => column.name);
@@ -680,7 +702,7 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
     const recorded = columns('automation_runs');
     if (recorded.length > 0 && !recorded.includes('phase')) sql.exec('ALTER TABLE automation_runs ADD COLUMN phase TEXT');
     if (recorded.length > 0 && !recorded.includes('skip_reason')) sql.exec('ALTER TABLE automation_runs ADD COLUMN skip_reason TEXT');
-    for (const [column, type] of [['batch_key', 'TEXT'], ['events_json', 'TEXT'], ['deliver_at', 'INTEGER'], ['when_busy', 'TEXT']]) {
+    for (const [column, type] of [['batch_key', 'TEXT'], ['events_json', 'TEXT'], ['deliver_at', 'INTEGER'], ['when_busy', 'TEXT'], ['head_sha', 'TEXT'], ['settle_json', 'TEXT']]) {
       if (recorded.length > 0 && !recorded.includes(column)) sql.exec(`ALTER TABLE automation_runs ADD COLUMN ${column} ${type}`);
     }
     if (automations.length > 0) {
@@ -840,11 +862,12 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
   }
 
   /** A GitHub delivery: for this project's repository, or a release, tag or deployment of any repository (a watch may
-   * name any). Links by branch first, then every switched-on automation whose trigger starts on it records a run, skipped
-   * ones included; a watch records each release, tag or deployment it has seen, so one a check also finds runs once.
-   * An event that reaches a workspace or the project agent joins its automation's batch for the subject when one is
-   * open (`addToBatch`). Deliveries are taken one at a time, so two events never open two batches for one key. Returns
-   * the number of automations the event matched. */
+   * name any). Links by branch first, and a push to a pull request drops the check results its waiting batches hold for
+   * the commit before (`dropReplacedChecks`); then every switched-on automation whose trigger starts on it records a
+   * run, skipped ones included; a watch records each release, tag or deployment it has seen, so one a check also finds
+   * runs once. An event that reaches a workspace or the project agent joins its automation's batch for the subject when
+   * one is open (`addToBatch`). Deliveries are taken one at a time, so two events never open two batches for one key.
+   * Returns the number of automations the event matched. */
   async receive(input: { projectId: string; event: AutomationEvent; bot: string | null }): Promise<number> {
     const received = this.receiving.then(() => this.receiveOne(input));
     this.receiving = received.catch(() => undefined);
@@ -860,7 +883,10 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
     const own = (await this.repository(projectId))?.toLowerCase() === event.repository.toLowerCase();
     if (own && input.bot !== null) this.addDefaultAutomations(input.bot);
     const context = this.eventContext(projectId, event, input.bot);
-    if (own) await this.linkFromEvent(projectId, event);
+    if (own) {
+      await this.linkFromEvent(projectId, event);
+      this.dropReplacedChecks(event, Date.now());
+    }
     const matching: Automation[] = [];
     for (const row of this.rows<AutomationRow>('SELECT * FROM automations WHERE enabled=1 AND proposal_json IS NULL ORDER BY default_key IS NOT NULL, name, id')) {
       const automation = this.automation(row);
@@ -892,13 +918,18 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
    * 90 s later, at most 10 minutes after its first), and while its message waits in the workspace's inbox: then the
    * waiting message takes the new text, still one input. A queued message waits for the running turn to end; a steered
    * one only for that turn's next tool boundary, so later events start a new batch sooner. A message the workspace has
-   * placed (or cannot update) no longer changes.
+   * placed (or cannot update) no longer changes. A check result for another commit than the batch's opens a new batch.
    */
   private async addToBatch(projectId: string, automation: Automation, batch: string, event: AutomationEvent): Promise<string | null> {
     const open = this.rows<RunRow>("SELECT * FROM automation_runs WHERE batch_key=? AND (state='queued' OR (state='running' AND submitted=1 AND started_at IS NULL)) ORDER BY created_at DESC, rowid DESC LIMIT 1", batch)[0];
     if (!open || open.workspace_id === null) return null;
+    const check = event.event === 'check_suite';
+    if (check && open.head_sha !== null && event.headSha !== null && event.headSha !== open.head_sha) return null;
     const events = [...runEvents(open), event];
-    const message = eventMessage(open.id, automation, events);
+    // A check result joining a settled batch is listed as it came; a waiting batch reads the check suites again.
+    const prior = settleOf(open);
+    const settle: Settle | null = prior !== null && check ? { ...prior, suites: null } : prior;
+    const message = eventMessage(open.id, automation, events, settle?.suites ?? null);
     if (open.state === 'running') {
       const updated = await this.env.SPACE_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${open.workspace_id}`)
         .runtimeAutomationUpdate({ projectId, workspaceId: open.workspace_id, requestId: `${AUTOMATION_REQUEST_PREFIX}${open.id}`, text: message })
@@ -913,9 +944,111 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
     const deliverAt = current.state === 'queued' ? Math.min(now + BATCH_QUIET_MS, current.created_at + BATCH_MAX_MS) : current.deliver_at;
     const waits = current.state === 'queued' ? 'it is delivered 90 s after the latest event'
       : current.when_busy === 'followUp' ? 'its message waits for the running turn to end' : 'its message waits for the running turn\'s next tool boundary';
-    this.ctx.storage.sql.exec('UPDATE automation_runs SET events_json=?, message=?, deliver_at=?, timeline_json=? WHERE id=?', JSON.stringify(events), message, deliverAt,
-      timelineWith(current, now, `${describeAutomationEvent(event)} joined the batch (${automationEventCount(messageEvents(events))}); ${waits}`), current.id);
+    this.ctx.storage.sql.exec('UPDATE automation_runs SET events_json=?, message=?, deliver_at=?, head_sha=?, settle_json=?, timeline_json=? WHERE id=?', JSON.stringify(events), message, deliverAt,
+      current.head_sha ?? (check ? event.headSha : null), settle === null ? null : JSON.stringify(settle),
+      timelineWith(current, now, `${describeAutomationEvent(event)} joined the batch (${automationEventCount(messageEvents(events, settle?.suites ?? null))}); ${waits}`), current.id);
     return current.id;
+  }
+
+  /**
+   * A pull request's batch, due for delivery, settles on GitHub first (docs/AUTOMATIONS-DESIGN.md §7). Check results
+   * wait until every check suite GitHub lists for the head commit has completed; a suite still queued with no check runs
+   * once the batch went quiet never started, and is not waited for. Reviews and comments wait while a review bot works
+   * on the head commit. Check results for an earlier commit are dropped, and a batch left with none is skipped. A held
+   * batch reads GitHub again `SETTLE_RECHECK_MS` later; `BATCH_MAX_MS` after its first event it is delivered as it
+   * stands. A settled batch lists the check suites in place of its check results, and its delivery time is cleared, so
+   * it is not read again while it waits for a slot. One GitHub cannot answer for is delivered without waiting. The
+   * timeline says what it waited for.
+   */
+  private async settle(run: RunRow, now: number): Promise<void> {
+    const events = runEvents(run);
+    const first = events[0];
+    const subject = run.subject_json === null ? null : AutomationSubjectSchema.parse(JSON.parse(run.subject_json));
+    const checks = events.some(event => event.event === 'check_suite');
+    if (!first || subject?.kind !== 'pullRequest' || subject.number === null || (!checks && !events.some(event => FEEDBACK_EVENTS[event.event]))) return;
+    const named = automationSubjectName(subject);
+    const authors = [...new Set(events.flatMap(event => FEEDBACK_EVENTS[event.event] && event.author !== null && isBotLogin(event.author) ? [event.author] : []))];
+    const read: PullRequestSettling | { error: string } = await this.env.GITHUB_APP.getByName(this.env.ACCOUNT_ID).pullRequestSettling(first.repository, subject.number, authors)
+      .then(result => {
+        // An RPC result holds its call's resources until disposed: keep a plain copy and free them now.
+        const copy = structuredClone(result);
+        result[Symbol.dispose]();
+        return copy;
+      }, (error: unknown) => ({ error: errorMessage(error) }));
+    this.ctx.storage.transactionSync(() => {
+      const current = this.run(run.id);
+      // An event joined (and set the next delivery time), or the run ended, while GitHub was read.
+      if (current?.state !== 'queued' || current.events_json !== run.events_json) return;
+      if ('error' in read) {
+        this.ctx.storage.sql.exec('UPDATE automation_runs SET deliver_at=NULL, timeline_json=? WHERE id=?', timelineWith(current, now, `Could not read ${named}'s checks on GitHub (${read.error}); delivered without waiting`), current.id);
+        return;
+      }
+      const short = read.headSha.slice(0, 7);
+      const kept = events.filter(event => event.event !== 'check_suite' || event.headSha === read.headSha);
+      if (kept.length === 0) {
+        this.finish(current, 'skipped', `Skipped: ${named} moved on to ${short}, a later commit than these checks ran on`, now);
+        return;
+      }
+      const timeline = TimelineSchema.parse(JSON.parse(current.timeline_json));
+      const dropped = events.length - kept.length;
+      if (dropped > 0) timeline.push({ at: now, label: `Dropped ${dropped} check ${dropped === 1 ? 'result' : 'results'} for an earlier commit than ${named}'s head ${short}` });
+      const suites = kept.some(event => event.event === 'check_suite') ? read.suites : null;
+      const running = (suites ?? []).filter(suite => suite.status !== 'completed' && !neverStarted(suite));
+      const bots = kept.some(event => FEEDBACK_EVENTS[event.event]) ? read.reviewBots : [];
+      const prior = settleOf(current);
+      const waited = [...new Set([...prior?.bots ?? [], ...bots])];
+      const cap = current.created_at + BATCH_MAX_MS;
+      let waiting: string | null = null;
+      if (now < cap && (running.length > 0 || bots.length > 0)) {
+        const suitesWaited = running.length > 0 ? [`${running.length} of ${suites?.length ?? 0} check suites on ${short} (${running.map(suite => suite.app).join(', ')})`] : [];
+        waiting = `Waiting for ${[...suitesWaited, ...bots].join(' and ')}`;
+        if (waiting !== prior?.waiting) timeline.push({ at: now, label: waiting });
+      } else {
+        if (suites !== null && suites.length > 0) {
+          const done = suites.filter(suite => suite.status === 'completed').length;
+          const never = suites.filter(neverStarted);
+          timeline.push({ at: now, label: [
+            running.length > 0 ? `Delivered at the 10-minute limit: ${done} of ${suites.length} check suites on ${short} completed; still running: ${running.map(suite => suite.app).join(', ')}` : `Waited for ${done} of ${suites.length} check suites on ${short}`,
+            ...never.length > 0 ? [`never started: ${never.map(suite => suite.app).join(', ')}`] : [],
+          ].join('; ') });
+        }
+        if (bots.length > 0) timeline.push({ at: now, label: `Delivered at the 10-minute limit; still working: ${bots.join(', ')}` });
+        else if (waited.length > 0) timeline.push({ at: now, label: `Waited for ${waited.join(', ')}` });
+      }
+      const automation = this.automation(this.requiredAutomation(current.automation_id));
+      const settle: Settle = { suites, bots: waited, waiting };
+      this.ctx.storage.sql.exec('UPDATE automation_runs SET events_json=?, message=?, deliver_at=?, settle_json=?, timeline_json=? WHERE id=?', JSON.stringify(kept), eventMessage(current.id, automation, kept, suites),
+        waiting === null ? null : Math.min(now + SETTLE_RECHECK_MS, cap), JSON.stringify(settle), JSON.stringify(timeline), current.id);
+    });
+  }
+
+  /** A push to a pull request (`synchronize`, a new head commit) drops the check results its waiting batches hold for
+   * earlier commits: a batch left with none is skipped, one with reviews or comments keeps them. A batch keeps its
+   * commit, so check results for the new one open a batch of their own. */
+  private dropReplacedChecks(event: AutomationEvent, now: number): void {
+    const subject = event.subjects[0];
+    const sha = event.headSha;
+    if (event.event !== 'pull_request' || event.action !== 'synchronize' || subject?.kind !== 'pullRequest' || sha === null) return;
+    const key = automationSubjectKey(subject);
+    const named = automationSubjectName(subject);
+    const short = sha.slice(0, 7);
+    this.ctx.storage.transactionSync(() => {
+      for (const run of this.rows<RunRow>("SELECT * FROM automation_runs WHERE state='queued' AND batch_key IS NOT NULL")) {
+        if (run.subject_json === null || automationSubjectKey(AutomationSubjectSchema.parse(JSON.parse(run.subject_json))) !== key) continue;
+        const events = runEvents(run);
+        const kept = events.filter(item => item.event !== 'check_suite' || item.headSha === sha);
+        const dropped = events.length - kept.length;
+        if (dropped === 0) continue;
+        if (kept.length === 0) {
+          this.finish(run, 'skipped', `Skipped: a push to ${named} (${short}) replaced the commit these checks ran on`, now);
+          continue;
+        }
+        const prior = settleOf(run);
+        this.ctx.storage.sql.exec('UPDATE automation_runs SET events_json=?, message=?, settle_json=?, timeline_json=? WHERE id=?', JSON.stringify(kept),
+          eventMessage(run.id, this.automation(this.requiredAutomation(run.automation_id)), kept, null), prior === null ? null : JSON.stringify({ ...prior, suites: null }),
+          timelineWith(run, now, `A push to ${named} (${short}) dropped ${dropped} check ${dropped === 1 ? 'result' : 'results'} for the commit before it; the rest is kept`), run.id);
+      }
+    });
   }
 
   /** The default automations, each offered once per project (a person may delete or change them afterwards). */
@@ -1138,6 +1271,8 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
       const plan = await this.reach(projectId, automation, this.messagePlan(projectId, automation, firing)).catch((error: unknown) => failedPlan(`Failed: ${errorMessage(error)}`));
       due.push({ row, cron: row.cron, automation, firing, plan });
     }
+    // A pull request's batch due for delivery settles first: it may wait longer for check suites or a review bot.
+    await Promise.all(this.rows<RunRow>("SELECT * FROM automation_runs WHERE state='queued' AND batch_key IS NOT NULL AND deliver_at <= ?", now).map(run => this.settle(run, now)));
     this.ctx.storage.transactionSync(() => {
       for (const { row, cron, automation, firing, plan } of due) {
         // Changed while its plan was read: the next alarm plans it again.
@@ -1154,7 +1289,7 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
       }
       const free = this.settings().concurrency - this.working();
       for (const run of free > 0 ? this.rows<RunRow>("SELECT * FROM automation_runs WHERE state='queued' AND (deliver_at IS NULL OR deliver_at <= ?) ORDER BY created_at, rowid LIMIT ?", now, free) : []) {
-        const sent = run.batch_key === null ? `Sent to ${run.target_name}` : `Sent to ${run.target_name} as one message: ${automationEventCount(messageEvents(runEvents(run)))}`;
+        const sent = run.batch_key === null ? `Sent to ${run.target_name}` : `Sent to ${run.target_name} as one message: ${automationEventCount(messageEvents(runEvents(run), settleOf(run)?.suites ?? null))}`;
         this.ctx.storage.sql.exec("UPDATE automation_runs SET state='running', timeline_json=? WHERE id=?", timelineWith(run, now, run.kind === 'start' ? `Starting workspace ${run.target_name}` : sent), run.id);
       }
     });
@@ -1550,16 +1685,17 @@ export class ProjectAutomationsDO extends BudgetedDurableObject {
     const labels = [first, ...plan.timeline, ended?.outcome ?? waiting];
     const timeline: Timeline = labels.map(label => ({ at: now, label }));
     const trigger = event === null ? firing.trigger === 'schedule' ? 'schedule' : 'manual' : automation.trigger.kind === 'label' ? 'label' : 'github';
-    const message = event !== null && ended === null ? eventMessage(id, automation, events) : plan.message;
+    const message = event !== null && ended === null ? eventMessage(id, automation, events, null) : plan.message;
     const whenBusy = plan.kind !== 'message' ? null : 'when' in automation.action && automation.action.when === 'queue' ? 'followUp' : 'steer';
     this.ctx.storage.sql.exec(`
-      INSERT INTO automation_runs(id, automation_id, automation_name, trigger, kind, event, subject_json, event_json, checks_json, start_json, state, workspace_id, target_name, message, outcome, timeline_json, scheduled_for, created_at, finished_at, phase, skip_reason, batch_key, events_json, deliver_at, when_busy)
-      VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO automation_runs(id, automation_id, automation_name, trigger, kind, event, subject_json, event_json, checks_json, start_json, state, workspace_id, target_name, message, outcome, timeline_json, scheduled_for, created_at, finished_at, phase, skip_reason, batch_key, events_json, deliver_at, when_busy, head_sha)
+      VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, id, automation.id, automation.name, trigger, plan.kind, event === null ? null : automationEventName(event), subject ? JSON.stringify(subject) : null,
     event === null ? null : JSON.stringify(event), JSON.stringify(plan.checks), plan.start === null ? null : JSON.stringify(plan.start), ended?.state ?? 'queued',
     plan.ended === null || plan.phase !== null ? plan.workspaceId : null, plan.targetName, message, ended?.outcome ?? null, JSON.stringify(timeline),
     scheduledFor, now, ended === null ? null : now, plan.phase, ended?.skipReason ?? null,
-    ended === null ? batch : null, event === null ? null : JSON.stringify(events), ended === null && batch !== null ? now + BATCH_QUIET_MS : null, whenBusy);
+    ended === null ? batch : null, event === null ? null : JSON.stringify(events), ended === null && batch !== null ? now + BATCH_QUIET_MS : null, whenBusy,
+    ended === null && batch !== null && event?.event === 'check_suite' ? event.headSha : null);
     this.ctx.storage.sql.exec(`
       DELETE FROM automation_runs WHERE automation_id=? AND state IN ('finished', 'skipped', 'failed')
         AND id NOT IN (SELECT id FROM automation_runs WHERE automation_id=? ORDER BY created_at DESC, rowid DESC LIMIT ?)
@@ -2036,19 +2172,35 @@ function runEvents(row: RunRow): AutomationEvent[] {
   return row.event_json === null ? [] : [AutomationEventSchema.parse(JSON.parse(row.event_json))];
 }
 
-/** The events a run's message lists: all but the empty reviews that only wrap comments among them. */
-function messageEvents(events: readonly AutomationEvent[]): AutomationMessageEvent[] {
-  return events.filter(event => !foldsIntoComments(event, events)).map(automationMessageEvent);
+/** What a pull request's batch read from GitHub before delivery, or null before it was read. */
+function settleOf(row: RunRow): Settle | null {
+  return row.settle_json === null ? null : SettleSchema.parse(JSON.parse(row.settle_json));
 }
 
-/** A GitHub event run's message: its automation's instruction filled in from the first event, and its events. */
-function eventMessage(runId: string, automation: Automation, events: readonly AutomationEvent[]): string {
+/** A check suite GitHub created that no check run started: an app the repository has not set up for it. */
+function neverStarted(suite: PullRequestCheckSuite): boolean {
+  return suite.status === 'queued' && suite.runs === 0;
+}
+
+/** The events a run's message lists: all but the empty reviews that only wrap comments among them. A settled batch
+ * lists its head commit's check suites, `suites`, in place of the check results it collected. */
+function messageEvents(events: readonly AutomationEvent[], suites: readonly PullRequestCheckSuite[] | null): AutomationMessageEvent[] {
+  const listed = events.filter(event => !foldsIntoComments(event, events) && (suites === null || event.event !== 'check_suite')).map(automationMessageEvent);
+  return suites === null ? listed : [...listed, ...suites.map((suite): AutomationMessageEvent => ({
+    kind: 'event', event: 'check_suite', author: null, path: null, line: null, state: null, url: null,
+    text: `${suite.app}: ${suite.status === 'completed' ? suite.conclusion ?? 'completed' : neverStarted(suite) ? 'never started' : 'still running'}`,
+  }))];
+}
+
+/** A GitHub event run's message: its automation's instruction filled in from the first event, and its events (with a
+ * settled batch's check suites). */
+function eventMessage(runId: string, automation: Automation, events: readonly AutomationEvent[], suites: readonly PullRequestCheckSuite[] | null): string {
   const first = events[0];
   const subject = first?.subjects[0];
   return automationMessage({
     run: runId, name: automation.name, source: 'github', subject: subject ? automationSubjectName(subject) : null,
     instruction: renderAutomationInstruction(automation.action.instruction, { ...first?.fields, 'automation.name': automation.name }),
-    events: messageEvents(events),
+    events: messageEvents(events, suites),
   });
 }
 

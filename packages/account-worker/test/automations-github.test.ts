@@ -69,6 +69,13 @@ async function installed(writers: readonly string[]) {
     http.get(`${API}/installation/repositories`, () => HttpResponse.json({ total_count: 1, repositories: [{ full_name: 'inKibra/pantry' }] })),
     http.get(`${API}/repos/inKibra/pantry/collaborators/:login/permission`, ({ params }) => writers.includes(String(params.login))
       ? HttpResponse.json({ permission: 'write' }) : HttpResponse.json({ message: 'Not Found' }, { status: 404 })),
+    // A pull request whose head commit has no checks, statuses or reviews: what a batch reads before delivery.
+    http.get(`${API}/repos/${REPOSITORY.full_name}/pulls/:number`, ({ params }) => HttpResponse.json({ state: 'open', draft: false, merged: false, title: `Change ${String(params.number)}`, html_url: `${REPOSITORY.html_url}/pull/${String(params.number)}`, head: { sha: commit('e') }, requested_reviewers: [] })),
+    http.get(`${API}/repos/${REPOSITORY.full_name}/pulls/:number/reviews`, () => HttpResponse.json([])),
+    http.get(`${API}/repos/${REPOSITORY.full_name}/commits/:sha/check-suites`, () => HttpResponse.json({ total_count: 0, check_suites: [] })),
+    http.get(`${API}/repos/${REPOSITORY.full_name}/commits/:sha/check-runs`, () => HttpResponse.json({ total_count: 0, check_runs: [] })),
+    http.get(`${API}/repos/${REPOSITORY.full_name}/commits/:sha/status`, () => HttpResponse.json({ state: 'pending', statuses: [] })),
+    http.get(`${API}/repos/${REPOSITORY.full_name}/commits/:sha/statuses`, () => HttpResponse.json([])),
   );
   const projectId = crypto.randomUUID();
   const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`);
@@ -134,9 +141,9 @@ async function linkedBeforeDefaults(): Promise<string> {
 const DEFAULT_NAMES = ['Failed checks to its workspace', 'Mentions of @gitspace-test', 'Merged or closed', 'Review feedback to its workspace'];
 const defaultsOf = async (projectId: string) => (await env.PROJECT_AUTOMATIONS.getByName(`${env.ACCOUNT_ID}:${projectId}`).list(projectId)).automations.filter(automation => automation.isDefault).map(automation => automation.name);
 
-const pull = (number: number, change: { author: string; base?: string; head: string; draft?: boolean; body?: string }) => ({
+const pull = (number: number, change: { author: string; base?: string; head: string; draft?: boolean; body?: string; sha?: string }) => ({
   number, title: `Change ${number}`, html_url: `https://github.com/inKibra/pantry/pull/${number}`, body: change.body ?? '', draft: change.draft ?? false, merged: false,
-  user: { login: change.author }, base: { ref: change.base ?? 'main' }, head: { ref: change.head }, labels: [],
+  user: { login: change.author }, base: { ref: change.base ?? 'main' }, head: { ref: change.head, sha: change.sha ?? commit('e') }, labels: [],
 });
 /** A review comment on a line of `src/search.ts` in PR #14, part of review `review`. */
 const lineComment = (id: number, body: string, login: string, review: number) => ({
@@ -606,6 +613,166 @@ describe('automations on GitHub events', () => {
     expect(await refused({ action: { kind: 'startWorkspace', mode: null, instruction: 'Review it.' } })).toMatchObject({ status: 'error', failure: { field: 'action.mode' } });
     expect(await refused({ trigger: { kind: 'github', events: [{ event: 'pull_request', actions: ['opened'] }, { event: 'issues', actions: ['opened'] }] } })).toMatchObject({ status: 'error', failure: { field: 'conditions' } });
     expect(await refused({ trigger: { kind: 'manual' }, conditions: [] })).toMatchObject({ status: 'error', failure: { field: 'action.kind' } });
+  });
+});
+
+describe('a pull request\'s batch settles before it is delivered', () => {
+  interface Suite { status: string; conclusion: string | null; latest_check_runs_count: number; app: { name: string; slug: string } }
+  interface Account { login: string; type: string }
+  /** PR #14 on GitHub as these tests change it: its head commit, and that commit's check suites, check runs and commit
+   * statuses (newest first, as GitHub lists them), and the PR's reviews. */
+  function pullRequest14(head: string) {
+    const onGitHub: { head: string; suites: Suite[]; runs: Array<{ status: string; conclusion: string | null; app: { slug: string } }>; statuses: Array<{ state: string; context: string; creator: Account }>; reviews: Array<{ user: Account }> } = {
+      head, suites: [], runs: [], statuses: [], reviews: [],
+    };
+    network.use(
+      http.get(`${API}/repos/${REPOSITORY.full_name}/pulls/14`, () => HttpResponse.json({ state: 'open', draft: false, merged: false, title: 'Change 14', html_url: `${REPOSITORY.html_url}/pull/14`, head: { sha: onGitHub.head }, requested_reviewers: [] })),
+      http.get(`${API}/repos/${REPOSITORY.full_name}/pulls/14/reviews`, () => HttpResponse.json(onGitHub.reviews)),
+      http.get(`${API}/repos/${REPOSITORY.full_name}/commits/:sha/check-suites`, ({ params }) => HttpResponse.json({ check_suites: params.sha === onGitHub.head ? onGitHub.suites : [] })),
+      http.get(`${API}/repos/${REPOSITORY.full_name}/commits/:sha/check-runs`, ({ params }) => HttpResponse.json({ check_runs: params.sha === onGitHub.head ? onGitHub.runs : [] })),
+      http.get(`${API}/repos/${REPOSITORY.full_name}/commits/:sha/statuses`, ({ params }) => HttpResponse.json(params.sha === onGitHub.head ? onGitHub.statuses : [])),
+    );
+    return onGitHub;
+  }
+  const suite = (name: string, status: string, conclusion: string | null, runs: number): Suite => ({ status, conclusion, latest_check_runs_count: runs, app: { name, slug: name.toLowerCase().replaceAll(' ', '-') } });
+  /** GitHub's `check_suite.completed` for one app's suite on `head`, naming PR #14. */
+  const suiteCompleted = (head: string, conclusion: string) => ({
+    action: 'completed', sender: { login: 'github' },
+    check_suite: { conclusion, head_branch: 'feature/search', head_sha: head, pull_requests: [{ number: 14, head: { ref: 'feature/search' }, base: { ref: 'main' } }] },
+  });
+  const opened = (head: string) => ({ action: 'opened', sender: { login: 'jules' }, pull_request: pull(14, { author: 'jules', head: 'feature/search', sha: head }) });
+  const messageOf = (submitted: { mock: { calls: ReadonlyArray<readonly unknown[]> } }, runId: string | undefined) =>
+    parseAutomationMessage(submittedText(submitted.mock.calls.find(([input]) => z.object({ requestId: z.string() }).parse(input).requestId === `automation:${runId}`)));
+
+  it('holds check results until every check suite on the head commit completed, then delivers them once with every suite\'s result', async () => {
+    const { projectId, automations, send, work, runs, submitted } = await installed(['jules']);
+    await vi.waitFor(async () => expect((await automations.list(projectId)).automations).toHaveLength(DEFAULT_NAMES.length));
+    const head = commit('a');
+    const onGitHub = pullRequest14(head);
+    onGitHub.suites = [suite('GitHub Actions', 'completed', 'failure', 3), suite('Vercel', 'in_progress', null, 1)];
+    await send('pull_request', opened(head));
+    await send('check_suite', suiteCompleted(head, 'failure'));
+    const checks = async () => (await runs()).filter(run => run.automationName === 'Failed checks to its workspace' && run.state !== 'skipped');
+
+    // Quiet for 90 s, but Vercel still runs: nothing is delivered.
+    await work();
+    expect(submitted).not.toHaveBeenCalled();
+    expect(await checks()).toMatchObject([{ state: 'queued' }]);
+    expect((await checks())[0]?.timeline.at(-1)?.label).toBe('Waiting for 1 of 2 check suites on aaaaaaa (Vercel)');
+
+    // Vercel passes (a pass starts no run of this automation): the batch goes once, with both suites' results.
+    onGitHub.suites = [suite('GitHub Actions', 'completed', 'failure', 3), suite('Vercel', 'completed', 'success', 1)];
+    await send('check_suite', suiteCompleted(head, 'success'));
+    await work();
+    await vi.waitFor(() => expect(submitted).toHaveBeenCalledTimes(1));
+    const [run, ...others] = await checks();
+    expect(others).toEqual([]);
+    expect(run).toMatchObject({ state: 'running' });
+    expect(messageOf(submitted, run?.id)?.events.map(event => [event.kind, event.text])).toEqual([['event', 'GitHub Actions: failure'], ['event', 'Vercel: success']]);
+    expect(run?.timeline.map(entry => entry.label)).toContain('Waited for 2 of 2 check suites on aaaaaaa');
+    await work();
+    expect(submitted).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops the old commit\'s check results on a push, keeps the batch\'s comments, and starts a new batch for the new commit\'s checks', async () => {
+    const { projectId, searchId, automations, send, work, runs, submitted } = await installed(['jules', 'dana']);
+    await vi.waitFor(async () => expect((await automations.list(projectId)).automations).toHaveLength(DEFAULT_NAMES.length));
+    // Its batches and the review feedback default's are delivered together.
+    await automations.updateSettings({ projectId, settings: { concurrency: 3, dailyRunCap: 50, trusted: [] } });
+    automationValue(await automations.create({ projectId, draft: {
+      name: 'Checks and comments', enabled: true, conditions: [],
+      trigger: { kind: 'github', events: [{ event: 'check_suite', actions: ['completed'] }, { event: 'issue_comment', actions: ['created'] }] },
+      action: { kind: 'messageWorkspace', workspaceId: searchId, instruction: 'Look at PR #14.' },
+    } }));
+    const [before, after] = [commit('a'), commit('b')];
+    const onGitHub = pullRequest14(before);
+    onGitHub.suites = [suite('GitHub Actions', 'in_progress', null, 2)];
+    await send('pull_request', opened(before));
+    await send('check_suite', suiteCompleted(before, 'failure'));
+    await send('issue_comment', {
+      action: 'created', sender: { login: 'dana' }, issue: { number: 14, title: 'Change 14', html_url: `${REPOSITORY.html_url}/pull/14`, user: { login: 'jules' }, labels: [], pull_request: {} },
+      comment: { html_url: `${REPOSITORY.html_url}/pull/14#issuecomment-5`, body: 'Please rename it.', user: { login: 'dana' } },
+    });
+    const batches = async () => (await runs()).filter(run => run.automationName === 'Checks and comments');
+    expect(await batches()).toMatchObject([{ state: 'queued', events: [{ event: 'check_suite.completed' }, { event: 'issue_comment.created' }] }]);
+
+    // The push: the check result for the commit before it goes, the comment stays.
+    onGitHub.head = after;
+    onGitHub.suites = [suite('GitHub Actions', 'completed', 'failure', 2)];
+    await send('pull_request', { action: 'synchronize', sender: { login: 'jules' }, pull_request: pull(14, { author: 'jules', head: 'feature/search', sha: after }) });
+    const [kept] = await batches();
+    expect(kept).toMatchObject({ state: 'queued', events: [{ event: 'issue_comment.created' }] });
+    expect(kept?.timeline.at(-1)?.label).toBe('A push to PR #14 (bbbbbbb) dropped 1 check result for the commit before it; the rest is kept');
+
+    // The new commit's check result opens a batch of its own.
+    await send('check_suite', suiteCompleted(after, 'failure'));
+    const [fresh, earlier] = await batches();
+    expect(earlier?.id).toBe(kept?.id);
+    expect(fresh).toMatchObject({ state: 'queued', events: [{ event: 'check_suite.completed' }] });
+
+    await work();
+    await vi.waitFor(() => expect(submitted.mock.calls.filter(([input]) => input.workspaceId === searchId && input.text.includes('Look at PR #14.'))).toHaveLength(2));
+    expect(messageOf(submitted, kept?.id)?.events.map(event => [event.kind, event.text])).toEqual([['comment', 'Please rename it.']]);
+    expect(messageOf(submitted, fresh?.id)?.events.map(event => [event.kind, event.text])).toEqual([['event', 'GitHub Actions: failure']]);
+  });
+
+  it('does not wait past the quiet window for a check suite GitHub created but never started, and names it', async () => {
+    const { projectId, automations, send, work, runs, submitted } = await installed(['jules']);
+    await vi.waitFor(async () => expect((await automations.list(projectId)).automations).toHaveLength(DEFAULT_NAMES.length));
+    const head = commit('a');
+    const onGitHub = pullRequest14(head);
+    onGitHub.suites = [suite('GitHub Actions', 'completed', 'failure', 3), suite('Cloudflare Pages', 'queued', null, 0)];
+    await send('pull_request', opened(head));
+    await send('check_suite', suiteCompleted(head, 'failure'));
+    await work();
+    await vi.waitFor(() => expect(submitted).toHaveBeenCalledTimes(1));
+    const [run] = (await runs()).filter(entry => entry.automationName === 'Failed checks to its workspace');
+    expect(messageOf(submitted, run?.id)?.events.map(event => event.text)).toEqual(['GitHub Actions: failure', 'Cloudflare Pages: never started']);
+    expect(run?.timeline.map(entry => entry.label)).toContain('Waited for 1 of 2 check suites on aaaaaaa; never started: Cloudflare Pages');
+  });
+
+  it('holds reviews while a review bot\'s commit status on the head commit is pending, and delivers them once it completes', async () => {
+    const { projectId, automations, send, work, runs, submitted } = await installed(['jules', 'dana']);
+    await vi.waitFor(async () => expect((await automations.list(projectId)).automations).toHaveLength(DEFAULT_NAMES.length));
+    const onGitHub = pullRequest14(commit('e'));
+    const coderabbit = { login: 'coderabbitai[bot]', type: 'Bot' };
+    // CodeRabbit reviewed the pull request before and reviews this commit now; CI's check run is no review bot's.
+    onGitHub.reviews = [{ user: coderabbit }];
+    onGitHub.statuses = [{ state: 'pending', context: 'CodeRabbit', creator: coderabbit }];
+    onGitHub.runs = [{ status: 'in_progress', conclusion: null, app: { slug: 'github-actions' } }];
+    await send('pull_request', opened(commit('e')));
+    await send('pull_request_review', submittedReview(900, 'One question about paging.', 'dana', 'commented'));
+    const feedback = async () => (await runs()).filter(run => run.automationName === 'Review feedback to its workspace');
+    await work();
+    expect(submitted).not.toHaveBeenCalled();
+    expect((await feedback())[0]?.timeline.at(-1)?.label).toBe('Waiting for coderabbitai');
+
+    onGitHub.statuses = [{ state: 'success', context: 'CodeRabbit', creator: coderabbit }, ...onGitHub.statuses];
+    await work();
+    await vi.waitFor(() => expect(submitted).toHaveBeenCalledTimes(1));
+    const [run] = await feedback();
+    expect(messageOf(submitted, run?.id)?.events.map(event => [event.kind, event.text])).toEqual([['review', 'One question about paging.']]);
+    expect(run?.timeline.map(entry => entry.label)).toContain('Waited for coderabbitai');
+  });
+
+  it('delivers a held batch as it stands 10 minutes after its first event', async () => {
+    const { projectId, automations, send, work, runs, submitted } = await installed(['jules']);
+    await vi.waitFor(async () => expect((await automations.list(projectId)).automations).toHaveLength(DEFAULT_NAMES.length));
+    const head = commit('a');
+    const onGitHub = pullRequest14(head);
+    onGitHub.suites = [suite('GitHub Actions', 'completed', 'failure', 3), suite('Vercel', 'in_progress', null, 1)];
+    await send('pull_request', opened(head));
+    await send('check_suite', suiteCompleted(head, 'failure'));
+    await work();
+    expect(submitted).not.toHaveBeenCalled();
+
+    // Vercel never finishes; the batch's first event was 10 minutes ago.
+    await runInDurableObject(automations, (_instance, state) => { state.storage.sql.exec("UPDATE automation_runs SET created_at=created_at-600000 WHERE state='queued'"); });
+    await work();
+    await vi.waitFor(() => expect(submitted).toHaveBeenCalledTimes(1));
+    const [run] = (await runs()).filter(entry => entry.automationName === 'Failed checks to its workspace');
+    expect(messageOf(submitted, run?.id)?.events.map(event => event.text)).toEqual(['GitHub Actions: failure', 'Vercel: still running']);
+    expect(run?.timeline.map(entry => entry.label)).toContain('Delivered at the 10-minute limit: 1 of 2 check suites on aaaaaaa completed; still running: Vercel');
   });
 });
 

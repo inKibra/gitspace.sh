@@ -8,7 +8,7 @@ import {
 import { ArtifactsCodeStore } from '@gitspace/runtime-workspace-do';
 import { accountAccessResponse, activeAccount } from './account-access.js';
 import { AutomationEventSchema, automationEvent, type AutomationEvent, type WatchedItem } from './automation-events.js';
-import type { AutomationWatchOn, PullRequestState } from '@gitspace/protocol/automations-contract';
+import { isBotLogin, type AutomationWatchOn, type PullRequestState } from '@gitspace/protocol/automations-contract';
 import { GitHubApiError, base64url, githubRequest } from './github-api.js';
 import { completeGuideReaderSignIn } from './guide-shares.js';
 import { notifyBrowsers } from './live-notices.js';
@@ -30,6 +30,20 @@ const KEPT_DELIVERIES = 500;
 const PULL_REQUEST_FILE_PAGES = 30;
 /** Check run conclusions that fail a pull request's checks; neutral and skipped ones pass. */
 const FAILED_CONCLUSIONS: Record<string, true> = { failure: true, timed_out: true, cancelled: true, action_required: true, startup_failure: true, stale: true };
+
+/** A check suite GitHub lists for a pull request's head commit: its app, `status` (`queued`, `in_progress`,
+ * `completed`), `conclusion` once completed, and how many check runs it has. */
+export interface PullRequestCheckSuite { app: string; status: string; conclusion: string | null; runs: number }
+
+/** What `GitHubAppDO.pullRequestSettling` reads: the head commit, its check suites, and the review bots working on it,
+ * named without `[bot]` (`coderabbitai`). */
+export interface PullRequestSettling { headSha: string; suites: PullRequestCheckSuite[]; reviewBots: string[] }
+
+/** A bot as a review bot is named and matched: its login or app slug, lowercased, without `[bot]`. */
+function reviewBotName(login: string): string {
+  return login.replace(/\[bot\]$/iu, '').toLowerCase();
+}
+
 const LISTED_DELIVERIES = 50;
 const REPOSITORY_PAGE_SIZE = 100;
 const REPOSITORY_PAGES = 100;
@@ -730,6 +744,48 @@ export class GitHubAppDO extends BudgetedDurableObject {
       state: pull.merged ? 'merged' : pull.state === 'closed' ? 'closed' : pull.draft ? 'draft' : 'open',
       checks: outcomes.includes('failing') ? 'failing' : outcomes.includes('pending') ? 'pending' : outcomes.length ? 'passing' : 'none',
       readAt: new Date().toISOString(), title: pull.title, url: pull.html_url,
+    };
+  }
+
+  /**
+   * What a pull request's batch waits on before it is delivered (docs/AUTOMATIONS-DESIGN.md §7): the head commit, the
+   * check suites GitHub lists for it, and the review bots still working on it. A bot is a `[bot]` login or a `Bot`
+   * account, or the app that owns a check run; it is working while its check run or its latest commit status on the
+   * head commit is not completed (`queued`, `in_progress`, `pending`), and it reviews the pull request when it reviewed
+   * it before, is requested to, or wrote one of `authors`. Read through the installation covering its repository.
+   */
+  async pullRequestSettling(repository: string, number: number, authors: readonly string[]): Promise<PullRequestSettling> {
+    const token = (await this.installationToken(repository, { pull_requests: 'read', checks: 'read', statuses: 'read', metadata: 'read' }, `Reading the checks of ${repository} pull request #${number}`)).token;
+    const account = z.object({ login: z.string(), type: z.string().optional() });
+    const pull = await githubRequest(`/repos/${repository}/pulls/${number}`, { token, schema: z.object({ head: z.object({ sha: z.string() }), requested_reviewers: z.array(account).optional() }) });
+    const sha = pull.head.sha;
+    const [suites, runs, statuses] = await Promise.all([
+      githubRequest(`/repos/${repository}/commits/${sha}/check-suites?per_page=100`, { token, schema: z.object({ check_suites: z.array(z.object({ status: z.string(), conclusion: z.string().nullable(), latest_check_runs_count: z.number().int(), app: z.object({ name: z.string() }).nullable() })) }) }),
+      githubRequest(`/repos/${repository}/commits/${sha}/check-runs?per_page=100`, { token, schema: z.object({ check_runs: z.array(z.object({ status: z.string(), app: z.object({ slug: z.string() }).nullable() })) }) }),
+      githubRequest(`/repos/${repository}/commits/${sha}/statuses?per_page=100`, { token, schema: z.array(z.object({ state: z.string(), context: z.string(), creator: account.nullable() })) }),
+    ]);
+    const isBot = (user: z.infer<typeof account>) => isBotLogin(user.login) || user.type === 'Bot';
+    // GitHub lists a commit's statuses newest first; each context's newest counts.
+    const latest = new Map<string, (typeof statuses)[number]>();
+    for (const status of statuses) if (!latest.has(status.context)) latest.set(status.context, status);
+    const working = new Set([
+      ...runs.check_runs.flatMap(run => run.status !== 'completed' && run.app ? [reviewBotName(run.app.slug)] : []),
+      ...[...latest.values()].flatMap(status => status.state === 'pending' && status.creator && isBot(status.creator) ? [reviewBotName(status.creator.login)] : []),
+    ]);
+    const reviewBots: string[] = [];
+    if (working.size > 0) {
+      const reviews = await githubRequest(`/repos/${repository}/pulls/${number}/reviews?per_page=100`, { token, schema: z.array(z.object({ user: account.nullable() })) });
+      const reviewers = new Set([
+        ...authors.filter(isBotLogin),
+        ...(pull.requested_reviewers ?? []).filter(isBot).map(user => user.login),
+        ...reviews.flatMap(review => review.user && isBot(review.user) ? [review.user.login] : []),
+      ].map(reviewBotName));
+      reviewBots.push(...[...working].filter(bot => reviewers.has(bot)));
+    }
+    return {
+      headSha: sha,
+      suites: suites.check_suites.map(suite => ({ app: suite.app?.name ?? 'An app', status: suite.status, conclusion: suite.conclusion, runs: suite.latest_check_runs_count })),
+      reviewBots,
     };
   }
 
