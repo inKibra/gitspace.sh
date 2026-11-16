@@ -87,13 +87,13 @@ describe('gitspace-ui blocks in Markdown', () => {
     'How it flows': ['tool-result store', 'conversation entries', 'Play the steps', 'unchanged'],
     'A choice for the person': ['Which cache keeps the replies?', 'Workers KV', 'Add to message'],
     'A plan to tick off': ['Before the release', '1 of 3 checks done', 'Smoke run on the release'],
-    'Before and after': ['The board in the transcript', 'A notice'],
+    'Before and after': ['A message from you', 'A notice'],
     'A layout or anything the components cannot express': ['Workspace board', 'Composer'],
-    'A walkthrough to play': ['Where a reply is cached now', '3 frames', 'captions only', 'Replies are cached in one Durable Object now', '11 ms'],
+    'A walkthrough to play': ['Where a reply is cached now', '3 frames', 'captions only', 'Replies are cached in one Durable Object now'],
   };
   it.each(UI_BLOCK_EXAMPLES.filter((example) => example.fence !== 'mermaid'))('draws the skill example "$title" as an agent writes it', async (example) => {
     await render(<GitSpaceMarkdown>{fence(example.fence, example.body)}</GitSpaceMarkdown>);
-    await waitFor(() => container.querySelector(`[data-gitspace-block="${example.fence}"]`) !== null);
+    await waitFor(() => container.querySelector(`[data-gitspace-block="${example.fence.split(' ')[0]}"]`) !== null);
     const text = container.textContent ?? '';
     expect(text).not.toContain('could not be drawn');
     for (const expected of SKILL_EXAMPLES[example.title] ?? ['missing expectations']) expect(text).toContain(expected);
@@ -126,6 +126,18 @@ describe('gitspace-ui blocks in Markdown', () => {
     await render(<GitSpaceMarkdown>{fence('gitspace-ui', '{ "root": card }')}</GitSpaceMarkdown>);
     await waitFor(() => container.textContent?.includes('could not be drawn') ?? false);
     expect(container.textContent).toContain('the gitspace-ui block is not JSON');
+  });
+
+  it('draws a short-form fence as its one component, and names the closest components for an unknown one', async () => {
+    const lines = [{ depth: 0, code: 'reply(req)', change: 'same' }, { depth: 1, code: 'cache.get(key)', change: 'added', note: 'strong reads' }];
+    await render(<GitSpaceMarkdown>{fence('gitspace-ui CallDiff id=fix-path', JSON.stringify({ title: 'Reads go to the cache', lines }))}</GitSpaceMarkdown>);
+    await waitFor(() => container.querySelector('[data-gitspace-block="gitspace-ui"]') !== null);
+    expect(container.textContent).toContain('Reads go to the cache');
+    expect(container.textContent).toContain('cache.get(key)');
+    expect(container.textContent).not.toContain('could not be drawn');
+    await render(<GitSpaceMarkdown>{fence('gitspace-ui CalDiff', JSON.stringify({ lines }))}</GitSpaceMarkdown>);
+    await waitFor(() => container.textContent?.includes('could not be drawn') ?? false);
+    expect(container.textContent).toContain('the closest are CallDiff, Diff, Card');
   });
 
   it('marks a block the agent corrected, with what was wrong in its tooltip, and only that block', async () => {

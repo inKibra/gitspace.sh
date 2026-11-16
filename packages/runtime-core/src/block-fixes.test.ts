@@ -75,7 +75,7 @@ test('blocks are numbered through a run\'s replies; only invalid ones are listed
       'Your reply holds blocks that do not validate; the chat shows an error card in place of each. Blocks are numbered through your reply from 1.',
       'Block 2 (mermaid): the Mermaid source is empty',
       'Block 3 (gitspace-ui, id "plan"): /elements/plan/children/0: no element "x" in elements; /elements/plan/children: Text takes no children',
-      'Correct them in place: call fix_block once per block, with block (its number or id) and source (the corrected body of its fence, without the fence lines), checked against skill://gitspace-ui. Each block takes 3 tries. Write nothing else: the person sees only your reply, with each block replaced by its correction.',
+      'Correct them in place: call fix_block once per block, with block (its number or id) and source (the corrected body of its fence, without the fence lines; the fence keeps its info string, so send one whole fence to change that), checked against the drawing brief or skill://gitspace-ui. Each block takes 3 tries. Write nothing else: the person sees only your reply, with each block replaced by its correction.',
     ]);
     expect(invalidBlocks([await reply([text(`${svg}\n${fence}mermaid\ngraph TD; A-->B\n${fence}`)])])).toEqual([]);
   } finally { await harness.close(context); }
@@ -113,6 +113,22 @@ test('a reply with an invalid block gets a hidden fix step; a refused correction
     expect(next.some(message => message.role === 'assistant' && message.content.some(part => part.type === 'text' && part.text.includes(emptyMermaid)))).toBe(false);
     expect(runtime.admitted).toHaveLength(3);
     expect(runtime.reports).toEqual([]);
+  } finally { await runtime.harness.close(context); }
+});
+
+test('a short-form block is listed by its id and corrected in place, keeping its info string', async () => {
+  const line = (change: string) => JSON.stringify({ lines: [{ depth: 0, code: 'cache.get(key)', change }] });
+  const reply = `The fix:\n${fence}gitspace-ui CallDiff id=fix-path\n${line('moved')}\n${fence}`;
+  const runtime = await open([[text(reply)], [fix('good', 'fix-path', line('added'))]]);
+  try {
+    await runtime.send('Show the fix');
+    const entries = await runtime.entries();
+    const step = entries.find(entry => BlockFixEntry.is(entry));
+    expect(BlockFixEntry.is(step) && step.data.blocks.map(block => block.id)).toEqual(['fix-path']);
+    expect(entries.filter(entry => ToolResultEntry.is(entry)).map(resultText)).toEqual(['Block 1 corrected.']);
+    const answer = entries.find(entry => AssistantEntry.is(entry));
+    const correction = entries.find(entry => BlockCorrectionEntry.is(entry));
+    expect(answer && correctedReply(answer, correction)?.model[0]).toMatchObject({ content: [text(`The fix:\n${fence}gitspace-ui CallDiff id=fix-path\n${line('added')}\n${fence}`)] });
   } finally { await runtime.harness.close(context); }
 });
 

@@ -5,7 +5,7 @@
 import { AssistantEntry, GenerationTask, LiveDoc, defineEntry, defineExtension, defineTask, defineTool, hook, runEndTask, type ConversationId, type EntryRecord, type ToolExecutionResult } from '@earendil-works/pi-durable';
 import type { Message } from '@earendil-works/pi-ai';
 import { Type } from 'typebox';
-import { extractBlocks, mapBlockColours, validateMarkdownBlocks, type UiBlockKind } from '@gitspace/protocol/gitspace-ui';
+import { extractBlocks, fenceSpec, mapBlockColours, validateMarkdownBlocks, type UiBlock, type UiBlockKind } from '@gitspace/protocol/gitspace-ui';
 import { BlockCorrectionsDoc } from './documents.js';
 import { AgentDefinitionContextDoc } from './subagent-state.js';
 import { BLOCK_FIX_REQUEST } from './transcript-rows.js';
@@ -27,17 +27,15 @@ export const BlockFixEntry = defineEntry<{ blocks: InvalidBlock[] }>('gitspace.b
 /** A reply's corrections so far: every corrected block, and a context edit that replaces the reply with them in place. */
 export const BlockCorrectionEntry = defineEntry<{ reply: number; corrected: BlockCorrection[] }>('gitspace.block-correction');
 
-/** The root element id of a gitspace-ui block's spec; null for another block or one without. */
-function blockId(kind: UiBlockKind, body: string): string | null {
-  if (kind !== 'gitspace-ui') return null;
-  try {
-    const spec: unknown = JSON.parse(body);
-    if (typeof spec !== 'object' || spec === null || !('root' in spec) || !('elements' in spec) || typeof spec.root !== 'string' || typeof spec.elements !== 'object' || spec.elements === null) return null;
-    const root: unknown = Reflect.get(spec.elements, spec.root);
-    return typeof root === 'object' && root !== null && 'id' in root && typeof root.id === 'string' ? root.id : null;
-  } catch {
-    return null;
-  }
+/** The root element id of a gitspace-ui block's spec, short form or full; null for another block or one without. */
+function blockId(block: UiBlock): string | null {
+  if (block.kind !== 'gitspace-ui') return null;
+  const read = fenceSpec(block.body, block.info);
+  if ('issue' in read) return null;
+  const { spec } = read;
+  if (typeof spec !== 'object' || spec === null || !('root' in spec) || !('elements' in spec) || typeof spec.root !== 'string' || typeof spec.elements !== 'object' || spec.elements === null) return null;
+  const root: unknown = Reflect.get(spec.elements, spec.root);
+  return typeof root === 'object' && root !== null && 'id' in root && typeof root.id === 'string' ? root.id : null;
 }
 
 /** The issues of block `index` (from 0) among `issues` of one Markdown text, each `<path>: <message>`. */
@@ -60,7 +58,7 @@ export function invalidBlocks(replies: readonly EntryRecord[]): InvalidBlock[] {
       blocks.forEach((block, blockIndex) => {
         number++;
         const own = blockIssues(issues, blockIndex);
-        if (own.length > 0) found.push({ number, entry: Number(entry.id), message: messageIndex, part: partIndex, block: blockIndex, kind: block.kind, id: blockId(block.kind, block.body), issues: own });
+        if (own.length > 0) found.push({ number, entry: Number(entry.id), message: messageIndex, part: partIndex, block: blockIndex, kind: block.kind, id: blockId(block), issues: own });
       });
     });
   });
@@ -78,7 +76,7 @@ export function blockFixPrompt(blocks: readonly InvalidBlock[]): string {
   return [
     `Your reply holds ${blocks.length === 1 ? 'a block that does' : 'blocks that do'} not validate; the chat shows an error card in place of ${blocks.length === 1 ? 'it' : 'each'}. Blocks are numbered through your reply from 1.`,
     ...lines,
-    `Correct ${blocks.length === 1 ? 'it' : 'them'} in place: call fix_block once per block, with block (its number or id) and source (the corrected body of its fence, without the fence lines), checked against skill://gitspace-ui. Each block takes ${BLOCK_FIX_TRIES} tries. Write nothing else: the person sees only your reply, with each block replaced by its correction.`,
+    `Correct ${blocks.length === 1 ? 'it' : 'them'} in place: call fix_block once per block, with block (its number or id) and source (the corrected body of its fence, without the fence lines; the fence keeps its info string, so send one whole fence to change that), checked against the drawing brief or skill://gitspace-ui. Each block takes ${BLOCK_FIX_TRIES} tries. Write nothing else: the person sees only your reply, with each block replaced by its correction.`,
   ].join('\n');
 }
 
@@ -233,11 +231,12 @@ export const fixBlockTool = defineTool({
       const blocks = part?.type === 'text' ? extractBlocks(part.text) : [];
       const original = blocks[target.block];
       if (message?.role !== 'assistant' || part?.type !== 'text' || !original) return fixResult(`Block ${target.number} is no longer in your reply; nothing was changed.`, true, othersDone);
-      // The fence keeps its marker and kind; a source that is itself one whole fence gives its kind and body.
+      // The fence keeps its marker, kind and info string; a source that is itself one whole fence gives its own.
       const fence = /^ {0,3}(`{3,}|~{3,})/.exec(part.text.slice(original.start))?.[1] ?? '```';
       const whole = /^\s*(?:`{3,}|~{3,})/.test(args.source) ? extractBlocks(args.source.trim()) : [];
       const [given] = whole.length === 1 && whole[0]?.closed ? whole : [];
-      const corrected = mapBlockColours(`${fence}${given?.kind ?? original.kind}\n${given?.body ?? args.source.replace(/\n$/, '')}\n${fence}`);
+      const opening = [given?.kind ?? original.kind, given ? given.info : original.info].filter(Boolean).join(' ');
+      const corrected = mapBlockColours(`${fence}${opening}\n${given?.body ?? args.source.replace(/\n$/, '')}\n${fence}`);
       const text = part.text.slice(0, original.start) + corrected + part.text.slice(original.end);
       const issues = blockIssues(validateMarkdownBlocks(text), target.block);
       const left = BLOCK_FIX_TRIES - used;

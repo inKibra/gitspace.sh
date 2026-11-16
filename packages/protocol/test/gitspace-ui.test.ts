@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { extractBlocks, mapBlockColours, parseSvg, requiredBlockAsks, themeColour, UI_BLOCK_EXAMPLES, uiBlockPrompt, validateMarkdownBlocks, validateSvg, validateUiSpec } from '../src/gitspace-ui.js';
+import { extractBlocks, fenceSpec, mapBlockColours, parseSvg, requiredBlockAsks, themeColour, UI_BLOCK_BRIEF, UI_BLOCK_EXAMPLES, uiBlockPrompt, validateMarkdownBlocks, validateSvg, validateUiSpec } from '../src/gitspace-ui.js';
 
 const fence = '```';
 
@@ -33,7 +33,7 @@ describe('gitspace-ui specs', () => {
   it('accepts every example the skill teaches, each drawn as its own block', () => {
     const prompt = uiBlockPrompt();
     expect(validateMarkdownBlocks(prompt)).toEqual([]);
-    expect(extractBlocks(prompt).map((block) => block.kind)).toEqual(UI_BLOCK_EXAMPLES.map((example) => example.fence));
+    expect(extractBlocks(prompt).map((block) => [block.kind, block.info].filter(Boolean).join(' '))).toEqual(UI_BLOCK_EXAMPLES.map((example) => example.fence));
   });
 
   it('rejects a FlowMap whose paths or steps name areas or paths it does not have', () => {
@@ -285,5 +285,53 @@ describe('Block ids, refs, Sequences and asks', () => {
     const card = { type: 'AskCard', id: 'q', ask: { required: true }, props: { questionId: 'q', question: 'Ship it?', prompt: 'Ship?', options: [{ value: 'y', label: 'Yes' }, { value: 'n', label: 'No' }], value: '' }, children: [] };
     expect(requiredBlockAsks(markdownFence({ root: 'q', elements: { q: card } }))).toEqual([{ id: 'q', prompt: 'Ship it?', choices: ['Yes', 'No'] }]);
     expect(requiredBlockAsks(markdownFence({ root: 'q', elements: { q: { ...card, ask: { required: false } } } }))).toEqual([]);
+  });
+});
+
+describe('Short-form blocks', () => {
+  const lines = [{ depth: 0, code: 'reply(req)', change: 'same' }, { depth: 1, code: 'cache.get(key)', change: 'added', note: 'strong reads' }];
+
+  it('expands a fence naming one component to the full spec of that one element, and validates it', () => {
+    const markdown = `Fix:\n${fence}gitspace-ui CallDiff id=fix-path\n${JSON.stringify({ title: 'Reads', lines })}\n${fence}`;
+    const full = { root: 'block', elements: { block: { type: 'CallDiff', props: { title: 'Reads', lines }, children: [], id: 'fix-path' } }, state: {} };
+    const [block] = extractBlocks(markdown);
+    expect(block?.info).toBe('CallDiff id=fix-path');
+    expect(fenceSpec(block?.body ?? '', block?.info ?? '')).toEqual({ spec: full });
+    expect(validateMarkdownBlocks(markdown)).toEqual([]);
+    expect(validateMarkdownBlocks(`${fence}gitspace-ui\n${JSON.stringify(full)}\n${fence}`)).toEqual([]);
+    expect(paths(validateMarkdownBlocks(`${fence}gitspace-ui CallDiff\n${JSON.stringify({ lines: [{ ...lines[0], change: 'moved' }] })}\n${fence}`))).toEqual(['block 1/elements/block/props/lines/0/change']);
+  });
+
+  it('makes a required block ask from id and ask=required, and none from a plain ask', () => {
+    const card = JSON.stringify({ question: 'Which cache keeps replies?', options: [{ value: 'kv', label: 'Workers KV' }, { value: 'do', label: 'Durable Object' }] });
+    const required = `Pick one:\n${fence}gitspace-ui AskCard id=cache ask=required\n${card}\n${fence}`;
+    expect(validateMarkdownBlocks(required)).toEqual([]);
+    expect(requiredBlockAsks(required)).toEqual([{ id: 'cache', prompt: 'Which cache keeps replies?', choices: ['Workers KV', 'Durable Object'] }]);
+    expect(requiredBlockAsks(`${fence}gitspace-ui AskCard id=cache ask\n${card}\n${fence}`)).toEqual([]);
+    expect(paths(validateMarkdownBlocks(`${fence}gitspace-ui AskCard ask=required\n${card}\n${fence}`))).toEqual(['block 1/elements/block/ask']);
+  });
+
+  it('refuses an unknown component with the closest names, and an unknown option', () => {
+    expect(validateMarkdownBlocks(`${fence}gitspace-ui CalDiff\n{}\n${fence}`)).toEqual([{ path: 'block 1', message: 'unknown component "CalDiff" in the fence\'s info string; the closest are CallDiff, Diff, Card' }]);
+    expect(validateMarkdownBlocks(`${fence}gitspace-ui Stats required\n{"tiles":[]}\n${fence}`)).toEqual([{ path: 'block 1', message: 'unknown option "required" in the fence\'s info string; after the component it takes id=<id>, ask or ask=required' }]);
+  });
+
+  it('keeps a short-form Svg in its short form when its colours are mapped', () => {
+    const markdown = `${fence}gitspace-ui Svg id=map\n${JSON.stringify({ svg: '<svg viewBox="0 0 4 4"><rect fill="#fff"/></svg>' })}\n${fence}`;
+    expect(mapBlockColours(markdown)).toBe(`${fence}gitspace-ui Svg id=map\n${JSON.stringify({ svg: '<svg viewBox="0 0 4 4"><rect fill="var(--card)"/></svg>' })}\n${fence}`);
+  });
+});
+
+describe('The drawing brief', () => {
+  it('shows a short-form body for each of its components, every one valid', () => {
+    const shapes = [...UI_BLOCK_BRIEF.matchAll(/^- (\w+)((?: [\w=.-]+)*) (\{.*?\})(?:; also: .*)?$/gmu)];
+    expect(shapes.map((shape) => shape[1])).toEqual(['CallDiff', 'StateFlow', 'Table', 'Stats', 'MetricDelta', 'Chart', 'Tradeoffs', 'AskCard', 'Timeline', 'Sequence', 'Reply', 'Svg']);
+    const markdown = shapes.map((shape) => `${fence}gitspace-ui ${shape[1]}${shape[2]}\n${shape[3]}\n${fence}`).join('\n\n');
+    expect(validateMarkdownBlocks(markdown)).toEqual([]);
+    expect(requiredBlockAsks(markdown).map((ask) => ask.id)).toEqual(['cache']);
+  });
+
+  it('stays within its budget of 4,500 characters', () => {
+    expect(UI_BLOCK_BRIEF.length).toBeLessThanOrEqual(4500);
   });
 });

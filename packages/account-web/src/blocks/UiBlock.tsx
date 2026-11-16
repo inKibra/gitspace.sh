@@ -6,7 +6,7 @@
 // stored chat message takes comments (comments/CommentLayer.tsx) on itself, its items and text selected in it, unless
 // it asks a question.
 import { askAnswerParts, questionState, type RuntimeQuestion } from '@gitspace/protocol-runtime';
-import { blockAskQuestionId, gitspaceUiCatalog, parseBlockRef, validateUiSpec } from '@gitspace/protocol/gitspace-ui';
+import { blockAskQuestionId, fenceSpec, gitspaceUiCatalog, parseBlockRef, validateUiSpec } from '@gitspace/protocol/gitspace-ui';
 import { Badge } from '@gitspace/ui';
 import { createStateStore, type Spec, type StateStore } from '@json-render/core';
 import { JSONUIProvider, Renderer, defineRegistry, useStateValue, type Actions } from '@json-render/react';
@@ -50,21 +50,15 @@ function RefBlock({ reference, refs, within }: { reference: string; refs: readon
   return <DrawnBlock spec={spec} refs={chain} />;
 }
 
-/** The body of a ```gitspace-ui or ```svg fence. */
-export function FencedBlock({ kind, body }: { kind: 'gitspace-ui' | 'svg'; body: string }) {
-  return kind === 'svg' ? <SvgBlock svg={body} /> : <JsonFence body={body} />;
+/** The body of a ```gitspace-ui or ```svg fence; `info` is the info string after the kind (a short-form component). */
+export function FencedBlock({ kind, body, info }: { kind: 'gitspace-ui' | 'svg'; body: string; info: string }) {
+  return kind === 'svg' ? <SvgBlock svg={body} /> : <JsonFence body={body} info={info} />;
 }
 
-function JsonFence({ body }: { body: string }) {
-  const parsed = useMemo((): { spec: unknown } | { error: string } => {
-    try {
-      return { spec: JSON.parse(body) };
-    } catch (error) {
-      return { error: `the gitspace-ui block is not JSON: ${error instanceof Error ? error.message : String(error)}` };
-    }
-  }, [body]);
-  if ('error' in parsed) return <BlockErrorCard issues={[{ path: '', message: parsed.error }]} source={body} sourceLabel="JSON" />;
-  return <UiBlock spec={parsed.spec} source={body} />;
+function JsonFence({ body, info }: { body: string; info: string }) {
+  const read = useMemo(() => fenceSpec(body, info), [body, info]);
+  if ('issue' in read) return <BlockErrorCard issues={[read.issue]} source={body} sourceLabel="JSON" />;
+  return <UiBlock spec={read.spec} source={body} />;
 }
 
 /** What an element of the block asks of the person. */

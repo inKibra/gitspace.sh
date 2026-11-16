@@ -15,6 +15,9 @@ export type UiBlockKind = 'gitspace-ui' | 'svg' | 'mermaid';
 export interface UiBlock {
   kind: UiBlockKind;
   body: string;
+  /** The fence's info string after the kind: `<Component> [id=<id>] [ask|ask=required]` for a short-form gitspace-ui
+   * fence, '' otherwise. */
+  info: string;
   /** Offset of the opening fence line. */
   start: number;
   /** Offset just past the closing fence line, or the end of the Markdown when the fence is not closed. */
@@ -542,10 +545,11 @@ function byteLength(text: string): number {
   return new TextEncoder().encode(text).length;
 }
 
-/** Finds the ```gitspace-ui, ```svg and ```mermaid fences in Markdown; other fences (and anything inside them) are skipped. */
+/** Finds the ```gitspace-ui, ```svg and ```mermaid fences in Markdown; other fences (and anything inside them) are skipped.
+ * A gitspace-ui fence may name a component after the kind (the short form, `fenceSpec`). */
 export function extractBlocks(markdown: string): UiBlock[] {
   const blocks: UiBlock[] = [];
-  let open: { fence: string; indent: number; kind: UiBlockKind | undefined; start: number; lines: string[] } | undefined;
+  let open: { fence: string; indent: number; kind: UiBlockKind | undefined; info: string; start: number; lines: string[] } | undefined;
   let offset = 0;
   for (const rawLine of markdown.split('\n')) {
     const lineStart = offset;
@@ -556,19 +560,89 @@ export function extractBlocks(markdown: string): UiBlock[] {
       if (opening === null) continue;
       const info = opening[3].trim();
       if (opening[2].startsWith('`') && info.includes('`')) continue;
-      open = { fence: opening[2], indent: opening[1].length, kind: BLOCK_KINDS.find((kind) => kind === info), start: lineStart, lines: [] };
+      const [name = '', ...rest] = info.split(/\s+/u);
+      const kind = BLOCK_KINDS.find((each) => each === name && (rest.length === 0 || each === 'gitspace-ui'));
+      open = { fence: opening[2], indent: opening[1].length, kind, info: rest.join(' '), start: lineStart, lines: [] };
       continue;
     }
     const closing = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(line);
     if (closing !== null && closing[1][0] === open.fence[0] && closing[1].length >= open.fence.length) {
-      if (open.kind !== undefined) blocks.push({ kind: open.kind, body: open.lines.join('\n'), start: open.start, end: lineStart + rawLine.length, closed: true });
+      if (open.kind !== undefined) blocks.push({ kind: open.kind, body: open.lines.join('\n'), info: open.info, start: open.start, end: lineStart + rawLine.length, closed: true });
       open = undefined;
       continue;
     }
     if (open.kind !== undefined) open.lines.push(line.replace(new RegExp(`^ {0,${open.indent}}`), ''));
   }
-  if (open?.kind !== undefined) blocks.push({ kind: open.kind, body: open.lines.join('\n'), start: open.start, end: markdown.length, closed: false });
+  if (open?.kind !== undefined) blocks.push({ kind: open.kind, body: open.lines.join('\n'), info: open.info, start: open.start, end: markdown.length, closed: false });
   return blocks;
+}
+
+/** A short-form fence's info string: the component it draws, the element's id and its ask. */
+interface ShortForm { component: string; id: string | null; ask: 'optional' | 'required' | null }
+
+const SHORT_FORM_OPTION = /^(?:id=(\S+)|ask(=required)?)$/u;
+
+/** The short form an info string names; null for the full form (no info), or the issue with it. */
+function shortForm(info: string): ShortForm | null | UiBlockIssue {
+  const [component, ...options] = info.split(/\s+/u).filter(Boolean);
+  if (component === undefined) return null;
+  if (!componentByType.has(component)) return { path: '', message: `unknown component "${component}" in the fence's info string; the closest are ${closestNames(component, [...componentByType.keys()]).join(', ')}` };
+  const form: ShortForm = { component, id: null, ask: null };
+  for (const option of options) {
+    const match = SHORT_FORM_OPTION.exec(option);
+    if (match === null) return { path: '', message: `unknown option "${option}" in the fence's info string; after the component it takes id=<id>, ask or ask=required` };
+    if (match[1] !== undefined) form.id = match[1];
+    else form.ask = match[2] === undefined ? 'optional' : 'required';
+  }
+  return form;
+}
+
+/** The `count` names closest to `name` by edit distance, ignoring case. */
+function closestNames(name: string, names: readonly string[], count = 3): string[] {
+  const target = name.toLowerCase();
+  const distance = (other: string): number => {
+    const candidate = other.toLowerCase();
+    let previous = Array.from({ length: candidate.length + 1 }, (_, index) => index);
+    for (let row = 1; row <= target.length; row++) {
+      const current = [row];
+      for (let column = 1; column <= candidate.length; column++) {
+        current.push(Math.min(previous[column] + 1, current[column - 1] + 1, previous[column - 1] + (target[row - 1] === candidate[column - 1] ? 0 : 1)));
+      }
+      previous = current;
+    }
+    return previous[candidate.length];
+  };
+  return names.map((other) => ({ other, score: distance(other) })).sort((a, b) => a.score - b.score).slice(0, count).map(({ other }) => other);
+}
+
+/**
+ * The spec a gitspace-ui fence holds, or the issue that keeps it from holding one. The full form is the spec's JSON. The
+ * short form names one component in the info string (`gitspace-ui CallDiff id=fix ask=required`) and holds only its
+ * props; it expands to a one-element spec whose element has that id and ask (`ask` optional, `ask=required` required).
+ * A short-form AskCard whose props have no `value` is wired as a question card: `question`, `options` and an optional
+ * `prompt` (the question when omitted) and `questionId` (the id, or "ask") are given, and the expansion binds the pick,
+ * reads /staged, /sent and /answered and answers the question.
+ */
+export function fenceSpec(body: string, info: string): { spec: unknown } | { issue: UiBlockIssue } {
+  const form = shortForm(info);
+  if (form !== null && !('component' in form)) return { issue: form };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch (error) {
+    return { issue: { path: '', message: `the gitspace-ui block is not JSON: ${error instanceof Error ? error.message : String(error)}` } };
+  }
+  if (form === null) return { spec: parsed };
+  if (!isRecord(parsed)) return { issue: { path: '', message: `a short-form block holds one JSON object: the props of ${form.component}` } };
+  const element: Record<string, unknown> = { type: form.component, props: parsed, children: [] };
+  if (form.id !== null) element.id = form.id;
+  if (form.ask !== null) element.ask = { required: form.ask === 'required' };
+  if (form.component !== 'AskCard' || Object.hasOwn(parsed, 'value')) return { spec: { root: 'block', elements: { block: element }, state: {} } };
+  const questionId = typeof parsed.questionId === 'string' ? parsed.questionId : form.id ?? 'ask';
+  const label = { $computed: 'lookup', args: { items: { $state: '/options' }, key: 'value', value: { $state: '/answer' }, field: 'label' } };
+  element.props = { prompt: parsed.question, ...parsed, questionId, options: { $state: '/options' }, value: { $bindState: '/answer' }, staged: { $state: `/staged/${questionId}` }, sent: { $state: `/sent/${questionId}` }, answered: { $state: '/answered' } };
+  element.on = { answer: { action: 'answer_question', params: { questionId, question: parsed.question, answer: { $state: '/answer' }, label } } };
+  return { spec: { root: 'block', elements: { block: element }, state: { answer: '', options: parsed.options } } };
 }
 
 /** Validates every block in Markdown. Issue paths start with `block <n>` (1-based, counting only these fences). The
@@ -605,26 +679,15 @@ interface CheckedBlock {
 
 function checkBlock(block: UiBlock): CheckedBlock {
   if (block.kind !== 'gitspace-ui' || !block.closed) return { issues: validateBlock(block), ids: new Map(), refs: [] };
-  let spec: unknown;
-  try {
-    spec = JSON.parse(block.body);
-  } catch {
-    return { issues: validateBlock(block), ids: new Map(), refs: [] };
-  }
-  return checkSpec(spec);
+  const read = fenceSpec(block.body, block.info);
+  return 'issue' in read ? { issues: [read.issue], ids: new Map(), refs: [] } : checkSpec(read.spec);
 }
 
 function validateBlock(block: UiBlock): UiBlockIssue[] {
   if (!block.closed) return [{ path: '', message: `the \`\`\`${block.kind} fence is not closed` }];
   if (block.kind === 'svg') return validateSvg(block.body);
   if (block.kind === 'mermaid') return validateMermaid(block.body);
-  let spec: unknown;
-  try {
-    spec = JSON.parse(block.body);
-  } catch (error) {
-    return [{ path: '', message: `the gitspace-ui block is not JSON: ${error instanceof Error ? error.message : String(error)}` }];
-  }
-  return validateUiSpec(spec);
+  return checkBlock(block).issues;
 }
 
 function validateMermaid(source: string): UiBlockIssue[] {
@@ -695,12 +758,9 @@ export function requiredBlockAsks(markdown: string): RequiredBlockAsk[] {
   const asks: RequiredBlockAsk[] = [];
   for (const block of extractBlocks(markdown)) {
     if (block.kind !== 'gitspace-ui' || !block.closed) continue;
-    let spec: unknown;
-    try {
-      spec = JSON.parse(block.body);
-    } catch {
-      continue;
-    }
+    const read = fenceSpec(block.body, block.info);
+    if ('issue' in read) continue;
+    const { spec } = read;
     if (!isRecord(spec) || !isRecord(spec.elements) || checkSpec(spec).issues.length > 0) continue;
     const { elements, state = {} } = spec;
     for (const element of Object.values(elements)) {
@@ -745,12 +805,9 @@ export function blockReplies(markdown: string): BlockReply[] {
   const replies: BlockReply[] = [];
   for (const block of extractBlocks(markdown)) {
     if (block.kind !== 'gitspace-ui' || !block.closed) continue;
-    let spec: unknown;
-    try {
-      spec = JSON.parse(block.body);
-    } catch {
-      continue;
-    }
+    const read = fenceSpec(block.body, block.info);
+    if ('issue' in read) continue;
+    const { spec } = read;
     if (!isRecord(spec) || !isRecord(spec.elements) || checkSpec(spec).issues.length > 0) continue;
     for (const element of Object.values(spec.elements)) {
       if (!isRecord(element) || element.type !== 'Reply' || !isRecord(element.props) || typeof element.props.comment !== 'string') continue;
@@ -1467,7 +1524,7 @@ export function mapBlockColours(markdown: string): string {
   let copied = 0;
   for (const block of extractBlocks(markdown)) {
     if (!block.closed || block.kind === 'mermaid') continue;
-    const body = block.kind === 'svg' ? parseSvg(block.body).source : themeSpec(block.body);
+    const body = block.kind === 'svg' ? parseSvg(block.body).source : themeSpec(block.body, block.info);
     if (body === block.body) continue;
     const fence = markdown.slice(block.start, block.end);
     const indent = /^ */.exec(fence)?.[0] ?? '';
@@ -1477,9 +1534,11 @@ export function mapBlockColours(markdown: string): string {
   return mapped + markdown.slice(copied);
 }
 
-/** A gitspace-ui spec's JSON with the literal colours of its Svg elements' svg as theme colours; unchanged when it is
- * not JSON or has none to map. */
-function themeSpec(body: string): string {
+/** A gitspace-ui fence's JSON with the literal colours of its Svg elements' svg as theme colours; unchanged when it is
+ * not JSON or has none to map. A short-form fence keeps its short form. */
+function themeSpec(body: string, info: string): string {
+  const form = shortForm(info);
+  if (form !== null && !('component' in form)) return body;
   let spec: unknown;
   try {
     spec = JSON.parse(body);
@@ -1497,7 +1556,7 @@ function themeSpec(body: string): string {
     }
     Object.values(value).forEach(visit);
   };
-  visit(spec);
+  visit(form === null ? spec : { type: form.component, props: spec });
   return changed ? JSON.stringify(spec) : body;
 }
 
@@ -1536,9 +1595,9 @@ function renderBareSchema(schema: z.core.JSONSchema.JSONSchema): string {
   }).join(' | ');
 }
 
-/** A worked example in the `gitspace-ui` skill: when to draw it and the block itself. Every example passes
- * `validateMarkdownBlocks` (tested), so the skill never teaches a block GitSpace would reject. */
-export interface UiBlockExample { title: string; when: string; fence: UiBlockKind; body: string }
+/** A worked example in the `gitspace-ui` skill: when to draw it, its fence's info string and the block itself. Every
+ * example passes `validateMarkdownBlocks` (tested), so the skill never teaches a block GitSpace would reject. */
+export interface UiBlockExample { title: string; when: string; fence: string; body: string }
 
 const spec = (value: Record<string, unknown>): string => JSON.stringify(value);
 
@@ -1565,67 +1624,46 @@ export const UI_BLOCK_EXAMPLES: readonly UiBlockExample[] = [
   {
     title: 'Values over time',
     when: 'A measure that changes over time or over a sequence (memory per turn, latency per release): a line Chart, one line per series.',
-    fence: 'gitspace-ui',
+    fence: 'gitspace-ui Chart',
     body: spec({
-      root: 'card',
-      elements: {
-        card: { type: 'Card', props: { title: 'Memory per turn', description: 'The workspace object resets at 128 MB' }, children: ['chart'] },
-        chart: { type: 'Chart', props: { kind: 'line', unit: 'bytes', series: { $state: '/series' }, rows: { $state: '/rows' }, max: 134217728 }, children: [] },
-      },
-      state: {
-        series: [{ key: 'read', label: 'Read per turn', color: 'blue' }, { key: 'held', label: 'Held after the turn', color: 'violet' }],
-        rows: [{ label: 'turn 1', values: { read: 31457280, held: 8388608 } }, { label: 'turn 2', values: { read: 32505856, held: 9437184 } }, { label: 'migrated', values: { read: 11534336, held: 4194304 } }, { label: 'turn 4', values: { read: 11665408, held: 4194304 } }],
-      },
+      title: 'Memory per turn (the workspace object resets at 128 MB)', kind: 'line', unit: 'bytes', max: 134217728,
+      series: [{ key: 'read', label: 'Read per turn', color: 'blue' }, { key: 'held', label: 'Held after the turn', color: 'violet' }],
+      rows: [{ label: 'turn 1', values: { read: 31457280, held: 8388608 } }, { label: 'turn 2', values: { read: 32505856, held: 9437184 } }, { label: 'migrated', values: { read: 11534336, held: 4194304 } }, { label: 'turn 4', values: { read: 11665408, held: 4194304 } }],
     }),
   },
   {
     title: 'Options compared',
     when: 'Several options against the same properties: a Table, the recommended one named in the text before it.',
-    fence: 'gitspace-ui',
+    fence: 'gitspace-ui Table',
     body: spec({
-      root: 'card',
-      elements: {
-        card: { type: 'Card', props: { title: 'Where replies are cached' }, children: ['table'] },
-        table: { type: 'Table', props: { columns: { $state: '/columns' }, rows: { $state: '/rows' }, caption: 'Reads measured from the worker in the same region' }, children: [] },
-      },
-      state: {
-        columns: [{ key: 'store', label: 'Store' }, { key: 'read', label: 'Read', align: 'right', mono: true }, { key: 'consistency', label: 'Consistency' }, { key: 'cost', label: 'Cost / month', align: 'right', mono: true }],
-        rows: [{ store: 'Workers KV', read: '4 ms', consistency: 'eventual, up to 60 s', cost: '$5' }, { store: 'Durable Object', read: '11 ms', consistency: 'strong', cost: '$12' }, { store: 'D1', read: '19 ms', consistency: 'strong', cost: '$5' }],
-      },
+      columns: [{ key: 'store', label: 'Store' }, { key: 'read', label: 'Read', align: 'right', mono: true }, { key: 'consistency', label: 'Consistency' }, { key: 'cost', label: 'Cost / month', align: 'right', mono: true }],
+      rows: [{ store: 'Workers KV', read: '4 ms', consistency: 'eventual, up to 60 s', cost: '$5' }, { store: 'Durable Object', read: '11 ms', consistency: 'strong', cost: '$12' }, { store: 'D1', read: '19 ms', consistency: 'strong', cost: '$5' }],
+      caption: 'Where replies are cached: reads measured from the worker in the same region',
     }),
   },
   {
     title: 'How it flows',
     when: 'How a request travels, what a change rewires, an architecture: a FlowMap, as the Change Guide draws a change. Areas grouped by package; paths added, removed or kept; steps that walk the flow.',
-    fence: 'gitspace-ui',
+    fence: 'gitspace-ui FlowMap id=codemode-output',
     body: spec({
-      root: 'card',
-      elements: {
-        card: { type: 'Card', props: { title: 'Where a codemode child\'s output goes now' }, children: ['map'] },
-        map: {
-          type: 'FlowMap', children: [], props: {
-            areas: [
-              { id: 'script', name: 'codemode script', group: 'runtime-core', role: 'Runs the agent\'s script and its child calls' },
-              { id: 'tool', name: 'tool execute', group: 'runtime-core', role: 'Runs one tool call and keeps its output' },
-              { id: 'store', name: 'tool-result store', group: 'runtime-workspace-do', role: 'Whole outputs, read on demand' },
-              { id: 'entries', name: 'conversation entries', group: 'pi-durable', role: 'What every turn reads back' },
-            ],
-            paths: [
-              { id: 'call', from: 'script', to: 'tool', label: 'child call', state: 'same' },
-              { id: 'full', from: 'tool', to: 'entries', label: 'whole output (up to 50 KB)', state: 'removed' },
-              { id: 'stub', from: 'tool', to: 'entries', label: '1 KB stub and reference', state: 'added' },
-              { id: 'keep', from: 'tool', to: 'store', label: 'whole output', state: 'added' },
-              { id: 'back', from: 'store', to: 'script', label: 'output for the script', state: 'added' },
-            ],
-            steps: [
-              { paths: ['call'], from: 'script', to: 'tool', caption: 'The script calls a tool.' },
-              { paths: ['keep', 'stub'], from: 'tool', to: 'store', caption: 'The whole output goes to the store; the entry keeps a stub.' },
-              { paths: ['back'], from: 'store', to: 'script', caption: 'The script reads the whole output from the store.' },
-            ],
-          },
-        },
-      },
-      state: {},
+      areas: [
+        { id: 'script', name: 'codemode script', group: 'runtime-core', role: 'Runs the agent\'s script and its child calls' },
+        { id: 'tool', name: 'tool execute', group: 'runtime-core', role: 'Runs one tool call and keeps its output' },
+        { id: 'store', name: 'tool-result store', group: 'runtime-workspace-do', role: 'Whole outputs, read on demand' },
+        { id: 'entries', name: 'conversation entries', group: 'pi-durable', role: 'What every turn reads back' },
+      ],
+      paths: [
+        { id: 'call', from: 'script', to: 'tool', label: 'child call', state: 'same' },
+        { id: 'full', from: 'tool', to: 'entries', label: 'whole output (up to 50 KB)', state: 'removed' },
+        { id: 'stub', from: 'tool', to: 'entries', label: '1 KB stub and reference', state: 'added' },
+        { id: 'keep', from: 'tool', to: 'store', label: 'whole output', state: 'added' },
+        { id: 'back', from: 'store', to: 'script', label: 'output for the script', state: 'added' },
+      ],
+      steps: [
+        { paths: ['call'], from: 'script', to: 'tool', caption: 'The script calls a tool.' },
+        { paths: ['keep', 'stub'], from: 'tool', to: 'store', caption: 'The whole output goes to the store; the entry keeps a stub.' },
+        { paths: ['back'], from: 'store', to: 'script', caption: 'The script reads the whole output from the store.' },
+      ],
     }),
   },
   {
@@ -1660,15 +1698,8 @@ export const UI_BLOCK_EXAMPLES: readonly UiBlockExample[] = [
   {
     title: 'Before and after',
     when: 'What changes for someone: two panes of Markdown, with a slider when they overlay.',
-    fence: 'gitspace-ui',
-    body: spec({
-      root: 'card',
-      elements: {
-        card: { type: 'Card', props: { title: 'The board in the transcript' }, children: ['compare'] },
-        compare: { type: 'BeforeAfter', props: { before: { label: 'Before', title: 'A message from you', body: 'The board arrived as **your** chat bubble.' }, after: { label: 'After', title: 'A notice', body: 'A quiet *Workspace board* row; **Show all** opens the full board.' }, slider: false }, children: [] },
-      },
-      state: {},
-    }),
+    fence: 'gitspace-ui BeforeAfter',
+    body: spec({ before: { label: 'Before', title: 'A message from you', body: 'The board arrived as **your** chat bubble.' }, after: { label: 'After', title: 'A notice', body: 'A quiet *Workspace board* row; **Show all** opens the full board.' }, slider: false }),
   },
   {
     title: 'A layout or anything the components cannot express',
@@ -1684,38 +1715,69 @@ export const UI_BLOCK_EXAMPLES: readonly UiBlockExample[] = [
   },
   {
     title: 'A walkthrough to play',
-    when: 'A change or an incident explained in order, as a short narrated video: a Sequence. One point per frame, a plain voice line each; give a block you show again an "id" and name it with { "ref" }.',
-    fence: 'gitspace-ui',
+    when: 'A change or an incident explained in order, as a short narrated video: a Sequence. One point per frame, a plain voice line each. A frame may show a block of the same message again by { "ref": "<its id>" } in place of its content.',
+    fence: 'gitspace-ui Sequence id=cache-walkthrough ask',
     body: spec({
-      root: 'page',
-      elements: {
-        page: { type: 'Stack', props: { gap: 'md' }, children: ['times', 'walk'] },
-        times: { type: 'Stats', id: 'read-times', props: { tiles: [{ label: 'Read', value: '11 ms', detail: 'was 4 ms', tone: 'bad' }, { label: 'Stale replies', value: '0', detail: 'was 3 a day', tone: 'good' }] }, children: [] },
-        walk: {
-          type: 'Sequence', id: 'cache-walkthrough', ask: { required: false, prompt: 'Tell me which frame is unclear and I redraw it.' }, children: [], props: {
-            title: 'Where a reply is cached now',
-            frames: [
-              { content: { type: 'Markdown', props: { content: '**Replies are cached in a Durable Object**, not in Workers KV.' }, children: [] }, say: 'Replies are cached in one Durable Object now, not in Workers KV.' },
-              { content: { type: 'Mermaid', props: { source: 'flowchart LR\n  worker --> cache[(Durable Object)] --> reply' }, children: [] }, say: 'The worker asks the object first; only a miss goes to the model.', hold: 5 },
-              { content: { ref: 'read-times' }, say: 'Reads are seven milliseconds slower, and no reply is stale any more.' },
-            ],
-          },
-        },
-      },
-      state: {},
+      title: 'Where a reply is cached now',
+      frames: [
+        { content: { type: 'Markdown', props: { content: '**Replies are cached in a Durable Object**, not in Workers KV.' }, children: [] }, say: 'Replies are cached in one Durable Object now, not in Workers KV.' },
+        { content: { type: 'Mermaid', props: { source: 'flowchart LR\n  worker --> cache[(Durable Object)] --> reply' }, children: [] }, say: 'The worker asks the object first; only a miss goes to the model.', hold: 5 },
+        { content: { type: 'Stats', props: { tiles: [{ label: 'Read', value: '11 ms', detail: 'was 4 ms', tone: 'bad' }, { label: 'Stale replies', value: '0', detail: 'was 3 a day', tone: 'good' }] }, children: [] }, say: 'Reads are seven milliseconds slower, and no reply is stale any more.' },
+      ],
     }),
   },
 ];
 
-/** Every agent's instruction about blocks, main agents and subagents alike; the `gitspace-ui` skill has the format. */
-export const UI_BLOCK_BRIEF = 'Drawing: GitSpace renders blocks you write in Markdown, in chat and in every Markdown field (goal, journal, Change Guide). Draw when a picture says it better than prose: results and measurements (Stats tiles, a Chart, a MetricDelta, a RunTag naming the run), options compared (a Table, Tradeoffs), values over time (a line Chart), how code or data flows or what a change rewires (a FlowMap, drawn as the Change Guide draws a change; a CallDiff, a StateFlow), a plan to tick off (a Checklist), a choice for the person (a card that stages it in their message bar; give it an id and a required ask when you need the answer), before and after (BeforeAfter), a change explained in order as a short narrated video (a Sequence of frames, each with a voice line). Use ```svg for layout, geometry, mockups or anything the components cannot express, and ```mermaid only for the most basic flows or when the work is already about Mermaid. Before you write a block, read skill://gitspace-ui: it has the format, every component and worked examples. GitSpace rejects an invalid block with the path that failed; fix it and write again.\n\nAsking: there is no ask tool. When you need the person\'s answer before you go on, end your reply with an AskCard (or another choice block) that has an "id" and "ask": { "required": true }: it puts the workspace in Needs you until they answer, and their answer arrives as your next message. Your turn ends with that reply; nothing waits. If they write in the chat instead, the question closes and their message is your next input. A plain question in prose needs no marking, and an optional ask ("required": false) is only an invitation.';
+const FENCE = '```';
+
+/** The props the drawing brief shows for its most used components: each is a valid short-form block (tested), with the
+ * fields it leaves out. */
+const BRIEF_SHAPES: readonly { component: string; options?: string; props: Record<string, unknown>; also?: string }[] = [
+  { component: 'CallDiff', options: 'id=cache-path', props: { lines: [{ depth: 0, code: 'reply(req)', change: 'same' }, { depth: 1, code: 'kv.get(key)', change: 'removed' }, { depth: 1, code: 'cache.get(key)', change: 'added', note: 'strong reads' }] }, also: 'title, language; line path' },
+  { component: 'StateFlow', props: { services: [{ id: 'w', name: 'Worker' }, { id: 'c', name: 'Cache', change: 'added', state: [{ key: 'hits', value: '0' }] }], steps: [{ from: 'w', to: 'c', label: 'get(key)', caption: 'Reads go to the cache.', sets: [{ service: 'c', key: 'hits', value: '1' }] }] }, also: 'title; service role, parent' },
+  { component: 'Table', props: { columns: [{ key: 'store', label: 'Store' }, { key: 'read', label: 'Read', align: 'right' }], rows: [{ store: 'KV', read: '4 ms' }] }, also: 'caption; column mono' },
+  { component: 'Stats', props: { tiles: [{ label: 'p50', value: '1.8 s', detail: 'was 3.1 s', tone: 'good' }] }, also: 'tone neutral|good|bad' },
+  { component: 'MetricDelta', props: { metrics: [{ label: 'p95', before: 4400, after: 2600, unit: 'ms', better: 'lower' }] }, also: 'trend; unit ms|seconds|count|percent|bytes|usd|tokens' },
+  { component: 'Chart', props: { kind: 'line', unit: 'ms', series: [{ key: 'p50', label: 'p50', color: 'blue' }], rows: [{ label: 'v1', values: { p50: 3100 } }, { label: 'v2', values: { p50: 1800 } }] }, also: 'title, max; kind bars|columns|line|stacked' },
+  { component: 'Tradeoffs', props: { question: 'Where do replies live?', options: [{ id: 'kv', label: 'KV' }, { id: 'do', label: 'Durable Object' }], criteria: [{ label: 'Consistency', scores: [1, 3] }], recommended: 'do' }, also: 'note; scores 0–3 per option' },
+  { component: 'AskCard', options: 'id=cache ask=required', props: { question: 'Which cache keeps replies?', options: [{ value: 'kv', label: 'Workers KV' }, { value: 'do', label: 'Durable Object', description: 'strong, one region' }] }, also: 'prompt (Markdown)' },
+  { component: 'Timeline', props: { events: [{ at: '2026-11-16T09:12:00Z', kind: 'deploy', label: 'v41 live' }, { at: '2026-11-16T09:20:00Z', kind: 'error', label: '5xx spike' }] }, also: 'title, detail; kind deploy|error|alert|fix|note' },
+  { component: 'Sequence', props: { title: 'Fix', frames: [{ content: { type: 'Markdown', props: { content: 'Replies are **cached**.' }, children: [] }, say: 'Replies are cached now.' }, { content: { ref: 'cache-path' }, say: 'Reads go to the cache first.' }] }, also: 'caption, hold; content is one element or { "ref": "<id>" }' },
+  { component: 'Reply', props: { comment: 'cm-0123456789ab', quote: 'the p95 tile', text: 'p95 of 20 runs.' } },
+  { component: 'Svg', props: { svg: '<svg viewBox="0 0 120 40"><rect x="1" y="1" width="118" height="38" rx="6" fill="none" stroke="var(--border)"/><text x="60" y="25" text-anchor="middle" fill="currentColor">cache</text></svg>' }, also: 'or a ```svg fence' },
+];
+
+/** Every agent's instruction about blocks, main agents and subagents alike: when to draw, the short form and the props
+ * of the most used components. The `gitspace-ui` skill is the reference for the rest. */
+export const UI_BLOCK_BRIEF = [
+  'Blocks: GitSpace draws blocks you write in Markdown, in chat and in every Markdown field (goal, journal, Change Guide, plan step). Draw when a picture says it better than prose: a sentence first, then the block; one idea per block.',
+  `When to draw:
+- explaining a fix: CallDiff (the code path before and after) and StateFlow (state moving between services)
+- numbers or results: Stats (headline numbers), MetricDelta (before → after), Chart (comparison; kind "line" over time)
+- options: Tradeoffs (scored; the person picks) or Table
+- a decision the person must make: AskCard with ask=required
+- a schema change: SchemaDiff
+- a sequence of events: Timeline
+- a walkthrough: Sequence (narrated frames)
+- a diagram: Mermaid (a few boxes) or Svg in theme colours only (currentColor, var(--border), var(--accent), var(--muted-foreground)…)
+- answering the person's comments: Reply`,
+  `Short form: a fence whose info string names one component holds just its props, as one JSON object:
+${FENCE}gitspace-ui CallDiff id=cache-path
+{"title":"…","lines":[…]}
+${FENCE}
+After the component, optionally: id=<id> (once per message) names the block; ask invites a response; ask=required (needs an id) makes it a question: the workspace shows Needs you and the person's pick arrives as your next message. There is no ask tool: end your reply with that block; nothing waits. If they write in the chat instead, the question closes and their message is your input.`,
+  `Props (each JSON is a valid short-form body; "also" names optional fields):
+${BRIEF_SHAPES.map((shape) => `- ${shape.component}${shape.options === undefined ? '' : ` ${shape.options}`} ${JSON.stringify(shape.props)}${shape.also === undefined ? '' : `; also: ${shape.also}`}`).join('\n')}`,
+  'Anything else (layouts with children, state, actions; FlowMap, Checklist, BeforeAfter and other components): read skill://gitspace-ui. GitSpace checks every block: an invalid one in your reply shows an error card, then a fix step asks you to correct it with fix_block; a tool write holding one is refused with its path. A person\'s comments on your message arrive as "Comment on “…”: …" lines with { "comment": { "id" } }; answer each with its own Reply block, then go on.',
+].join('\n\n');
 
 /** The skill's description: what an agent sees in a skill list, so it names the moments to read the skill. */
-export const UI_SKILL_DESCRIPTION = 'Draw what you show as blocks GitSpace renders: cards, charts, tables, FlowMaps, checklists, SVG. Read before you report numbers or a measurement, compare options, explain how code or data flows, lay out a plan, show a before and after, ask the person to choose, or answer the comments a person sent on your message.';
+export const UI_SKILL_DESCRIPTION = 'The reference for GitSpace blocks beyond the drawing brief: layouts with children, state and actions, refs, Sequences, every component\'s props, actions and expressions, and worked examples. Read before you draw a block the brief does not cover.';
 
-/** The agent's instructions for writing blocks; the body of the `gitspace-ui` skill. */
+/** The reference for writing blocks; the body of the `gitspace-ui` skill. It adds to `UI_BLOCK_BRIEF` and repeats none of
+ * it. */
 export function uiBlockPrompt(): string {
-  const fence = '```';
+  const fence = FENCE;
   const componentLines = [...componentByType].map(([name, component]) => {
     const named = component.slots?.filter((slot) => slot !== 'default') ?? [];
     const children = component.slots === undefined ? '' : ` [children${named.length > 0 ? `; slots: ${named.join(', ')}` : ''}]`;
@@ -1724,33 +1786,25 @@ export function uiBlockPrompt(): string {
   const actionLines = [...actionByName].map(([name, action]) => `- ${name} ${renderSchema(z.toJSONSchema(action.params, { io: 'input' }))} — ${action.description}${Object.hasOwn(builtInActions, name) ? ' (built in)' : ''}`);
   const functionLines = Object.entries(functions).map(([name, fn]) => `- ${name}: ${fn.description}`);
   const examples = UI_BLOCK_EXAMPLES.map((example) => `### ${example.title}\n${example.when}\n${fence}${example.fence}\n${example.body}\n${fence}`).join('\n\n');
-  return `GitSpace draws blocks you write in Markdown: in chat replies and in any Markdown you write through a tool (goal, requirement, Change Guide, journal, plan step detail). Write a sentence or two first, then the block; one idea per block, and never draw the same content twice.
+  return `The reference for GitSpace blocks. The drawing brief in your instructions has when to draw, the short form, the props of the most used components, asks, fixes and comments; this has the rest.
 
-## Which block
-- Results of a run or a measurement: Stats for the headline numbers, a Chart for the comparison, a RunTag for where they came from.
-- Options compared on the same properties: a Table.
-- Values over time or over a sequence: a Chart with kind "line". Parts of a total: kind "stacked".
-- How code or data flows, what a change rewires, an architecture: a FlowMap.
-- A plan or checks the person goes through: a Checklist.
-- A choice the person makes for you: a card whose button stages the choice; an AskCard for one question. Give it an "id" and a required "ask" when you need the answer before you go on.
-- Numbers that moved: MetricDelta. A spend against a limit: Budget.
-- A call path a change rewires, line by line: CallDiff. State moving between services, step by step: StateFlow. A migration's tables: SchemaDiff.
-- An investigation: LogTable for the log lines, Timeline for the events. Checks by platform or run: CheckGrid.
-- Options scored against criteria for the person to pick: Tradeoffs. Items the person puts in order: Rank.
-- Work in phases with its PRs and issues: Roadmap. Workspaces and what each waits on: WorkspaceGraph.
-- A change or an incident explained in order, to be played like a short narrated video: a Sequence.
-- A picture or a clip from the drive or a browser capture: Image, Video.
-- Before and after: BeforeAfter.
-- Layout, geometry, a UI mockup, or a drawing the components cannot express: ${fence}svg.
-- ${fence}mermaid only for the most basic flow (a handful of boxes in a line), or when the work is already about Mermaid. Anything more is a FlowMap or SVG.
-
-## Fences
-The info string is exactly the fence name.
-- ${fence}gitspace-ui: ONE JSON object { "root", "elements", "state" }.
+## Forms
+- Short form, for one component: ${fence}gitspace-ui <Component> [id=<id>] [ask|ask=required], holding the component's props as one JSON object. GitSpace reads it as the full form with one element, key "block": { "type": "<Component>", "props": <the JSON>, "children": [], "id"?, "ask"? } and empty state. A short-form AskCard gives question, options and optionally prompt and questionId (the id when omitted); GitSpace binds its pick, its staged, sent and answered state and its answer. An unknown component is refused with the closest names.
+- Full form, for layouts (children, slots, state, actions, repeat): ${fence}gitspace-ui with ONE JSON object { "root", "elements", "state" } (Spec below).
 - ${fence}svg: one <svg> drawing (SVG rules below).
 - ${fence}mermaid: a Mermaid diagram, at most 16 KiB.
 
-GitSpace checks every block when it is stored. A tool write holding a bad block is rejected with each problem's path, such as \`block 2/elements/table/props/columns/0/align\` (blocks counted in order among these three fences, then a JSON pointer into the spec); fix each one and write again.
+A problem's path, such as \`block 2/elements/table/props/columns/0/align\`, counts blocks in order among these fences, then points into the full form (a short-form block's element is "block").
+
+## Other components
+- Where numbers came from: a RunTag. Parts of a total: a Chart with kind "stacked".
+- How code or data flows, what a change rewires, an architecture: a FlowMap.
+- A plan or checks the person goes through: a Checklist.
+- A choice made with a card's own controls: a full-form Card whose button stages the choice (the example below).
+- A spend against a limit: Budget. Log lines: LogTable. Checks by platform or run: CheckGrid. Items the person puts in order: Rank.
+- Work in phases with its PRs and issues: Roadmap. Workspaces and what each waits on: WorkspaceGraph.
+- A picture or a clip from the drive or a browser capture: Image, Video. Before and after: BeforeAfter.
+- Layout, geometry, a UI mockup, or a drawing the components cannot express: ${fence}svg. ${fence}mermaid only for the most basic flow, or when the work is already about Mermaid; anything more is a FlowMap or SVG.
 
 ## Examples
 Each passes GitSpace's checks; copy their shape.
@@ -1763,8 +1817,8 @@ ${examples}
 - "state": the data the block reads. Seed every path a $state or repeat reads. At most ${MAX_ELEMENTS} elements and ${MAX_SPEC_BYTES / 1024} KiB.
 
 ## Ids, refs and asks
-- "id": a name for an element (1 to 64 letters, digits, ".", "_", "-"), used once in its document: one chat message, one Change Guide, one goal. A BlockRef { "id" } or a Sequence frame { "ref": "<id>" } draws that element again, with its own state, so you never copy a block to show it twice. A ref to another document's element is "<document>#<id>".
-- "ask": { "required": true | false, "prompt"?: "<one line>" } says the element asks the person something. This is how you ask: there is no ask tool. A required ask is an open question: it needs an "id", shows in the workspace's questions and puts the workspace in "Needs you" until it is answered, and the person answers through the block's own choice (an AskCard option, or a button that stages); the answer arrives as your next message. Make the block the end of your reply: your turn ends with it, and nothing waits. If the person writes in the chat instead, the question closes and their message is your next input. An optional ask is only an invitation and creates no question. A plain question in prose needs no block and no marking. Ask only on blocks in your chat messages.
+- "id": used once in its document: one chat message, one Change Guide, one goal. A BlockRef { "id" } or a Sequence frame { "ref": "<id>" } draws that element again, with its own state, so you never copy a block to show it twice. A ref to another document's element is "<document>#<id>".
+- "ask": { "required": true | false, "prompt"?: "<one line>" } in the full form. A required ask shows in the workspace's questions, and the person answers through the block's own choice (an AskCard option, or a button that stages). An optional ask creates no question. Ask only on blocks in your chat messages.
 
 ## Sequences
 A Sequence plays like a short video: frame 1 shows as a still with a play button, and play reads each frame's \`say\` aloud and shows it as the subtitle, then moves on. Write it as you would explain it out loud:
@@ -1772,9 +1826,6 @@ A Sequence plays like a short video: frame 1 shows as a still with a play button
 - \`say\`: one or two plain sentences (at most 400 characters) saying what to look at in the frame, not what the frame already reads. \`caption\` only when the subtitle should differ.
 - \`hold\`: seconds for a frame with no voice line or one that needs looking at longer; without a voice a frame lasts 4 s.
 - A frame whose content fails the checks shows as an error in its place; fix it like any block.
-
-## Comments
-A person comments on your latest turn: a passage of a message, a paragraph, a block, an item in a block (a row, a step, a line, a frame) or a tool call. Their next message carries each comment as a line "Comment on “<quote>”: <note>" and its data { "comment": { "id", "note", "anchor" } }; the anchor says where it is and quotes what they saw. Answer every comment with its own Reply block, { "comment": "<id>", "quote": "<a few words of what it is on>", "text": "<your answer>" }, as the root of its block, then go on with the work. The person reads the Reply under their comment.
 
 ## Components
 Props marked ? may be omitted or null; the rest are required.

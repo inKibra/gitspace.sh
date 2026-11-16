@@ -28,7 +28,7 @@ The space_* tools are called from a codemode script, as \`tools.<name>(args)\`; 
   - \`readersGuide\`: what to look at in the code and what to check;
   - \`exhibits\`: path, blob, note, and \`ranges\` with a note on the lines that matter;
   - \`requirementIds\` the section proves, and \`evidence\` (the command, test or bench run, or commit that proves it);
-  - \`diagram\` only when a picture explains more than the prose: one block, written as the gitspace-ui skill describes.
+  - \`diagram\` only when a picture explains more than the prose: one block, as the drawing brief in your instructions shows (the short form for one component; skill://gitspace-ui for the rest).
 
 Read the arguments with \`await tools.describe('space_guide', 'put')\`, then \`put\` with the revision from \`get\` (0 creates); the host records who wrote it. Every Markdown field and diagram is validated; an error names the field and the path inside the block. Fix and resubmit until accepted.
 

@@ -1010,7 +1010,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       if (!main) {
         const [committed, skills] = await Promise.all([options.instructionLoader.loadInstructions(), enabledSkills()]);
         const ui = skills.some(skill => skill.id === 'gitspace-ui');
-        return [committed, ui ? UI_BLOCK_BRIEF : '', serviceSummary, skills.filter(skill => skill.id !== 'gitspace-ui').map(skill => `- ${skill.id}: ${skill.description} (read skill://${skill.id})`).join('\n')].filter(Boolean).join('\n\n');
+        return [committed, ui ? UI_BLOCK_BRIEF : '', serviceSummary, skills.map(skill => `- ${skill.id}: ${skill.description} (read skill://${skill.id})`).join('\n')].filter(Boolean).join('\n\n');
       }
       const owned = { projectId: identity.projectId, spaceId: identity.workspaceId };
       const context = env.SPACE_CONTEXT.getByName(JSON.stringify([env.ACCOUNT_ID, identity.projectId, identity.workspaceId]));
@@ -1018,7 +1018,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
         options.instructionLoader.loadInstructions(), enabledSkills(), context.getGoal(owned), context.getWorkflow(owned), context.getRubric(owned),
       ]);
       const ui = skills.some(skill => skill.id === 'gitspace-ui');
-      const skillSummary = skills.filter(skill => skill.id !== 'gitspace-ui').map(skill => `- ${skill.id}: ${skill.description} (read skill://${skill.id})`).join('\n');
+      const skillSummary = skills.map(skill => `- ${skill.id}: ${skill.description} (read skill://${skill.id})`).join('\n');
       const canonical = `Current canonical workspace instructions. These replace prior Goal, Workflow, and Rubric instructions. Follow the latest requirements and gates unless the user tells you otherwise.\n${JSON.stringify({ goal, workflow, rubric })}`;
       return [USER_PRECEDENCE, AUTOMATION_INPUT, `Workspace ${workspace?.name ?? project.name}; project ${project.name}; branch ${workspace?.branch ?? project.baseBranch}. Cloud reads remain available without a machine. Only the user approves lifecycle scripts in Environment, enters secrets, answers protected interactive prompts and shares QA outside GitSpace; your tools cannot do these.`, SHOWING_FILES, ui ? UI_BLOCK_BRIEF : '', committed, canonical, serviceSummary, skillSummary ? `Enabled account skills:\n${skillSummary}` : ''].filter(Boolean).join('\n\n');
     } },

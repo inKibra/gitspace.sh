@@ -9,9 +9,9 @@ import { CorrectedMark } from './BlockCorrections.js';
 const FencedBlock = lazy(async () => ({ default: (await import('./UiBlock.js')).FencedBlock }));
 const MermaidFence = lazy(async () => ({ default: (await import('./MermaidDiagram.js')).MermaidFence }));
 
-function BlockFence({ code, isIncomplete, language }: CustomRendererProps) {
+function BlockFence({ code, isIncomplete, language, meta }: CustomRendererProps) {
   if (isIncomplete) return <BlockPlaceholder />;
-  return <><CorrectedMark code={code} /><Suspense fallback={<BlockPlaceholder />}><FencedBlock kind={language === 'svg' ? 'svg' : 'gitspace-ui'} body={code} /></Suspense></>;
+  return <><CorrectedMark code={code} /><Suspense fallback={<BlockPlaceholder />}><FencedBlock kind={language === 'svg' ? 'svg' : 'gitspace-ui'} body={code} info={meta?.trim() ?? ''} /></Suspense></>;
 }
 
 function DiagramFence(props: CustomRendererProps) {

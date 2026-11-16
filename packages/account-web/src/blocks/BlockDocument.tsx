@@ -1,7 +1,7 @@
 // The document a block is drawn in (one chat message, one Change Guide, one goal) and what its blocks share through it:
 // the elements its ids name, drawn again by a BlockRef or a Sequence frame { ref }, and the stored message whose
 // required asks are workspace questions. A block drawn outside a document finds no ids and no message.
-import { SEQUENCE_FRAME_CONTENT_PATH, extractBlocks, validateUiSpec, type UiBlockIssue } from '@gitspace/protocol/gitspace-ui';
+import { SEQUENCE_FRAME_CONTENT_PATH, extractBlocks, fenceSpec, validateUiSpec, type UiBlockIssue } from '@gitspace/protocol/gitspace-ui';
 import { useShape } from '@gitspace/ui';
 import type { Spec } from '@json-render/core';
 import type { ComponentRegistry } from '@json-render/react';
@@ -37,12 +37,9 @@ export function blockDocument(markdown: string): ReadonlyMap<string, BlockTarget
   const targets = new Map<string, BlockTarget>();
   for (const block of extractBlocks(markdown)) {
     if (block.kind !== 'gitspace-ui' || !block.closed) continue;
-    let spec: unknown;
-    try {
-      spec = JSON.parse(block.body);
-    } catch {
-      continue;
-    }
+    const read = fenceSpec(block.body, block.info);
+    if ('issue' in read) continue;
+    const { spec } = read;
     if (!conforms(spec, blockingIssues(validateUiSpec(spec)))) continue;
     for (const [key, element] of Object.entries(spec.elements)) {
       if ('id' in element && typeof element.id === 'string') targets.set(element.id, { spec, key });

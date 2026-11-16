@@ -13,7 +13,7 @@ import { SpaceAuthorityDO } from '../src/space-authority.js';
 import { createDispatchSelector } from '../src/runtime-dispatch-selection.js';
 import { executorCapabilities } from '../src/runtime-attachments.js';
 import { QuestionsDoc, WorkspaceDoc } from '@gitspace/runtime-core';
-import { UI_BLOCK_BRIEF, uiBlockPrompt } from '@gitspace/protocol/gitspace-ui';
+import { UI_BLOCK_BRIEF, UI_SKILL_DESCRIPTION, uiBlockPrompt } from '@gitspace/protocol/gitspace-ui';
 import { emptyWorkspaceStatus } from '@gitspace/protocol-workspace';
 import { ServiceTokenGrantSchema } from '@gitspace/protocol-environment';
 import { decodeJwt } from 'jose';
@@ -171,7 +171,7 @@ test('codemode executes in a cloud isolate without a machine and composes cloud 
   });
 });
 
-test('every agent carries the gitspace-ui brief and its pointer, never the whole skill, and none once the account turns the skill off', async () => {
+test('every agent carries the gitspace-ui brief and lists the skill, never the whole skill, and none once the account turns the skill off', async () => {
   const projectId = `ui-${crypto.randomUUID()}`, workspaceId = `ui-space-${crypto.randomUUID()}`;
   const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`);
   await authority.bootstrap({ id: projectId, name: 'Bakery', repositoryReference: null, baseBranch: 'main', createdBy: 'user' });
@@ -188,6 +188,7 @@ test('every agent carries the gitspace-ui brief and its pointer, never the whole
           const carried = await instructions(conversation, BACKGROUND_CONTEXT);
           expect(carried).toContain(UI_BLOCK_BRIEF);
           expect(carried).toContain('read skill://gitspace-ui');
+          expect(carried).toContain(`- gitspace-ui: ${UI_SKILL_DESCRIPTION} (read skill://gitspace-ui)`);
           expect(carried).not.toContain(prompt);
         }
         const before = (await skills.list()).find(skill => skill.id === 'gitspace-ui');
