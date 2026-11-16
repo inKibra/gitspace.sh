@@ -95,3 +95,7 @@ export const SequenceFrame = createContext<{ playing: boolean } | null>(null);
 /** True inside a block whose choice answers its open workspace question at once; false where a choice stages in the
  * person's message bar. */
 export const BlockAnswersQuestion = createContext(false);
+
+/** Inside a block whose workspace question closed unanswered: why, as a closed question card says it (`CLOSED_REASON`).
+ * The block then takes no choice. Null elsewhere. */
+export const BlockQuestionClosed = createContext<string | null>(null);

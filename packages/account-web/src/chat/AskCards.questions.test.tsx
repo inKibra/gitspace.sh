@@ -66,6 +66,7 @@ describe('an ask card that posted a workspace question', () => {
     ['dismissed', 'Dismissed'],
     ['stopped', 'Closed: the conversation was stopped or reset'],
     ['expired', 'Expired'],
+    ['replied', 'You replied in chat'],
   ])('once closed (%s) says why and offers no answer', async (reason, label) => {
     await render(ask, [{ ...asked, closed: { reason, at: '2026-11-07T10:00:00.000Z' } }]);
     expect(container.querySelector('section')?.getAttribute('aria-label')).toBe(`Question, ${label}`);

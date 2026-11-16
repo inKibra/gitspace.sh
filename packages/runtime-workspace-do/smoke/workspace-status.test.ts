@@ -41,7 +41,7 @@ test('a question or approval waiting on a person is orange even while its task r
 });
 
 test('a closed question waits on no one: the workspace is not orange for it', () => {
-  for (const reason of ['dismissed', 'stopped', 'expired'] as const) {
+  for (const reason of ['dismissed', 'stopped', 'expired', 'replied'] as const) {
     const closed = summarize({ conversations: [main], tasks: [], questions: [{ conversationId: 'main', kind: 'ask', answer: null, closed: { reason, at: '2026-11-13T10:00:00.000Z' } }] });
     expect(closed.summary.primaryColor).toBe('blue');
     expect(closed.statuses).toEqual({ main: 'idle' });

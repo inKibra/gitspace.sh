@@ -47,9 +47,10 @@ export const RuntimeTaskSchema = z.object({ id: z.string(), kind: z.string(), co
  * agent's `environment` run posts. */
 export const RuntimeQuestionToolSchema = z.object({ name: z.string(), args: RuntimeJsonSchema });
 export type RuntimeQuestionTool = z.infer<typeof RuntimeQuestionToolSchema>;
-/** Why a question closed without an answer: the person dismissed it, a person stopped or reset its conversation, or it
- * was left open by a call that no longer waits (`expired`). A closed question cannot be answered. */
-export const RuntimeQuestionClosedSchema = z.object({ reason: z.enum(['dismissed', 'stopped', 'expired']), at: z.iso.datetime() });
+/** Why a question closed without an answer: the person dismissed it, a person stopped or reset its conversation, it
+ * was left open by a call that no longer waits (`expired`), or the person wrote to its conversation instead of
+ * answering it (`replied`). A closed question cannot be answered. */
+export const RuntimeQuestionClosedSchema = z.object({ reason: z.enum(['dismissed', 'stopped', 'expired', 'replied']), at: z.iso.datetime() });
 export type RuntimeQuestionClosed = z.infer<typeof RuntimeQuestionClosedSchema>;
 /** A question for the person. Asking it ends the asking agent's turn; its answer, or its dismissal, is that
  * conversation's next input. `askedAt` is absent on questions asked before it was recorded; `answeredAt` on ones

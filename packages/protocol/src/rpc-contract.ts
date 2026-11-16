@@ -470,7 +470,7 @@ export const SessionControlViewCodec = wire.object({
   cost: wire.number,
   todos: wire.array(SessionTodoPhaseCodec),
   queue: wire.object({ steering: wire.array(wire.string), followUp: wire.array(wire.string) }),
-  /** `ask-tool` questions render inline at their ask call; `gitspace` questions (plan approval) have no transcript call to attach to.
+  /** `ask-tool` questions (kind ask: an agent's block ask, or an older conversation's ask call) render inline where they were asked; `gitspace` questions (plan approval) have no transcript call to attach to.
    * `links` name resources the reviewer should open before answering, such as the proposed plan artifact. */
   pendingAsk: wire.nullable(wire.object({
     id: wire.string,

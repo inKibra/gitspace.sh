@@ -33,7 +33,8 @@ export async function answerPlan(tx: Tx, conversationId: ConversationId, questio
   return { conversationId: String(conversationId), title: `Approved plan revision ${plan.revision}`, body, decisions: steps.map(step => step.title) };
 }
 /** A proposal whose question closed unanswered (dismissed, its conversation stopped, expired) is withdrawn: the plan in
- * effect before it is in effect again; with none, the conversation has no plan. */
+ * effect before it is in effect again; with none, the conversation has no plan. One the person replied to in chat
+ * instead (`replied`) is not withdrawn: it stays proposed, unapproved, for the agent to revise. */
 export async function withdrawPlan(tx: Tx, conversationId: ConversationId, questionId: string): Promise<void> {
   const plan = await tx.doc(PlanDoc, conversationId);
   if (plan.questionId !== questionId || plan.status !== 'proposed') return;

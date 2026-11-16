@@ -10,6 +10,6 @@ export * from './automation-requests.js';
 export * from './subagent-state.js';
 export * from './conversation-lifecycle.js';
 export { takeoverAsked } from './takeover.js';
-export { postQuestion, questionRefusal, repairBlockAsks, type QuestionClosure } from './questions.js';
+export { closeRepliedQuestions, postQuestion, questionRefusal, repairBlockAsks, replyQuestion, type QuestionClosure } from './questions.js';
 export { BLOCK_FIX_TRIES, BlockCorrectionEntry, BlockFixEntry, blockFixPrompt, correctedReply, invalidBlocks, type BlockCorrection, type InvalidBlock } from './block-fixes.js';
 export { commentLookup, rebuildCommentLookup, repairCommentLookup } from './comments.js';

@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Miniflare } from 'miniflare';
 import { z } from 'zod';
-import { RuntimeSnapshotSchema, RuntimeWatchEventSchema, RuntimeSessionResultSchema, RuntimeWorkspaceStatusSchema, type RuntimeSessionCommand, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
+import { RuntimeSnapshotSchema, RuntimeWatchEventSchema, RuntimeSessionResultSchema, RuntimeWorkspaceStatusSchema, questionState, type RuntimeSessionCommand, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
 import { WorkspaceDraftSchema, WorkspaceDraftSaveResultSchema } from '@gitspace/protocol-runtime/draft';
 import { searchWasmModule } from './search-wasm.js';
 
@@ -277,6 +277,23 @@ try {
     await until(snapshot => assistantReplies(snapshot) > before && snapshot.questions.find(item => item.id === question.id)?.answer !== null);
     await until(snapshot => snapshot.conversations.flatMap(item => item.messages).some(message => message.role === 'assistant' && message.content.some(block => block.type === 'text' && block.text.includes('Report held while the agent waits'))));
     console.log(`PASS an idle wake leaves no alarm and reads ${wake.rowsRead} rows (budget ${IDLE_WAKE_ROWS}); the event held meanwhile goes in when the run ends`);
+  }
+
+  // The person's message closes the open questions as replied and the workspace stops needing them; the project
+  // agent's instruction, which comes from no device, closes none.
+  {
+    await request('/submit?text=ask%20for%20a%20color&requestId=replied-ask');
+    const pending = await until(snapshot => snapshot.questions.some(item => item.kind === 'ask' && questionState(item) === 'open'));
+    const question = pending.questions.find(item => item.kind === 'ask' && questionState(item) === 'open')!;
+    await request('/submit?text=project%20instruction&requestId=start:replied&from=project');
+    const instructed = await until(snapshot => snapshot.conversations.flatMap(item => item.messages).some(message => message.role === 'assistant' && message.content.some(block => block.type === 'text' && block.text === 'fixture reply: project instruction')));
+    assert.equal(questionState(instructed.questions.find(item => item.id === question.id)!), 'open', 'The project agent\'s instruction closed the person\'s question');
+    assert.equal(summary(instructed).primaryColor, 'orange', 'An open question stopped needing the person');
+    await request('/submit?text=keep%20it%20as%20it%20is&requestId=replied-person');
+    const replied = await until(snapshot => snapshot.questions.find(item => item.id === question.id)?.closed?.reason === 'replied');
+    assert.notEqual(summary(replied).primaryColor, 'orange', 'The workspace still needs the person after they replied');
+    assert.equal((await session({ type: 'control' })).control.pendingAsk, null, 'A replied question is still pending');
+    console.log('PASS a person\'s message closes the open question as replied; the project agent\'s instruction does not');
   }
 
   for (const answer of [false, true]) {

@@ -84,10 +84,23 @@ async function watchFixture(ctx: DurableObjectState) {
   const start = (requestId: string, text: string, onDone: 'quiet' | 'wake' = 'quiet', whenBusy: 'steer' | 'followUp' = 'steer') => startFromProject(ctx.storage, runtime, { ...identity, requestId, text: `Instruction from the project agent:\n\n${text}`, whenBusy }, { name: 'FEAT-33', onDone });
   const submit = (requestId: string, text: string, deviceId?: string) => runtime.submit({ ...identity, requestId, text }, deviceId);
   const automate = (requestId: string, text: string, whenBusy?: 'steer' | 'followUp') => submitAutomationTurn(ctx.storage, runtime, { requestId, text, ...(whenBusy === undefined ? {} : { whenBusy }) });
-  return { identity, runtime, root, reply, call, requests, reports, published, automationReports, wakes, reported: () => reported.promise, settle, start, submit, automate, progress: () => projectProgress(ctx.storage, async () => runtime) };
+  /** The open questions once there are any: a block ask is posted after the commit that stored its reply. */
+  const asked = async (): Promise<ProjectQuestion[]> => {
+    let committed = Promise.withResolvers<void>();
+    const observation = runtime.harness.observeCommits({ end() {}, advance() { const done = committed; committed = Promise.withResolvers(); done.resolve(); } });
+    try {
+      for (let open = await runtime.projectQuestions(); ; open = await runtime.projectQuestions()) {
+        if (open.length > 0) return open;
+        await committed.promise;
+      }
+    } finally { observation.detach(); }
+  };
+  return { identity, runtime, root, reply, call, requests, reports, published, automationReports, wakes, reported: () => reported.promise, settle, start, submit, automate, asked, progress: () => projectProgress(ctx.storage, async () => runtime) };
 }
 
 const room = () => env.SPACE_AUTHORITY.getByName(`project-watch:${crypto.randomUUID()}`);
+/** A reply that asks "Which bucket?" as an agent asks: an AskCard whose required ask makes it a question. */
+const ASK_BUCKET = `Before I move them:\n\`\`\`gitspace-ui\n${JSON.stringify({ root: 'bucket', state: { answer: '', options: [{ value: 'assets', label: 'assets' }, { value: 'uploads', label: 'uploads' }] }, elements: { bucket: { type: 'AskCard', id: 'bucket', ask: { required: true, prompt: 'Which bucket?' }, props: { questionId: 'bucket', question: 'Which bucket?', prompt: 'Which bucket?', options: { $state: '/options' }, value: { $bindState: '/answer' }, answered: { $state: '/answered' } }, children: [] } } })}\n\`\`\``;
 
 test('only the turn the project agent started reports, once; later turns, a person\'s included, never do', async () => {
   await runInDurableObject(room(), async (_instance, ctx) => {
@@ -316,7 +329,7 @@ test('progress shows the running turn\'s newest messages; a question in it repor
     const held = Promise.withResolvers<void>();
     try {
       f.call('find', { pattern: '*.md' });
-      const asking = f.call('ask', { prompt: 'Which bucket?', choices: ['assets', 'uploads'] }, held.promise);
+      const asking = f.reply(ASK_BUCKET, held.promise);
       await f.start('start:progress', 'Move the uploads.');
       await asking.requested.promise;
       const progress = await f.progress();
@@ -334,9 +347,9 @@ test('progress shows the running turn\'s newest messages; a question in it repor
       expect((await f.progress()).turn).toBeNull();
       // The person answering finishes the turn; it already reported.
       f.reply('Moved to uploads.');
-      const question = (await f.runtime.snapshot()).questions.find(item => item.answer === null);
+      const [question] = await f.asked();
       if (!question) throw new Error('The ask left no open question');
-      await f.runtime.answer({ ...f.identity, questionId: question.id, answer: 'uploads' }, { deviceId: 'device-1', canApprove: false });
+      await f.runtime.answer({ ...f.identity, questionId: question.id, answer: [{ id: 'bucket', selectedOptions: ['uploads'], customInput: null }] }, { deviceId: 'device-1', canApprove: false, person: true });
       await f.settle();
       expect(f.reports).toHaveLength(1);
     } finally { held.resolve(); await f.runtime.harness.close(BACKGROUND_CONTEXT); }
@@ -347,11 +360,14 @@ test('the project agent answers an open ask for the person: the answer is the as
   await runInDurableObject(room(), async (_instance, ctx) => {
     const f = await watchFixture(ctx);
     try {
-      const asking = f.call('ask', { prompt: 'Which bucket?', choices: ['assets', 'uploads'] });
+      const asking = f.reply(ASK_BUCKET);
+      // The reply that asks ends the turn at once: the report is armed before the instruction goes in.
+      const reported = f.reported();
       await f.start('start:ask', 'Move the uploads.');
       await asking.requested.promise;
-      await f.reported();
-      const [question, ...others] = await f.runtime.projectQuestions();
+      await reported;
+      expect(f.reports.map(({ report }) => [report.outcome, report.excerpt])).toEqual([['asked', 'Which bucket?']]);
+      const [question, ...others] = await f.asked();
       if (!question) throw new Error('The ask left no open question');
       expect(others).toEqual([]);
       expect(question).toEqual({ id: question.id, conversation: 'main', kind: 'ask', prompt: 'Which bucket?', choices: ['assets', 'uploads'], answerable: true, why: null });

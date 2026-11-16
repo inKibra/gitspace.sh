@@ -101,9 +101,11 @@ const stream: StreamFunction = (_model, context, options) => {
   // A block fix step: the fixture corrects block 1 as a Mermaid graph.
   const fix = last?.role === 'user' && text.includes('call fix_block once per block');
   const call: Pick<ToolCall, 'name' | 'arguments'> = plan ? { name: 'propose_plan', arguments: { prompt: 'Approve this deterministic smoke plan?', choices: ['Misleading model choice', 'Another model choice'], steps: [{ id: 'smoke', title: 'Run the smoke step', detail: 'One deterministic step.' }] } }
-    : fix ? { name: 'fix_block', arguments: { block: 1, source: 'graph TD; A-->B' } } : { name: 'ask', arguments: { prompt: 'Choose a color', choices: ['blue', 'green'] } };
-  const calls = ask || plan || fix;
-  const output: AssistantMessage = { role: 'assistant', api: 'fixture', provider: 'fixture', model: 'fixture', content: calls ? [{ type: 'toolCall', id: crypto.randomUUID(), ...call }] : [{ type: 'text', text: `fixture reply: ${text}` }], stopReason: calls ? 'toolUse' : 'stop', timestamp: Date.now(), usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0.000001, output: 0.000002, cacheRead: 0, cacheWrite: 0, total: 0.000003 } } };
+    : { name: 'fix_block', arguments: { block: 1, source: 'graph TD; A-->B' } };
+  const calls = plan || fix;
+  // "ask for a color" asks as an agent does: a reply ending with an AskCard that carries a required ask.
+  const reply = ask ? `Pick one:\n\`\`\`gitspace-ui\n${JSON.stringify({ root: 'color', state: { answer: '', options: [{ value: 'blue', label: 'blue' }, { value: 'green', label: 'green' }] }, elements: { color: { type: 'AskCard', id: 'color', ask: { required: true, prompt: 'Choose a color' }, props: { questionId: 'color', question: 'Choose a color', prompt: 'Choose a color', options: { $state: '/options' }, value: { $bindState: '/answer' }, answered: { $state: '/answered' } }, children: [] } } })}\n\`\`\`` : `fixture reply: ${text}`;
+  const output: AssistantMessage = { role: 'assistant', api: 'fixture', provider: 'fixture', model: 'fixture', content: calls ? [{ type: 'toolCall', id: crypto.randomUUID(), ...call }] : [{ type: 'text', text: reply }], stopReason: calls ? 'toolUse' : 'stop', timestamp: Date.now(), usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0.000001, output: 0.000002, cacheRead: 0, cacheWrite: 0, total: 0.000003 } } };
   result.push({ type: 'start', partial: output });
   result.push({ type: 'done', reason: calls ? 'toolUse' : 'stop', message: output });
   result.end();
@@ -196,7 +198,7 @@ export class RuntimeSmoke extends DurableObject<unknown> {
       }
       if (url.pathname === '/answer') {
         const input = RuntimeAnswerInputSchema.parse(await request.json());
-        return Response.json(await runtime.answer(input, { deviceId: 'fixture-browser', canApprove: true }));
+        return Response.json(await runtime.answer(input, { deviceId: 'fixture-browser', canApprove: true, person: true }));
       }
       if (url.pathname === '/scoped-stop-seed') {
         const root = await runtime.harness.root(BACKGROUND_CONTEXT);
@@ -236,7 +238,8 @@ export class RuntimeSmoke extends DurableObject<unknown> {
         return Response.json(inspection.tasks.map(task => ({ id: String(task.record.id), conversationId: String(task.record.conversationId), kind: task.record.kind, state: task.record.state.status })));
       }
       if (url.pathname === '/submit') {
-        await runtime.submit({ ...identity, requestId: url.searchParams.get('requestId') ?? crypto.randomUUID(), text: url.searchParams.get('text') ?? '', conversationId: url.searchParams.get('conversationId') ?? undefined, ...(url.searchParams.has('draftRevision') ? { draftRevision: Number(url.searchParams.get('draftRevision')) } : {}), draftText: url.searchParams.get('draftText') ?? undefined }, 'fixture-browser');
+        // `from=project` submits as the project agent's instruction does: from no device, so it is not the person's reply.
+        await runtime.submit({ ...identity, requestId: url.searchParams.get('requestId') ?? crypto.randomUUID(), text: url.searchParams.get('text') ?? '', conversationId: url.searchParams.get('conversationId') ?? undefined, ...(url.searchParams.has('draftRevision') ? { draftRevision: Number(url.searchParams.get('draftRevision')) } : {}), draftText: url.searchParams.get('draftText') ?? undefined }, url.searchParams.get('from') === 'project' ? undefined : 'fixture-browser');
       }
       if (url.pathname === '/burst') {
         const root = await runtime.harness.root(BACKGROUND_CONTEXT);

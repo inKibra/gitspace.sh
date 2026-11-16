@@ -786,8 +786,8 @@ describe('cloud workspace lifecycle with no machines', () => {
         (await tx.doc(QuestionsDoc)).items.push({ id: 'approved-plan', conversationId: String(root.id), kind: 'approval', prompt: 'Approve this plan?', choices: [], answer: null });
       }, BACKGROUND_CONTEXT);
       await runtime.snapshot();
-      await expect(runtime.answer({ ...identity, questionId: 'approved-plan', answer: true }, { deviceId: 'browser', canApprove: true })).rejects.toThrow('An approval answer is { approved, note }');
-      await runtime.answer({ ...identity, questionId: 'approved-plan', answer: { approved: true, note: 'Keep the badge behind the flag.' } }, { deviceId: 'browser', canApprove: true });
+      await expect(runtime.answer({ ...identity, questionId: 'approved-plan', answer: true }, { deviceId: 'browser', canApprove: true, person: true })).rejects.toThrow('An approval answer is { approved, note }');
+      await runtime.answer({ ...identity, questionId: 'approved-plan', answer: { approved: true, note: 'Keep the badge behind the flag.' } }, { deviceId: 'browser', canApprove: true, person: true });
       expect((await runtime.snapshot()).questions.find(question => question.id === 'approved-plan')?.answer).toEqual({ approved: true, note: 'Keep the badge behind the flag.' });
       expect((await authority.listWorkspaces()).find(workspace => workspace.id === identity.workspaceId)?.phase).toBe('code');
       // A person's approval and rejection each become a decision entry of the workspace journal.
@@ -796,7 +796,7 @@ describe('cloud workspace lifecycle with no machines', () => {
         plan.status = 'proposed'; plan.questionId = 'rejected-plan';
         (await tx.doc(QuestionsDoc)).items.push({ id: 'rejected-plan', conversationId: String(root.id), kind: 'approval', prompt: 'Approve this revision?', choices: [], answer: null });
       }, BACKGROUND_CONTEXT);
-      await runtime.answer({ ...identity, questionId: 'rejected-plan', answer: { approved: false, note: 'Keep the flag.' } }, { deviceId: 'browser', canApprove: true });
+      await runtime.answer({ ...identity, questionId: 'rejected-plan', answer: { approved: false, note: 'Keep the flag.' } }, { deviceId: 'browser', canApprove: true, person: true });
       const journal = await env.SPACE_CONTEXT.getByName(JSON.stringify([env.ACCOUNT_ID, project.id, identity.workspaceId])).listJournal({ projectId: project.id, spaceId: identity.workspaceId });
       expect(journal.filter(entry => entry.kind === 'decision').map(entry => [entry.title, entry.body, entry.createdBy])).toEqual([
         ['Approved plan revision 1', 'Keep the badge behind the flag.', 'browser'],

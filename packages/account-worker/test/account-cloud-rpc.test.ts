@@ -232,15 +232,18 @@ describe('cloud lifecycle inspection and explicit authorization', () => {
     flatTreeReader(tree => tree === checkpoint.worktreeTree ? worktree : undefined, oid => blobs[oid]);
     const hash = await executionHash({ kind: 'script', command: script });
     await placement.runtimeAccess(identity, false);
-    // The agent's environment call waits on two cards: one the person declines, one they approve.
+    // Two environment calls each wait on a card: one the person declines, one they approve. They are in two
+    // conversations: a person's answer closes the other open questions of its own conversation as replied.
     await runInDurableObject(placement, async (_instance, state) => {
       state.storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_code_snapshot(singleton INTEGER PRIMARY KEY CHECK(singleton=1), checkpoint TEXT NOT NULL)');
       state.storage.sql.exec('INSERT INTO runtime_code_snapshot(singleton,checkpoint) VALUES(1,?)', JSON.stringify(checkpoint));
       const runtime = await createAccountWorkspaceRuntime(state, env, identity, async () => {}, async () => { throw new Error('Unexpected machine attach'); });
       const root = await runtime.harness.root(BACKGROUND_CONTEXT);
+      const anchor = await root.commit(tx => tx.appendEntry(root.id, { kind: 'test.anchor' }), BACKGROUND_CONTEXT);
+      const other = await root.fork(anchor.id, { ownership: { kind: 'ownerless' } }, BACKGROUND_CONTEXT);
       const lifecycle: RuntimeLifecycleApprovalRequest = { phase: 'machine/prepare', scripts: [{ hash, kind: 'script', label: '10-install.sh', phase: 'machine/prepare', fileName: '10-install.sh', content: script, previous: null }] };
       await runtime.harness.commit(async tx => {
-        for (const card of ['declined', 'approved']) (await tx.doc(QuestionsDoc)).items.push({ id: card, conversationId: String(root.id), kind: 'lifecycle-approval', prompt: 'The agent wants to run machine/prepare.', choices: Object.values(LIFECYCLE_APPROVAL_CHOICES), answer: null, lifecycle: { ...lifecycle, callId: `${card}-call` } });
+        for (const card of ['declined', 'approved']) (await tx.doc(QuestionsDoc)).items.push({ id: card, conversationId: String((card === 'declined' ? other : root).id), kind: 'lifecycle-approval', prompt: 'The agent wants to run machine/prepare.', choices: Object.values(LIFECYCLE_APPROVAL_CHOICES), answer: null, lifecycle: { ...lifecycle, callId: `${card}-call` } });
       }, BACKGROUND_CONTEXT);
       await runtime.wake();
       await runtime.harness.close(BACKGROUND_CONTEXT);

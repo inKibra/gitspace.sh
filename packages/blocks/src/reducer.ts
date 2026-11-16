@@ -106,7 +106,8 @@ function planSteps(value: unknown): NonNullable<AskBlock['steps']> {
 }
 
 function askQuestions(args: Record<string, unknown>): AskBlock['questions'] {
-  // GitSpace's `ask` asks one question: `prompt`, answered from `choices` or free text.
+  // GitSpace's `ask` tool (removed; agents now ask with a block's required ask) asked one question: `prompt`, answered
+  // from `choices` or free text. Its calls in older conversations still show as their cards.
   if (typeof args.prompt === 'string') {
     const choices = Array.isArray(args.choices) ? args.choices.filter((choice): choice is string => typeof choice === 'string') : [];
     return [{ id: 'question-1', prompt: args.prompt, ...(choices.length ? { options: choices.map((choice) => ({ id: choice, title: choice })) } : {}) }];

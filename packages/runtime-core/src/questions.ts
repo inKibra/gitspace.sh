@@ -14,8 +14,9 @@ import type { ConversationEvent } from './conversation-lifecycle.js';
  * Questions outlive the calls that ask them (docs/SIMPLIFICATION.md, Questions end the turn). An asking call records its
  * question (`postQuestion`) and ends the agent's turn (`questionPosted`); no call waits on a person, so no restart of the
  * workspace object can cut a waiting call off. The question closes when it is answered or dismissed (`settleQuestion`,
- * which also gives the event the asking conversation hears as its next input), or when a person stops or resets its
- * conversation (`closeConversationQuestions`). Only an open question waits on a person and takes an answer.
+ * which also gives the event the asking conversation hears as its next input), when the person writes to its
+ * conversation instead (`closeRepliedQuestions`), or when a person stops or resets its conversation
+ * (`closeConversationQuestions`). Only an open question waits on a person and takes an answer.
  */
 
 /** How an open question closes: answered (by a person, or by the project agent for one), or dismissed by the person.
@@ -28,6 +29,7 @@ const CLOSED_BECAUSE: Record<RuntimeQuestionClosed['reason'], string> = {
   dismissed: 'the person dismissed it',
   stopped: 'a person stopped or reset the conversation that asked it',
   expired: 'the call that asked it ended before it was answered',
+  replied: 'the person wrote in the chat instead of answering it',
 };
 /** The takeover fields kept; older cards also stored when their call stopped waiting. */
 const TakeoverQuestionFields = z.object(RuntimeTakeoverQuestionSchema.shape);
@@ -51,10 +53,16 @@ export async function postQuestion(tx: Tx, question: Omit<Question, 'askedAt' | 
 /** What an asking call returns: the question is posted, and the round ends the agent's turn (`terminate`). */
 export function questionPosted(id: string, what: string): ToolExecutionResult {
   return {
-    output: [{ type: 'text', text: `Posted ${what} to the user as question ${id}. Your turn ends here: do not wait or poll for it. The answer arrives as your next message, an event naming question ${id}; if the user dismisses it instead, that message says so.` }],
+    output: [{ type: 'text', text: `Posted ${what} to the user as question ${id}. Your turn ends here: do not wait or poll for it. The answer arrives as your next message, an event naming question ${id}; if the user dismisses it instead, that message says so. If they write in the chat instead, the question closes unanswered (nothing is approved) and their message is your next input.` }],
     details: { questionId: id },
     control: { terminate: true },
   };
+}
+
+/** What a reply ends its turn on asking: the prompt of its first required block ask, or null when it asks nothing. A
+ * reply that asks stops its turn for the person, as an asking call does. */
+export function replyQuestion(text: string): string | null {
+  return requiredBlockAsks(text)[0]?.prompt ?? null;
 }
 
 /** Entries one scan for block asks reads. */
@@ -72,7 +80,7 @@ const SCAN_ENTRIES = 64;
 export async function repairBlockAsks(harness: Harness, storage: Storage): Promise<void> {
   const through = (await harness.snapshot(BlockAsksDoc, BACKGROUND_CONTEXT))?.through ?? 0;
   let newest = through;
-  const posts: Omit<Question, 'askedAt' | 'answer'>[] = [];
+  const posts: { entryId: number; question: Omit<Question, 'askedAt' | 'answer'> }[] = [];
   let conversations: Cursor | undefined;
   do {
     const page = await storage.scanConversations({}, SCAN_ENTRIES, conversations, BACKGROUND_CONTEXT);
@@ -98,7 +106,7 @@ export async function repairBlockAsks(harness: Harness, storage: Storage): Promi
               const opener = openerAt(openers, entryId);
               if (opener === undefined) continue;
               const row = piMessageRowId(conversationId, opener, entryId, index, part);
-              for (const ask of asks) posts.push({ id: blockAskQuestionId(row, ask.id), conversationId, kind: 'ask', prompt: ask.prompt, choices: ask.choices });
+              for (const ask of asks) posts.push({ entryId, question: { id: blockAskQuestionId(row, ask.id), conversationId, kind: 'ask', prompt: ask.prompt, choices: ask.choices } });
             }
           }
         }
@@ -108,9 +116,15 @@ export async function repairBlockAsks(harness: Harness, storage: Storage): Promi
     conversations = page.next;
   } while (conversations);
   if (newest === through) return;
+  // The posts and the check whether the person wrote after each reply share one commit: a reply the person already
+  // wrote after (`BlockAsksDoc.replied`) posts its question closed as replied, never open.
   await harness.commit(async tx => {
-    for (const question of posts) await postQuestion(tx, question);
     const doc = await tx.doc(BlockAsksDoc);
+    const at = new Date().toISOString();
+    for (const { entryId, question } of posts) {
+      const replied = doc.replied?.[question.conversationId];
+      await postQuestion(tx, replied !== undefined && entryId <= replied ? { ...question, closed: { reason: 'replied', at } } : question);
+    }
     doc.through = Math.max(doc.through ?? 0, newest);
   }, BACKGROUND_CONTEXT);
 }
@@ -193,6 +207,26 @@ export async function closeConversationQuestions(tx: Tx, conversations: Readonly
     question.closed = { reason: 'stopped', at };
     if (question.kind === 'approval') await withdrawPlan(tx, id, question.id);
   }
+}
+
+/**
+ * The person's own input to conversation `conversationId` (their message, or their answer to question `answered`) is
+ * their reply to everything it asked: its other open questions close as `replied` in `tx`, the commit that takes the
+ * input. The conversation hears that input, not an event per question. Closing approves and runs nothing: a proposed
+ * plan stays proposed and unapproved for the agent to revise or propose again, and a lifecycle approval or take-over
+ * card is declined. A take-over card whose tab the person holds stays open: their handback ends it. The conversation's
+ * newest entry is recorded (`BlockAsksDoc.replied`): a block ask in a reply up to it whose question is not posted yet
+ * is posted closed (`repairBlockAsks`). Reads before it writes, so it runs before the input is admitted in `tx`.
+ */
+export async function closeRepliedQuestions(tx: Tx, conversationId: ConversationId, answered?: string): Promise<void> {
+  const latest = await tx.latestEntryId(conversationId);
+  const asks = await tx.doc(BlockAsksDoc);
+  const at = new Date().toISOString();
+  for (const question of (await tx.doc(QuestionsDoc)).items) {
+    if (question.conversationId !== String(conversationId) || question.id === answered || questionState(question) !== 'open' || question.takeover?.holder === 'you') continue;
+    question.closed = { reason: 'replied', at };
+  }
+  if (latest !== undefined) asks.replied = { ...asks.replied, [String(conversationId)]: Number(latest) };
 }
 
 /**

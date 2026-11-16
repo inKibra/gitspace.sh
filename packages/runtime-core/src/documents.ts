@@ -19,16 +19,19 @@ export const BlockCorrectionsDoc = defineDoc<{ replies: Record<string, number> }
  * they are the plan in effect, and `revision` counts approvals. While a later proposal waits or after it is rejected,
  * `approved` holds the plan in effect. Records from before plans had steps have no `steps`, `revision` or `approved`. */
 export const PlanDoc = defineDoc<{ text: string; status: 'draft' | 'proposed' | 'approved' | 'rejected'; questionId: string | null; steps?: RuntimePlanStep[]; revision?: number; approved?: { text: string; steps: RuntimePlanStep[] } | null }>({ kind: 'gitspace.plan', version: 1, scope: 'conversation', history: 'rewindable', fork: 'asOf', initial: () => ({ text: '', status: 'draft', questionId: null, steps: [], revision: 0, approved: null }), checkpointWhen: boundedReplay });
-/** Questions for the user: the agent's `ask`, plan and machine approvals, the project agent's batch of answers
- * (`tool.name` `space_workspace`), ask_takeover cards (`takeover`), and the lifecycle approval cards an `environment`
- * run posts (`lifecycle-approval`). No call waits on one: asking ends the agent's turn, and answering or closing it
- * delivers the conversation's next input (`questions.ts`). `answeredBy`: the project agent answered a plain ask in the
- * person's place; absent, a person answered. `closed`: it closed unanswered and takes no answer. */
+/** Questions for the user: the agent's required block asks (kind `ask`; older conversations also hold questions from
+ * a removed `ask` tool), plan and machine approvals, the project agent's batch of answers (`tool.name`
+ * `space_workspace`), ask_takeover cards (`takeover`), and the lifecycle approval cards an `environment` run posts
+ * (`lifecycle-approval`). No call waits on one: asking ends the agent's turn, and answering or closing it delivers the
+ * conversation's next input (`questions.ts`). `answeredBy`: the project agent answered a plain ask in the person's
+ * place; absent, a person answered. `closed`: it closed unanswered and takes no answer. */
 export type Question = { id: string; conversationId: string; kind: 'ask' | 'approval' | 'takeover' | 'lifecycle-approval'; prompt: string; choices: string[]; answer: JsonValue | null; askedAt?: string; answeredAt?: string; answeredBy?: AskAnswerer; closed?: RuntimeQuestionClosed; tool?: RuntimeQuestionTool; takeover?: RuntimeTakeoverQuestion; lifecycle?: RuntimeLifecycleApprovalQuestion };
 export const QuestionsDoc = defineDoc<{ items: Question[] }>({ kind: 'gitspace.questions', version: 1, scope: 'session', initial: () => ({ items: [] }), checkpointWhen: boundedReplay });
 /** The newest entry whose replies' required block asks are posted as questions (`repairBlockAsks`), session-wide; null
- * until the workspace's first open sets it to its newest entry. */
-export const BlockAsksDoc = defineDoc<{ through: number | null }>({ kind: 'gitspace.block-asks', version: 1, scope: 'session', initial: () => ({ through: null }), checkpointWhen: boundedReplay });
+ * until the workspace's first open sets it to its newest entry. `replied`: by conversation, the newest entry it held when
+ * the person last wrote to it (`closeRepliedQuestions`); a block ask in a reply up to that entry was replied to before
+ * its question was posted, so it is posted closed. */
+export const BlockAsksDoc = defineDoc<{ through: number | null; replied?: Record<string, number> }>({ kind: 'gitspace.block-asks', version: 1, scope: 'session', initial: () => ({ through: null }), checkpointWhen: boundedReplay });
 /** The comments people staged for their next message, oldest first (comments.ts). */
 export const StagedCommentsDoc = defineDoc<{ items: StagedComment[] }>({ kind: 'gitspace.staged-comments', version: 1, scope: 'session', initial: () => ({ items: [] }), checkpointWhen: boundedReplay });
 /**

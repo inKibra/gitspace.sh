@@ -154,4 +154,14 @@ describe('a required ask in a stored message', () => {
     await advance(50);
     expect(staged).toEqual(['Hold it']);
   });
+
+  it('once the person replied in chat instead, is locked: it says so, and no choice answers or stages', async () => {
+    const staged: string[] = [];
+    await draw([{ ...question(null), closed: { reason: 'replied', at: '2026-11-16T10:00:00.000Z' } }], async () => { throw new Error('no command expected'); }, staged);
+    expect(container.querySelector('[data-block-ask="closed"]')?.textContent).toBe('You replied in chat');
+    expect(container.querySelector('section')?.getAttribute('aria-label')).toBe('Ship the cache?, You replied in chat');
+    expect(container.querySelectorAll('[role="radio"], [role="option"]')).toHaveLength(0);
+    expect(container.querySelector('[inert]')?.textContent).toContain('Hold it');
+    expect(container.textContent).not.toContain('Picking an answer');
+  });
 });

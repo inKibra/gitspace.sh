@@ -16,7 +16,7 @@ import type { z } from 'zod';
 import { Lightbox } from '../Lightbox.js';
 import { CLOSED_REASON, QuestionCardsContext } from '../QuestionCards.js';
 import { useBlockActions, type BlockActionName, type BlockActions, type BlockState } from './BlockActions.js';
-import { BlockAnswersQuestion, BlockDocument, BlockRendering, OtherDocumentRef, blockingIssues, conforms, type BlockRenderingValue } from './BlockDocument.js';
+import { BlockAnswersQuestion, BlockDocument, BlockQuestionClosed, BlockRendering, OtherDocumentRef, blockingIssues, conforms, type BlockRenderingValue } from './BlockDocument.js';
 import { BlockErrorCard } from './BlockFrames.js';
 import { BLOCK_COMPONENTS, blockCatalog, blockFunctions } from './registry.js';
 import { SvgBlock } from './SvgBlock.js';
@@ -95,6 +95,9 @@ function DrawnBlock({ spec, refs }: { spec: Spec; refs: readonly string[] }) {
   // While its question is open, the block's choice answers it as the person answers any question; elsewhere the
   // choice stages in the composer.
   const answersQuestion = asked !== null && cards !== null && questionState(asked.question) === 'open';
+  // Once its question closed unanswered (the person replied in chat, dismissed it, stopped the conversation), the block
+  // is locked: it says why, and none of its choices takes an answer or stages one.
+  const closed = asked?.question.closed ? CLOSED_REASON[asked.question.closed.reason] : null;
   const actions = useMemo((): BlockActions | null => {
     if (!answersQuestion || !asked || !cards) return surface;
     const answer = async (label: string, block: BlockState): Promise<void> => {
@@ -131,17 +134,17 @@ function DrawnBlock({ spec, refs }: { spec: Spec; refs: readonly string[] }) {
     };
   }, [spec, refs, messageId, title]);
   return <JSONUIProvider registry={registry} store={store} handlers={handlers} functions={blockFunctions}>
-    <BlockRendering.Provider value={rendering}><BlockAnswersQuestion.Provider value={answersQuestion}><CommentBlock.Provider value={comments}>
+    <BlockRendering.Provider value={rendering}><BlockAnswersQuestion.Provider value={answersQuestion}><BlockQuestionClosed.Provider value={closed}><CommentBlock.Provider value={comments}>
       <Lightbox label={typeof title === 'string' && title ? title : 'Block'} mode="fill" className="my-2" actions={<BlockCommentButton />}
-        expanded={<div className="mx-auto flex w-full min-w-0 max-w-5xl flex-col gap-1.5"><Renderer spec={spec} registry={registry} /><Notices /></div>}>
+        expanded={<div className="mx-auto flex w-full min-w-0 max-w-5xl flex-col gap-1.5"><div inert={closed !== null} className="min-w-0"><Renderer spec={spec} registry={registry} /></div><Notices /></div>}>
         <div data-gitspace-block="gitspace-ui" data-comment-block={comments?.key} data-comment-kind={comments?.kind} data-comment-ask={comments?.asks ? '' : undefined} className="flex min-w-0 flex-col gap-1.5">
           {asks.length > 0 ? <AskMarkers asks={asks} asked={asked} /> : null}
-          <Renderer spec={spec} registry={registry} />
+          <div inert={closed !== null} className="min-w-0"><Renderer spec={spec} registry={registry} /></div>
           <Notices />
           <BlockMarker />
         </div>
       </Lightbox>
-    </CommentBlock.Provider></BlockAnswersQuestion.Provider></BlockRendering.Provider>
+    </CommentBlock.Provider></BlockQuestionClosed.Provider></BlockAnswersQuestion.Provider></BlockRendering.Provider>
   </JSONUIProvider>;
 }
 

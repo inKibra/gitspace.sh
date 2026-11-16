@@ -1038,10 +1038,12 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     const runtime = await this.getRuntime(input);
     const asked = (await runtime.snapshot()).questions.find(item => item.id === input.questionId);
     const open = asked !== undefined && questionState(asked) === 'open';
+    // A machine answers for no person: its answer closes no other question as replied.
+    const person = actor.kind !== 'machine';
     if (open && asked.kind === 'lifecycle-approval' && asked.lifecycle) {
       const choice = RuntimeLifecycleApprovalAnswerSchema.parse(input.answer);
       if (choice !== 'not-now') await approveExecutionsAsPerson(this, input, { executionHashes: asked.lifecycle.scripts.map(script => script.hash), scope: choice, person: { deviceId: actor.deviceId, kind: actor.kind, lifecycleControl: actor.lifecycleControl } });
-      return runtime.answer(input, { deviceId: actor.deviceId, canApprove: actor.lifecycleControl });
+      return runtime.answer(input, { deviceId: actor.deviceId, canApprove: actor.lifecycleControl, person });
     }
     if (open && asked.tool?.name === 'space_workspace') {
       if (!actor.canApprove) throw new Error('Human approval capability required');
@@ -1050,9 +1052,9 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
       const { profile } = await this.env.USER_SETTINGS.getByName(this.env.ACCOUNT_ID).get(actor.deviceId);
       const text = await settleProjectAnswers({ questionId: asked.id, card: asked.tool.args, decision: decision.data, person: profile.displayName.trim() || profile.handle || 'the user',
         deliver: (workspaceId, answer) => this.env.SPACE_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${workspaceId}`).projectAnswer({ projectId: input.projectId, workspaceId }, answer) });
-      return runtime.answer(input, { deviceId: actor.deviceId, canApprove: actor.canApprove }, text);
+      return runtime.answer(input, { deviceId: actor.deviceId, canApprove: actor.canApprove, person }, text);
     }
-    const result = await runtime.answer(input, { deviceId: actor.deviceId, canApprove: actor.canApprove });
+    const result = await runtime.answer(input, { deviceId: actor.deviceId, canApprove: actor.canApprove, person });
     if (!input.questionId.startsWith('machine-attach:') || RuntimeApprovalAnswerSchema.safeParse(input.answer).data?.approved !== true) return result;
     const question = (await runtime.snapshot()).questions.find(item => item.id === input.questionId);
     if (question?.tool?.name !== 'machines') return result;

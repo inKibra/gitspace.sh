@@ -7,7 +7,7 @@ import { piMessageRowId } from '@gitspace/blocks';
 import { blockAskQuestionId } from '@gitspace/protocol/gitspace-ui';
 import { createRuntimeHarness } from './harness.js';
 import { BlockAsksDoc, QuestionsDoc } from './documents.js';
-import { repairBlockAsks } from './questions.js';
+import { closeRepliedQuestions, repairBlockAsks } from './questions.js';
 import { createSessionControls } from './session-controls.js';
 
 const model: Model<Api> = { id: 'block-asks', name: 'Block asks', provider: 'test', api: 'test', baseUrl: 'https://invalid.test', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100_000, maxTokens: 1000 };
@@ -145,4 +145,45 @@ test('a reply stored with no scan after it (a reset between its commit and its q
     expect((await f.harness.snapshot(BlockAsksDoc, context))?.through).toBeGreaterThanOrEqual(stored.reply);
     expect(f.reports).toEqual([]);
   } finally { await f.harness.close(context); }
+});
+
+test('a person\'s message taken before a reply\'s question is posted makes it post closed as replied; a later reply\'s question opens', async () => {
+  const storage = new MemoryStorage();
+  const plain = await Harness.open(storage, { registry: createRegistry(), models: createModels() }, context);
+  try {
+    const root = await plain.root(context);
+    const conversationId = String(root.id);
+    // pi stores a reply with a required ask; its question is not posted yet.
+    const stored = await root.commit(async tx => {
+      (await tx.doc(BlockAsksDoc)).through = 0;
+      const input = await tx.appendEntry(root.id, { kind: 'pi.user', model: [{ role: 'user', content: 'Pick a cache', timestamp: 1 }] });
+      await tx.createSubmission({ conversationId: root.id, type: 'input', status: 'placed', entry: input.id });
+      const reply = await tx.appendEntry(root.id, { kind: AssistantEntry.kind, model: [{ role: 'assistant', content: [{ type: 'text', text: choiceBlock(true) }], api: model.api, provider: model.provider, model: model.id, stopReason: 'stop', timestamp: 2, usage }] });
+      return { input: Number(input.id), reply: Number(reply.id) };
+    }, context);
+    // The person writes in the chat first: the commit that takes their message, as a prompt from a device makes it.
+    await root.commit(async tx => {
+      await closeRepliedQuestions(tx, root.id);
+      await root.submit(tx, { type: 'input', requestId: 'person', content: 'Use KV.' });
+    }, context);
+    await repairBlockAsks(plain, storage);
+    const id = blockAskQuestionId(piMessageRowId(conversationId, stored.input, stored.reply, 0, 0), 'cache-choice');
+    const [question, ...others] = (await plain.snapshot(QuestionsDoc, context))?.items ?? [];
+    expect(others).toEqual([]);
+    expect(question).toMatchObject({ id, kind: 'ask', answer: null, closed: { reason: 'replied' } });
+    // Nothing waits on the person: Needs you counts open questions only.
+    expect(question && questionState(question)).toBe('closed');
+
+    // A reply stored after the person's message asks anew: its question opens.
+    const later = await root.commit(async tx => {
+      const input = await tx.appendEntry(root.id, { kind: 'pi.user', model: [{ role: 'user', content: 'Pick again', timestamp: 3 }] });
+      await tx.createSubmission({ conversationId: root.id, type: 'input', status: 'placed', entry: input.id });
+      const reply = await tx.appendEntry(root.id, { kind: AssistantEntry.kind, model: [{ role: 'assistant', content: [{ type: 'text', text: choiceBlock(true) }], api: model.api, provider: model.provider, model: model.id, stopReason: 'stop', timestamp: 4, usage }] });
+      return { input: Number(input.id), reply: Number(reply.id) };
+    }, context);
+    await repairBlockAsks(plain, storage);
+    const reasked = (await plain.snapshot(QuestionsDoc, context))?.items.find(item => item.id !== id);
+    expect(reasked && questionState(reasked)).toBe('open');
+    expect(later.reply).toBeGreaterThan(stored.reply);
+  } finally { await plain.close(context); }
 });

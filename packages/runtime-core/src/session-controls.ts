@@ -1,9 +1,9 @@
-import { AgentDoc, InboxDoc, UsageDoc, defineDoc, defineExtension, type Harness, type Conversation, type ConversationId, type ModelRef, type EntryId } from '@earendil-works/pi-durable';
+import { AgentDoc, InboxDoc, UsageDoc, defineDoc, defineExtension, type Harness, type Conversation, type ConversationId, type InputSubmissionDraft, type ModelRef, type EntryId } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { z } from 'zod';
 import { parse as parseYaml } from 'yaml';
 import { AgentDefinitionSchema, SessionControlSchema, ModelSelectionIntentSchema, type AgentSetupView, type RuntimeMessageDecision, type RuntimeSessionCommand, type RuntimeSessionResult, type SessionControlView } from '@gitspace/protocol-runtime/session-controls';
-import { PlanDoc, QuestionsDoc, TodosDoc, WorkspaceDoc, boundedReplay } from './documents.js';
+import { PlanDoc, QuestionsDoc, TodosDoc, WorkspaceDoc, boundedReplay, type Question } from './documents.js';
 import { boundSessionControl, type SessionHistoryPage, type SessionHistoryPageRequest } from '@gitspace/protocol-agent';
 import type { InferenceModelAdmission, RuntimeHarnessOptions } from './harness.js';
 import type { TranscriptPageRequest, TranscriptPage, TranscriptContentRequest, TranscriptContentPage } from '@gitspace/blocks';
@@ -14,7 +14,7 @@ import { isSubagentTool, questionState, TAKEOVER_ANSWERS, TAKEOVER_CHOICES } fro
 import { RuntimeBrowserCaptureShareSchema, type RuntimeBrowserCaptureShare } from '@gitspace/protocol-runtime';
 import { BUILT_IN_AGENT_DEFINITIONS } from './builtin-agents.js';
 import type { ConversationLifecycle } from './conversation-lifecycle.js';
-import { closeConversationQuestions } from './questions.js';
+import { closeConversationQuestions, closeRepliedQuestions, type QuestionClosure } from './questions.js';
 import { AgentDefinitionContextDoc } from './subagent-state.js';
 import { modelRoleThinkingSchema, parseModelRoleSelector } from '@gitspace/protocol/inference';
 import { commentsMessage } from '@gitspace/protocol-runtime/comments';
@@ -114,6 +114,18 @@ export type SessionControlServices = Pick<RuntimeHarnessOptions, 'admitInference
    * `tabGroup` the group's id. */
   browser?(conversationId: string, machineId: string | undefined, command: RuntimeBrowserManagement): Promise<RuntimeBrowserStatus | RuntimeBrowserArtifactPage | RuntimeBrowserOverview | RuntimeBrowserPreview | RuntimeBrowserCaptureView | RuntimeBrowserCaptureView[] | RuntimeBrowserShare | RuntimeBrowserShare[] | RuntimeBrowserConnectedTab | RuntimeBrowserCommentThreadView[] | RuntimeBrowserCommentThread | RuntimeBrowserCaptureShare | RuntimeBrowserCaptureShare[] | string | null>;
 };
+/** How the answer `answers` from a question's card closes `question`. An ask_takeover card is answered only by Not now:
+ * Take over is browserTakeOver, and a held tab's card ends at its handback. */
+function askClosure(question: Question, answers: Extract<RuntimeSessionCommand, { type: 'answerAsk' }>['answers']): QuestionClosure {
+  if (question.kind === 'takeover') {
+    if (answers[0]?.selectedOptions[0] !== TAKEOVER_CHOICES.notNow) throw new Error('A take-over request is answered only by Not now');
+    if (question.takeover?.holder === 'you') throw new Error('You hold this tab: hand it back with Resume agent');
+    return { answer: TAKEOVER_ANSWERS.declined };
+  }
+  if (question.kind !== 'ask') throw new Error('Approval requests require an explicit runtime approval answer');
+  if (!answers.length) throw new Error('Question answer is required');
+  return { answer: answers.map(answer => ({ id: answer.id, selectedOptions: [...answer.selectedOptions], customInput: answer.customInput })) };
+}
 export function createSessionControls(services: SessionControlServices) {
   const { harness } = services;
   const ctx = BACKGROUND_CONTEXT;
@@ -309,7 +321,13 @@ export function createSessionControls(services: SessionControlServices) {
           // The staged comments the message carries go as its lines and data, and leave the staged comments once it is in.
           const content = command.comments?.length ? commentsMessage(command.text, await stagedComments(harness, command.comments)) : command.text;
           if (deviceId !== undefined && command.decisions?.length) services.holdDecisions?.(String(target.id), requestId, { deviceId, text: content, decisions: command.decisions });
-          await target.submit({ type: 'input', requestId, content, whenBusy: command.streamingBehavior ?? 'followUp' }, ctx);
+          const input: InputSubmissionDraft = { type: 'input', requestId, content, whenBusy: command.streamingBehavior ?? 'followUp' };
+          // A person's message (one sent from a device) replies to the conversation's open questions, in the commit that
+          // takes it; a prompt with no device (an inspector's, a machine's) closes none.
+          await target.commit(async tx => {
+            if (deviceId !== undefined) await closeRepliedQuestions(tx, target.id);
+            await target.submit(tx, input);
+          }, ctx);
           if (command.comments?.length) await unstageComments(harness, command.comments);
         });
         break;
@@ -373,17 +391,12 @@ export function createSessionControls(services: SessionControlServices) {
         }, ctx));
         break;
       }
-      case 'answerAsk': await services.lifecycle.closeQuestion(command.id, async question => {
+      case 'answerAsk': await services.lifecycle.closeQuestion(command.id, async (question, tx, conversationId) => {
         if (question.conversationId !== String(target.id)) throw new Error(`Question ${command.id} belongs to another conversation`);
-        // An ask_takeover card is answered only by Not now: Take over is browserTakeOver, and a held tab's card ends at its handback.
-        if (question.kind === 'takeover') {
-          if (command.answers[0]?.selectedOptions[0] !== TAKEOVER_CHOICES.notNow) throw new Error('A take-over request is answered only by Not now');
-          if (question.takeover?.holder === 'you') throw new Error('You hold this tab: hand it back with Resume agent');
-          return { closure: { answer: TAKEOVER_ANSWERS.declined }, value: undefined };
-        }
-        if (question.kind !== 'ask') throw new Error('Approval requests require an explicit runtime approval answer');
-        if (!command.answers.length) throw new Error('Question answer is required');
-        return { closure: { answer: command.answers.map(answer => ({ id: answer.id, selectedOptions: [...answer.selectedOptions], customInput: answer.customInput })) }, value: undefined };
+        const closure = askClosure(question, command.answers);
+        // A person's answer (one sent from a device) also replies to the conversation's other open questions.
+        if (deviceId !== undefined) await closeRepliedQuestions(tx, conversationId, question.id);
+        return { closure, value: undefined };
       }); break;
       case 'dismissQuestion': await services.lifecycle.closeQuestion(command.id, async question => {
         if (question.conversationId !== String(target.id)) throw new Error(`Question ${command.id} belongs to another conversation`);

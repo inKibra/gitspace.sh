@@ -48,7 +48,7 @@ const samples: Record<string, ToolCall['arguments']> = {
   history_search: { query: 'decision' }, history_read: { conversationId: 'conversation' }, report_issue: { message: 'Observed concrete failure' },
   checkpoint: { goal: 'Inspect implementation' }, rewind: { checkpoint: 'checkpoint', report: 'Findings' }, wait: { timeoutMs: 1000 },
   mcp_discover: {}, mcp_invoke: { connectionId: 'connection', name: 'lookup', arguments: { query: 'hello' } }, web_browser: { action: 'tabs' },
-  todo: { items: [{ id: 'proof', text: 'Exercise registrations', status: 'completed' }] }, ask: { prompt: 'Choose a path', choices: ['A', 'B'] }, propose_plan: { prompt: 'Implement the selected plan', choices: ['Approve', 'Reject'], steps: [{ id: 'implement', title: 'Implement the selected plan', detail: 'The selected path.' }] },
+  todo: { items: [{ id: 'proof', text: 'Exercise registrations', status: 'completed' }] }, propose_plan: { prompt: 'Implement the selected plan', choices: ['Approve', 'Reject'], steps: [{ id: 'implement', title: 'Implement the selected plan', detail: 'The selected path.' }] },
   ask_takeover: { source: 'headless', targetId: 'tab', reason: 'Solve the CAPTCHA' },
 };
 async function registered(rounds: ToolCall[][], invoke: ToolServices['invoke'] = completed, given: JobServices = operations, extraTools: ToolRegistration[] = [], chatModel: Model<Api> = model) {
@@ -63,9 +63,12 @@ async function registered(rounds: ToolCall[][], invoke: ToolServices['invoke'] =
   const tools = [...createRuntimeTools({ ...services, invoke }, jobServices, (id, context) => harness.abortTask(id, context)), ...extraTools];
   const registry = createRegistry(); registry.install(defineExtension({ name: 'registration-proof', tools, tasks: [createJobTask(jobServices)] }));
   let generation = 0;
+  /** The tool names each model request offered. */
+  const offered: string[][] = [];
   const models: Models = Object.assign(createModels(), { getModel: () => chatModel, streamSimple(_model, context) {
     const providerSchema = z.object({ type: z.literal('object'), properties: z.record(z.string(), z.unknown()), anyOf: z.never().optional(), oneOf: z.never().optional(), allOf: z.never().optional() });
     for (const tool of getCurrentTools(context.messages)) providerSchema.parse(tool.parameters);
+    offered.push(getCurrentTools(context.messages).map(tool => tool.name));
     const calls = rounds[generation++];
     const reply: AssistantMessage = { role: 'assistant', content: calls ?? [{ type: 'text', text: 'Complete.' }], api: model.api, provider: model.provider, model: model.id, stopReason: calls ? 'toolUse' : 'stop', timestamp: generation, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
     const stream = createAssistantMessageEventStream(); stream.push({ type: 'done', reason: calls ? 'toolUse' : 'stop', message: reply }); stream.end(reply); return stream;
@@ -74,14 +77,14 @@ async function registered(rounds: ToolCall[][], invoke: ToolServices['invoke'] =
   const harness = await Harness.open(storage, { registry, models, settings: { toolExecution: 'parallel', compaction: { enabled: false } } }, BACKGROUND_CONTEXT);
   const root = await harness.root(BACKGROUND_CONTEXT, { agent: { model: { provider: chatModel.provider, modelId: chatModel.id }, tools } });
   await harness.commit(async tx => { (await tx.doc(WorkspaceDoc)).phase = 'code'; }, BACKGROUND_CONTEXT);
-  return { harness, root, tools, storage };
+  return { harness, root, tools, storage, offered };
 }
 const call = (name: string, args: ToolCall['arguments'], id = name): ToolCall => ({ type: 'toolCall', name, arguments: args, id });
 
 test('every registered tool advertises its real object contract and executes through the Harness registration path', async () => {
   const routed: string[] = [];
   const fixture = await registered([Object.entries(samples).map(([name, args]) => call(name, args))], async input => { routed.push(input.tool); return completed(input); }, { ...operations, wakeAt: async () => {} });
-  const { harness, root, tools } = fixture;
+  const { harness, root, tools, offered } = fixture;
   try {
     expect(tools.map(tool => tool.name).sort()).toEqual(Object.keys(samples).sort());
     await root.submit({ type: 'input', content: 'Exercise all registered contracts.' }, BACKGROUND_CONTEXT);
@@ -89,16 +92,19 @@ test('every registered tool advertises its real object contract and executes thr
     const results = (await root.context(BACKGROUND_CONTEXT)).messages.filter(message => message.role === 'toolResult');
     expect(results.map(result => result.toolCallId).sort()).toEqual(Object.keys(samples).sort());
     expect(results.filter(result => result.isError)).toEqual([]);
-    // The question tools post their questions and end: the transcript reads each card's question from its details.
+    // There is no ask tool: an agent asks with a block's required ask. The question tools it has post their questions
+    // and end: the transcript reads each card's question from its details.
+    expect(offered[0]).toEqual(expect.arrayContaining(['propose_plan', 'ask_takeover']));
+    expect(offered.flat()).not.toContain('ask');
     const questions = (await harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items ?? [];
-    for (const [callId, kind] of [['ask', 'ask'], ['propose_plan', 'approval'], ['ask_takeover', 'takeover']]) {
+    for (const [callId, kind] of [['propose_plan', 'approval'], ['ask_takeover', 'takeover']]) {
       const questionId = Reflect.get(Object(results.find(result => result.toolCallId === callId)?.details), 'questionId');
       expect(questions.find(question => question.id === questionId)).toMatchObject({ kind, answer: null });
     }
     // Models call web_browser (OpenAI reserves `browser`); dispatch keeps the signed protocol name.
-    expect(routed.sort()).toEqual(Object.keys(samples).filter(name => !['todo', 'ask', 'propose_plan', 'ask_takeover'].includes(name)).map(name => name === 'web_browser' ? 'browser' : name).sort());
+    expect(routed.sort()).toEqual(Object.keys(samples).filter(name => !['todo', 'propose_plan', 'ask_takeover'].includes(name)).map(name => name === 'web_browser' ? 'browser' : name).sort());
     expect((await harness.snapshot(TodosDoc, root.id, BACKGROUND_CONTEXT))?.items).toEqual(samples.todo?.items);
-    expect((await harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items.map(question => question.kind).sort()).toEqual(['approval', 'ask', 'takeover']);
+    expect((await harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items.map(question => question.kind).sort()).toEqual(['approval', 'takeover']);
     expect((await harness.snapshot(PlanDoc, root.id, BACKGROUND_CONTEXT))?.status).toBe('proposed');
   } finally { await harness.close(BACKGROUND_CONTEXT); }
 });

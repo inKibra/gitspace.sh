@@ -6,7 +6,7 @@ import { AssistantEntry, GenerationTask, LiveDoc, ToolResultEntry, UserEntry } f
 import { appendNotice, CacheNoticesDoc } from './notices.js';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { diffRevisions } from '@earendil-works/chord/delta';
-import { createRuntimeHarness, createConversationTools, AgentDefinitionContextDoc, BlockCorrectionsDoc, BlockFixEntry, CommentLookupDoc, StagedCommentsDoc, SubagentRunQueueDoc, correctedReply, type SubagentMetadata, ProcessExitsDoc, QuestionsDoc, WorkspaceDoc, answerPlan, questionRefusal, recordMachineReconnection, recordProcessExit, type PlanDecision, type QuestionClosure, type ToolServices, type RuntimeHarnessOptions } from '@gitspace/runtime-core';
+import { createRuntimeHarness, createConversationTools, AgentDefinitionContextDoc, BlockCorrectionsDoc, BlockFixEntry, CommentLookupDoc, StagedCommentsDoc, SubagentRunQueueDoc, correctedReply, type SubagentMetadata, ProcessExitsDoc, QuestionsDoc, WorkspaceDoc, answerPlan, closeRepliedQuestions, questionRefusal, recordMachineReconnection, recordProcessExit, replyQuestion, type PlanDecision, type QuestionClosure, type ToolServices, type RuntimeHarnessOptions } from '@gitspace/runtime-core';
 import { RuntimeApprovalAnswerSchema, RuntimeLifecycleApprovalAnswerSchema, RuntimeSnapshotSchema, RuntimeWatchEventSchema, RuntimeToolResultSchema, WORKSPACE_TOOL_RESULTS_MAX_BYTES, questionState, receiptDigest, type RuntimeToolResult, type RuntimeSnapshot, type RuntimeWatchEvent, type RuntimeSubmitInput, type RuntimeCancelInput, type RuntimeAnswerInput, type RuntimeGitCheckpoint, type RuntimeWorkspaceStatus } from '@gitspace/protocol-runtime';
 import type { CommentsDocument } from '@gitspace/protocol-runtime/comments';
 import { DurableObjectSqliteDatabase } from './sqlite.js';
@@ -40,8 +40,9 @@ import { createMessageDecisions, type SentDecisions } from './message-decisions.
 export type { SentDecisions } from './message-decisions.js';
 export type WorkspaceRuntimeOptions = Omit<RuntimeHarnessOptions, 'storage' | 'unfinished' | 'tools' | 'contextRead'> & { /** The runtime keeps long tool output in its own storage. */ tools: Omit<RuntimeHarnessOptions['tools'], 'results'>; lfs: GitLfsStore; retainLfs(checkpoint: RuntimeSnapshotCommitInput['checkpoint'], publicationId?: string): Promise<void>; code: Pick<ArtifactsCodeStore, 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths' | 'changedSnapshotPaths'> & CodeSearchSource; initialCheckpoint?: () => Promise<RuntimeSnapshotCommitInput['checkpoint'] | null>; /** Markdown for a document file (PDF, Office), or null for any other file. */ documentMarkdown?: (name: string, bytes: Uint8Array<ArrayBuffer>) => Promise<string | null>; browser?: RuntimeBrowserService; storage: DurableObjectStorage; identity: Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>; attachments: AttachmentServices; session: Pick<SessionControlServices, 'catalog' | 'reload'>; qa: { list(): Promise<z.infer<typeof RuntimeQaDocumentSchema>['items']>; act(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<{ shareDraft?: string }> }; /** The workspace's Chrome groups, read from stored rows for `gitspace.browsers` (docs/APERTURE-DESIGN.md §4.2). */ browsers?: () => Promise<RuntimeBrowsersDocument>; waitUntil(promise: Promise<unknown>): void; schedule(timestamp: number): Promise<void>; /** Called synchronously with each changed snapshot and its status summary right after the storage write that publishes it. */ published?(snapshot: RuntimeSnapshot, report: WorkspaceReport): void ; /** The canonical snapshot changed; these attached machines do not hold it yet. */ snapshotChanged?(machineIds: string[]): void; /** A main-conversation input submitted with a request id started its turn (called at once, before the publication that shows it) or that turn ended (called once its reply is read). */ turnChanged?(requestId: string, turn: RuntimeTurn): void; /** A person's prompt (a call carrying their device) is about to enter a conversation. */ personPrompted?(): void; /** A person (`deviceId`) approved or rejected a conversation's proposed plan; called once the answer is stored. */ recordDecision?(decision: PlanDecision & { deviceId: string }): Promise<void>; /** The decisions a person's prompt carried, once the prompt is placed in its conversation; called again (on the next submission change or wake) until it resolves, so it must accept the same message twice. */ recordMessageDecisions?(sent: SentDecisions): Promise<void>; /** A browser-loadable URL for a stored image a transcript row names. */ imageUrl?: TranscriptImageUrl; /** What the host keeps in memory for this runtime, by holder name, for the memory estimate line. */ memoryHolders?(): Promise<Record<string, unknown>>; /** The release this code is, recorded at each open so the next one can tell a code update from a restart. */ version?: string };
 /** The main conversation's turn for an input submitted with a request id; `withdrawn`: the input was taken back before
- * it ran (a person's cancel). */
-export type RuntimeTurn = { state: 'queued' } | { state: 'running' } | { state: 'ended'; outcome: 'finished' | 'failed' | 'withdrawn'; text: string | null; source: TextSource | null };
+ * it ran (a person's cancel); `asked`: its reply ends asking the person (a required block ask), and `text` is the
+ * question. */
+export type RuntimeTurn = { state: 'queued' } | { state: 'running' } | { state: 'ended'; outcome: 'finished' | 'asked' | 'failed' | 'withdrawn'; text: string | null; source: TextSource | null };
 /** One message of a turn, its text cut short. */
 export type RuntimeTurnItem = { role: 'user' | 'assistant' | 'tool'; text: string };
 /** `historyFrom`: for a submission, the history ordinal from which its input and everything after it are read. */
@@ -81,10 +82,11 @@ export type WorkspaceRuntime = {
   submit(input: RuntimeSubmitInput, deviceId?: string): Promise<RuntimeAccepted>;
   saveDraft(input: WorkspaceDraftSave, deviceId: string): Promise<WorkspaceDraftSaveResult>;
   cancel(input: RuntimeCancelInput): Promise<RuntimeAccepted>;
-  /** A person's answer to an open question; the asking conversation hears it as its next input (`text`, when given, is
-   * what it hears instead of the answer's own description). A question that is not open refuses it, except a retry of
-   * the answer it already has. */
-  answer(input: RuntimeAnswerInput, actor: { deviceId: string; canApprove: boolean }, text?: string): Promise<RuntimeAccepted>;
+  /** An answer to an open question; the asking conversation hears it as its next input (`text`, when given, is what it
+   * hears instead of the answer's own description). A person's answer (`person`, false for a machine's) also closes the
+   * conversation's other open questions as replied. A question that is not open refuses it, except a retry of the
+   * answer it already has. */
+  answer(input: RuntimeAnswerInput, actor: { deviceId: string; canApprove: boolean; person: boolean }, text?: string): Promise<RuntimeAccepted>;
   /** Runtime events newer than `after`, bounded: a snapshot for null, nothing when current, otherwise the retained
    * deltas after it, or a reset when it is ahead, expired or further behind than one read returns. */
   events(after: number | null): Promise<RuntimeWatchEvent[]>;
@@ -643,7 +645,11 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
       const replies = (answer?.model ?? []).flatMap((message, index) => message.role === 'assistant' ? [{ index, text: textParts(message.content) }] : []);
       const reply = replies.map(item => item.text).join('\n').trim();
       const first = replies.find(item => item.text.trim());
-      return { state: 'ended', outcome: 'finished', text: reply ? reply.slice(0, REPORT_CHARACTERS) : null, source: reply && first ? { conversationId: String(runtime.root.id), ordinal: Number(record.answer) * 1024 + first.index, characters: reply.length } : null };
+      // A reply holding a required block ask stopped the turn for the person: the turn asked, and says what. Its question
+      // is posted only after the reply's commit, too late for a report that waits on it.
+      const asked = replyQuestion(reply);
+      const text = (asked ?? reply).slice(0, REPORT_CHARACTERS) || null;
+      return { state: 'ended', outcome: asked === null ? 'finished' : 'asked', text, source: reply && first ? { conversationId: String(runtime.root.id), ordinal: Number(record.answer) * 1024 + first.index, characters: reply.length } : null };
     }
     const why = typeof record.detail === 'string' ? providerErrorText(record.detail) : UNANSWERED[record.reason] ?? record.reason;
     return { state: 'ended', outcome: record.reason === 'withdrawn' ? 'withdrawn' : 'failed', text: why.slice(0, REPORT_CHARACTERS), source: null };
@@ -872,14 +878,20 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
         const admitted = await options.admitInference({ conversationId: String(target.id), requestId: input.requestId, selection });
         await runtime.configureModel(target.id, admitted);
         await applyInferenceThinking(target, admitted);
-        await target.submit({ type: 'input', content: input.text, requestId: input.requestId, whenBusy: input.whenBusy ?? 'followUp' }, BACKGROUND_CONTEXT);
+        // A person's message (one sent from a device) replies to the conversation's open questions, in the commit that
+        // takes it, once: a retry of a message already taken closes none. An input with no device (the project agent's
+        // instruction, a machine's) closes none.
+        await target.commit(async tx => {
+          if (deviceId !== undefined && placed === undefined) await closeRepliedQuestions(tx, target.id);
+          await target.submit(tx, { type: 'input', content: input.text, requestId: input.requestId, whenBusy: input.whenBusy ?? 'followUp' });
+        }, BACKGROUND_CONTEXT);
       });
       if (deviceId !== undefined && input.draftRevision !== undefined && target.id === runtime.root.id) { await drafts.clear(input.draftRevision, deviceId, input.draftText); publish(); }
       await line;
       return { accepted: true as const, cursor: snapshot.cursor, conversationId: String(target.id), historyFrom };
     },
     async cancel(input: RuntimeCancelInput) { await runtime.lifecycle.stop(String((await conversation(input.conversationId)).id)); await line; return { accepted: true as const, cursor: snapshot.cursor }; },
-    async answer(input: RuntimeAnswerInput, actor: { deviceId: string; canApprove: boolean }, text?: string) {
+    async answer(input: RuntimeAnswerInput, actor: { deviceId: string; canApprove: boolean; person: boolean }, text?: string) {
       const current = (await harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items.find(item => item.id === input.questionId);
       // A retried answer the question already has is accepted again; any other answer to a closed question is refused.
       if (current?.answer !== null && current?.answer !== undefined && JSON.stringify(current.answer) === JSON.stringify(input.answer)) { await line; return { accepted: true as const, cursor: snapshot.cursor }; }
@@ -894,6 +906,8 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
         }
         const approval = question.kind === 'approval' ? RuntimeApprovalAnswerSchema.safeParse(input.answer) : null;
         if (approval && !approval.success) throw new Error('An approval answer is { approved, note }');
+        // A person's answer also replies to the conversation's other open questions.
+        if (actor.person) await closeRepliedQuestions(tx, conversationId, question.id);
         const closure = { answer: input.answer, ...(text === undefined ? {} : { text }) };
         if (!approval?.data) return { closure, value: null };
         const settled = await answerPlan(tx, conversationId, input.questionId, approval.data);

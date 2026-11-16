@@ -11,14 +11,14 @@ import { defineCatalog, type ComputedFunction } from '@json-render/core';
 import { useBoundProp, type Components } from '@json-render/react';
 import { schema } from '@json-render/react/schema';
 import { FileDiff, parsePatchFiles } from '@pierre/diffs';
-import { ArrowRight, PauseCircle, PlayCircle } from '@untitledui/icons';
+import { ArrowRight, Lock01, PauseCircle, PlayCircle } from '@untitledui/icons';
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { GitSpaceMarkdown } from '../GitSpaceMarkdown.js';
 import { useBlockActions } from './BlockActions.js';
 import { SvgBlock } from './SvgBlock.js';
 import { ChartView } from './ChartView.js';
 import { ChangeMapView } from '../guide/ChangeMap.js';
-import { BlockAnswersQuestion, BlockRefView } from './BlockDocument.js';
+import { BlockAnswersQuestion, BlockQuestionClosed, BlockRefView } from './BlockDocument.js';
 import { BudgetView, CallDiffView, CheckGridView, LogTableView, MetricDeltaView, RankView, SchemaDiffView, TimelineView, TradeoffsView, WorkspaceGraphView } from './ExplainViews.js';
 import { ImageView, VideoView } from './MediaBlocks.js';
 import { RoadmapView } from './RoadmapView.js';
@@ -174,6 +174,7 @@ interface AskOption { value: string; label: string; description?: string | null 
 function AskCardView({ questionId, question, prompt, options, value, staged, sent, answered, onPick }: { questionId: string; question: string; prompt: string; options: readonly AskOption[]; value: string; staged: string | null; sent: string | null; answered: string | null; onPick: (value: string) => void }) {
   const shape = useShape();
   const answersQuestion = useContext(BlockAnswersQuestion);
+  const closed = useContext(BlockQuestionClosed);
   const surface = useBlockActions();
   const canAnswer = answersQuestion || surface !== null;
   const done = sent ?? answered ?? staged;
@@ -184,6 +185,12 @@ function AskCardView({ questionId, question, prompt, options, value, staged, sen
       <span className="flex flex-wrap items-center gap-2 text-body font-medium">{options.find((option) => option.value === value)?.label ?? done}<Badge size="compact" variant="dot" color={staged && !sent && !answered ? 'amber' : 'green'}>{status}</Badge></span>
     </div>;
   }
+  // Its question closed unanswered: read only, like a closed question card, saying why.
+  if (closed !== null) return <section aria-label={`${question}, ${closed}`} className={`flex flex-col gap-2 border border-border bg-card px-3 py-2.5 ${shape.container}`}>
+    <span className="inline-flex items-center gap-1.5 text-caption text-muted-foreground"><Lock01 width={12} height={12} strokeWidth={1.5} />{question} · {closed}</span>
+    <div className="text-body text-foreground"><GitSpaceMarkdown>{prompt}</GitSpaceMarkdown></div>
+    <ul className="flex flex-col gap-1">{options.map((option) => <li key={option.value} className="text-body text-muted-foreground">{option.label}</li>)}</ul>
+  </section>;
   return <div className="flex flex-col gap-1.5">
     {/* FLUID-GAP: AskUserQuestions submits a single-choice question when a row is picked; it has no button to relabel. */}
     <AskUserQuestions

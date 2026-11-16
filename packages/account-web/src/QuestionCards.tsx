@@ -24,4 +24,5 @@ export const CLOSED_REASON: Readonly<Record<RuntimeQuestionClosed['reason'], str
   dismissed: 'Dismissed',
   stopped: 'Closed: the conversation was stopped or reset',
   expired: 'Expired',
+  replied: 'You replied in chat',
 };
