@@ -1,7 +1,8 @@
 import { createContext, useContext, useState, type MouseEvent, type ReactNode } from 'react';
 import { resolveResourceReference, resourceLinkHref, resourceUriFromHref } from '@gitspace/protocol/resource-uri';
 
-export interface ResourceRequest { uri: string }
+/** `diff`: open a `repo://` file's changes against the workspace's base rather than the file. */
+export interface ResourceRequest { uri: string; diff?: boolean }
 export const ResourceNavigation = createContext<((request: ResourceRequest) => void) | null>(null);
 
 /** Capture before Streamdown's external-link confirmation; internal links never leave this workspace. */

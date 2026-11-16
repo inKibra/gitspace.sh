@@ -217,6 +217,15 @@ export async function cloudRepositoryStatus(checkout: CloudCheckout, mode: Repos
   }));
 }
 
+/** Which of `folders` hold a file named in `manifests` in the working copy, reading one tree per folder. */
+export async function cloudPackageFolders(checkout: CloudCheckout, folders: readonly string[], manifests: Readonly<Record<string, true>>): Promise<Set<string>> {
+  const found = await Promise.all(folders.map(async folder => {
+    const node = await resolve(checkout.objects, checkout.worktree, folder);
+    return node && 'tree' in node && (await checkout.objects.tree(node.tree)).some(entry => entry.type !== 'tree' && Object.hasOwn(manifests, entry.name)) ? [folder] : [];
+  }));
+  return new Set(found.flat());
+}
+
 export async function cloudRepositoryTree(checkout: CloudCheckout, mode: RepositoryMode, path: string | null): Promise<RepositoryTreeEntry[]> {
   const { objects } = checkout;
   const compare = compared(checkout, mode);

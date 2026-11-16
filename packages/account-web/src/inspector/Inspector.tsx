@@ -18,6 +18,7 @@ import { useArtifactUploads } from './ArtifactUploads.js';
 import { DriveSurface, type DriveFileView, type InspectorDrive } from './DriveSurface.js';
 import type { ArtifactUploadClient } from './artifact-upload.js';
 import { ResourceNavigation, type ResourceRequest } from '../ResourceNavigation.js';
+import { parseResourceUri } from '@gitspace/protocol/resource-uri';
 import { IssuesView, openIssueCount, type IssuesViewProps } from './IssuesView.js';
 import { type InspectorArtifactContent, type ArtifactReference, type ThreadSelection, diffIdentities, InspectorLayout, RuntimeAvailability, openWorkspaceFirst, repositoryModes, ic, artifactId, Kicker, Padded } from './inspector-shared.js';
 import { GoalSurface, WorkflowDocument, RubricDocument } from './GoalSurface.js';
@@ -285,7 +286,12 @@ export function Inspector(props: InspectorProps) {
   const showDocument = (id: string): void => { setOpenFiles((current) => ({ ...current, active: id, viewing: true })); closeThread(); };
   const closeDocument = (id: string): void => { setOpenFiles((current) => closeInStrip(current, id)); closeThread(); };
   const openProduct = (kind: ProductKind): void => { if (kind === 'workflow' ? props.overview.workflow : props.overview.rubric) setProduct(kind); };
-  const openResource = ({ uri }: ResourceRequest): void => openDocument({ id: `resource:${uri}`, kind: 'resource', label: fileName(uri), target: uri });
+  const openResource = ({ uri, diff }: ResourceRequest): void => {
+    const resource = diff ? parseResourceUri(uri) : null;
+    // A ChangeSet file opens its diff against the base in Files, where the workspace's runtime serves it.
+    if (resource?.kind === 'repo' && runtimeAvailable) openFile(resource.path, 'base');
+    else openDocument({ id: `resource:${uri}`, kind: 'resource', label: fileName(uri), target: uri });
+  };
   useEffect(() => { if (props.resourceRequest) openResource(props.resourceRequest); }, [props.resourceRequest]);
   const openFile = (path: string, mode: RepositoryMode): void => { const id = `file:${path}`; setFileModes((current) => ({ ...current, [id]: mode })); openDocument({ id, kind: 'file', label: fileName(path), target: path }); if (mode === 'current') props.onRequestRepositoryFile(path, mode); else props.onRequestRepositoryDiff(path, mode); };
   const openEvidence = (reference: EvidenceReference): void => {

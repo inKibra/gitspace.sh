@@ -15,6 +15,7 @@ import type { ToolResultKey } from './tool-results.js';
 import { RuntimeWorkspaceArgumentsSchema } from '@gitspace/protocol/inspector-contract';
 import { DurableJobsDoc, createJobTask, createJobTool, type JobServices } from './jobs.js';
 import { RuntimeBashArgumentsSchema, RuntimeCodemodeDetailsSchema } from '@gitspace/protocol-runtime/tool-arguments';
+import { validateMarkdownBlocks } from '@gitspace/protocol/gitspace-ui';
 
 const model: Model<Api> = { id: 'tool-contract', name: 'Tool contract', provider: 'test', api: 'test', baseUrl: 'https://invalid.test', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 };
 const unused = async (): Promise<never> => { throw new Error('Unexpected operation'); };
@@ -45,7 +46,7 @@ const samples: Record<string, ToolCall['arguments']> = {
   space_workflow: { method: 'get' }, space_rubric: { method: 'get' }, space_journal: { method: 'list' }, space_guide: { method: 'get' }, space_review: { method: 'list' },
   web_search: { query: 'TypeScript documentation' }, web_fetch: { url: 'https://www.typescriptlang.org/docs/' }, generate_image: { prompt: 'A blue square' }, ast_grep: { pattern: 'foo($A)', path: 'src', language: 'typescript' },
   ast_edit: { ops: [{ pat: 'foo($A)', out: 'bar($A)' }], paths: ['src/main.ts'], language: 'typescript' }, ast_resolve: { proposalId: 'proposal', action: 'reject' },
-  history_search: { query: 'decision' }, history_read: { conversationId: 'conversation' }, report_issue: { message: 'Observed concrete failure' },
+  history_search: { query: 'decision' }, history_read: { conversationId: 'conversation' }, report_issue: { message: 'Observed concrete failure' }, blocks: { op: 'changeSet' },
   checkpoint: { goal: 'Inspect implementation' }, rewind: { checkpoint: 'checkpoint', report: 'Findings' }, wait: { timeoutMs: 1000 },
   mcp_discover: {}, mcp_invoke: { connectionId: 'connection', name: 'lookup', arguments: { query: 'hello' } }, web_browser: { action: 'tabs' },
   todo: { items: [{ id: 'proof', text: 'Exercise registrations', status: 'completed' }] }, propose_plan: { prompt: 'Implement the selected plan', choices: ['Approve', 'Reject'], steps: [{ id: 'implement', title: 'Implement the selected plan', detail: 'The selected path.' }] },
@@ -639,6 +640,62 @@ test('bash logs exposes executor failures as tool errors rather than successful 
     expect(JSON.stringify(result?.content)).toContain('Command output is unavailable');
   } finally { await harness.close(BACKGROUND_CONTEXT); }
 }, 4000);
+
+test('blocks builds a CommandRun and a TestReport from a finished job\'s record and from an exited process, and refuses a running job', async () => {
+  const output = 'bun test v1.4.4\n\nparse.test.ts:\nerror: expect(received).toBe(expected)\n\nExpected: 3\nReceived: 2\n\n      at <anonymous> (/repo/parse.test.ts:4:20)\n(fail) parse > reads a quoted value [0.20ms]\n\n 4 pass\n 0 skip\n 1 fail\nRan 5 tests across 1 file. [2.40s]\n';
+  const seed = defineTool({
+    name: 'seed-runs', description: 'Store a finished and a running test command.', parameters: Type.Object({}), replay: 'safe',
+    async execute(_input, api, context) {
+      await api.commit(async tx => {
+        const doc = await tx.doc(DurableJobsDoc, api.conversationId);
+        for (const [key, settled] of [['tests', true], ['watch', false]] as const) {
+          const job = { projectId: 'project', workspaceId: 'workspace', jobId: `job:${key}`, taskId: key, conversationId: String(api.conversationId), requestId: `task:${key}` };
+          const acceptance = RuntimeJobAcceptanceSchema.parse({ status: 'accepted', acceptedAt: '2026-11-16T09:00:00.000Z', job });
+          const observation = settled ? RuntimeJobObservationSchema.parse({ status: 'terminal', job, result: { status: 'completed', requestId: key, attemptId: key, content: [{ type: 'text', text: `Exit code: 1\n${output}` }] }, completedAt: '2026-11-16T09:00:02.500Z' }) : acceptance;
+          doc.records[key] = { acceptance, observation, args: { command: 'bun test', cwd: 'packages/parse', background: true }, fingerprint: key, spawningTask: api.taskId, deadlineAt: new Date(Date.now() + 10000).toISOString(), attemptId: key, cancelRequested: false, delivered: true };
+        }
+      }, context);
+      return { output: [{ type: 'text', text: 'Seeded.' }] };
+    },
+  });
+  const proc: unknown[] = [];
+  const invoke: ToolServices['invoke'] = async input => {
+    if (input.tool !== 'proc') return completed(input);
+    proc.push(input.args);
+    const daemon = { id: 'd1', name: 'e2e', state: 'exited', createdAt: '2026-11-16T09:00:00.000Z', finishedAt: '2026-11-16T09:01:00.000Z', pid: null, exitCode: 0, restartCount: 0 };
+    const answer = Reflect.get(Object(input.args), 'op') === 'describe'
+      ? { op: 'describe', daemon, spec: { name: 'e2e', application: '/bin/bash', args: ['-c', 'pnpm e2e'], envNames: [], cwd: '/repo', pty: true, restart: 'no', persist: false, detached: false } }
+      : { op: 'logs', state: 'exited', text: '12 passed\nall good\n', cursor: 2 };
+    return { status: 'completed', requestId: input.requestId, attemptId: input.attemptId, content: [{ type: 'text', text: JSON.stringify(answer) }] };
+  };
+  const { harness, root } = await registered([[call('seed-runs', {})], [
+    call('blocks', { op: 'commandRun', jobId: 'job:tests' }, 'command'), call('blocks', { op: 'testReport', jobId: 'job:tests' }, 'report'),
+    call('blocks', { op: 'commandRun', process: 'e2e', on: 'lab' }, 'process'), call('blocks', { op: 'testReport', jobId: 'job:watch' }, 'running'),
+  ]], invoke, operations, [seed]);
+  try {
+    await root.submit({ type: 'input', content: 'Show the test run.' }, BACKGROUND_CONTEXT);
+    await root.waitForIdle(withAbortSignal(AbortSignal.timeout(3000), BACKGROUND_CONTEXT));
+    const results = (await root.context(BACKGROUND_CONTEXT)).messages.filter(message => message.role === 'toolResult');
+    const answer = (id: string) => {
+      const result = results.find(message => message.toolCallId === id);
+      const text = result?.content.flatMap(item => item.type === 'text' ? [item.text] : []).join('') ?? '';
+      return { isError: result?.isError, text, value: result?.isError ? null : z.object({ component: z.string(), props: z.record(z.string(), z.unknown()), fence: z.string() }).loose().parse(JSON.parse(text)) };
+    };
+    const command = answer('command').value;
+    expect(command?.component).toBe('CommandRun');
+    expect(command?.props).toMatchObject({ command: 'bun test', cwd: 'packages/parse', exitCode: 1, durationMs: 2500, jobId: 'job:tests', truncated: false });
+    expect(String(command?.props.output)).toContain('(fail) parse > reads a quoted value');
+    expect(validateMarkdownBlocks(command?.fence ?? '')).toEqual([]);
+    const report = answer('report').value;
+    expect(report).toMatchObject({ component: 'TestReport', unrecognised: false, props: { runner: 'bun test', passed: 4, failed: 1, skipped: 0, durationMs: 2400, failures: [{ name: 'parse > reads a quoted value', file: 'parse.test.ts', message: 'expect(received).toBe(expected)\n\nExpected: 3\nReceived: 2' }] } });
+    expect(validateMarkdownBlocks(report?.fence ?? '')).toEqual([]);
+    // A process is read on its machine through proc describe and logs.
+    expect(answer('process').value?.props).toMatchObject({ command: '/bin/bash -c \'pnpm e2e\'', exitCode: 0, durationMs: 60000, output: '12 passed\nall good', jobId: 'e2e', cwd: '/repo' });
+    expect(proc).toEqual([{ op: 'describe', name: 'e2e', on: 'lab' }, { op: 'logs', name: 'e2e', lines: 10000, on: 'lab' }]);
+    expect(answer('running')).toMatchObject({ isError: true, value: null });
+    expect(answer('running').text).toContain('Job job:watch is still running');
+  } finally { await harness.close(BACKGROUND_CONTEXT); }
+}, 5000);
 
 test('codemode children own durable attempts', async () => {
   const invoked: Array<Parameters<ToolServices['invoke']>[0]> = [];

@@ -8,6 +8,7 @@ import { DaemonResponseSchema, DaemonSnapshotSchema, type DaemonSnapshot } from 
 import type { OperationalServices } from './tasks.js';
 import { ConversationLifecycleDoc, handleEvents } from './conversation-lifecycle.js';
 import { watchSteer } from './steer.js';
+import { commandResult, type FinishedRun } from './block-runs.js';
 
 export type JobServices = OperationalServices & {
   deliverConversationEvent(input: { conversationId: string; requestId: string; kind: 'command-completed' | 'process-exited'; text: string; payload?: JsonValue }): Promise<void>;
@@ -47,6 +48,21 @@ function pruneFinishedJobs(doc: { records: Record<string, JobRecord> }): void {
   if (finished.length <= MAX_FINISHED_JOBS) return;
   finished.sort((a, b) => b.completedAt.localeCompare(a.completedAt));
   for (const { key } of finished.slice(MAX_FINISHED_JOBS)) delete doc.records[key];
+}
+/** A finished bash job of this conversation, by its jobId, as `blocks` commandRun and testReport read it: its command
+ * from the record's arguments, its exit code and output from its result, its duration from acceptance to completion. */
+export async function finishedJob(jobId: string, api: ToolExecutionApi, context: Context): Promise<FinishedRun> {
+  const document = await api.snapshot(DurableJobsDoc, api.conversationId, context);
+  const found = Object.values(document?.records ?? {}).find(item => item.acceptance.job.conversationId === String(api.conversationId) && item.acceptance.job.jobId === jobId);
+  if (!found) throw new Error(`No job ${jobId} in this conversation, or it finished before the last ${MAX_FINISHED_JOBS} finished jobs; bash { op: "list" } lists them`);
+  const observation = storedObservation(found.observation, found.acceptance.job);
+  if (observation.status === 'not-started') throw new Error(`Job ${jobId} did not run (${observation.reason})${observation.message ? `: ${observation.message}` : ''}`);
+  if (observation.status !== 'terminal') throw new Error(`Job ${jobId} is still running; wait for it with bash { op: "wait", job }`);
+  const text = observation.result.content.flatMap(item => item.type === 'text' ? [item.text] : []).join('');
+  const result = commandResult(text);
+  if (!result) throw new Error(`Job ${jobId} ended without an exit code (${observation.result.status}): ${observation.result.status === 'failed' ? observation.result.error.message : text.slice(0, 500)}`);
+  const args = RuntimeBashCommandArgumentsSchema.parse(found.args);
+  return { id: jobId, command: args.command, cwd: args.cwd ?? null, exitCode: result.exitCode, durationMs: Date.parse(observation.completedAt) - Date.parse(found.acceptance.acceptedAt), output: result.output, cut: result.cut };
 }
 /**
  * A failed try (a job's reconciliation, dispatch or completion delivery; a process stop) is tried again after this long,

@@ -334,4 +334,10 @@ describe('The drawing brief', () => {
   it('stays within its budget of 4,500 characters', () => {
     expect(UI_BLOCK_BRIEF.length).toBeLessThanOrEqual(4500);
   });
+
+  it('points at the builders, and the skill documents each one', () => {
+    expect(UI_BLOCK_BRIEF).toContain('Show real data with builders: `tools.blocks({ op })`, op diff, excerpt, changeSet, commandRun or testReport, returns a ready fence; paste it, add notes.');
+    const skill = uiBlockPrompt();
+    for (const builder of ['diff { path, base? } → Diff', 'excerpt { path, start, end, commit?, highlight?, note? } → CodeExcerpt', 'changeSet { base? } → ChangeSet', 'commandRun { jobId } or { process, on? } → CommandRun', 'testReport { jobId } or { process, on? } → TestReport']) expect(skill).toContain(`- ${builder}`);
+  });
 });

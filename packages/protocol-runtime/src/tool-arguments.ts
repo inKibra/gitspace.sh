@@ -74,6 +74,23 @@ export const RuntimeProcArgumentsSchema = z.discriminatedUnion('op', [
   /** Points a workspace URL (`as`, default the name) at this machine's running service and `http` port (default its first). */
   z.strictObject({ op: z.literal('pin').describe('Point a workspace URL at a service this machine runs.'), name: processName, source: z.enum(['declared', 'process']).default('process').describe('process: the running process named name (default); declared: the service the workspace declares under that name.'), as: z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/u).optional().describe('Workspace URL to point; name when omitted.'), port: z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/u).optional().describe('The service\'s named http port; its first when omitted.'), ...processSelection }),
 ]);
+/** A finished run a CommandRun or TestReport is built from: a bash job of this conversation, or a proc process. */
+const blocksRun = { jobId: path.optional().describe('A finished bash job of this conversation: the jobId of its handle ("job:…").'), process: processName.optional().describe('An exited proc process, by name.'), ...processSelection };
+const oneRun = (run: { jobId?: string; process?: string }) => (run.jobId === undefined) !== (run.process === undefined);
+const ONE_RUN = 'Name the run: jobId (a bash job) or process (a proc process), one of them';
+export const RuntimeBlocksArgumentsSchema = z.discriminatedUnion('op', [
+  z.strictObject({ op: z.literal('diff').describe('A Diff of one file: its changes against the base.'), path: path.describe('The repository file.'), base: path.optional().describe('Branch whose merge base with HEAD is compared; the project\'s base branch when omitted.') }),
+  z.strictObject({
+    op: z.literal('excerpt').describe('A CodeExcerpt: lines start to end of a file.'), path: path.describe('The repository file.'),
+    start: z.number().int().positive().describe('First line, one-based.'), end: z.number().int().positive().describe('Last line; at most 120 lines in all.'),
+    commit: z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u, 'commit is a full commit id').optional().describe('Read the file at this commit; the working copy when omitted.'),
+    highlight: z.array(z.number().int().positive()).max(120).optional().describe('Line numbers to mark.'), note: z.string().max(400).optional().describe('One line shown under the lines.'),
+  }),
+  z.strictObject({ op: z.literal('changeSet').describe('A ChangeSet: every changed file against the base, grouped by package or folder.'), base: path.optional().describe('Branch whose merge base with HEAD is compared; the project\'s base branch when omitted.') }),
+  z.strictObject({ op: z.literal('commandRun').describe('A CommandRun: a finished job\'s or process\'s command, exit code, duration and output.'), ...blocksRun }).refine(oneRun, ONE_RUN),
+  z.strictObject({ op: z.literal('testReport').describe('A TestReport parsed from a finished test run\'s output.'), ...blocksRun }).refine(oneRun, ONE_RUN),
+]);
+export type RuntimeBlocksArguments = z.infer<typeof RuntimeBlocksArgumentsSchema>;
 const agentMessagingOptions = [
   z.strictObject({ op: z.literal('send').describe('Send a message to the parent or a sibling.'), to: path.describe('Address: parent, a sibling\'s name, or a conversation id.'), message: path.describe('The message.') }),
   z.strictObject({ op: z.literal('wait').describe('Wait for the next event: a reply, a finished job or an exited process; a message from the user also ends it.'), timeoutMs: z.number().int().min(1).max(300_000).default(30_000).describe('Longest to wait, at most 5 minutes (default 30 seconds).') }),
@@ -87,7 +104,7 @@ export const RuntimeAgentsArgumentsSchema = z.union([
   RuntimeChildAgentsArgumentsSchema,
 ]);
 export function runtimeOperationIsReadOnly(name: string, args: z.infer<typeof RuntimeJsonSchema>): boolean {
-  if (['read', 'grep', 'code_search', 'find', 'web_search', 'web_fetch', 'history_search', 'history_read', 'ast_grep', 'mcp_discover', 'workspace_status', 'wait'].includes(name)) return true;
+  if (['read', 'grep', 'code_search', 'find', 'web_search', 'web_fetch', 'history_search', 'history_read', 'ast_grep', 'mcp_discover', 'workspace_status', 'wait', 'blocks'].includes(name)) return true;
   if (!args || typeof args !== 'object' || Array.isArray(args)) return false;
   if (['machines', 'agents', 'bash', 'proc', 'sync_machine'].includes(name)) return ['list', 'status', 'describe', 'logs', 'wait', 'diff'].includes(String(args.op));
   if (name === 'sync') return ['status', 'diff', 'backups'].includes(String(args.method));

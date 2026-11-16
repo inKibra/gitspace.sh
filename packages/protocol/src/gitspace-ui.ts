@@ -203,7 +203,58 @@ const components = {
   },
   Diff: {
     props: z.strictObject({ patch: z.string().describe('A unified diff of one file, with its diff --git header'), title: z.string().nullish() }),
-    description: 'A small code change drawn as GitSpace draws diffs.',
+    description: 'A small code change drawn as GitSpace draws diffs. Build it with tools.blocks diff from the workspace\'s real diff.',
+  },
+  CodeExcerpt: {
+    props: z.strictObject({
+      path: z.string().min(1).max(300).describe('The repository file'),
+      startLine: z.number().int().min(1).describe('The line number of the first line'),
+      lines: z.array(z.string().max(1000)).min(1).max(120).describe('The file\'s lines from startLine, as they are'),
+      commit: z.string().regex(/^[a-f0-9]{7,64}$/u, 'commit is a commit id: 7 to 64 lowercase hex digits').nullish().describe('The commit the lines are from; the current file when omitted'),
+      highlight: z.array(z.number().int().min(1)).max(120).nullish().describe('Line numbers (as the file numbers them) to mark'),
+      note: z.string().max(400).nullish().describe('One line under the lines: what to look at'),
+    }),
+    description: 'Lines of one repository file with their line numbers, the ones that matter marked; the path opens the file in the Inspector from the first line. Build it with tools.blocks excerpt rather than copying lines.',
+  },
+  CommandRun: {
+    props: z.strictObject({
+      command: z.string().min(1).max(2000),
+      exitCode: z.number().int(),
+      durationMs: z.number().nonnegative(),
+      output: z.string().max(16_000).describe('The end of the output'),
+      truncated: z.boolean().describe('Whether output is only the end of a longer output'),
+      jobId: z.string().max(200).nullish().describe('The job or process it ran as'),
+      cwd: z.string().max(300).nullish(),
+    }),
+    description: 'A command that ran: a pass or fail badge from its exit code, its duration, and its output folded until opened. Build it with tools.blocks commandRun from the job.',
+  },
+  TestReport: {
+    props: z.strictObject({
+      runner: z.string().max(40).nullish().describe('vitest, bun test, jest, pytest, go test…'),
+      passed: z.number().int().nonnegative().nullable().describe('null when the output does not say'),
+      failed: z.number().int().nonnegative().nullable(),
+      skipped: z.number().int().nonnegative().nullable(),
+      durationMs: z.number().nonnegative().nullish(),
+      failures: z.array(z.strictObject({ name: z.string().min(1).max(300), file: z.string().max(300).nullish(), message: z.string().max(2000) })).max(40),
+      flaky: z.array(z.string().min(1).max(300)).max(40).nullish().describe('Tests that failed, then passed on a retry'),
+      note: z.string().max(400).nullish(),
+    }),
+    description: 'A test run: passed, failed and skipped counts, each failure with its file and message, and flaky tests. Build it with tools.blocks testReport from the run\'s job rather than retyping its numbers.',
+  },
+  ChangeSet: {
+    props: z.strictObject({
+      base: z.string().max(200).nullish().describe('What the files are compared with: a branch or commit'),
+      head: z.string().max(200).nullish(),
+      files: z.array(z.strictObject({
+        path: z.string().min(1).max(300),
+        added: z.number().int().nonnegative(),
+        removed: z.number().int().nonnegative(),
+        status: z.enum(['added', 'modified', 'deleted', 'renamed', 'conflicted']),
+        binary: z.boolean().nullish(),
+      })).min(1).max(400),
+      groups: z.array(z.strictObject({ name: z.string().min(1).max(120), paths: z.array(z.string().min(1)).min(1) })).max(60).nullish().describe('Areas in order, each naming its files\' paths; files in no group show last'),
+    }),
+    description: 'The files a change touches, grouped by area, each with its +/- line counts and status; a file opens its diff in the Inspector. Build it with tools.blocks changeSet.',
   },
   RunTag: {
     props: z.strictObject({ commit: z.string(), machine: z.string(), sample: z.string(), label: z.string().nullish() }),
@@ -902,6 +953,22 @@ function checkElement(elements: Record<string, unknown>, element: unknown, path:
     } else if (type === 'FlowMap' && !hasExpression(element.props)) {
       const map = components.FlowMap.props.safeParse(element.props);
       if (map.success) checkFlowMapReferences(map.data, propsPath, check.issues);
+    } else if (type === 'ChangeSet' && !hasExpression(element.props)) {
+      const set = components.ChangeSet.props.safeParse(element.props);
+      if (set.success) {
+        const files = new Set(set.data.files.map(file => file.path));
+        set.data.groups?.forEach((group, index) => group.paths.forEach((file, position) => {
+          if (!files.has(file)) check.issues.push({ path: [index, 'paths', position].reduce<string>(pointer, pointer(propsPath, 'groups')), message: `no file "${file}" in files` });
+        }));
+      }
+    } else if (type === 'CodeExcerpt' && !hasExpression(element.props)) {
+      const excerpt = components.CodeExcerpt.props.safeParse(element.props);
+      if (excerpt.success) {
+        const last = excerpt.data.startLine + excerpt.data.lines.length - 1;
+        excerpt.data.highlight?.forEach((line, index) => {
+          if (line < excerpt.data.startLine || line > last) check.issues.push({ path: pointer(pointer(propsPath, 'highlight'), index), message: `line ${line} is not among the excerpt's lines ${excerpt.data.startLine}–${last}` });
+        });
+      }
     }
   }
   checkElementChildren(elements, element, path, component, check.issues);
@@ -1742,9 +1809,9 @@ const BRIEF_SHAPES: readonly { component: string; options?: string; props: Recor
   { component: 'Tradeoffs', props: { question: 'Where do replies live?', options: [{ id: 'kv', label: 'KV' }, { id: 'do', label: 'Durable Object' }], criteria: [{ label: 'Consistency', scores: [1, 3] }], recommended: 'do' }, also: 'note; scores 0–3 per option' },
   { component: 'AskCard', options: 'id=cache ask=required', props: { question: 'Which cache keeps replies?', options: [{ value: 'kv', label: 'Workers KV' }, { value: 'do', label: 'Durable Object', description: 'strong, one region' }] }, also: 'prompt (Markdown)' },
   { component: 'Timeline', props: { events: [{ at: '2026-11-16T09:12:00Z', kind: 'deploy', label: 'v41 live' }, { at: '2026-11-16T09:20:00Z', kind: 'error', label: '5xx spike' }] }, also: 'title, detail; kind deploy|error|alert|fix|note' },
-  { component: 'Sequence', props: { title: 'Fix', frames: [{ content: { type: 'Markdown', props: { content: 'Replies are **cached**.' }, children: [] }, say: 'Replies are cached now.' }, { content: { ref: 'cache-path' }, say: 'Reads go to the cache first.' }] }, also: 'caption, hold; content is one element or { "ref": "<id>" }' },
+  { component: 'Sequence', props: { title: 'Fix', frames: [{ content: { type: 'Markdown', props: { content: '**Cached**.' }, children: [] }, say: 'Replies are cached now.' }, { content: { ref: 'cache-path' }, say: 'Reads hit it first.' }] }, also: 'caption, hold; content is one element or { "ref": "<id>" }' },
   { component: 'Reply', props: { comment: 'cm-0123456789ab', quote: 'the p95 tile', text: 'p95 of 20 runs.' } },
-  { component: 'Svg', props: { svg: '<svg viewBox="0 0 120 40"><rect x="1" y="1" width="118" height="38" rx="6" fill="none" stroke="var(--border)"/><text x="60" y="25" text-anchor="middle" fill="currentColor">cache</text></svg>' }, also: 'or a ```svg fence' },
+  { component: 'Svg', props: { svg: '<svg viewBox="0 0 80 30"><rect width="80" height="30" rx="6" fill="none" stroke="var(--border)"/><text x="8" y="20" fill="currentColor">cache</text></svg>' }, also: 'or a ```svg fence' },
 ];
 
 /** Every agent's instruction about blocks, main agents and subagents alike: when to draw, the short form and the props
@@ -1760,15 +1827,16 @@ export const UI_BLOCK_BRIEF = [
 - a sequence of events: Timeline
 - a walkthrough: Sequence (narrated frames)
 - a diagram: Mermaid (a few boxes) or Svg in theme colours only (currentColor, var(--border), var(--accent), var(--muted-foreground)…)
-- answering the person's comments: Reply`,
+- answering the person's comments: Reply
+Show real data with builders: \`tools.blocks({ op })\`, op diff, excerpt, changeSet, commandRun or testReport, returns a ready fence; paste it, add notes.`,
   `Short form: a fence whose info string names one component holds just its props, as one JSON object:
 ${FENCE}gitspace-ui CallDiff id=cache-path
 {"title":"…","lines":[…]}
 ${FENCE}
-After the component, optionally: id=<id> (once per message) names the block; ask invites a response; ask=required (needs an id) makes it a question: the workspace shows Needs you and the person's pick arrives as your next message. There is no ask tool: end your reply with that block; nothing waits. If they write in the chat instead, the question closes and their message is your input.`,
+After the component, optionally: id=<id> (once per message) names the block; ask invites a response; ask=required (needs an id) makes it a question: the workspace shows Needs you and the person's pick arrives as your next message. There is no ask tool: end your reply with that block; nothing waits. If they write in the chat instead, the question closes.`,
   `Props (each JSON is a valid short-form body; "also" names optional fields):
 ${BRIEF_SHAPES.map((shape) => `- ${shape.component}${shape.options === undefined ? '' : ` ${shape.options}`} ${JSON.stringify(shape.props)}${shape.also === undefined ? '' : `; also: ${shape.also}`}`).join('\n')}`,
-  'Anything else (layouts with children, state, actions; FlowMap, Checklist, BeforeAfter and other components): read skill://gitspace-ui. GitSpace checks every block: an invalid one in your reply shows an error card, then a fix step asks you to correct it with fix_block; a tool write holding one is refused with its path. A person\'s comments on your message arrive as "Comment on “…”: …" lines with { "comment": { "id" } }; answer each with its own Reply block, then go on.',
+  'Anything else (layouts with children, state, actions; FlowMap, Checklist, BeforeAfter and other components): read skill://gitspace-ui. GitSpace checks every block: an invalid one in your reply gets a fix step (fix_block); a tool write holding one is refused. A person\'s comments on your message arrive as "Comment on “…”: …" lines with { "comment": { "id" } }; answer each with its own Reply block, then go on.',
 ].join('\n\n');
 
 /** The skill's description: what an agent sees in a skill list, so it names the moments to read the skill. */
@@ -1805,6 +1873,15 @@ A problem's path, such as \`block 2/elements/table/props/columns/0/align\`, coun
 - Work in phases with its PRs and issues: Roadmap. Workspaces and what each waits on: WorkspaceGraph.
 - A picture or a clip from the drive or a browser capture: Image, Video. Before and after: BeforeAfter.
 - Layout, geometry, a UI mockup, or a drawing the components cannot express: ${fence}svg. ${fence}mermaid only for the most basic flow, or when the work is already about Mermaid; anything more is a FlowMap or SVG.
+- Real code, a change, a command or a test run: Diff, CodeExcerpt, ChangeSet, CommandRun, TestReport, made by the builders below.
+
+## Builders
+Show real data, never retyped: the \`blocks\` tool (tools.blocks({ op, … }) from a script) reads the source and answers JSON { component, props, fence }, the props already checked. Paste \`fence\` into your reply as it is and write your notes around it; a call that cannot read its source fails and says why, rather than inventing data.
+- diff { path, base? } → Diff: one file's changes in the workspace's cloud working copy against its merge base with the project's base branch (or the branch \`base\`), with every hunk. A patch over 32 KiB is refused: show the parts that matter with excerpt.
+- excerpt { path, start, end, commit?, highlight?, note? } → CodeExcerpt: lines start to end (at most 120) of the file in the working copy, or at \`commit\` (a full commit id); a file unchanged since HEAD is pinned to HEAD's commit. highlight marks lines by their number; note is one line under them.
+- changeSet { base? } → ChangeSet: every file changed against the same base, with its status and +/- counts, grouped by area: its top-level package (the first of its one- and two-deep folders holding package.json, go.mod, Cargo.toml, pyproject.toml or another manifest), else its top-level folder.
+- commandRun { jobId } or { process, on? } → CommandRun: a finished bash job of this conversation (the "job:…" id its handle names) or an exited proc process: its command, exit code, duration and its last 60 lines of output.
+- testReport { jobId } or { process, on? } → TestReport: the passed, failed and skipped counts, failures (name, file, message) and flaky tests of a finished test run, read from the summaries of vitest, bun test, jest, pytest and go test. Output none of them wrote answers \`unrecognised: true\`: only the counts it states in words (null where it states none), no failures, and a note saying so.
 
 ## Examples
 Each passes GitSpace's checks; copy their shape.

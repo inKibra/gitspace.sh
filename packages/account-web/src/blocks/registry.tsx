@@ -22,6 +22,7 @@ import { BlockAnswersQuestion, BlockQuestionClosed, BlockRefView } from './Block
 import { BudgetView, CallDiffView, CheckGridView, LogTableView, MetricDeltaView, RankView, SchemaDiffView, TimelineView, TradeoffsView, WorkspaceGraphView } from './ExplainViews.js';
 import { ImageView, VideoView } from './MediaBlocks.js';
 import { RoadmapView } from './RoadmapView.js';
+import { ChangeSetView, CodeExcerptView, CommandRunView, TestReportView } from './SourceViews.js';
 import { SequenceView } from './SequenceView.js';
 import { StateFlowView } from './StateFlowView.js';
 import { ItemComment, ReplyView, commentItem } from '../comments/CommentLayer.js';
@@ -267,6 +268,10 @@ export const BLOCK_COMPONENTS: Components<typeof blockCatalog> = {
   },
   Button: ({ props, emit }) => <Button variant={props.variant ?? 'secondary'} size="compact" disabled={props.disabled ?? false} onClick={() => emit('press')}>{props.label}</Button>,
   Diff: ({ props }) => <DiffView patch={props.patch} title={props.title ?? null} />,
+  CodeExcerpt: ({ props }) => <CodeExcerptView {...props} />,
+  CommandRun: ({ props }) => <CommandRunView {...props} />,
+  TestReport: ({ props }) => <TestReportView {...props} />,
+  ChangeSet: ({ props }) => <ChangeSetView {...props} />,
   RunTag: ({ props }) => {
     const text = <span className="inline-flex w-fit max-w-full items-center self-start whitespace-nowrap rounded border border-border bg-background px-1 font-mono text-[10.5px] leading-4 text-muted-foreground"><span className="text-foreground">{props.commit}</span>&nbsp;· {props.machine} · {props.sample}</span>;
     return props.label ? <Tooltip content={props.label} side="top">{text}</Tooltip> : text;

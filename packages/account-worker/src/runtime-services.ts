@@ -26,6 +26,7 @@ import { readRuntimeTranscript, readRuntimeHistory } from './runtime-transcript-
 import type { RuntimeInstructionLoader } from './runtime-instruction-loader.js';
 import { createDispatchSelector } from './runtime-dispatch-selection.js';
 import { invokeRuntimeSpaceTool, runtimeSpaceToolNames } from './runtime-space-tools.js';
+import { cloudBlock } from './runtime-block-builders.js';
 import { createRuntimeBrowserAuthority, type RuntimeBrowserAuthority } from './runtime-browser.js';
 import { announceComment } from './browser-comments.js';
 import { browserShareAccount } from './browser-share.js';
@@ -34,7 +35,7 @@ import { workspaceLiveKey } from '@gitspace/protocol/live-notice';
 import { servicesBlock } from './workspace-service-urls.js';
 import { createCloudCodemode } from './runtime-codemode.js';
 import type { RuntimeModelHelper, RuntimeWebSearchInput, RuntimeWebSearchResult } from './runtime-inference.js';
-import { PROCESS_MACHINE_DETACHED, RuntimeProcArgumentsSchema, RuntimeCodeSearchArgumentsSchema, questionState } from '@gitspace/protocol-runtime';
+import { PROCESS_MACHINE_DETACHED, RuntimeBlocksArgumentsSchema, RuntimeProcArgumentsSchema, RuntimeCodeSearchArgumentsSchema, questionState } from '@gitspace/protocol-runtime';
 import { fetchInternalService, isHostedServiceHostname } from './service-access.js';
 import { mintServiceToken } from './service-tokens.js';
 import { changeAgentWorkspace, setCloudWorkspacePhase } from './cloud-workspace-lifecycle.js';
@@ -715,6 +716,8 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       if (input.tool === 'agents' || input.tool === 'checkpoint' || input.tool === 'rewind' || input.tool === 'wait') return options.runtime().invokeConversationTool(input);
       if (input.tool === 'environment') return environment(input);
       if (input.tool === 'sync') return sync(input);
+      // commandRun and testReport are answered in runtime-core, from the conversation's job records.
+      if (input.tool === 'blocks') return completed(input, await cloudBlock(env, env.ACCOUNT_ID, await source(), RuntimeBlocksArgumentsSchema.parse(input.args)));
       if (input.tool === 'generate_image') {
         // Input images may be stored ones: the image provider gets their bytes.
         const args = RuntimeGenerateImageArgumentsSchema.parse(input.args);
