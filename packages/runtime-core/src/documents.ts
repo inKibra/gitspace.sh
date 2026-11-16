@@ -12,6 +12,9 @@ export function boundedReplay(_value: unknown, _ops: unknown, info: CheckpointIn
 export const WorkspaceDoc = defineDoc<{ phase: 'plan' | 'code' | 'review' | 'ship'; instructions: string; goal: string }>({ kind: 'gitspace.workspace', version: 1, scope: 'session', initial: () => ({ phase: 'code', instructions: '', goal: '' }), checkpointWhen: boundedReplay });
 export const MachinesDoc = defineDoc<{ attachments: RuntimeAttachment[] }>({ kind: 'gitspace.machines', version: 1, scope: 'session', initial: () => ({ attachments: [] }), checkpointWhen: boundedReplay });
 export const TodosDoc = defineDoc<{ items: RuntimeTodoItem[] }>({ kind: 'gitspace.todos', version: 1, scope: 'conversation', history: 'rewindable', fork: 'asOf', initial: () => ({ items: [] }), checkpointWhen: boundedReplay });
+/** Each reply's newest block correction entry (`block-fixes.ts`), by the reply's entry id: how the transcript reader finds
+ * the corrections of the replies it shows without reading past them. */
+export const BlockCorrectionsDoc = defineDoc<{ replies: Record<string, number> }>({ kind: 'gitspace.block-corrections', version: 1, scope: 'conversation', history: 'rewindable', fork: 'asOf', initial: () => ({ replies: {} }), checkpointWhen: boundedReplay });
 /** A conversation's plan. `text`, `steps`, `status` and `questionId` are its latest proposal's; once that is approved
  * they are the plan in effect, and `revision` counts approvals. While a later proposal waits or after it is rejected,
  * `approved` holds the plan in effect. Records from before plans had steps have no `steps`, `revision` or `approved`. */

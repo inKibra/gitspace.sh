@@ -1,6 +1,6 @@
 import { planQuestions } from './approval.js';
 import { providerErrorText } from './provider-error.js';
-import { WORKSPACE_REPORT_ENTRY, askAnswererSchema, workspaceTurnReportSchema, type AskBlock, type MessageImage, type RichContentBlock, type ToolCallBlock, type TransportBlock, type TurnBlock, type todoBlockSchema } from './model.js';
+import { WORKSPACE_REPORT_ENTRY, askAnswererSchema, messageCorrectionsSchema, workspaceTurnReportSchema, type AskBlock, type MessageImage, type RichContentBlock, type ToolCallBlock, type TransportBlock, type TurnBlock, type todoBlockSchema } from './model.js';
 import type { z } from 'zod';
 import type { TranscriptItem } from './history.js';
 import { executionIdentity, executionSettled, extractExecutions, mergeExecution } from './execution.js';
@@ -379,6 +379,8 @@ export class TranscriptProjector {
   #assistantParts(event: TranscriptEventInput, content: unknown[], final: boolean): void {
     const turn = this.#ensureTurn(event);
     const message = this.#message ??= { ordinal: event.ordinal, parts: new Map(), ...createdAt(event) };
+    // A stored message whose blocks the agent corrected arrives with the corrections in its text and lists them.
+    const corrections = final ? messageCorrectionsSchema.safeParse(event.payload.corrected).data ?? [] : [];
     for (const [index, rawPart] of content.entries()) {
       const part = record(rawPart);
       if (!part || typeof part.type !== 'string') continue;
@@ -387,12 +389,14 @@ export class TranscriptProjector {
         const previous = this.store.read(id);
         if (previous?.type === 'message' || (final ? part.text.trim() : part.text)) {
           const at = previous?.type === 'message' ? previous.at : message.at;
+          const corrected = corrections.filter((correction) => correction.part === index).map(({ block, at: correctedAt, issues }) => ({ block, at: correctedAt, issues }));
           this.#write({
             id,
             type: 'message',
             role: 'assistant',
             text: part.text,
             ...(!final ? { pending: true } : previous?.type === 'message' ? { pending: false } : {}),
+            ...(corrected.length ? { corrected } : {}),
             ...(at ? { at } : {}),
           }, previous);
           message.parts.set(index, 'message');

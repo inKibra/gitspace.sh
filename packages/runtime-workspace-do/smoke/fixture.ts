@@ -1,5 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
-import { createModels, createAssistantMessageEventStream, type Model, type StreamFunction, type AssistantMessage } from '@earendil-works/pi-ai';
+import { createModels, createAssistantMessageEventStream, type Model, type StreamFunction, type AssistantMessage, type ToolCall } from '@earendil-works/pi-ai';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { createOperationalTasks, type OperationalServices } from '../../runtime-core/src/tasks.js';
 import { RuntimeAnswerInputSchema, RuntimeIdentitySchema, RuntimeSessionInputSchema, RuntimeSnapshotSchema } from '@gitspace/protocol-runtime';
@@ -98,9 +98,14 @@ const stream: StreamFunction = (_model, context, options) => {
     return result;
   }
   const plan = last?.role === 'user' && text === 'propose a plan';
-  const output: AssistantMessage = { role: 'assistant', api: 'fixture', provider: 'fixture', model: 'fixture', content: ask || plan ? [{ type: 'toolCall', id: crypto.randomUUID(), name: plan ? 'propose_plan' : 'ask', arguments: plan ? { prompt: 'Approve this deterministic smoke plan?', choices: ['Misleading model choice', 'Another model choice'], steps: [{ id: 'smoke', title: 'Run the smoke step', detail: 'One deterministic step.' }] } : { prompt: 'Choose a color', choices: ['blue', 'green'] } }] : [{ type: 'text', text: `fixture reply: ${text}` }], stopReason: ask || plan ? 'toolUse' : 'stop', timestamp: Date.now(), usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0.000001, output: 0.000002, cacheRead: 0, cacheWrite: 0, total: 0.000003 } } };
+  // A block fix step: the fixture corrects block 1 as a Mermaid graph.
+  const fix = last?.role === 'user' && text.includes('call fix_block once per block');
+  const call: Pick<ToolCall, 'name' | 'arguments'> = plan ? { name: 'propose_plan', arguments: { prompt: 'Approve this deterministic smoke plan?', choices: ['Misleading model choice', 'Another model choice'], steps: [{ id: 'smoke', title: 'Run the smoke step', detail: 'One deterministic step.' }] } }
+    : fix ? { name: 'fix_block', arguments: { block: 1, source: 'graph TD; A-->B' } } : { name: 'ask', arguments: { prompt: 'Choose a color', choices: ['blue', 'green'] } };
+  const calls = ask || plan || fix;
+  const output: AssistantMessage = { role: 'assistant', api: 'fixture', provider: 'fixture', model: 'fixture', content: calls ? [{ type: 'toolCall', id: crypto.randomUUID(), ...call }] : [{ type: 'text', text: `fixture reply: ${text}` }], stopReason: calls ? 'toolUse' : 'stop', timestamp: Date.now(), usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0.000001, output: 0.000002, cacheRead: 0, cacheWrite: 0, total: 0.000003 } } };
   result.push({ type: 'start', partial: output });
-  result.push({ type: 'done', reason: ask || plan ? 'toolUse' : 'stop', message: output });
+  result.push({ type: 'done', reason: calls ? 'toolUse' : 'stop', message: output });
   result.end();
   return result;
 };

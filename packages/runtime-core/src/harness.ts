@@ -1,4 +1,4 @@
-import { Harness, createRegistry, defineExtension, hook, AssistantEntry, GenerationTask, CompactionTask, LiveDoc, AgentDoc, type HarnessSettings, type ModelRef, type Storage, type ConversationId, type Cursor, type Wake } from '@earendil-works/pi-durable';
+import { Harness, createRegistry, defineExtension, hook, AssistantEntry, GenerationTask, CompactionTask, LiveDoc, AgentDoc, type HarnessSettings, type ModelRef, type Storage, type ConversationId, type Cursor, type ToolRegistration, type Wake } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import type { Message, Models } from '@earendil-works/pi-ai';
 import { utf8ByteLength } from '@earendil-works/chord/output';
@@ -8,6 +8,7 @@ import { BlockAsksDoc, CommentLookupDoc, QuestionsDoc, WorkspaceDoc } from './do
 import { expireLegacyQuestions, repairBlockAsks } from './questions.js';
 import { requiredBlockAsks } from '@gitspace/protocol/gitspace-ui';
 import { carriesComments, repairCommentLookup } from './comments.js';
+import { createBlockFixes, fixBlockTool } from './block-fixes.js';
 import { sessionControlsExtension, SessionControlsDoc } from './session-controls.js';
 import { createBackgroundAgentTask, createSubagentReplyExtension } from './background-agents.js';
 import { createRetainedRulesExtension, type RetainedRuleServices } from './retained-rules.js';
@@ -151,7 +152,7 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
   const deliver: ConversationLifecycle['deliver'] = async input => (await lifecycleReady.promise).deliver(input);
   const jobs: JobServices = { ...options.operations, deliverConversationEvent: deliver };
   const backgroundAgentTask = createBackgroundAgentTask(deliver);
-  const tools = createRuntimeTools(options.tools, jobs, (id, context) => harness.abortTask(id, context));
+  const tools: ToolRegistration[] = [...createRuntimeTools(options.tools, jobs, (id, context) => harness.abortTask(id, context)), fixBlockTool];
   const extension = defineExtension({ name: 'gitspace', tools, tasks: [...createOperationalTasks(options.operations), backgroundAgentTask, createJobTask(jobs), createProcessExitTask(jobs)], sections: [{ key: 'gitspace', async render(input, context) {
     const workspace = await input.read.snapshot(WorkspaceDoc, context);
     const child = (await input.read.snapshot(AgentDefinitionContextDoc, input.conversationId, context))?.child;
@@ -288,6 +289,8 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
   registry.install(sessionControlsExtension);
   registry.install(childExtension);
   registry.install(createSubagentReplyExtension(deliver));
+  const blockFixes = createBlockFixes(async (id, requestId) => (await lifecycleReady.promise).admit(id, requestId));
+  registry.install(blockFixes.extension);
   const harness = await Harness.open(options.storage, { models: options.models, registry, settings: { ...options.settings, extensions: options.settings?.extensions ?? registry.snapshot().installed().filter(item => item.name !== childExtension.name), followUpMode: 'one-at-a-time',
     // An idle conversation's parsed context (8 MB for a 250k-token conversation with screenshots) is dropped at once:
     // a workspace object holds many conversations, and re-reading one costs tens of milliseconds.
@@ -307,6 +310,7 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
     return lookup;
   };
   harness.observeCommits({ end() {}, advance(publication) {
+    for (const change of publication.changes) if (change.type === 'entry') blockFixes.noteReply(change.value);
     const asking = publication.changes.some(change => change.type === 'entry' && AssistantEntry.is(change.value)
       && (change.value.model ?? []).some(message => message.role === 'assistant' && message.content.some(part => part.type === 'text' && requiredBlockAsks(part.text).length > 0)));
     if (asking) void repairAsks();

@@ -1,10 +1,12 @@
-import { CompactionEntry, ToolTask, type Conversation, type ConversationId, type Cursor, type EntryRecord, type Storage, type TaskQuery } from '@earendil-works/pi-durable';
+import { AssistantEntry, CompactionEntry, ToolResultEntry, ToolTask, type Conversation, type ConversationId, type Cursor, type EntryRecord, type Storage, type TaskQuery } from '@earendil-works/pi-durable';
+import type { Message } from '@earendil-works/pi-ai';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { PI_ENTRY_ORDINALS as ENTRY_ORDINALS, TranscriptProjector, WORKSPACE_REPORT_ENTRY, openerAt, piSessionId, previewTranscriptItem, transcriptContentRequestSchema, transcriptPageRequestSchema, turnRowId, TRANSCRIPT_CONTENT_CHARACTERS, TRANSCRIPT_PAGE_BYTES, TRANSCRIPT_PAGE_ROWS, type TranscriptContentPage, type TranscriptContentRequest, type TranscriptEventInput, type TranscriptItem, type TranscriptPage, type TranscriptPageRequest, type TranscriptRow } from '@gitspace/blocks';
 import type { RuntimeToolResult } from '@gitspace/protocol-runtime';
 import type { TranscriptEvent } from '@gitspace/protocol-runtime/session-controls';
 import type { RuntimeTranscriptRange } from '@gitspace/runtime-core/history';
-import { turnOpeners } from '@gitspace/runtime-core/transcript-rows';
+import { transcriptInputs } from '@gitspace/runtime-core/transcript-rows';
+import { BlockFixEntry, correctedReply, type BlockCorrection } from '@gitspace/runtime-core';
 import { z } from 'zod';
 
 export type RuntimeTranscriptEvent = TranscriptEvent & { sessionId: string };
@@ -58,8 +60,17 @@ function inTurn(event: TranscriptEvent, entry: EntryRecord): TranscriptEvent {
   return { ...event, payload: { ...event.payload, message: { role: 'custom', customType: MACHINE_NOTICE, display: true, title: IN_TURN_TITLE[entry.kind] ?? 'Note', content } } };
 }
 
-/** The entries that open the conversation's turns (where its inputs were placed), ascending, and the same as a set. */
-type Openers = { readonly ids: readonly number[]; readonly set: ReadonlySet<number> };
+/** What a page reads once: the entries that open the conversation's turns (where its inputs were placed), ascending, and
+ * the same as a set; where its block fix steps start, ascending (`transcriptInputs`); and each corrected reply's newest
+ * correction entry, by the reply's entry id. */
+type Openers = { readonly ids: readonly number[]; readonly set: ReadonlySet<number>; readonly fixes: readonly number[]; readonly corrections: Readonly<Record<string, number>> };
+
+/** Whether entry `entry` lies in a block fix step: a step starts at or below it with no turn opening between. */
+function inFixStep(openers: Openers, entry: number): boolean {
+  const fix = openerAt(openers.fixes, entry);
+  const opener = openerAt(openers.ids, entry);
+  return fix !== undefined && (opener === undefined || fix > opener);
+}
 
 /** The position a turn row's ID names: the event it came from, or its turn's input for the turn's user message. */
 function positionOf(rowId: string): number | undefined {
@@ -69,11 +80,12 @@ function positionOf(rowId: string): number | undefined {
   return user ? Number(user[1]) : undefined;
 }
 
-/** One Pi entry as transcript events. Tool results recorded by reference show the executor's stored result. */
-export function entryEvents(entry: EntryRecord, executorResult?: ExecutorResultReader, withdrawn?: WithdrawnNotices): TranscriptEvent[] {
+/** One Pi entry as transcript events. Tool results recorded by reference show the executor's stored result. A reply
+ * with block corrections (`correctedReply`) shows its corrected messages, each message's event listing its corrections. */
+export function entryEvents(entry: EntryRecord, executorResult?: ExecutorResultReader, withdrawn?: WithdrawnNotices, correction?: { model: readonly Message[]; corrected: readonly BlockCorrection[] }): TranscriptEvent[] {
   if (withdrawn?.has(String(entry.id))) return [];
   const base = Number(entry.id) * ENTRY_ORDINALS;
-  return (entry.model ?? []).map((source, index) => {
+  return (correction?.model ?? entry.model ?? []).map((source, index) => {
     if (entry.kind === MACHINE_NOTICE) {
       const title = typeof entry.data === 'object' && entry.data !== null && !Array.isArray(entry.data) && typeof entry.data.source === 'string' ? entry.data.source : 'Machine';
       return { ordinal: base + index, kind: 'message_end', payload: { message: { role: 'custom', customType: MACHINE_NOTICE, display: true, title, content: source.content }, entryId: String(entry.id) }, createdAt: new Date(source.timestamp).toISOString() };
@@ -92,7 +104,8 @@ export function entryEvents(entry: EntryRecord, executorResult?: ExecutorResultR
         if (result) message = { ...source, content: result.content, isError: result.status !== 'completed' };
       }
     }
-    return { ordinal: base + index, kind: 'message_end', payload: { message, entryId: String(entry.id) }, createdAt: new Date(message.timestamp).toISOString() };
+    const corrected = correction?.corrected.flatMap(item => item.message === index ? [{ part: item.part, block: item.block, at: item.at, issues: item.issues }] : []) ?? [];
+    return { ordinal: base + index, kind: 'message_end', payload: { message, entryId: String(entry.id), ...(corrected.length ? { corrected } : {}) }, createdAt: new Date(message.timestamp).toISOString() };
   });
 }
 
@@ -208,9 +221,12 @@ function withImageUrls<T>(item: T, imageUrl: TranscriptImageUrl | undefined): T 
 
 /** The reply the model is writing now in a conversation (pi's live generation message), if any. */
 export type InProgressReply = (conversationId: ConversationId) => Promise<unknown>;
+/** A conversation's replies with block corrections: each reply's newest correction entry, by the reply's entry id. */
+export type BlockCorrectionsReader = (conversationId: ConversationId) => Promise<Readonly<Record<string, number>>>;
 /** Transcript pages are projected per request from small windows of Pi entries, each told the name of the turn it
- * starts in. Nothing is persisted: Pi's entries and submissions are the only transcript storage. */
-export function createTranscriptReader(storage: Storage, withdrawn: WithdrawnNotices, executorResult?: ExecutorResultReader, imageUrl?: TranscriptImageUrl, inProgress?: InProgressReply) {
+ * starts in. Nothing is persisted: Pi's entries and submissions are the only transcript storage. A block fix step shows
+ * nothing, and a reply shows with its block corrections. */
+export function createTranscriptReader(storage: Storage, withdrawn: WithdrawnNotices, executorResult?: ExecutorResultReader, imageUrl?: TranscriptImageUrl, inProgress?: InProgressReply, blockCorrections?: BlockCorrectionsReader) {
   async function live(conversationId: ConversationId): Promise<boolean> {
     for (const status of LIVE_STATUSES) {
       const query: TaskQuery = { conversationId, status, background: false };
@@ -269,10 +285,16 @@ export function createTranscriptReader(storage: Storage, withdrawn: WithdrawnNot
     return found;
   }
 
-  /** Where each of the conversation's turns opens, ascending, and the same as a set. */
+  /** Where each of the conversation's turns opens and each fix step starts, and its replies' corrections. */
   async function openersOf(conversationId: ConversationId): Promise<Openers> {
-    const ids = await turnOpeners(storage, conversationId, ctx);
-    return { ids, set: new Set(ids) };
+    const [{ openers: ids, fixes }, corrections] = await Promise.all([transcriptInputs(storage, conversationId, ctx), blockCorrections?.(conversationId) ?? {}]);
+    return { ids, set: new Set(ids), fixes, corrections };
+  }
+
+  /** The conversation's entry `id`, read as its newest at or below it. */
+  async function entryAt(conversationId: ConversationId, id: number): Promise<EntryRecord | undefined> {
+    const [found] = (await storage.scanEntries({ conversationId }, 1, { after: id + 1 }, ctx)).items;
+    return found !== undefined && Number(found.id) === id ? found : undefined;
   }
 
   /** `own` (oldest first) as a window, with the entries past it its tool calls need for their results. */
@@ -346,16 +368,19 @@ export function createTranscriptReader(storage: Storage, withdrawn: WithdrawnNot
     for (const entry of view.entries) {
       entryId = Number(entry.id);
       written = 0;
+      if (inFixStep(openers, entryId) && (BlockFixEntry.is(entry) || AssistantEntry.is(entry) || ToolResultEntry.is(entry))) continue;
+      const correctionId = AssistantEntry.is(entry) ? openers.corrections[String(entry.id)] : undefined;
+      const correction = correctionId === undefined ? undefined : correctedReply(entry, view.entries.find(item => Number(item.id) === correctionId) ?? await entryAt(conversationId, correctionId));
       const opens = openers.set.has(entryId);
       if (opens) projector.apply({ sessionId, ordinal: entryId * ENTRY_ORDINALS, kind: 'turn_start', payload: {} });
-      for (const event of entryEvents(entry, executorResult, withdrawn)) projector.apply({ ...(opens ? event : inTurn(event, entry)), sessionId });
+      for (const event of entryEvents(entry, executorResult, withdrawn, correction)) projector.apply({ ...(opens ? event : inTurn(event, entry)), sessionId });
       const notice = noticeEvent(entry);
       if (notice) projector.apply({ ...notice, sessionId });
     }
-    if (!view.newer) for (const event of await executing(conversationId, sessionId, view.entries)) projector.apply(event);
+    if (!view.newer) for (const event of await executing(conversationId, sessionId, view.entries.filter(entry => !inFixStep(openers, Number(entry.id))))) projector.apply(event);
     // The reply the model is writing now, stored by pi as it arrives: its text and thinking show as pending rows, which
-    // the next page drops once the stored reply replaces them.
-    if (!view.newer && running && inProgress) {
+    // the next page drops once the stored reply replaces them. A fix step's shows nothing.
+    if (!view.newer && running && inProgress && !inFixStep(openers, view.last + 1)) {
       const message = await inProgress(conversationId);
       if (message !== undefined) projector.apply({ sessionId, ordinal: (view.last + 1) * ENTRY_ORDINALS, kind: 'message_update', payload: { message } });
     }

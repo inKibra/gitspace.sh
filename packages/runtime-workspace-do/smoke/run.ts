@@ -220,21 +220,28 @@ try {
   assert(!continuedRoot.messages.some(message => message.role === 'user' && message.content.some(part => part.type === 'text' && /continue/iu.test(part.text))), 'Continue made up a message');
   console.log('PASS continue runs a failed run again with no message of its own');
 
-  // The fixture model echoes the prompt, so this reply holds an invalid block: the main agent gets one notice, which
-  // starts no turn.
+  // The fixture model echoes the prompt, so this reply holds an invalid block. A hidden fix step follows, in which the
+  // fixture corrects block 1 with fix_block: the person sees one reply, its block corrected and marked, and nothing else.
   {
-    const told = 'user: Block 1 in your last message is invalid: the Mermaid source is empty\nThe chat shows an error in place of that block. Check the failing paths against skill://gitspace-ui and send a corrected block in a new message.';
+    const fence = '```';
+    const corrected = `assistant: fixture reply: Status:\n${fence}mermaid\ngraph TD; A-->B\n${fence}`;
     const texts = (snapshot: RuntimeSnapshot) => snapshot.conversations.find(item => item.title === 'Workspace')!.messages.flatMap(message => message.content.flatMap(part => part.type === 'text' ? [`${message.role}: ${part.text}`] : []));
-    await request(`/submit?text=${encodeURIComponent('Status:\n```mermaid\n\n```')}`);
-    await until(snapshot => texts(snapshot).includes(told));
+    await request(`/submit?text=${encodeURIComponent(`Status:\n${fence}mermaid\n\n${fence}`)}`);
+    await until(snapshot => texts(snapshot).includes(corrected));
     await Bun.sleep(500);
     const settled = RuntimeSnapshotSchema.parse(await request('/'));
-    assert.equal(texts(settled).filter(text => text === told).length, 1, 'The invalid block was noticed more than once');
-    assert.equal(texts(settled).at(-1), told, 'The block notice started a turn');
-    const mainId = settled.conversations.find(item => item.title === 'Workspace')!.id;
+    assert.deepEqual(texts(settled).slice(-2), [`user: Status:\n${fence}mermaid\n\n${fence}`, corrected], 'The fix step showed after the corrected reply');
+    assert(!texts(settled).some(text => text.includes('fix_block')), 'The fix step showed in the snapshot');
+    const main = settled.conversations.find(item => item.title === 'Workspace')!;
+    const page = (await session({ type: 'transcriptPage', request: { generation: null, before: null, after: null, around: null } }, main.id)).transcriptPage!;
+    const turn = page.rows.at(-1)!.turnId;
+    const rows = page.rows.filter(row => row.turnId === turn).map(row => row.item);
+    assert.deepEqual(rows.map(item => item.type === 'message' ? `${item.role}: ${item.text}` : item.type), [`user: Status:\n${fence}mermaid\n\n${fence}`, corrected], 'The fix step showed rows in the transcript');
+    const reply = rows.at(-1);
+    assert.deepEqual(reply?.type === 'message' ? reply.corrected?.map(item => ({ block: item.block, issues: item.issues })) : null, [{ block: 0, issues: ['the Mermaid source is empty'] }], 'The corrected reply is not marked');
     const tasks = z.array(z.object({ conversationId: z.string(), state: z.string() })).parse(await request('/live-tasks'));
-    assert(!tasks.some(task => task.conversationId === mainId && task.state !== 'terminal'), 'The block notice left work running');
-    console.log('PASS an invalid block in the agent\'s reply is noticed once and starts no turn');
+    assert(!tasks.some(task => task.conversationId === main.id && task.state !== 'terminal'), 'The fix step left work running');
+    console.log('PASS an invalid block in the agent\'s reply is corrected in place by a hidden fix step');
   }
 
 

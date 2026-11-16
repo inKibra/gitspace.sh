@@ -11,12 +11,22 @@ const messageImageSchema = z.union([
   z.object({ url: z.string().min(1), mimeType: z.enum(['image/png', 'image/jpeg', 'image/webp']) }),
 ]);
 
+/** A block of a message the agent corrected in place after it was stored: the block's index among the message's blocks
+ * (from 0), when it was corrected, and the issues the correction fixed. */
+export const blockCorrectionSchema = z.object({ block: z.number().int().nonnegative(), at: z.string(), issues: z.array(z.string()) });
+export type BlockCorrection = z.infer<typeof blockCorrectionSchema>;
+/** What a transcript event of a stored assistant message carries as `payload.corrected`: its block corrections, each
+ * naming the content part (the message row) its block is in. */
+export const messageCorrectionsSchema = z.array(blockCorrectionSchema.extend({ part: z.number().int().nonnegative() }));
+
 export const messageBlockSchema = base.extend({
   type: z.literal('message'),
   role: z.enum(['user', 'assistant']),
   text: z.string(),
   images: z.array(messageImageSchema).optional(),
   pending: z.boolean().optional(),
+  /** The message's blocks the agent corrected; `text` holds the corrections. */
+  corrected: z.array(blockCorrectionSchema).optional(),
   at,
 });
 

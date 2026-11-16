@@ -91,7 +91,7 @@ export function TranscriptItemView({ item, active, onAnswer, state, onStateChang
         from={item.role}
         title={item.role === 'assistant' ? fullTime(item.at) : undefined}
         data-pending={item.pending || undefined}
-      >{sent === null || mentioned === null ? <AgentMessageActions><MessageBlockDocument messageId={item.id} text={item.text} pending={item.pending ?? false}><CommentMessage row={item.id}><GitSpaceMarkdown streaming={item.pending}>{item.text}</GitSpaceMarkdown></CommentMessage></MessageBlockDocument></AgentMessageActions> : <>
+      >{sent === null || mentioned === null ? <AgentMessageActions><MessageBlockDocument messageId={item.id} text={item.text} pending={item.pending ?? false} corrected={item.corrected}><CommentMessage row={item.id}><GitSpaceMarkdown streaming={item.pending}>{item.text}</GitSpaceMarkdown></CommentMessage></MessageBlockDocument></AgentMessageActions> : <>
         {sent.tabs.length || mentioned.captures.length ? <span className="flex flex-wrap gap-1.5 pb-1.5">
           {sent.tabs.map((tab, index) => <TabChip key={`${tab.url}:${index}`} host={URL.canParse(tab.url) ? new URL(tab.url).host : tab.url} detail={tab.browser} />)}
           {mentioned.captures.map(capture => <CaptureChip key={capture.captureId} name={capture.name ?? 'Capture not found'} detail={capture.name ? 'Capture' : null} />)}

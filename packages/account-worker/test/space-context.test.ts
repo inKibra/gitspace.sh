@@ -293,4 +293,12 @@ describe('SpaceContextDO', () => {
     expect(await inside('inspector-blocks', (context) => context.getChangeGuide(identity))).toBeNull();
     expect(await inside('inspector-blocks', (context) => context.listJournal(identity))).toEqual([]);
   });
+
+  it('stores a block\'s literal colours as theme colours', async () => {
+    const entry = await inside('inspector-colours', (context) => context.appendJournalEntry({
+      ...identity, id: 'drawn', kind: 'narrative', phase: 'code', title: 'Drawn', body: 'Layout:\n```svg\n<svg viewBox="0 0 4 4"><rect fill="#f4f4f5" stroke="rgba(34, 197, 94, 0.5)"/></svg>\n```', outcome: null, decisions: [], evidence: [], createdBy: 'agent-a',
+    }));
+    expect(entry.body).toBe('Layout:\n```svg\n<svg viewBox="0 0 4 4"><rect fill="var(--muted)" stroke="var(--success)" stroke-opacity="0.5"/></svg>\n```');
+    expect((await inside('inspector-colours', (context) => context.listJournal(identity))).map(item => item.body)).toEqual([entry.body]);
+  });
 });

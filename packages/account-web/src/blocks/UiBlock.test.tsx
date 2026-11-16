@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GitSpaceMarkdown } from '../GitSpaceMarkdown.js';
 import { BlockActionsProvider, type BlockActions, type BlockState } from './BlockActions.js';
 import { BLOCK_FIXTURES, SVG_DRAWING, type BlockFixture } from './fixtures.js';
+import { MessageBlockDocument } from './BlockDocument.js';
 import { UI_BLOCK_EXAMPLES } from '@gitspace/protocol/gitspace-ui';
 
 let container: HTMLDivElement;
@@ -125,6 +126,22 @@ describe('gitspace-ui blocks in Markdown', () => {
     await render(<GitSpaceMarkdown>{fence('gitspace-ui', '{ "root": card }')}</GitSpaceMarkdown>);
     await waitFor(() => container.textContent?.includes('could not be drawn') ?? false);
     expect(container.textContent).toContain('the gitspace-ui block is not JSON');
+  });
+
+  it('marks a block the agent corrected, with what was wrong in its tooltip, and only that block', async () => {
+    const corrected = '<svg viewBox="0 0 10 10"><rect width="10" height="10" fill="currentColor"/></svg>';
+    const text = `${fence('svg', corrected)}\n\n${fence('svg', SVG_DRAWING)}`;
+    await render(<MessageBlockDocument messageId="message" text={text} pending={false} corrected={[{ block: 0, at: '2026-11-16T10:00:00.000Z', issues: ['/0: <script> is not allowed'] }]}><GitSpaceMarkdown>{text}</GitSpaceMarkdown></MessageBlockDocument>);
+    await waitFor(() => container.querySelectorAll('[data-gitspace-block="svg"] svg').length === 2);
+    const marks = [...container.querySelectorAll('[data-block-corrected]')];
+    expect(marks.map(mark => [mark.textContent, mark.getAttribute('title')])).toEqual([['corrected', 'Corrected after it was sent. It had:\n• /0: <script> is not allowed']]);
+  });
+
+  it('draws an svg fence\'s literal colours as theme colours', async () => {
+    await render(<GitSpaceMarkdown>{fence('svg', '<svg viewBox="0 0 10 10"><rect width="10" height="10" fill="#f4f4f5" stroke="rgba(34, 197, 94, 0.5)"/></svg>')}</GitSpaceMarkdown>);
+    await waitFor(() => container.querySelector('[data-gitspace-block="svg"] rect') !== null);
+    const rect = container.querySelector('[data-gitspace-block="svg"] rect');
+    expect([rect?.getAttribute('fill'), rect?.getAttribute('stroke'), rect?.getAttribute('stroke-opacity')]).toEqual(['var(--muted)', 'var(--success)', '0.5']);
   });
 
   it('draws a valid svg fence and refuses an unsafe one', async () => {

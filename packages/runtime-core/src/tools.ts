@@ -7,7 +7,7 @@ import { BACKGROUND_CONTEXT, withAbortSignal, type Context } from '@earendil-wor
 import * as Arguments from '@gitspace/protocol-runtime/tool-arguments';
 import { LIFECYCLE_APPROVAL_CHOICES, RuntimeContentSchema, RuntimeJsonSchema, RuntimeToolResultSchema, RuntimeBrowserToolArgumentsSchema, RuntimeAskTakeoverArgumentsSchema, RuntimeFullOutputDetailsSchema, RuntimeProposePlanArgumentsSchema, RuntimeTodoArgumentsSchema, TAKEOVER_CHOICES, TOOL_RESULT_MAX_BYTES, receiptDigest, type RuntimeAskTakeoverArguments, type RuntimeBrowserApprovalCard, type RuntimeLifecycleApprovalRequest, type RuntimePlanStep, type RuntimeTakeoverTab, type RuntimeToolResult, type WorkspaceBoardRow } from '@gitspace/protocol-runtime';
 import { appendJournalEntryInputSchema, appendReviewMessageInputSchema, attachRequirementEvidenceInputSchema, changeGuideAgentDraftSchema, createReviewThreadInputSchema, endJournalPhaseInputSchema, goalAgentDraftSchema, markGuideSectionReadInputSchema, putChangeGuideInputSchema, putGoalInputSchema, putRubricInputSchema, putWorkflowInputSchema, resolveReviewThreadInputSchema, reviewAnchorContextSchema, reviewMessageViewSchema, rubricAgentDraftSchema, startJournalPhaseInputSchema, workflowAgentDraftSchema, RuntimeWorkspaceArgumentsSchema, RuntimeAutomationsArgumentsSchema } from '@gitspace/protocol/inspector-contract';
-import { validateMarkdownBlocks } from '@gitspace/protocol/gitspace-ui';
+import { mapBlockColours, validateMarkdownBlocks } from '@gitspace/protocol/gitspace-ui';
 import { PlanDoc, QuestionsDoc, TodosDoc } from './documents.js';
 import { planTodos } from './plan.js';
 import { createJobTool, watchProcessExit, type JobServices } from './jobs.js';
@@ -25,8 +25,8 @@ export type CodemodeToolOutcome =
   | { status: 'interrupted'; error: string };
 const codemodeExecutorStatus = z.object({ executorStatus: z.union(RuntimeToolResultSchema.options.map(option => option.shape.status)) });
 /** Tools only the model calls: a script never asks a person, plans, keeps a todo list, checkpoints, waits, messages
- * agents or starts another script. */
-export const MODEL_ONLY_TOOLS: readonly string[] = ['codemode', 'agents', 'checkpoint', 'rewind', 'wait', 'todo', 'ask', 'propose_plan', 'ask_takeover'];
+ * agents, starts another script or corrects a reply's blocks. */
+export const MODEL_ONLY_TOOLS: readonly string[] = ['codemode', 'agents', 'checkpoint', 'rewind', 'wait', 'todo', 'ask', 'propose_plan', 'ask_takeover', 'fix_block'];
 /** Tools a main conversation's model reaches only from codemode, as `tools.<name>(args)`; it is offered every other
  * tool. A subagent has no codemode and is offered every tool its definition lists. `environment`, whose runs may post a
  * card for a person's approval that ends the agent's turn, is offered to the model too. */
@@ -429,9 +429,11 @@ export function createRuntimeTools(services: ToolServices, operations: JobServic
     // A model's call is checked against the advertised schema (steps required) before it runs. A recovered call runs
     // with its recorded arguments only, and one recorded before plans had steps has none: it proposes a Markdown-only plan.
     const args = parseToolArguments('propose_plan', RecordedProposePlanArgumentsSchema, input);
-    const issues = (args.steps ?? []).flatMap((step, index) => validateMarkdownBlocks(step.detail).map(issue => `steps/${index}/detail: ${issue.path}: ${issue.message}`));
+    // Steps are stored with their blocks' literal colours as theme colours.
+    const steps = args.steps?.map(step => ({ ...step, detail: mapBlockColours(step.detail) }));
+    const issues = (steps ?? []).flatMap((step, index) => validateMarkdownBlocks(step.detail).map(issue => `steps/${index}/detail: ${issue.path}: ${issue.message}`));
     if (issues.length > 0) throw new Error(`The plan's steps hold invalid blocks:\n${issues.join('\n')}`);
-    return questionPosted(await askPerson('approval', args.prompt, args.choices, api, context, args.steps), 'your plan for approval');
+    return questionPosted(await askPerson('approval', args.prompt, args.choices, api, context, steps), 'your plan for approval');
   } }));
   tools.push(defineTool({ name: 'ask_takeover', callers: ['model'], description: ASK_TAKEOVER, parameters: runtimeToolParameters(RuntimeAskTakeoverArgumentsSchema), prepareArguments: input => parseToolArguments('ask_takeover', RuntimeAskTakeoverArgumentsSchema, input), replay: 'safe', async execute(input, api, context) {
     const args = parseToolArguments('ask_takeover', RecordedAskTakeoverArgumentsSchema, input);

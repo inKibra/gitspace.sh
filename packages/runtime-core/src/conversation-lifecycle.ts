@@ -91,6 +91,9 @@ export type ConversationLifecycle = {
    * unknown one.
    */
   closeQuestion<T>(questionId: string, settle: (question: Question, tx: Tx, conversationId: ConversationId) => Promise<{ closure: QuestionClosure; value: T }>): Promise<T>;
+  /** Admits inference for a run the runtime starts itself (a block fix step) with the conversation's selected model,
+   * and applies that model and its effort. */
+  admit(conversationId: ConversationId, requestId: string): Promise<void>;
 };
 export type ConversationLifecycleOptions = {
   harness: Harness; storage: Storage; admitInference: RuntimeHarnessOptions['admitInference'];
@@ -282,6 +285,11 @@ export function createConversationLifecycle(options: ConversationLifecycleOption
   }
   return {
     userInput,
+    async admit(id, requestId) {
+      const conversation = await harness.conversation(id, context);
+      if (!conversation) throw new Error('Conversation not found');
+      await admit(conversation, requestId);
+    },
     async runWhileActive(id, operation) {
       return serialized(async () => {
         const conversation = await resolve(id);

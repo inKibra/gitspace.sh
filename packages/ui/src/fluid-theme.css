@@ -86,6 +86,16 @@
   --destructive: light-dark(#EF4444, #F87171);
   --destructive-light: light-dark(#FEF2F2, #450A0A);
 
+  /* ── Status and chart series ──
+     The colours a drawing's literal colours map to (@gitspace/protocol
+     themeColour): greens, ambers and oranges, then the hues with no status
+     meaning (cyan, violet, pink). */
+  --success: light-dark(#16A34A, #4ADE80);
+  --warning: light-dark(#D97706, #FBBF24);
+  --chart-1: light-dark(#0891B2, #22D3EE);
+  --chart-2: light-dark(#7C3AED, #A78BFA);
+  --chart-3: light-dark(#DB2777, #F472B6);
+
   /* ── Focus indicator ──
      Every component focus ring reads var(--focus-ring, #6B97FF), so this is
      the single theming point. The literal fallback keeps registry components

@@ -4,18 +4,19 @@
 import { Suspense, lazy } from 'react';
 import type { CustomRenderer, CustomRendererProps } from 'streamdown';
 import { BlockPlaceholder } from './BlockFrames.js';
+import { CorrectedMark } from './BlockCorrections.js';
 
 const FencedBlock = lazy(async () => ({ default: (await import('./UiBlock.js')).FencedBlock }));
 const MermaidFence = lazy(async () => ({ default: (await import('./MermaidDiagram.js')).MermaidFence }));
 
 function BlockFence({ code, isIncomplete, language }: CustomRendererProps) {
   if (isIncomplete) return <BlockPlaceholder />;
-  return <Suspense fallback={<BlockPlaceholder />}><FencedBlock kind={language === 'svg' ? 'svg' : 'gitspace-ui'} body={code} /></Suspense>;
+  return <><CorrectedMark code={code} /><Suspense fallback={<BlockPlaceholder />}><FencedBlock kind={language === 'svg' ? 'svg' : 'gitspace-ui'} body={code} /></Suspense></>;
 }
 
 function DiagramFence(props: CustomRendererProps) {
   if (props.isIncomplete) return <BlockPlaceholder />;
-  return <Suspense fallback={<BlockPlaceholder />}><MermaidFence {...props} /></Suspense>;
+  return <><CorrectedMark code={props.code} /><Suspense fallback={<BlockPlaceholder />}><MermaidFence {...props} /></Suspense></>;
 }
 
 export const BLOCK_RENDERERS: CustomRenderer[] = [{ language: ['gitspace-ui', 'svg'], component: BlockFence }, { language: 'mermaid', component: DiagramFence }];

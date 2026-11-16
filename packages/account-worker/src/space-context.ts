@@ -67,7 +67,7 @@ import {
   type WorkflowNode,
   type WorkflowView,
 } from '@gitspace/protocol/inspector-contract';
-import { extractBlocks, validateMarkdownBlocks } from '@gitspace/protocol/gitspace-ui';
+import { extractBlocks, mapBlockColours, validateMarkdownBlocks } from '@gitspace/protocol/gitspace-ui';
 import { BOARD_JOURNAL_ENTRIES } from '@gitspace/protocol-runtime';
 import type { z } from 'zod';
 import { BudgetedDurableObject } from './storage-quarantine.js';
@@ -249,7 +249,7 @@ export class SpaceContextDO extends BudgetedDurableObject {
   }
 
   putGoal(input: PutGoalInput): GoalRecordView {
-    const parsed = putGoalInputSchema.parse(input);
+    const parsed = putGoalInputSchema.parse(withThemeColours(input));
     assertMarkdownBlocks([['goal.summary', parsed.goal.summary], ...parsed.goal.requirements.map((requirement, index): MarkdownField => [`goal.requirements[${index}].description`, requirement.description])]);
     const identity = this.requireIdentity(parsed);
     return this.ctx.storage.transactionSync(() => {
@@ -497,7 +497,7 @@ export class SpaceContextDO extends BudgetedDurableObject {
   }
 
   startJournalPhase(input: StartJournalPhaseInput): JournalEntryView {
-    const parsed = startJournalPhaseInputSchema.parse(input);
+    const parsed = startJournalPhaseInputSchema.parse(withThemeColours(input));
     assertMarkdownBlocks([['intent', parsed.intent]]);
     const identity = this.requireIdentity(parsed);
     return this.ctx.storage.transactionSync(() => {
@@ -524,7 +524,7 @@ export class SpaceContextDO extends BudgetedDurableObject {
   }
 
   endJournalPhase(input: EndJournalPhaseInput): JournalEntryView {
-    const parsed = endJournalPhaseInputSchema.parse(input);
+    const parsed = endJournalPhaseInputSchema.parse(withThemeColours(input));
     assertMarkdownBlocks([['outcome', parsed.outcome]]);
     const identity = this.requireIdentity(parsed);
     return this.ctx.storage.transactionSync(() => {
@@ -563,7 +563,7 @@ export class SpaceContextDO extends BudgetedDurableObject {
   }
 
   appendJournalEntry(input: AppendJournalEntryInput): JournalEntryView {
-    const parsed = appendJournalEntryInputSchema.parse(input);
+    const parsed = appendJournalEntryInputSchema.parse(withThemeColours(input));
     assertMarkdownBlocks([['body', parsed.body], ['outcome', parsed.outcome]]);
     const identity = this.requireIdentity(parsed);
     return this.ctx.storage.transactionSync(() => {
@@ -635,7 +635,7 @@ export class SpaceContextDO extends BudgetedDurableObject {
   }
 
   putChangeGuide(input: PutChangeGuideInput): ChangeGuideView {
-    const parsed = putChangeGuideInputSchema.parse(input);
+    const parsed = putChangeGuideInputSchema.parse(withThemeColours(input));
     const fields: MarkdownField[] = [['guide.intro', parsed.guide.intro]];
     const diagrams: MarkdownField[] = [];
     for (const [index, section] of parsed.guide.sections.entries()) {
@@ -1184,6 +1184,15 @@ const GUIDE_COLUMNS = 'revision, head_commit, base_ref, base_commit, title, crea
 const requirementAcceptanceSchema = goalRequirementSchema.pick({ acceptedBy: true, acceptedAt: true }).required();
 /** A requirement whose acceptance a person recorded and that is no longer accepted. */
 const REOPENED_ACCEPTANCE = JSON.stringify({ acceptedBy: null, acceptedAt: null });
+
+/** A write's input with the literal colours of the blocks in its strings as theme colours (`mapBlockColours`), as its
+ * Markdown fields are stored. */
+function withThemeColours(value: unknown): unknown {
+  if (typeof value === 'string') return mapBlockColours(value);
+  if (Array.isArray(value)) return value.map(withThemeColours);
+  if (typeof value !== 'object' || value === null) return value;
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, withThemeColours(item)]));
+}
 
 /** A Markdown field of a write, named by its path in the write's input. */
 type MarkdownField = [string, string | null | undefined];

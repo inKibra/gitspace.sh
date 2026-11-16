@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { extractBlocks, parseSvg, requiredBlockAsks, UI_BLOCK_EXAMPLES, uiBlockPrompt, validateMarkdownBlocks, validateSvg, validateUiSpec } from '../src/gitspace-ui.js';
+import { extractBlocks, mapBlockColours, parseSvg, requiredBlockAsks, themeColour, UI_BLOCK_EXAMPLES, uiBlockPrompt, validateMarkdownBlocks, validateSvg, validateUiSpec } from '../src/gitspace-ui.js';
 
 const fence = '```';
 
@@ -123,14 +123,15 @@ describe('SVG drawings', () => {
     expect(validateSvg(themed)).toEqual([]);
   });
 
-  it('rejects scripts, foreignObject, event handlers, external links and literal colours', () => {
+  it('rejects scripts, foreignObject, event handlers and external links, with literal colours in them or not', () => {
     expect(paths(validateSvg('<svg><script>alert(1)</script></svg>'))).toEqual(['/0']);
     expect(paths(validateSvg('<svg><foreignObject><div/></foreignObject></svg>'))).toEqual(['/0', '/0/0']);
     expect(paths(validateSvg('<svg><rect onclick="alert(1)" fill="none"/></svg>'))).toEqual(['/0']);
     expect(paths(validateSvg('<svg><use href="https://example.com/a.svg#x"/></svg>'))).toEqual(['/0']);
     expect(paths(validateSvg('<svg><use xlink:href="&#106;avascript:alert(1)"/></svg>'))).toEqual(['/0']);
     expect(paths(validateSvg('<svg><rect fill="url(https://example.com/p.svg#g)"/></svg>'))).toHaveLength(2);
-    expect(paths(validateSvg('<svg><circle r="2" fill="#ff0000"/></svg>'))).toEqual(['/0']);
+    expect(paths(validateSvg('<svg><circle r="2" fill="#ff0000" onclick="alert(1)"/><foreignObject fill="white"/></svg>'))).toEqual(['/0', '/1']);
+    expect(paths(validateSvg('<svg><circle r="2" fill="banana"/></svg>'))).toEqual(['/0']);
     expect(paths(validateSvg('<svg/><svg/>'))).toEqual(['']);
   });
 
@@ -173,6 +174,55 @@ describe('SVG drawings', () => {
     const spec = reviewSpec();
     spec.elements.count = { type: 'Svg', props: { svg: '<svg><g><script/></g></svg>' }, children: [] };
     expect(paths(validateUiSpec(spec))).toEqual(['/elements/count/props/svg/0/0']);
+  });
+
+  // The reply that was refused with 26 issues such as fill="#f4f4f5": zinc greys, white and a green.
+  const refused: [string, string, string][] = [
+    ['fill', '#ffffff', 'var(--card)'], ['stroke', '#e4e4e7', 'var(--border)'], ['fill', '#fafafa', 'var(--background)'], ['stroke', '#d4d4d8', 'var(--border)'],
+    ['fill', '#f4f4f5', 'var(--muted)'], ['stroke', '#e4e4e7', 'var(--border)'], ['fill', '#18181b', 'var(--foreground)'], ['fill', '#71717a', 'var(--muted-foreground)'],
+    ['fill', '#52525b', 'var(--muted-foreground)'], ['fill', '#a1a1aa', 'var(--muted-foreground)'], ['fill', '#27272a', 'var(--foreground)'], ['fill', '#3f3f46', 'var(--foreground)'],
+    ['fill', '#09090b', 'var(--foreground)'], ['stroke', '#a1a1aa', 'var(--muted-foreground)'], ['fill', '#22c55e', 'var(--success)'], ['stroke', '#16a34a', 'var(--success)'],
+    ['fill', '#ffffff', 'var(--card)'], ['stroke', '#e4e4e7', 'var(--border)'], ['fill', '#f4f4f5', 'var(--muted)'], ['fill', '#fff', 'var(--card)'],
+    ['stroke', '#d4d4d8', 'var(--border)'], ['fill', '#18181b', 'var(--foreground)'], ['fill', '#71717a', 'var(--muted-foreground)'], ['fill', '#22c55e', 'var(--success)'],
+    ['stop-color', '#22c55e', 'var(--success)'], ['stop-color', '#ffffff', 'var(--card)'],
+  ];
+  const refusedSvg = `<svg viewBox="0 0 10 10">${refused.map(([name, colour]) => `<rect ${name}="${colour}"/>`).join('')}</svg>`;
+
+  it('maps the 26 literal colours of a refused reply to theme variables, so it validates clean', () => {
+    expect(refused).toHaveLength(26);
+    expect(validateMarkdownBlocks(`${fence}svg\n${refusedSvg}\n${fence}`)).toEqual([]);
+    const { root, source } = parseSvg(refusedSvg);
+    const drawn = root?.children.flatMap(child => typeof child === 'string' ? [] : child.attributes);
+    expect(drawn).toEqual(refused.map(([name, , paint]) => [name, paint]));
+    expect(source).toBe(`<svg viewBox="0 0 10 10">${refused.map(([name, , paint]) => `<rect ${name}="${paint}"/>`).join('')}</svg>`);
+  });
+
+  it('maps rgb(), hsl(), named and hex colours by hue and lightness, and keeps an alpha as the paint\'s opacity', () => {
+    const mapped: [string, { paint: string; opacity: number } | null][] = [
+      ['rgb(239, 68, 68)', { paint: 'var(--destructive)', opacity: 1 }], ['rgba(59, 130, 246, 0.25)', { paint: 'var(--focus-ring)', opacity: 0.25 }],
+      ['rgb(245 158 11 / 50%)', { paint: 'var(--warning)', opacity: 0.5 }], ['hsl(142 71% 45%)', { paint: 'var(--success)', opacity: 1 }],
+      ['hsla(270, 80%, 60%, 0.5)', { paint: 'var(--chart-2)', opacity: 0.5 }], ['orange', { paint: 'var(--warning)', opacity: 1 }],
+      ['Teal', { paint: 'var(--chart-1)', opacity: 1 }], ['hotpink', { paint: 'var(--chart-3)', opacity: 1 }], ['white', { paint: 'var(--card)', opacity: 1 }],
+      ['black', { paint: 'var(--foreground)', opacity: 1 }], ['slategray', { paint: 'var(--muted-foreground)', opacity: 1 }], ['#0f172a', { paint: 'var(--foreground)', opacity: 1 }],
+      ['#80808080', { paint: 'var(--muted-foreground)', opacity: 0.5 }], ['#dcfce7', { paint: 'var(--success)', opacity: 0.14 }], ['transparent', { paint: 'none', opacity: 1 }],
+      ['currentColor', null], ['var(--foreground)', null], ['banana', null], ['rgb(1, 2)', null],
+    ];
+    expect(mapped.map(([colour]) => [colour, themeColour(colour)])).toEqual(mapped);
+    const { root, issues, source } = parseSvg('<svg><rect fill="rgba(255,0,0,.5)" stroke="#00f8" stroke-opacity="0.5"/><text style="fill: hsl(142 71% 45% / 0.4); stroke: red !important">x</text></svg>');
+    expect(issues).toEqual([]);
+    expect(root?.children).toEqual([
+      { name: 'rect', attributes: [['fill', 'var(--destructive)'], ['stroke', 'var(--focus-ring)'], ['stroke-opacity', '0.265'], ['fill-opacity', '0.5']], children: [] },
+      { name: 'text', attributes: [['style', 'fill:var(--success); stroke:var(--destructive) !important;fill-opacity:0.4']], children: ['x'] },
+    ]);
+    expect(source).toBe('<svg><rect fill="var(--destructive)" stroke="var(--focus-ring)" stroke-opacity="0.265" fill-opacity="0.5"/><text style="fill:var(--success); stroke:var(--destructive) !important;fill-opacity:0.4">x</text></svg>');
+  });
+
+  it('stores blocks with theme colours: svg fences and Svg elements; other text and mermaid unchanged', () => {
+    const spec = { root: 's', elements: { s: { type: 'Svg', props: { svg: '<svg><rect fill="#ef4444"/></svg>' }, children: [] } } };
+    const markdown = `Intro <rect fill="#fff"/>\n  ${fence}svg\n  <svg viewBox="0 0 4 4">\n    <rect fill="white"/>\n  </svg>\n  ${fence}\n${fence}gitspace-ui\n${JSON.stringify(spec, null, 2)}\n${fence}\n${fence}mermaid\ngraph TD; A[#fff]-->B\n${fence}\n`;
+    const stored = { ...spec, elements: { s: { ...spec.elements.s, props: { svg: '<svg><rect fill="var(--destructive)"/></svg>' } } } };
+    expect(mapBlockColours(markdown)).toBe(`Intro <rect fill="#fff"/>\n  ${fence}svg\n  <svg viewBox="0 0 4 4">\n    <rect fill="var(--card)"/>\n  </svg>\n  ${fence}\n${fence}gitspace-ui\n${JSON.stringify(stored)}\n${fence}\n${fence}mermaid\ngraph TD; A[#fff]-->B\n${fence}\n`);
+    expect(mapBlockColours('No blocks, #fff')).toBe('No blocks, #fff');
   });
 });
 

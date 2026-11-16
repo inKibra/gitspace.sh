@@ -7,6 +7,8 @@ import type { Spec } from '@json-render/core';
 import type { ComponentRegistry } from '@json-render/react';
 import { Link03 } from '@untitledui/icons';
 import { createContext, useContext, useMemo, type ReactNode } from 'react';
+import type { BlockCorrection } from '@gitspace/blocks';
+import { BlockCorrections } from './BlockCorrections.js';
 
 /** The validator checked the shape `Renderer` reads: { root, elements, state? } with catalog components only. */
 export function conforms(spec: unknown, issues: readonly UiBlockIssue[]): spec is Spec {
@@ -49,10 +51,18 @@ export function blockDocument(markdown: string): ReadonlyMap<string, BlockTarget
   return targets;
 }
 
-/** A chat message as the document its blocks are drawn in: a stored message names its required asks' questions. */
-export function MessageBlockDocument({ messageId, text, pending, children }: { messageId: string; text: string; pending: boolean; children: ReactNode }) {
+/** A chat message as the document its blocks are drawn in: a stored message names its required asks' questions, and its
+ * blocks the agent corrected after it was sent draw with a "corrected" mark (`CorrectedMark`). */
+export function MessageBlockDocument({ messageId, text, pending, corrected, children }: { messageId: string; text: string; pending: boolean; corrected?: readonly BlockCorrection[]; children: ReactNode }) {
   const value = useMemo((): BlockDocumentValue => ({ targets: blockDocument(text), messageId: pending ? null : messageId }), [text, messageId, pending]);
-  return <BlockDocument.Provider value={value}>{children}</BlockDocument.Provider>;
+  const marks = useMemo(() => {
+    const blocks = corrected?.length ? extractBlocks(text) : [];
+    return new Map((corrected ?? []).flatMap((correction): [string, BlockCorrection][] => {
+      const block = blocks[correction.block];
+      return block ? [[block.body.trim(), correction]] : [];
+    }));
+  }, [text, corrected]);
+  return <BlockDocument.Provider value={value}><BlockCorrections.Provider value={marks}>{children}</BlockCorrections.Provider></BlockDocument.Provider>;
 }
 
 /** What a component inside a drawn block needs to draw more of its document: the block's spec and registry (a Sequence

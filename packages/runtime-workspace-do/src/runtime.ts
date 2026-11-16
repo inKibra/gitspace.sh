@@ -2,11 +2,11 @@ import { providerErrorText, WORKSPACE_REPORT_ENTRY, type WorkspaceTurnReport } f
 import { createWithdrawnNotices } from './withdrawn-notices.js';
 import { SqliteStorage } from '@earendil-works/pi-durable/storage/sqlite';
 import type { Conversation, ConversationId, ConversationRecord, Cursor, EntryRecord, Harness, TaskId, TaskRecord, EntryId, CommitPublication, SubmissionRecord, RunFailure, RunFailureReason } from '@earendil-works/pi-durable';
-import { AssistantEntry, GenerationTask, LiveDoc } from '@earendil-works/pi-durable';
-import { appendNotice, CacheNoticesDoc, noticeInvalidBlocks } from './notices.js';
+import { AssistantEntry, GenerationTask, LiveDoc, ToolResultEntry, UserEntry } from '@earendil-works/pi-durable';
+import { appendNotice, CacheNoticesDoc } from './notices.js';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { diffRevisions } from '@earendil-works/chord/delta';
-import { createRuntimeHarness, createConversationTools, AgentDefinitionContextDoc, CommentLookupDoc, StagedCommentsDoc, SubagentRunQueueDoc, type SubagentMetadata, ProcessExitsDoc, QuestionsDoc, WorkspaceDoc, answerPlan, questionRefusal, recordMachineReconnection, recordProcessExit, type PlanDecision, type QuestionClosure, type ToolServices, type RuntimeHarnessOptions } from '@gitspace/runtime-core';
+import { createRuntimeHarness, createConversationTools, AgentDefinitionContextDoc, BlockCorrectionsDoc, BlockFixEntry, CommentLookupDoc, StagedCommentsDoc, SubagentRunQueueDoc, correctedReply, type SubagentMetadata, ProcessExitsDoc, QuestionsDoc, WorkspaceDoc, answerPlan, questionRefusal, recordMachineReconnection, recordProcessExit, type PlanDecision, type QuestionClosure, type ToolServices, type RuntimeHarnessOptions } from '@gitspace/runtime-core';
 import { RuntimeApprovalAnswerSchema, RuntimeLifecycleApprovalAnswerSchema, RuntimeSnapshotSchema, RuntimeWatchEventSchema, RuntimeToolResultSchema, WORKSPACE_TOOL_RESULTS_MAX_BYTES, questionState, receiptDigest, type RuntimeToolResult, type RuntimeSnapshot, type RuntimeWatchEvent, type RuntimeSubmitInput, type RuntimeCancelInput, type RuntimeAnswerInput, type RuntimeGitCheckpoint, type RuntimeWorkspaceStatus } from '@gitspace/protocol-runtime';
 import type { CommentsDocument } from '@gitspace/protocol-runtime/comments';
 import { DurableObjectSqliteDatabase } from './sqlite.js';
@@ -344,7 +344,8 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
       return files;
     } finally { await reader.close(); }
   };
-  const history = createSessionHistory(options.storage, storage, withdrawn, undefined, options.imageUrl, async id => (await harness.snapshot(LiveDoc, id, BACKGROUND_CONTEXT))?.generation?.message);
+  const history = createSessionHistory(options.storage, storage, withdrawn, undefined, options.imageUrl, async id => (await harness.snapshot(LiveDoc, id, BACKGROUND_CONTEXT))?.generation?.message,
+    async id => (await harness.snapshot(BlockCorrectionsDoc, id, BACKGROUND_CONTEXT))?.replies ?? {});
   const recordMessageDecisions = options.recordMessageDecisions;
   const messageDecisions = recordMessageDecisions ? createMessageDecisions(options.storage.sql, recordMessageDecisions) : undefined;
   /** A failed pass keeps its decisions for the next one; it is only logged. */
@@ -410,8 +411,19 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
     if (read) { const sizes = messageCharacters(entries.flatMap(entry => entry.model ?? [])); read.entries += sizes.characters + sizes.imageCharacters; }
     const parentId = record.parent?.conversationId ?? record.owner?.conversationId;
     const child = (await harness.snapshot(AgentDefinitionContextDoc, record.id, BACKGROUND_CONTEXT))?.child;
+    // A block fix step (its input, until a person's or an event's input) shows nothing, and a reply shows with its block
+    // corrections (`correctedReply`), as the transcript reader shows them.
+    const corrections = history ? (await harness.snapshot(BlockCorrectionsDoc, record.id, BACKGROUND_CONTEXT))?.replies ?? {} : {};
+    let fixing = false;
+    const shown = entries.flatMap(entry => {
+      fixing = BlockFixEntry.is(entry) || (fixing && !UserEntry.is(entry));
+      if (fixing && (BlockFixEntry.is(entry) || AssistantEntry.is(entry) || ToolResultEntry.is(entry))) return [];
+      const correctionId = corrections[String(entry.id)];
+      const correction = correctionId === undefined ? undefined : correctedReply(entry, entries.find(item => Number(item.id) === correctionId));
+      return [{ id: entry.id, model: correction?.model ?? entry.model ?? [] }];
+    });
     // A rejected model request leaves an empty assistant message; its error is the user's only explanation.
-    const latest = entries.flatMap(entry => entry.model ?? []).findLast(message => message.role === 'assistant');
+    const latest = shown.flatMap(entry => entry.model).findLast(message => message.role === 'assistant');
     const live = history ? await harness.snapshot(LiveDoc, record.id, BACKGROUND_CONTEXT) : undefined;
     const retry = live?.generation?.retry;
     const ended: RunFailure | undefined = live?.runFailure;
@@ -427,7 +439,7 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
       subagent: child ? { conversationId: String(record.id), ...child } : null,
       // The snapshot paints the conversation until its transcript page loads, which draws tool results from stored rows.
       // Carrying them here made a busy workspace's snapshot pass the 1 MB response limit, failing every watch.
-      messages: entries.flatMap(entry => (entry.model ?? []).flatMap<RuntimeSnapshot['conversations'][number]['messages'][number]>((message, index) => message.role === 'toolResult' ? [] : [{ id: `${entry.id}:${index}`, role: message.role, content: typeof message.content === 'string' ? [{ type: 'text', text: message.content }] : message.content.flatMap(block => block.type === 'text' ? [{ type: 'text', text: block.text }] : []), createdAt: new Date(message.timestamp).toISOString() }])),
+      messages: shown.flatMap(entry => entry.model.flatMap<RuntimeSnapshot['conversations'][number]['messages'][number]>((message, index) => message.role === 'toolResult' ? [] : [{ id: `${entry.id}:${index}`, role: message.role, content: typeof message.content === 'string' ? [{ type: 'text', text: message.content }] : message.content.flatMap(block => block.type === 'text' ? [{ type: 'text', text: block.text }] : []), createdAt: new Date(message.timestamp).toISOString() }])),
     };
   }
   async function refreshConversations(): Promise<void> {
@@ -647,8 +659,6 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
   harness.observeCommits({ end() {}, advance(publication) {
     let ended: string | undefined;
     for (const change of publication.changes) {
-      // The main agent's finished message: its invalid blocks get a notice, posted after the listener returns.
-      if (change.type === 'entry' && change.value.conversationId === runtime.root.id && AssistantEntry.is(change.value)) options.waitUntil(Promise.resolve(change.value).then(entry => noticeInvalidBlocks(harness, entry)).catch(options.onReport));
       if (change.type === 'entry') dirtyConversations.add(change.value.conversationId);
       else if (change.type === 'conversation') dirtyConversations.add(change.value.id);
       else if (change.type === 'task') dirtyTasks.set(Number(change.value.id), change.value);

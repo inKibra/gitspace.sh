@@ -1,11 +1,13 @@
 import { expect, test } from 'bun:test';
-import { Harness, MemoryStorage, ToolTask, createRegistry, defineExtension, defineTool, type Conversation, type EntryDraft, type Tx } from '@earendil-works/pi-durable';
+import { Harness, MemoryStorage, ToolTask, createRegistry, defineExtension, defineTool, type Conversation, type ConversationId, type EntryDraft, type Tx } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
-import { createModels, type AssistantMessage } from '@earendil-works/pi-ai';
-import { RuntimeTranscriptSchema } from '@gitspace/protocol-runtime';
-import { formatConversationEvents, type TranscriptRow } from '@gitspace/blocks';
+import { createAssistantMessageEventStream, createModels, type Api, type AssistantMessage, type Model } from '@earendil-works/pi-ai';
+import { RuntimeIdentitySchema, RuntimeTranscriptSchema } from '@gitspace/protocol-runtime';
+import { formatConversationEvents, piMessageRowId, type TranscriptRow } from '@gitspace/blocks';
 import { createTranscriptReader, transcriptResponse, type WithdrawnNotices } from '../src/transcript.js';
-import { QuestionsDoc, repairBlockAsks } from '@gitspace/runtime-core';
+import { BlockCorrectionsDoc, QuestionsDoc, createRuntimeHarness, repairBlockAsks } from '@gitspace/runtime-core';
+
+const fixtureModel: Model<Api> = { id: 'fixture', name: 'Fixture', provider: 'openai', api: 'openai-responses', baseUrl: 'https://invalid.test', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100_000, maxTokens: 1000 };
 
 const context = BACKGROUND_CONTEXT;
 const none: WithdrawnNotices = { has: () => false, add: () => {} };
@@ -323,4 +325,56 @@ test('a required block ask\'s question names the row the transcript reader shows
     // `blockAskQuestionId(<message row id>, <element id>)`: the row id is the one this reader gives the message.
     expect(questions.map(question => question.id)).toEqual([`block-ask:${row?.item.id ?? ''}:ship`]);
   });
+});
+
+test('a reply whose block the agent corrected shows once, as one message row with the correction in place and marked; its fix step shows nothing', async () => {
+  const storage = new MemoryStorage();
+  const fence = '```';
+  const reply = `Here is the flow:\n${fence}mermaid\n\n${fence}\nThat is all.`;
+  const script: AssistantMessage['content'][] = [
+    [{ type: 'thinking', thinking: 'Draw it.' }, { type: 'text', text: reply }],
+    [{ type: 'thinking', thinking: 'Fix it.' }, { type: 'toolCall', id: 'bad', name: 'fix_block', arguments: { block: 1, source: '' } }],
+    [{ type: 'toolCall', id: 'good', name: 'fix_block', arguments: { block: 1, source: 'graph TD; A-->B' } }],
+  ];
+  let requests = 0;
+  const models = Object.assign(createModels(), { getModel: () => fixtureModel, streamSimple() {
+    const content = script[requests++] ?? [{ type: 'text', text: 'Done.' }];
+    const message = assistant(content, Date.now());
+    const stream = createAssistantMessageEventStream();
+    stream.push({ type: 'done', reason: message.stopReason === 'toolUse' ? 'toolUse' : 'stop', message }); stream.end(message);
+    return stream;
+  } });
+  const unused = async (): Promise<never> => { throw new Error('Unexpected service'); };
+  const runtime = await createRuntimeHarness({
+    identity: RuntimeIdentitySchema.parse({ projectId: 'project', workspaceId: 'workspace' }), storage, models, model: { provider: 'openai', modelId: 'fixture' },
+    tools: { images: { store: async image => image, load: async image => image }, invoke: unused, prepareBrowser: unused, takeoverTab: unused, lifecycleApproval: async () => null, instructions: async () => '', preflight: async () => {}, results: { put: unused, text: unused } },
+    operations: { execute: unused, reconcile: async () => null, cancel: unused, jobScope: () => ({ projectId: 'project', workspaceId: 'workspace' }), controlJob: unused, observeProcess: unused, stopProcess: unused, wakeAt: async () => {} },
+    retainedRules: { loadRules: async () => [] }, editTool: () => 'edit', onReport: error => { throw error; },
+    admitInference: async () => ({ provider: 'openai', modelId: 'fixture' }), bindInferenceConversation: async () => {}, refuseRequest: unused, unfinished: { begin: () => 0, end: () => {} },
+  });
+  try {
+    const root = runtime.root;
+    await runtime.lifecycle.admit(root.id, 'draw');
+    await root.submit({ type: 'input', content: 'Draw the flow', requestId: 'draw' }, context);
+    await root.waitForIdle(context);
+    expect(requests).toBe(3);
+    const corrections = async (id: ConversationId) => (await runtime.harness.snapshot(BlockCorrectionsDoc, id, context))?.replies ?? {};
+    const { rows } = await createTranscriptReader(storage, none, undefined, undefined, undefined, corrections).page(root.id, { generation: null, before: null, after: null, around: null });
+    const entries = (await root.entries({}, 64, undefined, context)).items.toReversed();
+    const [input] = entries;
+    const stored = entries.find(entry => entry.kind === 'pi.assistant');
+    // The stored reply is as the model wrote it; its row is the one it always was, with the corrected block in place.
+    expect(stored?.model?.[0]).toMatchObject({ content: [{ type: 'thinking', thinking: 'Draw it.' }, { type: 'text', text: reply }] });
+    expect(rows.map(row => ({ id: row.id, turn: row.turnId, status: row.turnStatus, item: row.item }))).toEqual([
+      { id: `pi:${String(root.id)}:turn:${Number(input?.id) * 1024}:user`, turn: `pi:${String(root.id)}:turn:${Number(input?.id) * 1024}`, status: 'done', item: expect.objectContaining({ type: 'message', role: 'user', text: 'Draw the flow' }) },
+      { id: expect.stringContaining(':thinking:'), turn: `pi:${String(root.id)}:turn:${Number(input?.id) * 1024}`, status: 'done', item: expect.objectContaining({ type: 'thinking', text: 'Draw it.' }) },
+      {
+        id: piMessageRowId(String(root.id), Number(input?.id), Number(stored?.id), 0, 1), turn: `pi:${String(root.id)}:turn:${Number(input?.id) * 1024}`, status: 'done',
+        item: expect.objectContaining({ type: 'message', role: 'assistant', text: `Here is the flow:\n${fence}mermaid\ngraph TD; A-->B\n${fence}\nThat is all.`, corrected: [{ block: 0, at: expect.any(String), issues: ['the Mermaid source is empty'] }] }),
+      },
+    ]);
+    // The fix step is stored, for the inspector and the model; the person's transcript has none of it.
+    expect(entries.map(entry => entry.kind)).toEqual(expect.arrayContaining(['gitspace.block-fix', 'gitspace.block-correction', 'pi.tool-result']));
+    expect(rows.some(row => JSON.stringify(row.item).includes('fix_block') || JSON.stringify(row.item).includes('Fix it.'))).toBe(false);
+  } finally { await runtime.harness.close(context); }
 });

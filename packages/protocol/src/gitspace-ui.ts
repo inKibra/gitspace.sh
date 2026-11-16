@@ -33,6 +33,8 @@ export interface ParsedSvg {
   /** The first root element; null when there is none. Draw it only when `issues` is empty. */
   root: SvgElementNode | null;
   issues: UiBlockIssue[];
+  /** The drawing's source with its literal colours as theme colours (`themeColour`), as GitSpace stores it. */
+  source: string;
 }
 
 export interface UiComponent {
@@ -63,7 +65,10 @@ export const SVG_ELEMENTS: ReadonlySet<string> = new Set([
   'marker', 'linearGradient', 'radialGradient', 'stop', 'clipPath', 'mask', 'pattern', 'use', 'symbol',
 ]);
 const SVG_PAINT_PROPERTIES = new Set(['fill', 'stroke', 'color', 'stop-color', 'flood-color', 'lighting-color']);
-const SVG_THEME_VARIABLES = ['--foreground', '--muted-foreground', '--background', '--border', '--accent', '--destructive', '--focus-ring', '--surface-2'];
+/** The property that keeps a mapped paint's alpha; `color` and `lighting-color` have none, so their alpha is dropped. */
+const PAINT_OPACITY: Readonly<Record<string, string>> = { fill: 'fill-opacity', stroke: 'stroke-opacity', 'stop-color': 'stop-opacity', 'flood-color': 'flood-opacity' };
+/** Theme variables a drawing colours with: each is set in both the light and the dark theme (@gitspace/ui fluid-theme.css). */
+const SVG_THEME_VARIABLES = ['--foreground', '--muted-foreground', '--background', '--card', '--muted', '--border', '--accent', '--destructive', '--success', '--warning', '--focus-ring', '--chart-1', '--chart-2', '--chart-3', '--surface-2'];
 
 const color = z.enum(['gray', 'blue', 'green', 'red', 'amber', 'orange', 'violet', 'indigo', 'cyan', 'emerald', 'pink']);
 const gap = z.enum(['sm', 'md', 'lg']);
@@ -1183,7 +1188,7 @@ export function validateSvg(svg: string): UiBlockIssue[] {
  */
 export function parseSvg(svg: string): ParsedSvg {
   const bytes = byteLength(svg);
-  if (bytes > MAX_SVG_BYTES) return { root: null, issues: [{ path: '', message: `the SVG is ${bytes} bytes; the limit is ${MAX_SVG_BYTES}` }] };
+  if (bytes > MAX_SVG_BYTES) return { root: null, issues: [{ path: '', message: `the SVG is ${bytes} bytes; the limit is ${MAX_SVG_BYTES}` }], source: svg };
   const issues: UiBlockIssue[] = [];
   const stack: { node: SvgElementNode; path: string; children: number }[] = [];
   const tag = /<(\/?)([A-Za-z_][\w.:-]*)((?:\s+[A-Za-z_][\w.:-]*\s*=\s*(?:"[^"]*"|'[^']*'))*)\s*(\/?)>/y;
@@ -1191,6 +1196,9 @@ export function parseSvg(svg: string): ParsedSvg {
   let root: SvgElementNode | null = null;
   let roots = 0;
   let index = 0;
+  // The source with each tag's mapped attributes, copied up to `copied`.
+  let source = '';
+  let copied = 0;
   while (index < svg.length) {
     const next = svg.indexOf('<', index);
     const text = svg.slice(index, next === -1 ? svg.length : next);
@@ -1229,7 +1237,13 @@ export function parseSvg(svg: string): ParsedSvg {
       continue;
     }
     const path = open === undefined ? '' : `${open.path}/${open.children++}`;
-    const node: SvgElementNode = { name, attributes: checkSvgAttributes(attributes, path, issues), children: [] };
+    const checked = checkSvgAttributes(attributes, path, issues);
+    if (checked.source !== attributes) {
+      const at = next + 1 + name.length;
+      source += svg.slice(copied, at) + checked.source;
+      copied = at + attributes.length;
+    }
+    const node: SvgElementNode = { name, attributes: checked.decoded, children: [] };
     if (open === undefined) {
       roots += 1;
       root ??= node;
@@ -1244,7 +1258,7 @@ export function parseSvg(svg: string): ParsedSvg {
   const unclosed = stack.at(-1);
   if (unclosed !== undefined) issues.push({ path: unclosed.path, message: `<${unclosed.node.name}> is not closed` });
   if (roots === 0) issues.push({ path: '', message: 'no <svg> element' });
-  return { root, issues };
+  return { root, issues, source: source + svg.slice(copied) };
 }
 
 const LOCAL_REFERENCE = /^#[\w.:-]+$/;
@@ -1257,18 +1271,35 @@ function decodeEntity(entity: string, hex: string | undefined, decimal: string |
   return code <= 0x10ffff ? String.fromCodePoint(code) : '\ufffd';
 }
 
-/** Checks a tag's attributes and returns them decoded. */
-function checkSvgAttributes(attributes: string, path: string, issues: UiBlockIssue[]): [string, string][] {
-  const decoded: [string, string][] = [];
-  for (const [, name, doubleQuoted, singleQuoted] of attributes.matchAll(/\s+([A-Za-z_][\w.:-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)) {
+/** One attribute of a tag: its source, its raw and given (decoded) values, and the value it is stored with; null values
+ * for one refused for a bare "&". */
+interface SvgAttribute { segment: string; raw: string; name: string; given: string | null; value: string | null }
+
+/**
+ * Checks a tag's attributes. Returns them decoded, with literal colours as theme colours (`themeColour`) and a mapped
+ * paint's alpha in its opacity attribute (multiplying one the tag sets), and the attributes' source with the same values.
+ */
+function checkSvgAttributes(attributes: string, path: string, issues: UiBlockIssue[]): { decoded: [string, string][]; source: string } {
+  const read: SvgAttribute[] = [];
+  const opacities = new Map<string, number>();
+  for (const [segment, name, doubleQuoted, singleQuoted] of attributes.matchAll(/\s+([A-Za-z_][\w.:-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)) {
     const raw = doubleQuoted ?? singleQuoted ?? '';
     if (raw.replace(ENTITY, '').includes('&')) {
       issues.push({ path, message: `${name}: "&" must start an entity such as &amp;` });
+      read.push({ segment, raw, name, given: null, value: null });
       continue;
     }
-    const value = raw.replace(ENTITY, decodeEntity);
-    decoded.push([name, value]);
+    const given = raw.replace(ENTITY, decodeEntity);
     const lower = name.toLowerCase();
+    let value = given;
+    if (lower === 'style') value = themeStyle(given);
+    else if (SVG_PAINT_PROPERTIES.has(lower)) {
+      const colour = themeColour(given);
+      const opacity = PAINT_OPACITY[lower];
+      if (colour !== null) value = colour.paint;
+      if (colour !== null && opacity !== undefined && colour.opacity < 1) opacities.set(opacity, colour.opacity);
+    }
+    read.push({ segment, raw, name, given, value });
     if (lower.startsWith('on')) issues.push({ path, message: `${name}: event handler attributes are not allowed` });
     else if (lower === 'href' || lower.endsWith(':href')) {
       if (!LOCAL_REFERENCE.test(value.trim())) issues.push({ path, message: `${name}="${value}": only a local "#id" reference is allowed` });
@@ -1276,7 +1307,48 @@ function checkSvgAttributes(attributes: string, path: string, issues: UiBlockIss
     else if (SVG_PAINT_PROPERTIES.has(lower)) checkSvgPaint(lower, value, path, issues);
     if (!lower.startsWith('xmlns')) checkSvgUrls(name, value, path, issues);
   }
-  return decoded;
+  for (const [name, opacity] of opacities) {
+    const set = read.find(attribute => attribute.name.toLowerCase() === name && attribute.value !== null);
+    const current = set === undefined ? null : opacityValue(set.value ?? '');
+    if (set === undefined) read.push({ segment: ` ${name}="${opacity}"`, raw: String(opacity), name, given: String(opacity), value: String(opacity) });
+    else if (current !== null) set.value = String(Math.round(current * opacity * 1000) / 1000);
+  }
+  return {
+    decoded: read.flatMap(attribute => attribute.value === null ? [] : [[attribute.name, attribute.value]]),
+    source: read.map(({ segment, raw, given, value }) => value === null || value === given ? segment : `${segment.slice(0, segment.length - raw.length - 1)}${value.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('\'', '&apos;')}${segment.at(-1) ?? ''}`).join(''),
+  };
+}
+
+/** An opacity value (`0.5` or `50%`) as a number; null for anything else. */
+function opacityValue(text: string): number | null {
+  const match = /^\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))(%?)\s*$/.exec(text);
+  return match === null ? null : Number(match[1]) / (match[2] === '%' ? 100 : 1);
+}
+
+/** A style attribute with the literal colours of its paint declarations as theme colours, a mapped paint's alpha in
+ * its opacity declaration (multiplying one the style sets, else added). */
+function themeStyle(style: string): string {
+  const opacities = new Map<string, number>();
+  const declarations = style.split(';').map(declaration => {
+    const colon = declaration.indexOf(':');
+    const property = declaration.slice(0, colon).trim().toLowerCase();
+    if (colon === -1 || !SVG_PAINT_PROPERTIES.has(property)) return declaration;
+    const value = declaration.slice(colon + 1);
+    const important = /\s*!important\s*$/i.exec(value)?.[0] ?? '';
+    const colour = themeColour(value.slice(0, value.length - important.length));
+    if (colour === null) return declaration;
+    const opacity = PAINT_OPACITY[property];
+    if (opacity !== undefined && colour.opacity < 1) opacities.set(opacity, colour.opacity);
+    return `${declaration.slice(0, colon + 1)}${colour.paint}${important}`;
+  });
+  for (const [name, opacity] of opacities) {
+    const at = declarations.findIndex(declaration => declaration.slice(0, Math.max(0, declaration.indexOf(':'))).trim().toLowerCase() === name);
+    const set = declarations[at];
+    const current = set === undefined ? null : opacityValue(set.slice(set.indexOf(':') + 1));
+    if (set === undefined) declarations.push(`${name}:${opacity}`);
+    else if (current !== null) declarations[at] = `${set.slice(0, set.indexOf(':') + 1)}${Math.round(current * opacity * 1000) / 1000}`;
+  }
+  return declarations.join(';');
 }
 
 function checkSvgStyle(style: string, path: string, issues: UiBlockIssue[]): void {
@@ -1294,7 +1366,139 @@ function checkSvgPaint(property: string, value: string, path: string, issues: Ui
   const paint = value.trim();
   if (/^(currentcolor|none)$/i.test(paint) || /^var\(--[\w-]+\)$/.test(paint)) return;
   if ((property === 'fill' || property === 'stroke') && /^url\(#[\w.:-]+\)$/.test(paint)) return;
-  issues.push({ path, message: `${property}="${paint}": colours are currentColor, none or a theme variable such as var(--foreground)${property === 'fill' || property === 'stroke' ? ', or url(#id)' : ''}` });
+  issues.push({ path, message: `${property}="${paint}": colours are currentColor, none, a theme variable such as var(--foreground) or a literal colour (hex, rgb(), hsl() or a CSS name)${property === 'fill' || property === 'stroke' ? ', or url(#id)' : ''}` });
+}
+
+/** CSS named colours as six hex digits. */
+const NAMED_COLOURS: Readonly<Record<string, string>> = Object.fromEntries('aliceblue:f0f8ff antiquewhite:faebd7 aqua:00ffff aquamarine:7fffd4 azure:f0ffff beige:f5f5dc bisque:ffe4c4 black:000000 blanchedalmond:ffebcd blue:0000ff blueviolet:8a2be2 brown:a52a2a burlywood:deb887 cadetblue:5f9ea0 chartreuse:7fff00 chocolate:d2691e coral:ff7f50 cornflowerblue:6495ed cornsilk:fff8dc crimson:dc143c cyan:00ffff darkblue:00008b darkcyan:008b8b darkgoldenrod:b8860b darkgray:a9a9a9 darkgreen:006400 darkgrey:a9a9a9 darkkhaki:bdb76b darkmagenta:8b008b darkolivegreen:556b2f darkorange:ff8c00 darkorchid:9932cc darkred:8b0000 darksalmon:e9967a darkseagreen:8fbc8f darkslateblue:483d8b darkslategray:2f4f4f darkslategrey:2f4f4f darkturquoise:00ced1 darkviolet:9400d3 deeppink:ff1493 deepskyblue:00bfff dimgray:696969 dimgrey:696969 dodgerblue:1e90ff firebrick:b22222 floralwhite:fffaf0 forestgreen:228b22 fuchsia:ff00ff gainsboro:dcdcdc ghostwhite:f8f8ff gold:ffd700 goldenrod:daa520 gray:808080 green:008000 greenyellow:adff2f grey:808080 honeydew:f0fff0 hotpink:ff69b4 indianred:cd5c5c indigo:4b0082 ivory:fffff0 khaki:f0e68c lavender:e6e6fa lavenderblush:fff0f5 lawngreen:7cfc00 lemonchiffon:fffacd lightblue:add8e6 lightcoral:f08080 lightcyan:e0ffff lightgoldenrodyellow:fafad2 lightgray:d3d3d3 lightgreen:90ee90 lightgrey:d3d3d3 lightpink:ffb6c1 lightsalmon:ffa07a lightseagreen:20b2aa lightskyblue:87cefa lightslategray:778899 lightslategrey:778899 lightsteelblue:b0c4de lightyellow:ffffe0 lime:00ff00 limegreen:32cd32 linen:faf0e6 magenta:ff00ff maroon:800000 mediumaquamarine:66cdaa mediumblue:0000cd mediumorchid:ba55d3 mediumpurple:9370db mediumseagreen:3cb371 mediumslateblue:7b68ee mediumspringgreen:00fa9a mediumturquoise:48d1cc mediumvioletred:c71585 midnightblue:191970 mintcream:f5fffa mistyrose:ffe4e1 moccasin:ffe4b5 navajowhite:ffdead navy:000080 oldlace:fdf5e6 olive:808000 olivedrab:6b8e23 orange:ffa500 orangered:ff4500 orchid:da70d6 palegoldenrod:eee8aa palegreen:98fb98 paleturquoise:afeeee palevioletred:db7093 papayawhip:ffefd5 peachpuff:ffdab9 peru:cd853f pink:ffc0cb plum:dda0dd powderblue:b0e0e6 purple:800080 rebeccapurple:663399 red:ff0000 rosybrown:bc8f8f royalblue:4169e1 saddlebrown:8b4513 salmon:fa8072 sandybrown:f4a460 seagreen:2e8b57 seashell:fff5ee sienna:a0522d silver:c0c0c0 skyblue:87ceeb slateblue:6a5acd slategray:708090 slategrey:708090 snow:fffafa springgreen:00ff7f steelblue:4682b4 tan:d2b48c teal:008080 thistle:d8bfd8 tomato:ff6347 turquoise:40e0d0 violet:ee82ee wheat:f5deb3 white:ffffff whitesmoke:f5f5f5 yellow:ffff00 yellowgreen:9acd32'.split(' ').map((pair): [string, string] => [pair.slice(0, -7), pair.slice(-6)]));
+/** Below this chroma (the channels' spread, 0 to 1) a colour is a neutral grey; slate greys stay under it. */
+const SATURATED_CHROMA = 0.16;
+/** A colour this light with at least `TINT_CHROMA` is a pale tint of its hue rather than a grey. */
+const TINT_LIGHTNESS = 0.8;
+const TINT_CHROMA = 0.1;
+/** Neutrals by HSL lightness, lightest first: each band's theme colour holds about that lightness in the light theme. */
+const NEUTRAL_BANDS: readonly { from: number; paint: string }[] = [
+  { from: 0.99, paint: 'var(--card)' },
+  { from: 0.965, paint: 'var(--background)' },
+  { from: 0.93, paint: 'var(--muted)' },
+  { from: 0.75, paint: 'var(--border)' },
+  { from: 0.3, paint: 'var(--muted-foreground)' },
+];
+/** Saturated colours by hue in degrees, each band below `below`; from 345 on, red again. */
+const HUE_BANDS: readonly { below: number; paint: string }[] = [
+  { below: 15, paint: 'var(--destructive)' },
+  { below: 70, paint: 'var(--warning)' },
+  { below: 165, paint: 'var(--success)' },
+  { below: 200, paint: 'var(--chart-1)' },
+  { below: 250, paint: 'var(--focus-ring)' },
+  { below: 290, paint: 'var(--chart-2)' },
+  { below: 345, paint: 'var(--chart-3)' },
+];
+
+/** A CSS number or percentage as a fraction of `whole` (a percentage of 100), clamped to 0 to 1; null for anything else. */
+function colourAmount(token: string | undefined, whole: number): number | null {
+  const match = /^([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)(%?)$/.exec(token ?? '');
+  return match === null ? null : Math.min(1, Math.max(0, Number(match[1]) / (match[2] === '%' ? 100 : whole)));
+}
+
+/** A hex, rgb(), rgba(), hsl(), hsla() or named colour as channels from 0 to 1; null for anything else. */
+function literalColour(value: string): { red: number; green: number; blue: number; alpha: number } | null {
+  const text = value.trim().toLowerCase();
+  const hex = /^#([0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/.exec(text)?.[1] ?? NAMED_COLOURS[text];
+  if (hex !== undefined) {
+    const digits = hex.length <= 4 ? [...hex].map(digit => digit + digit).join('') : hex;
+    const [red, green, blue, alpha = 255] = [0, 2, 4, 6].flatMap(at => at < digits.length ? [Number.parseInt(digits.slice(at, at + 2), 16)] : []);
+    return red === undefined || green === undefined || blue === undefined ? null : { red: red / 255, green: green / 255, blue: blue / 255, alpha: alpha / 255 };
+  }
+  const call = /^(rgba?|hsla?)\(\s*([^()]*?)\s*\)$/.exec(text);
+  const tokens = call?.[2]?.split(/\s*[,/]\s*|\s+/) ?? [];
+  if (call === null || (tokens.length !== 3 && tokens.length !== 4)) return null;
+  const alpha = tokens.length === 4 ? colourAmount(tokens[3], 1) : 1;
+  if (alpha === null) return null;
+  if (call[1]?.startsWith('rgb')) {
+    const [red, green, blue] = tokens.slice(0, 3).map(token => colourAmount(token, 255));
+    return red == null || green == null || blue == null ? null : { red, green, blue, alpha };
+  }
+  const turn = /^([+-]?(?:\d+(?:\.\d*)?|\.\d+))(deg|turn|rad|grad)?$/.exec(tokens[0] ?? '');
+  const saturation = colourAmount(tokens[1], 100);
+  const lightness = colourAmount(tokens[2], 100);
+  if (turn === null || saturation === null || lightness === null) return null;
+  const degrees = Number(turn[1]) * (turn[2] === 'turn' ? 360 : turn[2] === 'rad' ? 180 / Math.PI : turn[2] === 'grad' ? 0.9 : 1);
+  const hue = ((degrees % 360) + 360) % 360;
+  const reach = saturation * Math.min(lightness, 1 - lightness);
+  const channel = (offset: number) => {
+    const k = (offset + hue / 30) % 12;
+    return lightness - reach * Math.max(-1, Math.min(k - 3, 9 - k, 1));
+  };
+  return { red: channel(0), green: channel(8), blue: channel(4), alpha };
+}
+
+/**
+ * A literal colour (hex of 3, 4, 6 or 8 digits, rgb(), rgba(), hsl(), hsla() or a CSS name) as the nearest theme colour
+ * and the opacity it keeps (1 when opaque); `transparent` is `none`; null for anything else (currentColor, a variable).
+ * Neutrals map by lightness (`NEUTRAL_BANDS`), saturated colours by hue (`HUE_BANDS`); a pale tint is its hue's colour
+ * with the white it holds as transparency.
+ */
+export function themeColour(value: string): { paint: string; opacity: number } | null {
+  if (value.trim().toLowerCase() === 'transparent') return { paint: 'none', opacity: 1 };
+  const colour = literalColour(value);
+  if (colour === null) return null;
+  const { red, green, blue } = colour;
+  const max = Math.max(red, green, blue);
+  const min = Math.min(red, green, blue);
+  const chroma = max - min;
+  const lightness = (max + min) / 2;
+  const tint = lightness >= TINT_LIGHTNESS && chroma >= TINT_CHROMA;
+  if (chroma < SATURATED_CHROMA && !tint) {
+    return { paint: NEUTRAL_BANDS.find(band => lightness >= band.from)?.paint ?? 'var(--foreground)', opacity: Math.round(colour.alpha * 100) / 100 };
+  }
+  const sector = max === red ? ((green - blue) / chroma + 6) % 6 : max === green ? (blue - red) / chroma + 2 : (red - green) / chroma + 4;
+  const paint = HUE_BANDS.find(band => sector * 60 < band.below)?.paint ?? 'var(--destructive)';
+  return { paint, opacity: Math.round(colour.alpha * (tint ? 1 - min : 1) * 100) / 100 };
+}
+
+/**
+ * Markdown with the literal colours of its blocks' drawings as theme colours (`themeColour`): ```svg fences, and the svg
+ * of Svg elements in ```gitspace-ui fences (whose spec is then written back as compact JSON). Everything else, and a
+ * fence with nothing to map or that is not closed, is unchanged. GitSpace stores blocks this way.
+ */
+export function mapBlockColours(markdown: string): string {
+  let mapped = '';
+  let copied = 0;
+  for (const block of extractBlocks(markdown)) {
+    if (!block.closed || block.kind === 'mermaid') continue;
+    const body = block.kind === 'svg' ? parseSvg(block.body).source : themeSpec(block.body);
+    if (body === block.body) continue;
+    const fence = markdown.slice(block.start, block.end);
+    const indent = /^ */.exec(fence)?.[0] ?? '';
+    mapped += `${markdown.slice(copied, block.start)}${fence.slice(0, fence.indexOf('\n') + 1)}${body.split('\n').map(line => indent + line).join('\n')}\n${fence.slice(fence.lastIndexOf('\n') + 1)}`;
+    copied = block.end;
+  }
+  return mapped + markdown.slice(copied);
+}
+
+/** A gitspace-ui spec's JSON with the literal colours of its Svg elements' svg as theme colours; unchanged when it is
+ * not JSON or has none to map. */
+function themeSpec(body: string): string {
+  let spec: unknown;
+  try {
+    spec = JSON.parse(body);
+  } catch {
+    return body;
+  }
+  let changed = false;
+  const visit = (value: unknown): void => {
+    if (Array.isArray(value)) value.forEach(visit);
+    if (!isRecord(value)) return;
+    if (value.type === 'Svg' && isRecord(value.props) && typeof value.props.svg === 'string') {
+      const source = parseSvg(value.props.svg).source;
+      changed ||= source !== value.props.svg;
+      value.props.svg = source;
+    }
+    Object.values(value).forEach(visit);
+  };
+  visit(spec);
+  return changed ? JSON.stringify(spec) : body;
 }
 
 function checkSvgUrls(name: string, value: string, path: string, issues: UiBlockIssue[]): void {
@@ -1599,5 +1803,5 @@ Conditions ("visible" and $cond): true or false; {"$state": "/path"} is truthy; 
 - Put the data the block shows in "state" and read it with $state, $item and $cond; never repeat a value that state holds.
 - A choice the person makes for you (a decision, an answer, a batch to send) uses the stage action: it waits in their message bar so they can add context. Only sign-offs (accept_requirement) act at once.
 - GitSpace owns /answered, /staged/<key>, /sent/<key> and /gitspaceNotices: read /answered, /staged and /sent with $state to show progress without seeding them; never write them, and never read /gitspaceNotices.
-- SVG (a ${fence}svg block or the Svg component's literal svg string): one <svg> root; only ${[...SVG_ELEMENTS].join(', ')}; every attribute value quoted; no comments, CDATA or DOCTYPE; no script, style, foreignObject or on* attributes; href only a local "#id"; colours (fill, stroke, color, stop-color, also inside style) only currentColor, none or a theme variable such as ${SVG_THEME_VARIABLES.map((name) => `var(${name})`).join(', ')}, and url(#id) for fill and stroke; at most ${MAX_SVG_BYTES / 1024} KiB.`;
+- SVG (a ${fence}svg block or the Svg component's literal svg string): one <svg> root; only ${[...SVG_ELEMENTS].join(', ')}; every attribute value quoted; no comments, CDATA or DOCTYPE; no script, style, foreignObject or on* attributes; href only a local "#id"; colours (fill, stroke, color, stop-color, also inside style) currentColor, none or a theme variable such as ${SVG_THEME_VARIABLES.map((name) => `var(${name})`).join(', ')}, and url(#id) for fill and stroke, so the drawing follows the light and dark theme; a literal colour (hex, rgb(), hsl() or a CSS name) is stored as the nearest theme variable; at most ${MAX_SVG_BYTES / 1024} KiB.`;
 }
