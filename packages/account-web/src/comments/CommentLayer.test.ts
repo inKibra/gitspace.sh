@@ -1,6 +1,6 @@
 import type { TranscriptItem, TranscriptRow } from '@gitspace/blocks';
 import { describe, expect, it } from 'vitest';
-import { openRows } from './CommentLayer.js';
+import { gutterSlot, openRows } from './CommentLayer.js';
 
 function row(turnId: string, item: TranscriptItem, ordinal: number): TranscriptRow {
   return { id: item.id, ordinal, turnId, turnStatus: 'done', item, truncated: false, contentBytes: 0 };
@@ -27,5 +27,19 @@ describe('comments go on the latest turn', () => {
     expect(openRows([...older, ...latest], false).size).toBe(0);
     const streaming = row('t2', { id: 't2:pending', type: 'message', role: 'assistant', text: 'Reads st', pending: true }, 8);
     expect(openRows([...older, ...latest, streaming], true).has('t2:pending')).toBe(false);
+  });
+});
+
+describe('comment icons sit in the gutter right of the column', () => {
+  // A column whose right edge is at 800, a gutter 28 px wide past it, and a first line of text running to the edge.
+  const gutter = { top: 100, left: 800, width: 28, height: 600 };
+  const line = { top: 340, left: 24, right: 800, width: 776, height: 24 };
+
+  it('keeps the icon clear of a full-width line, inside the gutter, level with the line', () => {
+    const slot = gutterSlot(gutter, line);
+    const icon = { left: gutter.left + slot.left, top: gutter.top + slot.top, size: 16 };
+    expect(icon.left).toBeGreaterThanOrEqual(line.right);
+    expect(icon.left + icon.size).toBeLessThanOrEqual(gutter.left + gutter.width);
+    expect(icon.top + icon.size / 2).toBe(line.top + line.height / 2);
   });
 });

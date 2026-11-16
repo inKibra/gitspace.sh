@@ -321,20 +321,91 @@ function NoteEditor({ quote, label, at, onSave, onCancel }: { quote: string | nu
  * move the comment with it. */
 interface Pending { at: EditorAt; label: string; quote: string | null; target: CommentTarget }
 
-/** The comment icon of something in a commentable message, and its editor. */
-function CommentTrigger({ label, quote, targetFor, className = '', children }: { label: string; quote: string | null; targetFor: () => CommentTarget; className?: string; children?: ReactNode }) {
+/** The comment icon of something in a commentable message, and its editor, which opens beside `around` (by default the
+ * item or tool row the icon is in). */
+function CommentTrigger({ label, quote, targetFor, around, className = '', children }: { label: string; quote: string | null; targetFor: () => CommentTarget; around?: Element | null; className?: string; children?: ReactNode }) {
   const layer = useContext(CommentLayer);
   const scope = useContext(CommentScope);
   const [open, setOpen] = useState<Pending | null>(null);
   if (!layer || !scope) return null;
   return <>
     <button type="button" aria-label={`Comment on ${label}`} title="Comment" data-comment-trigger="" data-comment-ui=""
-      onClick={(event) => { event.stopPropagation(); setOpen({ at: editorAt(event.currentTarget), label, quote, target: targetFor() }); }}
+      onClick={(event) => { event.stopPropagation(); setOpen({ at: editorAt(around ?? event.currentTarget), label, quote, target: targetFor() }); }}
       className={`inline-flex shrink-0 items-center gap-1 rounded p-0.5 text-muted-foreground transition-opacity hover:bg-surface-2 hover:text-foreground ${className}`}>
       <Annotation width={13} height={13} />{children}
     </button>
     {open ? <NoteEditor quote={open.quote} label={open.label} at={open.at} onCancel={() => setOpen(null)}
       onSave={async (note) => { await layer.stage(scope.row, open.target, open.quote ?? open.label, note); setOpen(null); }} /> : null}
+  </>;
+}
+
+/** A comment icon's side; it fits the gutter (CommentMargin.tsx). */
+const HANDLE_SIZE = 16;
+/** How long an icon stays after the pointer leaves what it is for, so the pointer can cross to it. */
+const HANDLE_LINGER = 250;
+
+interface Box { top: number; width: number; height: number }
+
+/** Where a comment icon goes in the gutter, relative to the gutter: centred across it, level with the middle of the
+ * first line of what it is for. */
+export function gutterSlot(gutter: Box, line: Box): { left: number; top: number } {
+  return { left: (gutter.width - HANDLE_SIZE) / 2, top: line.top - gutter.top + (line.height - HANDLE_SIZE) / 2 };
+}
+
+/** The gutter right of the chat's column that `element` is in, where its comment icons go: outside the text. */
+function gutterOf(element: Element): HTMLElement | null {
+  return element.closest('[data-comment-column]')?.querySelector<HTMLElement>(':scope > [data-comment-gutter]') ?? null;
+}
+
+/** The element's first line of text, else its box. */
+function firstLine(element: Element): DOMRect {
+  const range = document.createRange();
+  range.selectNodeContents(element);
+  return [...range.getClientRects()].find((rect) => rect.width > 0 && rect.height > 0) ?? element.getBoundingClientRect();
+}
+
+/** The pointer cannot hover (touch): every icon shows, dimmed. */
+function useTouch(): boolean {
+  const [touch, setTouch] = useState(() => window.matchMedia('(hover: none)').matches);
+  useEffect(() => {
+    const media = window.matchMedia('(hover: none)');
+    const change = (): void => setTouch(media.matches);
+    media.addEventListener('change', change);
+    return () => media.removeEventListener('change', change);
+  }, []);
+  return touch;
+}
+
+/** The comment icon of the item or tool row (`anchor`, a selector) this is in: in the column's gutter level with its
+ * first line while it is hovered; with no gutter (a lightbox), inline with `inlineClassName`. */
+function GutterTrigger({ anchor: selector, inlineClassName, ...trigger }: { anchor: string; inlineClassName: string; label: string; quote: string | null; targetFor: () => CommentTarget }) {
+  const touch = useTouch();
+  const [marker, setMarker] = useState<HTMLSpanElement | null>(null);
+  const [slot, setSlot] = useState<{ left: number; top: number } | null>(null);
+  const linger = useRef(0);
+  const anchor = marker?.closest(selector) ?? marker?.parentElement ?? null;
+  const gutter = marker ? gutterOf(marker) : null;
+  useEffect(() => {
+    if (!anchor || !gutter) return;
+    const place = (): void => { window.clearTimeout(linger.current); setSlot(gutterSlot(gutter.getBoundingClientRect(), firstLine(anchor))); };
+    if (touch) {
+      place();
+      const observer = new ResizeObserver(place);
+      observer.observe(gutter);
+      return () => observer.disconnect();
+    }
+    const leave = (): void => { linger.current = window.setTimeout(() => setSlot(null), HANDLE_LINGER); };
+    anchor.addEventListener('mouseenter', place);
+    anchor.addEventListener('mouseleave', leave);
+    return () => { window.clearTimeout(linger.current); anchor.removeEventListener('mouseenter', place); anchor.removeEventListener('mouseleave', leave); };
+  }, [anchor, gutter, touch]);
+  return <>
+    <span ref={setMarker} hidden />
+    {gutter ? slot ? createPortal(<span data-comment-ui="" data-gutter-handle="" className="absolute z-10 flex" style={slot}
+      onMouseEnter={() => window.clearTimeout(linger.current)}
+      onMouseLeave={() => { if (!touch) linger.current = window.setTimeout(() => setSlot(null), HANDLE_LINGER); }}>
+      <CommentTrigger {...trigger} around={anchor} className={`size-4 justify-center p-0 ${touch ? 'opacity-60' : ''}`} />
+    </span>, gutter) : null : marker ? <CommentTrigger {...trigger} className={inlineClassName} /> : null}
   </>;
 }
 
@@ -351,7 +422,8 @@ export function commentItem(path: string, label: string): { 'data-comment-item':
   return { 'data-comment-item': path, 'data-comment-label': label };
 }
 
-/** An item's comment icon (shown while its row, marked `group/item`, is hovered) and how many comments it has. */
+/** An item's comment icon (in the column's gutter while its row, marked `group/item`, is hovered) and how many comments
+ * it has. */
 export function ItemComment({ path, label, quote }: { path: string; label: string; quote: string | null }) {
   const block = useContext(CommentBlock);
   const scope = useContext(CommentScope);
@@ -360,7 +432,7 @@ export function ItemComment({ path, label, quote }: { path: string; label: strin
   const name = `${block.kind} ${label}`;
   return <span className="inline-flex shrink-0 items-center gap-0.5 align-middle" data-comment-ui="">
     <CommentCount notes={notes} />
-    {scope.editable ? <CommentTrigger label={name} quote={quote} className="opacity-0 focus-visible:opacity-100 group-hover/item:opacity-100 [@media(hover:none)]:opacity-60"
+    {scope.editable ? <GutterTrigger anchor="[data-comment-item]" label={name} quote={quote} inlineClassName="opacity-0 focus-visible:opacity-100 group-hover/item:opacity-100 [@media(hover:none)]:opacity-60"
       targetFor={() => ({ kind: 'item', block: block.key, path, label: name.slice(0, 120) })} /> : null}
   </span>;
 }
@@ -387,8 +459,8 @@ export function BlockMarker() {
   </span>;
 }
 
-/** A tool call's row comment ("why this command?"): an icon on the row while it is hovered (the row is `group/item` and
- * positioned) and a count. Its output takes no comments. */
+/** A tool call's row comment ("why this command?"): an icon in the column's gutter while the row is hovered, and a
+ * count on the row (which is positioned). Its output takes no comments. */
 export function CallComment({ id, tool, target }: { id: string; tool: string; target: string }) {
   const layer = useContext(CommentLayer);
   const notes = useCommentsAt({ call: id });
@@ -397,7 +469,7 @@ export function CallComment({ id, tool, target }: { id: string; tool: string; ta
   if (!layer || (!editable && notes.length === 0)) return null;
   return <CommentScope.Provider value={scope}><span data-comment-ui="" className="absolute right-16 top-0 flex h-7 items-center gap-0.5">
     <CommentCount notes={notes} />
-    {editable ? <CommentTrigger label={`${tool} call`} quote={target ? `${tool} ${target}` : tool} className="bg-surface-2 opacity-0 focus-visible:opacity-100 group-hover/item:opacity-100 [@media(hover:none)]:opacity-60"
+    {editable ? <GutterTrigger anchor="[data-call]" label={`${tool} call`} quote={target ? `${tool} ${target}` : tool} inlineClassName="bg-surface-2 opacity-0 focus-visible:opacity-100 group-hover/item:opacity-100 [@media(hover:none)]:opacity-60"
       targetFor={() => ({ kind: 'entity', ref: `tool-call:${id}` })} /> : null}
   </span></CommentScope.Provider>;
 }
@@ -409,7 +481,6 @@ export function useCallCommentCount(calls: readonly string[]): number {
 }
 
 interface ProseHandle { element: Element; label: string; quote: string; left: number; top: number }
-const HANDLE_SIZE = 20;
 
 function proseElements(target: Element): Element[] {
   return [...target.querySelectorAll(PROSE)].filter((element) => !element.closest(NOT_PROSE) && !(element.tagName === 'P' && element.parentElement?.tagName === 'LI'));
@@ -422,73 +493,61 @@ function proseLabel(element: Element): string {
   return 'Paragraph';
 }
 
-/** The icon for one prose element, in the gutter level with its first line: past the element's right edge, or for a
- * heading just past its first line of text. */
-function proseHandle(container: Element, element: Element): ProseHandle {
-  const box = container.getBoundingClientRect();
-  const own = element.getBoundingClientRect();
-  const range = document.createRange();
-  range.selectNodeContents(element);
-  const line = range.getClientRects()[0] ?? own;
+/** The icon for one prose element: in the gutter, level with its first line. */
+function proseHandle(gutter: Element, element: Element): ProseHandle {
   const label = proseLabel(element);
-  return {
-    element, label, quote: commentExcerpt(element.textContent ?? '', COMMENT_QUOTE_MAX),
-    left: Math.min((label === 'Heading' ? line.right + 2 : own.right) - box.left + 4, box.width - HANDLE_SIZE),
-    top: line.top - box.top + (line.height - HANDLE_SIZE) / 2,
-  };
+  return { element, label, quote: commentExcerpt(element.textContent ?? '', COMMENT_QUOTE_MAX), ...gutterSlot(gutter.getBoundingClientRect(), firstLine(element)) };
 }
 
-/** The comment icons of a message's prose: the hovered element's (kept while the pointer crosses to it); with no hover
- * (touch), every element's, dimmed, as item icons are. */
+/** The comment icons of a message's prose, in the column's gutter: the hovered element's (kept while the pointer
+ * crosses to it); with no hover (touch), every element's, dimmed, as item icons are. */
 function ProseHandles({ container, row }: { container: HTMLDivElement; row: string }) {
   const layer = useContext(CommentLayer);
-  const [touch, setTouch] = useState(() => window.matchMedia('(hover: none)').matches);
+  const touch = useTouch();
+  const gutter = gutterOf(container);
   const [hovered, setHovered] = useState<ProseHandle | null>(null);
   const [all, setAll] = useState<readonly ProseHandle[]>([]);
   const [editing, setEditing] = useState<{ handle: ProseHandle; at: EditorAt } | null>(null);
-  useEffect(() => {
-    const media = window.matchMedia('(hover: none)');
-    const change = (): void => setTouch(media.matches);
-    media.addEventListener('change', change);
-    return () => media.removeEventListener('change', change);
+  const linger = useRef(0);
+  const current = useRef<Element | null>(null);
+  const clearSoon = useCallback((): void => {
+    window.clearTimeout(linger.current);
+    linger.current = window.setTimeout(() => { current.current = null; setHovered(null); }, HANDLE_LINGER);
   }, []);
   useEffect(() => {
-    if (touch) return;
-    let timer = 0;
-    let current: Element | null = null;
-    const clearSoon = (): void => { window.clearTimeout(timer); timer = window.setTimeout(() => { current = null; setHovered(null); }, 250); };
+    if (touch || !gutter) return;
     const move = (event: MouseEvent): void => {
       if (!(event.target instanceof Element)) return;
-      if (event.target.closest('[data-prose-handle]')) { window.clearTimeout(timer); return; }
       const start = event.target.closest(PROSE);
       const prose = start?.tagName === 'P' && start.parentElement?.tagName === 'LI' ? start.parentElement : start;
-      if (prose && prose === current) { window.clearTimeout(timer); return; }
+      if (prose && prose === current.current) { window.clearTimeout(linger.current); return; }
       if (!prose || !container.contains(prose) || prose.closest(NOT_PROSE)) { clearSoon(); return; }
-      window.clearTimeout(timer);
-      current = prose;
-      setHovered(proseHandle(container, prose));
+      window.clearTimeout(linger.current);
+      current.current = prose;
+      setHovered(proseHandle(gutter, prose));
     };
     container.addEventListener('mousemove', move);
     container.addEventListener('mouseleave', clearSoon);
-    return () => { window.clearTimeout(timer); container.removeEventListener('mousemove', move); container.removeEventListener('mouseleave', clearSoon); };
-  }, [container, touch]);
+    return () => { window.clearTimeout(linger.current); container.removeEventListener('mousemove', move); container.removeEventListener('mouseleave', clearSoon); };
+  }, [container, gutter, touch, clearSoon]);
   useLayoutEffect(() => {
-    if (!touch) return;
-    const update = (): void => setAll(proseElements(container).map((prose) => proseHandle(container, prose)));
+    if (!touch || !gutter) return;
+    const update = (): void => setAll(proseElements(container).map((prose) => proseHandle(gutter, prose)));
     update();
     const observer = new ResizeObserver(update);
     observer.observe(container);
     return () => observer.disconnect();
-  }, [container, touch]);
-  if (!layer) return null;
+  }, [container, gutter, touch]);
+  if (!layer || !gutter) return null;
   const shown = touch ? all : hovered ? [hovered] : [];
   return <>
-    {shown.map((handle, index) => <button key={index} type="button" data-prose-handle="" data-comment-ui="" aria-label={`Comment on this ${handle.label.toLowerCase()}`} title="Comment"
-      className={`absolute z-10 flex size-5 items-center justify-center rounded text-muted-foreground hover:bg-surface-2 hover:text-foreground focus-visible:opacity-100 ${touch ? 'opacity-60' : ''}`}
+    {createPortal(shown.map((handle, index) => <button key={index} type="button" data-prose-handle="" data-comment-ui="" aria-label={`Comment on this ${handle.label.toLowerCase()}`} title="Comment"
+      className={`absolute z-10 flex size-4 items-center justify-center rounded text-muted-foreground hover:bg-surface-2 hover:text-foreground focus-visible:opacity-100 ${touch ? 'opacity-60' : ''}`}
       style={{ left: handle.left, top: handle.top }}
+      onMouseEnter={() => window.clearTimeout(linger.current)} onMouseLeave={() => { if (!touch) clearSoon(); }}
       onClick={(event) => { event.stopPropagation(); setEditing({ handle, at: editorAt(handle.element) }); }}>
       <Annotation width={13} height={13} />
-    </button>)}
+    </button>), gutter)}
     {editing ? <NoteEditor quote={editing.handle.quote} label={editing.handle.label} at={editing.at} onCancel={() => setEditing(null)}
       onSave={async (note) => {
         const flat = flatText(container);

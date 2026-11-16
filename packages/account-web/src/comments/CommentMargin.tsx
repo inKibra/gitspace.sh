@@ -5,9 +5,11 @@
 // card; a sent one is read-only, with the agent's reply under it.
 //
 // The margin's space is kept from the start where it fits, so the first comment moves nothing; the column and the
-// margin are centred together. Where it does not fit (a narrow window, the Inspector open) a 16 px strip right of the
-// column is kept instead, and the comments are dots there, each opening its comments beside its anchor. The margin also
-// paints the passages the comments quote (CSS Custom Highlight API) and marks the paragraphs commented as a whole.
+// margin are centred together. Where it does not fit (a narrow window, the Inspector open) a 28 px strip right of the
+// column is kept instead, and the comments are dots at its right edge, each opening its comments beside its anchor. The
+// comment icons of paragraphs, items and tool rows go in the gutter right of the column (CommentLayer.tsx), never over
+// the text: the gap before the margin, or the strip's left part. The margin also paints the passages the comments quote
+// (CSS Custom Highlight API) and marks the paragraphs commented as a whole.
 import { Badge, Button, useShape } from '@gitspace/ui';
 import { commentExcerpt } from '@gitspace/protocol-runtime/comments';
 import { Edit02, Lock01, Trash01 } from '@untitledui/icons';
@@ -15,16 +17,18 @@ import { useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useStat
 import { anchorLabel, locateAnchor } from './CommentLayer.js';
 import { CommentLayer, type CommentNote } from './context.js';
 
-/** Width of the margin column and its gap from the column. */
-const MARGIN_WIDTH = 256;
-const MARGIN_GAP = 16;
+/** Width of the margin column and its gap from the column; the gap holds the comment icons. */
+const MARGIN_WIDTH = 244;
+const MARGIN_GAP = 28;
 /** Anchors this close (px, from the first of a run) share one stacked marker. */
 const GROUP_GAP = 40;
 /** Space between margin cards, and between edge dots. */
 const CARD_GAP = 6;
 const DOT_GAP = 14;
-/** Where the margin does not fit: the strip right of the column for the edge dots. */
-const EDGE_GUTTER = 16;
+/** Where the margin does not fit: the strip right of the column for the comment icons (its left part) and the edge
+ * dots (its right `DOT_STRIP`). */
+const EDGE_GUTTER = 28;
+const DOT_STRIP = 12;
 const PILL_HEIGHT = 30;
 
 interface Group { key: string; notes: CommentNote[]; anchorTop: number }
@@ -285,8 +289,11 @@ export function CommentMarginLayout({ columnMax, children }: { columnMax: number
   const groupOpen = (group: Group): boolean => group.notes.length === 1 || openGroups.has(group.key) || group.notes.some((note) => note.id === active);
   const open = (group: Group, key?: string): void => { setOpenGroups((current) => new Set(current).add(group.key)); if (key) setFocus(key); };
 
-  const column = <div data-comment-column="" className="relative min-w-0">{children}</div>;
-  const dots = shown && !wide ? <div data-comment-margin="edge" className="pointer-events-none absolute inset-y-0 right-0.5 w-3">
+  const column = <div data-comment-column="" className="relative min-w-0">
+    {children}
+    {layer ? <div data-comment-gutter="" className="pointer-events-none absolute inset-y-0 left-full [&>*]:pointer-events-auto" style={{ width: wide ? MARGIN_GAP : EDGE_GUTTER - DOT_STRIP }} /> : null}
+  </div>;
+  const dots = shown && !wide ? <div data-comment-margin="edge" className="pointer-events-none absolute inset-y-0 right-0" style={{ width: DOT_STRIP }}>
     {groups.map((group, index) => {
       const top = placed[index] ?? group.anchorTop;
       const staged = group.notes.some((note) => note.state === 'staged');
