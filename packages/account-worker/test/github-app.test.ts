@@ -7,6 +7,7 @@ import { RuntimeAttachInputSchema, RuntimeIdentitySchema, RuntimeMachineIdSchema
 import { ArtifactsCodeStore, AttachmentStore } from '@gitspace/runtime-workspace-do';
 import { readInspectorContext } from '../src/account-inspector-data.js';
 import { withCloudCheckout } from '../src/cloud-repository.js';
+import { GitHubAppDO } from '../src/github-app.js';
 import { createGuideShare } from '../src/guide-shares.js';
 import { refreshProjectRemote } from '../src/project-remote.js';
 import { SpaceAuthorityDO } from '../src/space-authority.js';
@@ -361,8 +362,12 @@ describe('GitHub App', () => {
     // An origin GitSpace reads without the App whose import was still refused (outside GitHub here) waits for the copy too.
     const assets = await project('Acme Assets', 'https://git.example.org/acme/assets.git');
     expect(await github().projectAccess(assets.id)).toEqual({ state: 'awaits-copy', origin: 'https://git.example.org/acme/assets.git' });
+    // A repository the App covers whose copy Artifacts refused as too large waits for the copy as well.
+    vi.spyOn(GitHubAppDO.prototype, 'coverage').mockReturnValue(91);
+    expect(await github().projectAccess(app.id)).toEqual({ state: 'awaits-copy', origin: 'https://github.com/acme-labs/widgets.git' });
     awaits.mockResolvedValue(false);
     expect(await github().projectAccess(assets.id)).toEqual({ state: 'ready' });
+    expect(await github().projectAccess(app.id)).toEqual({ state: 'ready' });
   });
 
   it("keeps an installation that answers a project's request for its organization, and one the App's owner made", async () => {

@@ -158,8 +158,9 @@ export type GitHubProjectBridge = z.infer<typeof GitHubProjectBridgeSchema>;
 export const GitHubProjectAccessSchema = z.discriminatedUnion('state', [
   /** Not on GitHub, public, or covered by an installation. */
   z.object({ state: z.literal('ready') }),
-  /** Not on GitHub or public, but the cloud's import of `origin` was refused (private outside GitHub, or larger than the
-   * import limit): the project's repository waits for one of the account's machines to copy the base branch in. */
+  /** Not on GitHub, public, or covered by an installation, but the cloud's import of `origin` was refused (private outside
+   * GitHub, larger than the import limit, or too large to copy in the cloud): the project's repository waits for one of
+   * the account's machines to copy the base branch in. */
   z.object({ state: z.literal('awaits-copy'), origin: z.string().min(1) }),
   /** Private, and the App is not installed on its owner. */
   z.object({ state: z.literal('needs-app'), repository: GitHubRepositoryNameSchema, organization: GitHubLoginSchema, appName: z.string().nullable(), bridge: GitHubProjectBridgeSchema.nullable(), awaitsCopy: z.boolean() }),

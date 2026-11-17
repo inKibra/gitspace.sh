@@ -402,10 +402,11 @@ export class GitHubAppDO extends BudgetedDurableObject {
 
   /**
    * Whether the cloud reads a project's repository itself. A repository not on GitHub, public, or covered by an
-   * installation is ready, unless the cloud's import was refused anyway (`awaits-copy`). A private one the App does not
-   * cover is read through the machine attached to the project's base workspace, its `bridge`; the answer also says what
-   * stands in the way of the App: no install on its owner, a request an owner there has not answered, or an install that
-   * leaves this repository out, and whether the project's repository waits for a machine to copy it in (`awaitsCopy`).
+   * installation is ready, unless the cloud's import was refused anyway (`awaits-copy`: private outside GitHub, or too
+   * large). A private one the App does not cover is read through the machine attached to the project's base workspace,
+   * its `bridge`; the answer also says what stands in the way of the App: no install on its owner, a request an owner
+   * there has not answered, or an install that leaves this repository out, and whether the project's repository waits
+   * for a machine to copy it in (`awaitsCopy`).
    */
   async projectAccess(projectId: string): Promise<GitHubProjectAccess> {
     const project = (await this.env.USER_PROJECTS.getByName(this.env.ACCOUNT_ID).list('active')).find((candidate) => candidate.id === projectId);
@@ -413,9 +414,8 @@ export class GitHubAppDO extends BudgetedDurableObject {
     const origin = project.repositoryReference;
     if (origin === null) return { state: 'ready' };
     const repository = githubRepositoryOf(origin);
-    if (repository !== null && this.coverage(repository) !== null) return { state: 'ready' };
     const awaitsCopy = await new ArtifactsCodeStore(this.env.ARTIFACTS).awaitsMachineSeed(project.id, project.baseBranch);
-    if (repository === null || await this.publicOnGitHub(repository)) return awaitsCopy ? { state: 'awaits-copy', origin } : { state: 'ready' };
+    if (repository === null || this.coverage(repository) !== null || await this.publicOnGitHub(repository)) return awaitsCopy ? { state: 'awaits-copy', origin } : { state: 'ready' };
     const organization = repository.slice(0, repository.indexOf('/'));
     const bridge = await this.projectBridge(projectId);
     const appName = this.app()?.name ?? null;

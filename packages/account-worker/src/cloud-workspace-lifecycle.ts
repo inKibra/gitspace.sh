@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { CloudProjectOperation, CloudProjectSummary, CloudWorkspaceDefinition } from '@gitspace/protocol';
-import { cloudResourceId, GITSPACE_SOURCE_PROJECT_ROLE } from '@gitspace/protocol';
+import { cloudResourceId, GITSPACE_SOURCE_PROJECT_ROLE, normalizeRemoteRepositoryUrl } from '@gitspace/protocol';
 import type { RuntimeWorkspaceMutationArgumentsSchema } from '@gitspace/protocol/inspector-contract';
 import type { RuntimeGitCheckpoint, RuntimeSnapshot } from '@gitspace/protocol-runtime';
 import { assertWorkspacePhase, WorkspacePhaseSchema, type WorkspacePhase } from '@gitspace/protocol-workspace';
@@ -521,7 +521,10 @@ async function runProjectSetBaseBranch({ env, userId, authority, operation, requ
   const { baseBranch } = SetBaseBranchRequestSchema.parse(request);
   const project = await requireActiveProject(authority, projectId);
   const code = new ArtifactsCodeStore(env.ARTIFACTS);
-  await ensureProjectCodeRepository(env, code, project);
+  // An origin whose base branch never reached the project repository (one just switched to) is imported at the branch
+  // asked for, which the old base branch's name may not exist in.
+  const imported = project.repositoryReference === null || await code.projectImported(projectId, project.baseBranch);
+  await ensureProjectCodeRepository(env, code, imported ? project : { ...project, baseBranch });
   const ref = `refs/heads/${baseBranch}`;
   if (await code.resolveRef(artifactsProjectRepository(projectId), ref) === null && await importOriginRef(env, userId, code, project, ref) === null) {
     throw new Error(`Branch ${baseBranch} does not exist in the project repository or its origin`);
@@ -531,9 +534,13 @@ async function runProjectSetBaseBranch({ env, userId, authority, operation, requ
 }
 
 /** The project's origin moves to `repositoryUrl` (a fork, a moved repository); its workspaces keep their branches and
- * the base space reads from the new origin from now on. The new origin is read at once, as Check origin would. */
+ * the base space reads from the new origin from now on. A project repository the old origin's base branch never reached
+ * holds nothing, so it is discarded first and the next import fills a new one from the new origin; one holding any ref
+ * is kept. The new origin is read at once, as Check origin would. */
 export async function setCloudProjectRepository(env: Env, userId: string, projectId: string, expectedRevision: number, repositoryUrl: string): Promise<CloudProjectSummary> {
   const authority = await requireProject(env, userId, projectId);
+  const project = await requireProjectAt(authority, projectId, expectedRevision);
+  if (project.lifecycle === 'active' && normalizeRemoteRepositoryUrl(repositoryUrl) !== project.repositoryReference) await new ArtifactsCodeStore(env.ARTIFACTS).discardEmptyProject(projectId);
   const updated = await env.USER_PROJECTS.getByName(userId).put(await authority.setRepository(expectedRevision, repositoryUrl));
   await refreshProjectRemote(env, userId, projectId).catch((error: unknown) => {
     console.warn(JSON.stringify({ event: 'project_repository_check_failed', projectId, message: error instanceof Error ? error.message : String(error) }));

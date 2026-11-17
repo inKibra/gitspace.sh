@@ -47,9 +47,39 @@ function namespace(options: { repositories?: string[]; refs?: string[]; importEr
       repositories.set(name, opts?.description ?? null);
       return created;
     },
-    delete: unsupported,
+    delete: async name => { calls.push(`delete ${name}`); return repositories.delete(name); },
   };
   return { code: new ArtifactsCodeStore(binding), calls, refs, repositories };
+}
+
+const packet = (line: string) => (line.length + 4).toString(16).padStart(4, '0') + line;
+const zero = '0'.repeat(40);
+const credentials = async (): Promise<GitHttpAuth> => ({ kind: 'basic', username: 'x-access-token', password: 'ghs_covered' });
+
+/** The covered origin, `main` at a commit its every pack request gets, and the project repository's smart HTTP: its
+ * upload-pack advertises the `held` refs, and its receive-pack answers every push with the `status` lines. Returns the
+ * history depth each pack request asked for and the pushes received. */
+function smartHttp(input: { held: string[]; status: string[] }) {
+  const depths: number[] = [];
+  const pushes: string[] = [];
+  const pack = new Uint8Array([...new TextEncoder().encode('PACK'), 0, 0, 0, 2, 0, 0, 0, 0, ...new Uint8Array(20).fill(3)]);
+  network.use(
+    http.get(`${origin.url}/info/refs`, () => new HttpResponse(packet('# service=git-upload-pack\n') + '0000' + packet('version 2\n') + packet('ls-refs\n') + packet('fetch=shallow\n') + '0000')),
+    http.post(`${origin.url}/git-upload-pack`, async ({ request }) => {
+      const body = await request.text();
+      if (body.includes('command=ls-refs')) return new HttpResponse(packet(`${'c'.repeat(40)} refs/heads/main\n`) + '0000');
+      depths.push(Number(/deepen (\d+)/u.exec(body)?.[1]));
+      return new HttpResponse(new Blob([packet('packfile\n'), new TextEncoder().encode((pack.length + 5).toString(16).padStart(4, '0')), new Uint8Array([1]), pack, '0000']));
+    }),
+    http.get(`${info.remote}/info/refs`, ({ request }) => new HttpResponse(new URL(request.url).searchParams.get('service') === 'git-receive-pack'
+      ? packet(`${zero} capabilities^{}\0report-status\n`) + '0000'
+      : packet('# service=git-upload-pack\n') + '0000' + (input.held.length === 0 ? packet(`${zero} capabilities^{}\0multi_ack\n`) : input.held.map((ref, index) => packet(`${'d'.repeat(40)} ${ref}${index === 0 ? '\0multi_ack' : ''}\n`)).join('')) + '0000')),
+    http.post(`${info.remote}/git-receive-pack`, async ({ request }) => {
+      pushes.push(new TextDecoder().decode(await request.arrayBuffer()));
+      return new HttpResponse(input.status.map(packet).join('') + '0000');
+    }),
+  );
+  return { depths, pushes };
 }
 
 describe('project import classification', () => {
@@ -115,8 +145,6 @@ describe('project import classification', () => {
   it('imports a covered repository over authenticated smart HTTP, never through the native import', async () => {
     const artifacts = namespace();
     const head = 'c'.repeat(40);
-    const zero = '0'.repeat(40);
-    const packet = (line: string) => (line.length + 4).toString(16).padStart(4, '0') + line;
     const pack = new Uint8Array([...new TextEncoder().encode('PACK'), 0, 0, 0, 2, 0, 0, 0, 0, ...new Uint8Array(20).fill(3)]);
     const requests: string[] = [];
     let pushed = '';
@@ -140,7 +168,6 @@ describe('project import classification', () => {
         return new HttpResponse(packet('unpack ok\n') + packet('ok refs/heads/main\n') + '0000');
       }),
     );
-    const credentials = async (): Promise<GitHttpAuth> => ({ kind: 'basic', username: 'x-access-token', password: 'ghs_covered' });
     await expect(artifacts.code.importProject(projectId, origin, credentials)).resolves.toEqual(info);
     const basic = `Basic ${btoa('x-access-token:ghs_covered')}`;
     expect(requests).toEqual([`origin discovery ${basic}`, `origin refs ${basic}`, `origin discovery ${basic}`, `origin pack ${basic}`]);
@@ -150,6 +177,52 @@ describe('project import classification', () => {
       'revoke initial-token',
       'revoke lease-write',
     ]);
+  });
+
+  it('leaves a covered import Artifacts refuses as too large however little history it carries as a machine copy target, naming the sizes', async () => {
+    const artifacts = namespace();
+    const smart = smartHttp({ held: [], status: ['push is 87.4 MiB, limit is 64.0 MiB\n'] });
+    const imported = artifacts.code.importProject(projectId, origin, credentials);
+    await expect(imported).rejects.toBeInstanceOf(ProjectImportRequiresMachineError);
+    await expect(imported).rejects.toMatchObject({ reason: 'too-large', message: expect.stringMatching(/87\.4 MiB.*64\.0 MiB.*copy it in through one of your machines/u) });
+    // History stepped down to the commit alone before the refusal stood.
+    expect(smart.depths).toEqual([64, 16, 4, 1]);
+    expect(artifacts.calls.filter(call => call.startsWith('create') || call.startsWith('delete'))).toEqual([
+      `create project-imported ${JSON.stringify({ setDefaultBranch: 'main', readOnly: false, description: 'GitSpace authenticated import of project imported (main)' })}`,
+      'delete project-imported',
+      `create project-imported ${JSON.stringify({ setDefaultBranch: 'main', readOnly: false, description: 'GitSpace machine-seeded project imported (main): too large to copy in the cloud, push is 87.4 MiB, limit is 64.0 MiB' })}`,
+    ]);
+    expect(await artifacts.code.awaitsMachineSeed(projectId, 'main')).toBe(true);
+    // Opening the project again reports the refusal without sending the copy again.
+    await expect(artifacts.code.importProject(projectId, origin, credentials)).rejects.toMatchObject({ reason: 'too-large', message: expect.stringContaining('87.4 MiB') });
+    expect(smart.pushes).toHaveLength(4);
+    // A machine published the base branch: the import completes from its copy.
+    artifacts.refs.add('main');
+    expect(await artifacts.code.awaitsMachineSeed(projectId, 'main')).toBe(false);
+    await expect(artifacts.code.importProject(projectId, origin, credentials)).resolves.toEqual(info);
+    expect(smart.pushes).toHaveLength(4);
+  });
+
+  it('discards an empty project repository and imports another origin into a new one', async () => {
+    const artifacts = namespace();
+    artifacts.repositories.set('project-imported', 'GitSpace machine-seeded project imported (main): too large to copy in the cloud, push is 87.4 MiB, limit is 64.0 MiB');
+    smartHttp({ held: [], status: [] });
+    const moved = { url: 'https://example.com/moved/repository.git', branch: 'main' };
+    await expect(artifacts.code.importProject(projectId, moved, null)).rejects.toMatchObject({ reason: 'too-large' });
+    await expect(artifacts.code.discardEmptyProject(projectId)).resolves.toBe(true);
+    await expect(artifacts.code.importProject(projectId, moved, null)).resolves.toEqual(info);
+    expect(artifacts.calls).toEqual(['revoke lease-read', 'delete project-imported', 'import project-imported', 'revoke initial-token']);
+    // Nothing to discard once it is gone.
+    artifacts.repositories.clear();
+    await expect(artifacts.code.discardEmptyProject(projectId)).resolves.toBe(false);
+  });
+
+  it.each([['refs/heads/main'], ['refs/gitspace/origin/heads/main'], ['refs/gitspace/spaces/imported/checkpoints']])('never discards a project repository holding %s', async held => {
+    const artifacts = namespace({ repositories: ['project-imported'] });
+    smartHttp({ held: [held], status: [] });
+    await expect(artifacts.code.discardEmptyProject(projectId)).resolves.toBe(false);
+    expect(artifacts.calls).toEqual(['revoke lease-read']);
+    expect(artifacts.repositories.has('project-imported')).toBe(true);
   });
 });
 

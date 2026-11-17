@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { Result, TaggedError } from 'better-result';
+import { artifactsPushRefusal, artifactsPushSize } from '@gitspace/protocol-workspace';
 import { ARTIFACTS_COPY_DEPTH, ArtifactsSnapshotError, copyNegotiation, initializeArtifactsRepository, NEGOTIATION_WINDOW, publishRef, readAdvertisedRefs, SnapshotObjects, transferCommit, validateSnapshotPath, writeArtifactsSnapshot, type GitHttpAuth, type WriteSnapshotInput } from './artifacts-snapshot.js';
 import { changedSnapshotEntries, planSnapshotMerge, snapshotEntries } from './artifacts-merge.js';
 import type { RuntimeGitCheckpoint } from './artifacts-snapshot.js';
@@ -94,9 +95,17 @@ const PROJECT_IMPORT_REQUIRES_MACHINE_MESSAGES: Record<ProjectImportRequiresMach
 /** Artifacts cannot import this origin itself: one of the account's machines copies the base branch into the project
  * repository. A refused import leaves that repository empty as the machine's target (`ensureMachineSeedTarget`). */
 export class ProjectImportRequiresMachineError extends TaggedError('ProjectImportRequiresMachineError')<{ reason: ProjectImportRequiresMachineReason; message: string }> {
-  constructor(reason: ProjectImportRequiresMachineReason) {
-    super({ reason, message: PROJECT_IMPORT_REQUIRES_MACHINE_MESSAGES[reason] });
+  constructor(reason: ProjectImportRequiresMachineReason, message = PROJECT_IMPORT_REQUIRES_MACHINE_MESSAGES[reason]) {
+    super({ reason, message });
   }
+}
+/** What a machine seed target's description says after a covered import Artifacts refused as too large however little
+ * history it carried, followed by the sizes the refusal reported. */
+const TOO_LARGE_TO_COPY = 'too large to copy in the cloud';
+/** The `too-large` message of a covered import's refusal, naming the refused push's size and the limit when reported. */
+function tooLargeToCopyMessage(push: { size: string; limit: string } | null): string {
+  const sizes = push ? `the smallest copy GitSpace can send is ${push.size}, and Cloudflare Artifacts takes at most ${push.limit} in one push` : 'Cloudflare Artifacts refused even the smallest copy GitSpace can send';
+  return `This repository is too large for GitSpace to copy in the cloud: ${sizes}. On this project's page, copy it in through one of your machines that can read it.`;
 }
 const ArtifactsImportRefusalSchema = z.object({ name: z.literal('ArtifactsError'), code: z.enum(['REMOTE_AUTH_REQUIRED', 'MEMORY_LIMIT']) });
 const IMPORT_REFUSAL_REASONS: Record<z.infer<typeof ArtifactsImportRefusalSchema>['code'], ProjectImportRequiresMachineReason> = { REMOTE_AUTH_REQUIRED: 'private', MEMORY_LIMIT: 'too-large' };
@@ -291,12 +300,15 @@ export class ArtifactsCodeStore {
 
   /** The project repository with its origin's history. Artifacts' native import reads a public origin and cannot send
    * credentials, so a covered origin's repository is created empty and its base branch streamed in over authenticated
-   * smart HTTP; an empty repository whose branch never landed (an interrupted import) is filled the same way. */
+   * smart HTTP; an empty repository whose branch never landed (an interrupted import) is filled the same way, unless a
+   * covered import was refused as too large, which only a machine's copy fills. */
   async importProject(projectId: string, source: { url: string; branch?: string }, credentials: OriginCredentials) {
     const name = artifactsProjectRepository(projectId);
     const state = await this.importState(projectId, source.branch);
     if (state !== 'absent') {
       if (state === 'pending') {
+        const description = (await this.find(name))?.description ?? '';
+        if (description.includes(TOO_LARGE_TO_COPY)) throw new ProjectImportRequiresMachineError('too-large', tooLargeToCopyMessage(artifactsPushSize(description)));
         if (credentials === null) throw new ProjectImportRequiresMachineError('pending');
         await this.importCoveredProject(projectId, source, credentials, true);
       }
@@ -323,7 +335,9 @@ export class ArtifactsCodeStore {
   }
 
   /** A covered origin's base branch streamed into the project repository, created first unless it `exists`. The
-   * branch is created only from absent, so an interrupted import resumes and a concurrent one cannot overwrite it. */
+   * branch is created only from absent, so an interrupted import resumes and a concurrent one cannot overwrite it. A
+   * copy Artifacts refuses as too large however little history it carries leaves the repository, still empty, as a
+   * machine's copy target recording the refusal. */
   private async importCoveredProject(projectId: string, source: { url: string; branch?: string }, credentials: () => Promise<GitHttpAuth>, exists: boolean) {
     if (source.branch === undefined || !isSupportedBranchName(source.branch)) throw new Error('A covered origin is imported by its base branch name');
     const name = artifactsProjectRepository(projectId);
@@ -344,7 +358,17 @@ export class ArtifactsCodeStore {
         finally { await disposeArtifactsRepository(repo); }
       }
     }
-    await this.fetchIntoRepository(name, { remote: source.url, auth }, ref, commit, null);
+    try { await this.fetchIntoRepository(name, { remote: source.url, auth }, ref, commit, null); }
+    catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (artifactsPushRefusal(message) !== 'too-large') throw error;
+      const push = artifactsPushSize(message);
+      // A repository's description is set only at creation: the empty one is created again as the machine's target.
+      if (await this.discardEmptyProject(projectId)) {
+        await this.ensureMachineSeedTarget(projectId, source.branch, `${TOO_LARGE_TO_COPY}${push ? `, push is ${push.size}, limit is ${push.limit}` : ''}`);
+      }
+      throw new ProjectImportRequiresMachineError('too-large', tooLargeToCopyMessage(push));
+    }
   }
 
   /** Streams `commit` from an origin into a repository ref, negotiating with the repository's recent history (each have
@@ -363,13 +387,15 @@ export class ArtifactsCodeStore {
     } finally { await disposeArtifactsRepository(repo); }
   }
 
-  /** The empty repository one of the account's machines copies the base branch into, left by a refused import.
-   * Never imports or commits: importProject reports 'pending' until the branch exists. */
-  async ensureMachineSeedTarget(projectId: string, branch: string) {
+  /** The empty repository one of the account's machines copies the base branch into, left by a refused import, its
+   * description naming a `refusal` the cloud does not retry. Never imports or commits: importProject reports 'pending'
+   * until the branch exists. */
+  async ensureMachineSeedTarget(projectId: string, branch: string, refusal: string | null = null) {
     const name = artifactsProjectRepository(projectId);
     if (await this.find(name)) return this.info(name);
     // An unresolved gitspace-source branch is recorded as 'HEAD', never a branch name.
-    const created = await this.binding.create(name, { ...(branch === 'HEAD' ? {} : { setDefaultBranch: branch }), readOnly: false, description: `GitSpace machine-seeded project ${projectId} (${branch})` })
+    const description = `GitSpace machine-seeded project ${projectId} (${branch})${refusal === null ? '' : `: ${refusal}`}`;
+    const created = await this.binding.create(name, { ...(branch === 'HEAD' ? {} : { setDefaultBranch: branch }), readOnly: false, description })
       .catch((error: unknown) => {
         // A concurrent seed or cloud import created it first; it is not ours to initialize.
         if (ArtifactsAlreadyExistsSchema.safeParse(error).success) return null;
@@ -531,6 +557,24 @@ export class ArtifactsCodeStore {
         return (await repo.readCommit(value))?.hash ?? null;
       } finally { await repo.revokeToken(token.id); }
     } finally { await disposeArtifactsRepository(repo); }
+  }
+
+  /** Deletes the project repository while it holds no ref at all (an import or machine copy that never landed: nothing
+   * to lose), so the next import creates it afresh, from another origin too. A repository holding any ref is kept.
+   * Whether it was deleted. */
+  async discardEmptyProject(projectId: string): Promise<boolean> {
+    const name = artifactsProjectRepository(projectId);
+    if (!await this.find(name)) return false;
+    const repo = await this.binding.get(name);
+    try {
+      const [info, token] = await Promise.all([repo.info(), repo.createToken('read', 60)]);
+      try {
+        // An empty repository advertises only its capabilities, under the zero ID.
+        const refs = await readAdvertisedRefs({ remote: info.remote, auth: { kind: 'bearer', token: token.plaintext } });
+        if ([...refs.values()].some(oid => !/^0{40}$/u.test(oid))) return false;
+      } finally { await repo.revokeToken(token.id); }
+    } finally { await disposeArtifactsRepository(repo); }
+    return this.deleteRepository(name);
   }
 
   /** Permanent deletion; an absent repository is already deleted. */

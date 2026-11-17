@@ -178,7 +178,8 @@ export function RepositoryAccessCard({ access, copy, onInstall, onOpenSettings, 
     : <GitHubAccessCard access={access} copy={copy} onInstall={onInstall} onOpenSettings={onOpenSettings} onAttachMachine={onAttachMachine} />;
 }
 
-/** A repository the cloud reads but could not import (private outside GitHub, or larger than the import limit). */
+/** A repository the cloud reads but could not import (private outside GitHub, larger than the import limit, or too large
+ * to copy in the cloud). */
 function OriginCopyCard({ origin, copy }: { origin: string; copy: MachineCopyProps }): ReactElement {
   const shape = useShape();
   return <section aria-label="Repository access" className={`flex w-full max-w-[560px] flex-col gap-4 border border-border bg-card p-5 ${shape.container}`}>
@@ -188,7 +189,7 @@ function OriginCopyCard({ origin, copy }: { origin: string; copy: MachineCopyPro
     </div>
     <div className="flex flex-col gap-1.5">
       <h2 className="text-subtitle font-semibold text-foreground">Copy this repository in through one of your machines</h2>
-      <p className="text-body text-muted-foreground">GitSpace couldn't import it itself: it is private outside GitHub, or larger than Cloudflare Artifacts' 40 MB import limit. This project's agent and workspaces start once it is copied in.</p>
+      <p className="text-body text-muted-foreground">GitSpace couldn't import it itself: it is private outside GitHub, larger than Cloudflare Artifacts' 40 MB import limit, or too large to copy in the cloud, where Cloudflare Artifacts takes at most 64 MiB in one push. This project's agent and workspaces start once it is copied in.</p>
     </div>
     <MachineCopy target={origin} lead="Copy through a machine" alternative="Choose another machine that can read it." {...copy} />
   </section>;

@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import { copyNegotiation, NEGOTIATION_WINDOW, readAdvertisedRefs, SnapshotObjects, transferCommit, writeArtifactsSnapshot, type ArtifactsFetch, type GitHttpAuth, type RuntimeGitCheckpoint } from '../src/artifacts-snapshot.js';
 import { ArtifactsCodeStore } from '../src/artifacts.js';
 import { planSnapshotMerge } from '../src/artifacts-merge.js';
-import { GitLfsSnapshotSchema } from '@gitspace/protocol-workspace';
+import { artifactsPushRefusal, artifactsPushSize, GitLfsSnapshotSchema } from '@gitspace/protocol-workspace';
 
 const text = new TextEncoder();
 const author = { name: 'Fixture', email: 'fixture@example.invalid', timestamp: 1, timezoneOffset: 0 };
@@ -1287,7 +1287,26 @@ for (const protocolVersion of [0, 2] as const) test(`a transfer sends objects on
   } finally { request.mockRestore(); await rm(root, { recursive: true, force: true }); }
 }, 15_000);
 
-for (const protocolVersion of [0, 2] as const) test(`a transfer Artifacts refuses as too large is sent again with less history until it fits, over Git v${protocolVersion}`, async () => {
+/** How Artifacts words a too-large refusal: its error code (2026-10-31), or only the sizes in its status (2026-11-16). */
+const TOO_LARGE_REFUSALS = {
+  code: (size: number, limit: number) => `unpack artifacts_git_receive_pack_request_too_large: push is ${size} bytes, limit is ${limit}\nng refs/heads/main artifacts_git_receive_pack_request_too_large\n`,
+  size: (size: number, limit: number) => `push is ${(size / 1024 / 1024).toFixed(1)} MiB, limit is ${(limit / 1024 / 1024).toFixed(1)} MiB\n`,
+};
+
+test('a push refusal is too large by its error code, an HTTP 413, or the sizes Artifacts reports', () => {
+  const live = 'Git push rejected: push is 87.4 MiB, limit is 64.0 MiB';
+  expect(artifactsPushRefusal(live)).toBe('too-large');
+  expect(artifactsPushSize(live)).toEqual({ size: '87.4 MiB', limit: '64.0 MiB' });
+  expect(artifactsPushSize('Git push rejected: unpack ok; ng refs/heads/main push is 1.2GiB; the limit is 64 MiB')).toEqual({ size: '1.2GiB', limit: '64 MiB' });
+  expect(artifactsPushRefusal('Git push rejected: unpack artifacts_git_receive_pack_request_too_large: push is 100796006 bytes, limit is 67108864')).toBe('too-large');
+  expect(artifactsPushRefusal('error: RPC failed; HTTP 413 curl 22 The requested URL returned error: 413')).toBe('too-large');
+  expect(artifactsPushRefusal('error: 413 Request Entity Too Large')).toBe('too-large');
+  expect(artifactsPushSize('error: 413 Request Entity Too Large')).toBeNull();
+  expect(artifactsPushRefusal('Git push rejected: unpack ok; ng refs/heads/main fetch first')).toBeNull();
+  expect(artifactsPushRefusal('Git push rejected: unpack error delta base is missing')).toBe('pack');
+});
+
+for (const protocolVersion of [0, 2] as const) for (const wording of ['code', 'size'] as const) test(`a transfer Artifacts refuses as too large (by ${wording}) is sent again with less history until it fits, over Git v${protocolVersion}`, async () => {
   // Each commit rewrites one file with 48 KiB nothing compresses, so each commit of history adds 48 KiB to a push; the
   // destination, like Artifacts with its 64 MiB, takes 300 KiB a push.
   const root = await mkdtemp(join(tmpdir(), 'too-large-'));
@@ -1310,7 +1329,7 @@ for (const protocolVersion of [0, 2] as const) test(`a transfer Artifacts refuse
     const body = advertise ? null : new Uint8Array(await new Response(init?.body).arrayBuffer());
     if (service === 'receive-pack' && body) {
       pushes.push(body.length);
-      if (body.length > limit) return new Response(line(`unpack artifacts_git_receive_pack_request_too_large: push is ${body.length} bytes, limit is ${limit}\n`) + line('ng refs/heads/main artifacts_git_receive_pack_request_too_large\n') + '0000');
+      if (body.length > limit) return new Response(TOO_LARGE_REFUSALS[wording](body.length, limit).split(/(?<=\n)/u).map(line).join('') + '0000');
     }
     const child = Bun.spawn(['git', '-c', 'receive.shallowUpdate=true', service, '--stateless-rpc', ...(advertise ? ['--advertise-refs'] : []), url.hostname === 'source.invalid' ? source : destination], {
       stdin: body ?? 'ignore', stdout: 'pipe', stderr: 'pipe',

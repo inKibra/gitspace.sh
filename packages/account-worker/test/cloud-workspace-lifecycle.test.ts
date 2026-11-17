@@ -363,6 +363,39 @@ describe('cloud workspace lifecycle with no machines', () => {
     expect(await authority.getWorkspace(refused.workspace.id)).toMatchObject({ name: input.name, branch: input.branch, lifecycle: 'active', sourceCommit: commit('1') });
   });
 
+  it('discards a project repository the old origin never reached when the origin moves, and imports the new origin at the base branch asked for', async () => {
+    const { userId, client, project, artifacts, authority, run } = await cloudProject('Moved origin', 'https://github.com/example/too-large.git');
+    const identity = { projectId: project.id, workspaceId: project.id };
+    const space = env.SPACE_AUTHORITY.getByName(`${userId}:${project.id}`);
+    expect(await space.runtimeRepositoryCheckpoint(identity)).toMatchObject({ branch: 'main', headCommit: commit('1') });
+    // The old origin's import never landed: the project repository holds nothing.
+    artifacts.refs.delete(`project-${project.id} refs/heads/main`);
+    const discard = vi.spyOn(ArtifactsCodeStore.prototype, 'discardEmptyProject').mockResolvedValue(true);
+    const imports = vi.spyOn(ArtifactsCodeStore.prototype, 'importProject');
+    const importProject = imports.getMockImplementation();
+    if (!importProject) throw new Error('Missing import fixture');
+    // The new origin has only trunk; once imported, the repository's default branch completes any later import.
+    imports.mockImplementation(async (projectId, source, credentials) => {
+      const imported = [...artifacts.refs.keys()].some(key => key.startsWith(`project-${projectId} `));
+      if (!imported && source.branch !== 'trunk') throw new Error(`The origin has no branch ${source.branch}`);
+      if (!imported) artifacts.refs.set(`project-${projectId} refs/heads/trunk`, commit('2'));
+      return importProject(projectId, source, credentials);
+    });
+    const current = await authority.getProject();
+    if (!current) throw new Error('Missing project');
+    const moved = await client.project.setRepository({ projectId: project.id, expectedRevision: current.revision, repositoryUrl: 'https://github.com/example/moved.git' });
+    if (moved.status === 'error') throw moved.error;
+    expect(discard.mock.calls).toEqual([[project.id]]);
+    // Setting the same origin again leaves the repository alone.
+    const again = await client.project.setRepository({ projectId: project.id, expectedRevision: moved.value.revision, repositoryUrl: 'https://github.com/example/moved.git' });
+    if (again.status === 'error') throw again.error;
+    expect(discard).toHaveBeenCalledTimes(1);
+    expect(await run(client.project.setBaseBranch({ projectId: project.id, expectedRevision: again.value.revision, baseBranch: 'trunk' }))).toMatchObject({ state: 'succeeded' });
+    expect(await space.runtimeRepositoryCheckpoint(identity)).toMatchObject({ branch: 'trunk', headCommit: commit('2') });
+    expect(imports.mock.calls.map(([, source]) => source)).toContainEqual({ url: 'https://github.com/example/moved.git', branch: 'trunk' });
+    expect(await authority.getProject()).toMatchObject({ repositoryReference: 'https://github.com/example/moved.git', baseBranch: 'trunk' });
+  });
+
   it('resumes a failed creation from the cloud and refuses to retry a finished one', async () => {
     const { client, project, artifacts, authority, ready } = await cloudProject('Retry');
     artifacts.setBranch.mockRejectedValueOnce(new Error('Artifacts push unavailable'));

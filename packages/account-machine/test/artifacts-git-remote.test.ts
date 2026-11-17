@@ -439,7 +439,11 @@ exec '${realGit}' "$@"
   } finally { process.env.PATH = path; }
 });
 
-it('sends a checkpoint push Artifacts refuses as too large in smaller steps, keeping its history and no staging ref', async () => {
+// How Artifacts words a too-large refusal: its error code (2026-10-31), or only the sizes in its status (2026-11-16).
+it.each([
+  ['its error code', 'unpack artifacts_git_receive_pack_request_too_large: push carries $count commits, limit is 3'],
+  ['the sizes', 'push is $count.0 MiB, limit is 3.0 MiB'],
+])('sends a checkpoint push Artifacts refuses as too large (by %s) in smaller steps, keeping its history and no staging ref', async (_wording, refusal) => {
   const f = fixture();
   writeFileSync(join(f.root, 'file'), 'base'); git(f.root, 'add', 'file'); git(f.root, 'commit', '-m', 'base');
   const base = git(f.root, 'rev-parse', 'HEAD');
@@ -453,7 +457,7 @@ while read old new ref; do
   case "$new" in 0000000000000000000000000000000000000000) continue ;; esac
   count=$(git rev-list --count "$new" --not --all)
   echo "$ref $count" >> '${log}'
-  if [ "$count" -gt 3 ]; then echo "unpack artifacts_git_receive_pack_request_too_large: push carries $count commits, limit is 3" >&2; exit 1; fi
+  if [ "$count" -gt 3 ]; then echo "${refusal}" >&2; exit 1; fi
 done
 `);
   chmodSync(hook, 0o755);
