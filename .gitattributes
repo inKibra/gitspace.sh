@@ -1,0 +1,9 @@
+# Marketing media (rendered videos, voice-over and music, GIFs) lives in Git LFS: as plain git objects it put the
+# repository's current tree over the 64 MiB a single push may carry into GitSpace's cloud copy.
+# Served web assets (landing-page/public, packages/*/public) stay plain files, since their builds may not fetch LFS.
+marketing/**/*.mp4 filter=lfs diff=lfs merge=lfs -text
+marketing/**/*.mov filter=lfs diff=lfs merge=lfs -text
+marketing/**/*.webm filter=lfs diff=lfs merge=lfs -text
+marketing/**/*.wav filter=lfs diff=lfs merge=lfs -text
+marketing/**/*.mp3 filter=lfs diff=lfs merge=lfs -text
+marketing/**/*.gif filter=lfs diff=lfs merge=lfs -text
