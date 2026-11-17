@@ -1,12 +1,13 @@
 // @vitest-environment happy-dom
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { GitSpaceMarkdown } from '../GitSpaceMarkdown.js';
 import { BlockActionsProvider, type BlockActions, type BlockState } from './BlockActions.js';
 import { BLOCK_FIXTURES, SVG_DRAWING, type BlockFixture } from './fixtures.js';
 import { MessageBlockDocument } from './BlockDocument.js';
-import { UI_BLOCK_EXAMPLES } from '@gitspace/protocol/gitspace-ui';
+import { UI_BLOCK_EXAMPLES, fenceSpec } from '@gitspace/protocol/gitspace-ui';
+import { blockMarkdown } from '@gitspace/protocol/block-markdown';
 
 let container: HTMLDivElement;
 let root: Root;
@@ -288,5 +289,59 @@ describe('blocks in the lightbox', () => {
     expect(dialog()).toBeNull();
     await click('Pick one; it waits in your message so you can say why.');
     await waitFor(() => dialog()?.textContent?.includes('Survives a deploy') ?? false);
+  });
+});
+
+describe('Copy as Markdown', () => {
+  let writeText: Mock<(text: string) => Promise<void>>;
+  beforeEach(() => {
+    writeText = vi.fn<(text: string) => Promise<void>>(async () => undefined);
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+  });
+
+  /** Presses the `index`th Copy as Markdown button (from the end when negative) and returns what it wrote to the
+   * clipboard. A block drawn inside another block (a frame's ref) comes before the outer block's own button. */
+  async function copy(index = 0): Promise<string | undefined> {
+    const button = [...container.querySelectorAll<HTMLElement>('button[title="Copy as Markdown"]')].at(index);
+    if (!button) throw new Error(`no Copy as Markdown button ${index}; the page reads: ${container.textContent ?? ''}`);
+    await act(async () => button.click());
+    await waitFor(() => writeText.mock.calls.length > 0);
+    return writeText.mock.calls.at(-1)?.[0];
+  }
+
+  const tradeoffs = { question: 'Which rollout?', options: [{ id: 'a', label: 'Percentage' }, { id: 'b', label: 'By cycle' }], criteria: [{ label: 'Small first exposure', scores: [3, 1] }], recommended: 'a', note: 'Scores are my judgement, not measurements.' };
+
+  it('draws a Tradeoffs note under the comparison and copies the block as Markdown', async () => {
+    await render(<GitSpaceMarkdown>{fence('gitspace-ui Tradeoffs', JSON.stringify(tradeoffs))}</GitSpaceMarkdown>);
+    await waitFor(() => container.querySelector('[data-gitspace-block="gitspace-ui"]') !== null);
+    expect(container.querySelector('figure p')?.textContent).toBe('Scores are my judgement, not measurements.');
+    expect(await copy()).toBe('**Which rollout?**\n\n|  | Percentage (recommended) | By cycle |\n| --- | --- | --- |\n| Small first exposure | 3/3 | 1/3 |\n\nRecommended: **Percentage**\n\nScores are my judgement, not measurements.');
+  });
+
+  it('copies a short-form fence as its full form, from the block\'s state as it is now', async () => {
+    const full = fenceSpec(JSON.stringify(tradeoffs), 'Tradeoffs');
+    await render(<GitSpaceMarkdown>{fence('gitspace-ui', JSON.stringify('spec' in full ? full.spec : null))}</GitSpaceMarkdown>);
+    await waitFor(() => container.querySelector('[data-gitspace-block="gitspace-ui"]') !== null);
+    expect(await copy()).toBe('spec' in full ? blockMarkdown(full.spec) : 'not read');
+
+    await render(<GitSpaceMarkdown>{fence('gitspace-ui', JSON.stringify(fixture('benchmark').spec))}</GitSpaceMarkdown>);
+    await waitFor(() => container.textContent?.includes('1.1 s') ?? false);
+    expect(await copy()).toContain('1.1 s');
+    await click('Menu cache (abc1234)');
+    await waitFor(() => container.textContent?.includes('0.4 s') ?? false);
+    expect(await copy()).toContain('0.4 s');
+  });
+
+  it('copies a frame that shows another block of the message as that block', async () => {
+    const text = `${fence('gitspace-ui Stats id=numbers', JSON.stringify({ tiles: [{ label: 'Hits', value: 9 }] }))}\n\n${fence('gitspace-ui Sequence', JSON.stringify({ title: 'Walk', frames: [{ content: { ref: 'numbers' }, say: 'The numbers.' }, { content: { type: 'Markdown', props: { content: 'Done.' }, children: [] } }] }))}`;
+    await render(<MessageBlockDocument messageId="message" text={text} pending={false}><GitSpaceMarkdown>{text}</GitSpaceMarkdown></MessageBlockDocument>);
+    await waitFor(() => container.querySelectorAll('[data-gitspace-block="gitspace-ui"]').length >= 2);
+    expect(await copy(-1)).toBe('**Walk**\n\n**1.**\n\n- **Hits:** 9\n\n> The numbers.\n\n**2.**\n\nDone.');
+  });
+
+  it('copies an svg drawing as its title', async () => {
+    await render(<GitSpaceMarkdown>{fence('svg', '<svg viewBox="0 0 10 10"><title>Request path</title><rect width="10" height="10" fill="currentColor"/></svg>')}</GitSpaceMarkdown>);
+    await waitFor(() => container.querySelector('[data-gitspace-block="svg"] svg') !== null);
+    expect(await copy()).toBe('(diagram) Request path');
   });
 });

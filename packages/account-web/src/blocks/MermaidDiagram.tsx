@@ -1,6 +1,8 @@
 // A Mermaid diagram from a ```mermaid fence, drawn by Mermaid (strict security: no scripts, no HTML labels) in the
 // page's scheme and drawn again when the scheme changes. It opens in the lightbox at its natural size to pan and zoom;
-// beside the expand button, its source copies and its drawing downloads as SVG.
+// beside the expand button, its source copies, the diagram copies as Markdown (a mermaid fence) and its drawing downloads
+// as SVG.
+import { blockMarkdown } from '@gitspace/protocol/block-markdown';
 import { Button } from '@gitspace/ui';
 import type { MermaidConfig } from '@streamdown/mermaid';
 import { Copy01, Download01 } from '@untitledui/icons';
@@ -9,6 +11,7 @@ import type { CustomRendererProps } from 'streamdown';
 import { useDarkScheme } from '../appearance.js';
 import { Lightbox } from '../Lightbox.js';
 import { BlockErrorCard, BlockPlaceholder } from './BlockFrames.js';
+import { CopyMarkdownButton } from './CopyMarkdown.js';
 
 const LIGHT: MermaidConfig = { theme: 'neutral' };
 const DARK: MermaidConfig = { theme: 'dark' };
@@ -50,6 +53,7 @@ function MermaidDiagram({ source }: { source: string }) {
   return <Lightbox label="Mermaid diagram" mode="zoom" className="my-2"
     actions={<>
       <Button variant="secondary" size="icon-compact" type="button" aria-label="Copy the Mermaid source" onClick={() => { void navigator.clipboard.writeText(source); }}><Copy01 width={14} height={14} /></Button>
+      <CopyMarkdownButton markdown={() => blockMarkdown({ root: 'block', elements: { block: { type: 'Mermaid', props: { source }, children: [] } } })} />
       <Button variant="secondary" size="icon-compact" type="button" aria-label="Download the diagram as SVG" onClick={download}><Download01 width={14} height={14} /></Button>
     </>}
     expanded={<div role="img" aria-label="Mermaid diagram" className="[&>svg]:!h-full [&>svg]:!w-full [&>svg]:!max-w-none" style={{ width: drawn.width, height: drawn.height }} dangerouslySetInnerHTML={{ __html: drawn.svg }} />}>

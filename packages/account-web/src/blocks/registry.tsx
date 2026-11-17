@@ -1,4 +1,5 @@
-// The components a gitspace-ui block may use, drawn with @gitspace/ui, and the `$computed` functions. The json-render
+// The components a gitspace-ui block may use, drawn with @gitspace/ui; the `$computed` functions are the protocol's
+// `blockFunctions`, which blockMarkdown reads with too. The json-render
 // catalog is the protocol catalog's components with their zod props, so a renderer receives the props GitSpace
 // validated when it stored the block.
 import { gitspaceUiCatalog } from '@gitspace/protocol/gitspace-ui';
@@ -7,7 +8,7 @@ import {
   InputField, InputGroup, RadioGroup, RadioItem, Slider, StatTile, Switch, Table, TableBody, TableCell, TableHead, TableHeader, TableRow, TabsSubtle,
   TabsSubtleItem, Tooltip, badgeColors, useShape,
 } from '@gitspace/ui';
-import { defineCatalog, type ComputedFunction } from '@json-render/core';
+import { defineCatalog } from '@json-render/core';
 import { useBoundProp, type Components } from '@json-render/react';
 import { schema } from '@json-render/react/schema';
 import { FileDiff, parsePatchFiles } from '@pierre/diffs';
@@ -325,26 +326,4 @@ export const BLOCK_COMPONENTS: Components<typeof blockCatalog> = {
   Video: ({ props }) => <VideoView {...props} />,
   Sequence: ({ props }) => <SequenceView {...props} />,
   Reply: ({ props }) => <ReplyView comment={props.comment} quote={props.quote ?? null} text={props.text} />,
-};
-
-/** The items of `args.items` whose `args.field` is true. */
-function flaggedItems(args: Record<string, unknown>): unknown[] {
-  const items = Array.isArray(args.items) ? args.items : [];
-  return items.filter((item) => typeof item === 'object' && item !== null && Object.entries(item).some(([key, value]) => key === args.field && value === true));
-}
-
-function fieldOf(item: unknown, field: unknown): unknown {
-  if (typeof item !== 'object' || item === null) return undefined;
-  return Object.entries(item).find(([key]) => key === field)?.[1];
-}
-
-/** The catalog's `$computed` functions. */
-export const blockFunctions: Record<keyof typeof gitspaceUiCatalog.functions, ComputedFunction> = {
-  progress: (args) => `${flaggedItems(args).length} of ${Array.isArray(args.items) ? args.items.length : 0} ${typeof args.noun === 'string' ? args.noun : ''}`.trim(),
-  where: flaggedItems,
-  pick: (args) => fieldOf(Array.isArray(args.items) && typeof args.index === 'number' ? args.items[args.index] : undefined, args.field),
-  lookup: (args) => {
-    const items: unknown[] = Array.isArray(args.items) ? args.items : [];
-    return fieldOf(items.find((candidate) => typeof candidate === 'object' && candidate !== null && Object.entries(candidate).some(([key, value]) => key === args.key && value === args.value)), args.field);
-  },
 };

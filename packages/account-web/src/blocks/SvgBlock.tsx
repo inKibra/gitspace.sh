@@ -2,10 +2,12 @@
 // elements, no comments, scripts, handlers or external references), and only a drawing that passes is drawn: from the
 // parsed tree, element by element, so the source string never reaches the HTML parser. Its colours are currentColor and
 // theme variables, so it follows the page's light or dark scheme. It opens in the lightbox at its natural size.
+import { blockMarkdown } from '@gitspace/protocol/block-markdown';
 import { parseSvg, SVG_ELEMENTS, type SvgElementNode } from '@gitspace/protocol/gitspace-ui';
 import { useLayoutEffect, useMemo, useRef } from 'react';
 import { Lightbox } from '../Lightbox.js';
 import { BlockErrorCard } from './BlockFrames.js';
+import { CopyMarkdownButton } from './CopyMarkdown.js';
 
 const SVG_NAMESPACE = 'http://www.w3.org/2000/svg';
 const XLINK_NAMESPACE = 'http://www.w3.org/1999/xlink';
@@ -41,7 +43,8 @@ export function SvgBlock({ svg }: { svg: string }) {
   if (parsed.root === null || parsed.issues.length > 0) return <BlockErrorCard issues={parsed.issues} source={svg} sourceLabel="SVG" />;
   const title = parsed.root.children.find((child) => typeof child !== 'string' && child.name === 'title');
   const label = title && typeof title !== 'string' ? title.children.filter((child) => typeof child === 'string').join('').trim() : '';
-  return <Lightbox label={label || 'Drawing'} mode="zoom" className="my-2" expanded={<SvgDrawing root={parsed.root} size={naturalSize(parsed.root)} />}>
+  return <Lightbox label={label || 'Drawing'} mode="zoom" className="my-2" expanded={<SvgDrawing root={parsed.root} size={naturalSize(parsed.root)} />}
+    actions={<CopyMarkdownButton markdown={() => blockMarkdown({ root: 'block', elements: { block: { type: 'Svg', props: { svg }, children: [] } } })} />}>
     <SvgDrawing root={parsed.root} />
   </Lightbox>;
 }

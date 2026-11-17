@@ -6,6 +6,7 @@
 // the person's next message carries. A block of a stored chat message takes comments (comments/CommentLayer.tsx) on
 // itself, its items and text selected in it, unless it asks a question.
 import { askAnswerParts, questionState, type RuntimeQuestion } from '@gitspace/protocol-runtime';
+import { blockFunctions, blockMarkdown } from '@gitspace/protocol/block-markdown';
 import { blockAskQuestionId, fenceSpec, gitspaceUiCatalog, parseBlockRef, validateUiSpec } from '@gitspace/protocol/gitspace-ui';
 import { Badge } from '@gitspace/ui';
 import { createStateStore, type Spec, type StateStore } from '@json-render/core';
@@ -18,7 +19,8 @@ import { CLOSED_REASON, QuestionCardsContext } from '../QuestionCards.js';
 import { useBlockActions, type BlockActionName, type BlockActions, type BlockState } from './BlockActions.js';
 import { BlockDocument, BlockQuestionClosed, BlockRendering, BlockStagedAnswer, OtherDocumentRef, blockingIssues, conforms, type BlockRenderingValue } from './BlockDocument.js';
 import { BlockErrorCard } from './BlockFrames.js';
-import { BLOCK_COMPONENTS, blockCatalog, blockFunctions } from './registry.js';
+import { BLOCK_COMPONENTS, blockCatalog } from './registry.js';
+import { CopyMarkdownButton } from './CopyMarkdown.js';
 import { SvgBlock } from './SvgBlock.js';
 import { BlockCommentButton, BlockMarker, CommentBlock, blockKey, type CommentBlockValue } from '../comments/CommentLayer.js';
 import { useComposerStaging } from '../chat/staging.js';
@@ -70,7 +72,7 @@ interface AskQuestion { ask: BlockAsk & { id: string }; question: RuntimeQuestio
 
 function DrawnBlock({ spec, refs }: { spec: Spec; refs: readonly string[] }) {
   const surface = useBlockActions();
-  const { messageId } = useContext(BlockDocument);
+  const { messageId, targets } = useContext(BlockDocument);
   const cards = useContext(QuestionCardsContext);
   // A block drawn again by ref shows its content only; its asks belong to where it was written.
   const asks = useMemo((): BlockAsk[] => refs.length > 0 ? [] : Object.values(spec.elements).flatMap((element) => 'ask' in element && typeof element.ask === 'object' && element.ask !== null ? [{
@@ -130,7 +132,13 @@ function DrawnBlock({ spec, refs }: { spec: Spec; refs: readonly string[] }) {
   }, [spec, refs, messageId, title]);
   return <JSONUIProvider registry={registry} store={store} handlers={handlers} functions={blockFunctions}>
     <BlockRendering.Provider value={rendering}><BlockStagedAnswer.Provider value={stagesAnswer ? staged : null}><BlockQuestionClosed.Provider value={closed}><CommentBlock.Provider value={comments}>
-      <Lightbox label={typeof title === 'string' && title ? title : 'Block'} mode="fill" className="my-2" actions={<BlockCommentButton />}
+      <Lightbox label={typeof title === 'string' && title ? title : 'Block'} mode="fill" className="my-2" actions={<>
+        <CopyMarkdownButton markdown={() => blockMarkdown({ ...spec, state: store.getSnapshot() }, (ref) => {
+          const listed = targets.get(parseBlockRef(ref)?.id ?? '');
+          return listed ? { ...listed.spec, root: listed.key } : undefined;
+        })} />
+        <BlockCommentButton />
+      </>}
         expanded={<div className="mx-auto flex w-full min-w-0 max-w-5xl flex-col gap-1.5"><div inert={closed !== null} className="min-w-0"><Renderer spec={spec} registry={registry} /></div><Notices /></div>}>
         <div data-gitspace-block="gitspace-ui" data-comment-block={comments?.key} data-comment-kind={comments?.kind} data-comment-ask={comments?.asks ? '' : undefined} className="flex min-w-0 flex-col gap-1.5">
           {asks.length > 0 ? <AskMarkers asks={asks} asked={asked} /> : null}

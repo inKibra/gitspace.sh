@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { extractBlocks, fenceSpec, mapBlockColours, parseSvg, requiredBlockAsks, themeColour, UI_BLOCK_BRIEF, UI_BLOCK_EXAMPLES, uiBlockPrompt, validateMarkdownBlocks, validateSvg, validateUiSpec } from '../src/gitspace-ui.js';
+import { blockReplies, extractBlocks, fenceSpec, mapBlockColours, parseSvg, requiredBlockAsks, themeColour, UI_BLOCK_BRIEF, UI_BLOCK_EXAMPLES, UI_REPLY_EXAMPLES, uiBlockPrompt, validateMarkdownBlocks, validateSvg, validateUiSpec } from '../src/gitspace-ui.js';
 
 const fence = '```';
 
@@ -30,10 +30,11 @@ describe('gitspace-ui specs', () => {
     expect(validateUiSpec(reviewSpec())).toEqual([]);
   });
 
-  it('accepts every example the skill teaches, each drawn as its own block', () => {
+  it('accepts every example and example reply the skill teaches, each block drawn as its own', () => {
     const prompt = uiBlockPrompt();
     expect(validateMarkdownBlocks(prompt)).toEqual([]);
-    expect(extractBlocks(prompt).map((block) => [block.kind, block.info].filter(Boolean).join(' '))).toEqual(UI_BLOCK_EXAMPLES.map((example) => example.fence));
+    const replyFences = UI_REPLY_EXAMPLES.flatMap((example) => extractBlocks(example.reply).map((block) => `gitspace-ui ${block.info}`));
+    expect(extractBlocks(prompt).map((block) => [block.kind, block.info].filter(Boolean).join(' '))).toEqual([...replyFences, ...UI_BLOCK_EXAMPLES.map((example) => example.fence)]);
   });
 
   it('rejects a FlowMap whose paths or steps name areas or paths it does not have', () => {
@@ -320,6 +321,41 @@ describe('Short-form blocks', () => {
     const markdown = `${fence}gitspace-ui Svg id=map\n${JSON.stringify({ svg: '<svg viewBox="0 0 4 4"><rect fill="#fff"/></svg>' })}\n${fence}`;
     expect(mapBlockColours(markdown)).toBe(`${fence}gitspace-ui Svg id=map\n${JSON.stringify({ svg: '<svg viewBox="0 0 4 4"><rect fill="var(--card)"/></svg>' })}\n${fence}`);
   });
+
+  it('reads a CallDiff language alias as its language, in either form, and still refuses an unknown language', () => {
+    const short = `${fence}gitspace-ui CallDiff\n${JSON.stringify({ language: 'ts', lines })}\n${fence}`;
+    expect(validateMarkdownBlocks(short)).toEqual([]);
+    const [block] = extractBlocks(short);
+    expect(fenceSpec(block?.body ?? '', block?.info ?? '')).toEqual({ spec: { root: 'block', elements: { block: { type: 'CallDiff', props: { language: 'typescript', lines }, children: [] } }, state: {} } });
+    const full = { root: 'seq', elements: { seq: { type: 'Sequence', props: { title: 'Walk', frames: [{ content: { type: 'CallDiff', props: { language: 'SH', lines }, children: [] } }, { content: { type: 'Markdown', props: { content: 'done' }, children: [] } }] }, children: [] } }, state: {} };
+    expect(validateUiSpec(full)).toEqual([]);
+    expect(fenceSpec(JSON.stringify(full), '')).toEqual({ spec: { ...full, elements: { seq: { ...full.elements.seq, props: { ...full.elements.seq.props, frames: [{ content: { type: 'CallDiff', props: { language: 'shell', lines }, children: [] } }, full.elements.seq.props.frames[1]] } } } } });
+    expect(paths(validateMarkdownBlocks(`${fence}gitspace-ui CallDiff\n${JSON.stringify({ language: 'cobol', lines })}\n${fence}`))).toEqual(['block 1/elements/block/props/language']);
+  });
+
+  it('accepts a Tradeoffs note under the comparison', () => {
+    const tradeoffs = { question: 'Which rollout?', options: [{ id: 'a', label: 'Percentage' }, { id: 'b', label: 'By cycle' }], criteria: [{ label: 'Small first exposure', scores: [3, 1] }], recommended: 'a', note: 'Scores are my judgement, not measurements.' };
+    expect(validateMarkdownBlocks(`${fence}gitspace-ui Tradeoffs\n${JSON.stringify(tradeoffs)}\n${fence}`)).toEqual([]);
+    expect(paths(validateMarkdownBlocks(`${fence}gitspace-ui Tradeoffs\n${JSON.stringify({ ...tradeoffs, note: 3 })}\n${fence}`))).toEqual(['block 1/elements/block/props/note']);
+  });
+});
+
+describe('Example replies', () => {
+  it('validates every block of every reply, each in the short form between prose', () => {
+    for (const example of UI_REPLY_EXAMPLES) expect({ title: example.title, issues: validateMarkdownBlocks(example.reply) }).toEqual({ title: example.title, issues: [] });
+    expect(UI_REPLY_EXAMPLES.map((example) => extractBlocks(example.reply).map((block) => block.info.split(' ')[0]))).toEqual([
+      ['CallDiff'], ['MetricDelta', 'TestReport'], ['Tradeoffs', 'AskCard'], ['Timeline', 'CommandRun'], ['SchemaDiff'], ['CallDiff', 'Stats', 'Sequence'], ['Reply', 'Reply'], ['ChangeSet', 'TestReport'],
+    ]);
+    for (const example of UI_REPLY_EXAMPLES) expect({ title: example.title, opensWithProse: !example.reply.startsWith(fence) }).toEqual({ title: example.title, opensWithProse: true });
+  });
+
+  it('ends the decision reply with its required question, and answers each comment with its own Reply', () => {
+    const decision = UI_REPLY_EXAMPLES.find((example) => example.title === 'Options compared, then the person decides')?.reply ?? '';
+    expect(requiredBlockAsks(decision)).toEqual([{ id: 'reminder-channel', prompt: 'How should borrowers hear about overdue books?', choices: ['Daily digest email', 'One email per book', 'SMS'] }]);
+    expect(decision.endsWith(fence)).toBe(true);
+    const comments = UI_REPLY_EXAMPLES.find((example) => example.title === 'Answering the person\'s comments')?.reply ?? '';
+    expect(blockReplies(comments).map((reply) => reply.comment)).toEqual(['cm-4f1a9c2e7b30', 'cm-9d03b6e1a57c']);
+  });
 });
 
 describe('The drawing brief', () => {
@@ -333,6 +369,16 @@ describe('The drawing brief', () => {
 
   it('stays within its budget of 4,500 characters', () => {
     expect(UI_BLOCK_BRIEF.length).toBeLessThanOrEqual(4500);
+  });
+
+  it('asks for a required AskCard on decisions, names the example reply, prefers specific blocks and Copy as Markdown', () => {
+    expect(UI_BLOCK_BRIEF).toContain('When the person must choose, compare the options, recommend one, then end the reply with an AskCard ask=required holding the choices; don\'t leave the decision in prose');
+    const decision = UI_REPLY_EXAMPLES.find((example) => example.title === 'Options compared, then the person decides');
+    expect(UI_BLOCK_BRIEF).toContain(`example reply "${decision?.title ?? 'missing'}"`);
+    expect(UI_BLOCK_BRIEF).toContain('Prefer the specific block to a Table: before/after numbers → MetricDelta, schema changes → SchemaDiff, events in time → Timeline, options → Tradeoffs.');
+    expect(UI_BLOCK_BRIEF).toContain('Draw even when the person will paste the result elsewhere: every block has Copy as Markdown.');
+    const skill = uiBlockPrompt();
+    for (const mention of ['Every block has Copy as Markdown', 'short names Markdown fences use (ts, js, py, sh, yml, md…)', 'A Tradeoffs `note` is one short line under the comparison']) expect(skill).toContain(mention);
   });
 
   it('points at the builders, and the skill documents each one', () => {

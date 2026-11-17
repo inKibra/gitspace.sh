@@ -1,0 +1,104 @@
+[
+  {
+    "id": "race-fix",
+    "title": "Explain a race-condition fix",
+    "kind": "scenario",
+    "expected": [
+      "CallDiff",
+      "StateFlow"
+    ],
+    "requiresAsk": false,
+    "text": "I fixed a double-charge bug in our checkout worker last week and need to explain it to the team in tomorrow's review. Can you explain what the race was and why the fix closes it?\n\nBefore:\n```ts\nasync function chargeOrder(orderId: string) {\n  const order = await db.orders.find(orderId);\n  if (order.status !== 'pending') return;\n  const charge = await payments.charge(order.customerId, order.totalCents);\n  await db.orders.update(orderId, { status: 'paid', chargeId: charge.id });\n}\n```\n\nAfter:\n```ts\nasync function chargeOrder(orderId: string) {\n  const claimed = await db.orders.updateWhere(\n    { id: orderId, status: 'pending' },\n    { status: 'charging' },\n  );\n  if (claimed === 0) return;\n  const order = await db.orders.find(orderId);\n  const charge = await payments.charge(order.customerId, order.totalCents, { idempotencyKey: `order-${orderId}` });\n  await db.orders.update(orderId, { status: 'paid', chargeId: charge.id });\n}\n```\n\nThe queue delivers each message at least once, and we run 4 workers. We saw 23 double charges in October."
+  },
+  {
+    "id": "benchmarks",
+    "title": "Report benchmark numbers",
+    "kind": "scenario",
+    "expected": [
+      "Stats",
+      "MetricDelta",
+      "Chart"
+    ],
+    "requiresAsk": false,
+    "text": "I reran our search API benchmarks after switching the ranking step from per-document scoring to batched scoring. Same hardware (c7g.2xlarge), a 10k-query replay, 3 runs each, medians below. Write up the results for the PR description.\n\nBefore (per-document): p50 41 ms, p95 118 ms, p99 260 ms, throughput 1,850 req/s, CPU 78%, memory 1.9 GB.\nAfter (batched, batch size 32): p50 29 ms, p95 71 ms, p99 192 ms, throughput 2,640 req/s, CPU 64%, memory 2.3 GB.\n\nI also tried batch size 64: p50 31 ms, p95 69 ms, p99 240 ms, throughput 2,700 req/s, CPU 66%, memory 2.8 GB."
+  },
+  {
+    "id": "storage-options",
+    "title": "Compare three storage options",
+    "kind": "scenario",
+    "expected": [
+      "Tradeoffs",
+      "Table"
+    ],
+    "requiresAsk": false,
+    "text": "We need somewhere to keep user-uploaded attachments for the support app: about 2 TB today, growing about 150 GB a month, mostly PDFs and screenshots under 5 MB, read a few times in the first week and rarely after that. Compare these three options and tell me which you'd pick.\n\n1. Postgres large objects in our existing database: no new service; backups get much bigger (the nightly dump already takes 40 minutes); database storage costs $0.115/GB-month.\n2. S3 Standard with a lifecycle rule to S3 Infrequent Access after 30 days: $0.023/GB-month, then $0.0125/GB-month; $0.0004 per 1,000 GETs; needs signed URLs and a new IAM role; 99.99% availability.\n3. A self-hosted MinIO cluster on our three existing storage nodes: no per-GB bill, but about 6 hours a month of ops time; we'd handle disk failures and upgrades ourselves; nobody on the team has run it before."
+  },
+  {
+    "id": "rollout-decision",
+    "title": "Needs the person's decision between two rollout plans",
+    "kind": "scenario",
+    "expected": [
+      "AskCard"
+    ],
+    "requiresAsk": true,
+    "text": "We're rolling out the new billing engine next week and I have two plans on the table. Tell me which you'd recommend and why; I'll make the call.\n\nPlan A, percentage rollout: 5% of accounts on Monday, 25% on Wednesday, 100% the following Monday. Both engines run during the rollout, and a flag can send any account back to the old engine in under a minute. It costs about 3 extra days of dual-running infrastructure (around $1,200). Risk: if we roll an account back mid-cycle, that customer gets invoices from two engines in the same month.\n\nPlan B, cut over by billing cycle: every account whose cycle starts on the 1st moves on 1 December; the rest move at their next cycle start over the following 4 weeks. No account ever has two engines in one cycle. Rolling back means waiting for the next cycle or re-running invoices by hand (about 2 hours of finance time per 100 accounts). It takes 4 weeks to finish instead of 1.\n\nFinance prefers B; support prefers A."
+  },
+  {
+    "id": "schema-migration",
+    "title": "Explain a schema migration",
+    "kind": "scenario",
+    "expected": [
+      "SchemaDiff"
+    ],
+    "requiresAsk": false,
+    "text": "Can you explain what this migration changes and what someone running it in production needs to watch for? The users table has 4.2M rows and orders has 31M.\n\nOld schema:\n```sql\nCREATE TABLE users (\n  id SERIAL PRIMARY KEY,\n  email TEXT NOT NULL,\n  name TEXT,\n  created_at TIMESTAMP DEFAULT now()\n);\nCREATE TABLE orders (\n  id SERIAL PRIMARY KEY,\n  user_id INTEGER REFERENCES users(id),\n  total NUMERIC(10,2),\n  status TEXT\n);\n```\n\nNew schema:\n```sql\nCREATE TABLE users (\n  id BIGSERIAL PRIMARY KEY,\n  email TEXT NOT NULL UNIQUE,\n  display_name TEXT,\n  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),\n  deleted_at TIMESTAMPTZ\n);\nCREATE TABLE orders (\n  id BIGSERIAL PRIMARY KEY,\n  user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,\n  total_cents BIGINT NOT NULL,\n  status TEXT NOT NULL CHECK (status IN ('pending', 'paid', 'refunded', 'cancelled'))\n);\nCREATE INDEX orders_user_id_idx ON orders(user_id);\n```"
+  },
+  {
+    "id": "incident-logs",
+    "title": "Incident from log lines",
+    "kind": "scenario",
+    "expected": [
+      "Timeline"
+    ],
+    "requiresAsk": false,
+    "text": "Our checkout API had an outage this morning. Here are the relevant log lines. What happened? Write it up so I can paste it into the incident channel.\n\n```\n2026-11-14T09:02:11Z deploy  api v3.42.0 rollout started (canary 10%)\n2026-11-14T09:04:37Z api     WARN db pool: 48/50 connections in use\n2026-11-14T09:05:02Z deploy  canary healthy, promoting v3.42.0 to 100%\n2026-11-14T09:06:15Z api     ERROR db pool exhausted: timeout acquiring connection after 5000ms\n2026-11-14T09:06:16Z api     ERROR POST /checkout 503 (x412 in last 60s)\n2026-11-14T09:07:40Z alert   checkout error rate 38% > 5% threshold, paging on-call\n2026-11-14T09:11:02Z oncall  rolled back to v3.41.3\n2026-11-14T09:12:30Z api     db pool: 21/50 connections in use\n2026-11-14T09:13:05Z alert   resolved: checkout error rate 0.4%\n2026-11-14T10:20:00Z dev     found: v3.42.0 opens a transaction around the fraud-check HTTP call (p99 2.8 s), holding a connection for the whole call\n```"
+  },
+  {
+    "id": "request-flow",
+    "title": "Explain a request flow across services",
+    "kind": "scenario",
+    "expected": [
+      "StateFlow",
+      "FlowMap",
+      "Mermaid"
+    ],
+    "requiresAsk": false,
+    "text": "I'm new on the team. Can you explain how a password-reset request flows through our services? Here's what I've pieced together from the code:\n\n- The web app POSTs /password-reset to the API gateway with the email.\n- The gateway rate-limits by IP (5 per hour) and forwards the request to the auth service.\n- The auth service looks the user up in Postgres. If there is no such user it still returns 202, so nobody can probe for registered emails.\n- If the user exists, auth creates a reset token (32 random bytes, stored hashed, expires in 30 minutes) and publishes a password_reset_requested event to the message queue.\n- The notification service consumes the event, renders the email template and sends it through the email provider. On a provider error it retries 3 times with backoff, then moves the event to a dead-letter queue.\n- When the user clicks the link, the web app POSTs /password-reset/confirm with the token and the new password. Auth checks the hash and the expiry, updates the password, deletes the token and revokes all of that user's sessions."
+  },
+  {
+    "id": "change-catch-up",
+    "title": "Catch up on a change before standup",
+    "kind": "scenario",
+    "expected": [
+      "Sequence"
+    ],
+    "requiresAsk": false,
+    "text": "I'm reviewing this on my phone before standup and only have a few minutes. Get me up to speed on what this change does and what I should check.\n\n```diff\n--- a/src/cache.ts\n+++ b/src/cache.ts\n@@ -1,3 +1,17 @@\n-export async function getProfile(id: string) {\n-  return db.profiles.find(id);\n-}\n+const cache = new Map<string, { value: Profile; expires: number }>();\n+const TTL_MS = 60_000;\n+\n+export async function getProfile(id: string) {\n+  const hit = cache.get(id);\n+  if (hit && hit.expires > Date.now()) return hit.value;\n+  const value = await db.profiles.find(id);\n+  cache.set(id, { value, expires: Date.now() + TTL_MS });\n+  return value;\n+}\n+\n+export function invalidateProfile(id: string) {\n+  cache.delete(id);\n+}\n--- a/src/routes/profile.ts\n+++ b/src/routes/profile.ts\n@@ -8,5 +8,6 @@\n export async function updateProfile(req: Request) {\n   const body = await req.json();\n   await db.profiles.update(req.params.id, body);\n+  invalidateProfile(req.params.id);\n   return Response.json({ ok: true });\n }\n```"
+  },
+  {
+    "id": "control-env-var",
+    "title": "Control: one-line factual question",
+    "kind": "control",
+    "expected": [],
+    "requiresAsk": false,
+    "text": "Which environment variable sets the API client's request timeout?\n\n```ts\nexport function clientConfig(env: NodeJS.ProcessEnv) {\n  return {\n    baseUrl: env.API_BASE_URL ?? 'https://api.example.com',\n    timeoutMs: Number(env.API_REQUEST_TIMEOUT_MS ?? 10_000),\n    retries: Number(env.API_RETRIES ?? 2),\n  };\n}\n```"
+  },
+  {
+    "id": "control-yes-no",
+    "title": "Control: quick yes/no code question",
+    "kind": "control",
+    "expected": [],
+    "requiresAsk": false,
+    "text": "Quick one: does this function change the array the caller passes in?\n\n```ts\nfunction topThree(scores: number[]): number[] {\n  return scores.sort((a, b) => b - a).slice(0, 3);\n}\n```"
+  }
+]

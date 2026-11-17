@@ -103,6 +103,15 @@ export type UiAsk = z.infer<typeof askSchema>;
 /** Where a picture or clip lives: a drive file or a browser capture. */
 const mediaSource = z.string().regex(/^(?:drive:\/\/(?:workspace|base)\/\S+|capture:[\w-]{1,128})$/u, 'src is a drive file (drive://workspace/… or drive://base/…) or a browser capture (capture:<id>)');
 const FRAME_CONTENT_SHAPE = 'content is one element { "type", "props", "children" } as in "elements", or { "ref": "<block id>" }';
+/** The languages a CallDiff highlights. */
+const CODE_LANGUAGES = ['typescript', 'tsx', 'javascript', 'jsx', 'python', 'go', 'rust', 'java', 'kotlin', 'swift', 'ruby', 'sql', 'shell', 'yaml', 'markdown', 'json', 'css', 'html'] as const;
+/** Short names agents write for a language (as Markdown fences name them), read as that language. */
+const CODE_LANGUAGE_ALIASES: Record<string, (typeof CODE_LANGUAGES)[number]> = {
+  ts: 'typescript', mts: 'typescript', cts: 'typescript', js: 'javascript', mjs: 'javascript', cjs: 'javascript', py: 'python', golang: 'go', rs: 'rust',
+  kt: 'kotlin', rb: 'ruby', sh: 'shell', bash: 'shell', zsh: 'shell', yml: 'yaml', md: 'markdown',
+};
+/** A language by its name or an alias, in any case; the parsed value is the language's name. */
+const codeLanguage = z.string().transform((name) => CODE_LANGUAGE_ALIASES[name.toLowerCase()] ?? name.toLowerCase()).pipe(z.enum(CODE_LANGUAGES));
 
 /** A block reference split: `document` is null for an element of the same document. Null when `ref` is not one. */
 export function parseBlockRef(ref: string): { document: string | null; id: string } | null {
@@ -331,7 +340,7 @@ const components = {
   CallDiff: {
     props: z.strictObject({
       title: z.string().max(120).nullish(),
-      language: z.enum(['typescript', 'tsx', 'javascript', 'python', 'go', 'rust', 'java', 'kotlin', 'swift', 'ruby', 'sql', 'shell']).nullish().describe('Highlights the code; typescript when omitted'),
+      language: codeLanguage.nullish().describe(`Highlights the code; typescript when omitted. One of ${CODE_LANGUAGES.join(', ')}; short names such as ts, js, py, sh, yml are read as these`),
       lines: z.array(z.strictObject({
         depth: z.number().int().min(0).max(12).describe('Nesting: a call inside the call above is one deeper'),
         code: z.string().min(1).max(200).describe('One line of code: an assignment, a call, a return'),
@@ -409,8 +418,9 @@ const components = {
       options: z.array(z.strictObject({ id: z.string().min(1).max(40), label: z.string().min(1).max(60) })).min(2).max(5),
       criteria: z.array(z.strictObject({ label: z.string().min(1).max(60), scores: z.array(z.number().int().min(0).max(3)).describe('One per option: 0 poor to 3 strong'), note: z.string().max(120).nullish() })).min(1).max(8),
       recommended: z.string().nullish().describe('The option id you recommend'),
+      note: z.string().max(300).nullish().describe('One short line under the comparison: how it was scored, what a score depends on'),
     }),
-    description: 'Options scored against criteria as a colored grid, the recommended one marked. The person picks an option; it stages as their decision.',
+    description: 'Options scored against criteria as a colored grid, the recommended one marked, and an optional note under it. The person picks an option; it stages as their decision.',
   },
   CheckGrid: {
     props: z.strictObject({
@@ -584,7 +594,7 @@ const actionByName = new Map<string, UiAction>([...Object.entries(builtInActions
 const functionNames = new Set(Object.keys(functions));
 const confirmSchema = z.strictObject({ title: z.string(), message: z.string(), confirmLabel: z.string().nullish(), cancelLabel: z.string().nullish(), variant: z.enum(['default', 'danger']).nullish() });
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
@@ -672,7 +682,8 @@ function closestNames(name: string, names: readonly string[], count = 3): string
  * props; it expands to a one-element spec whose element has that id and ask (`ask` optional, `ask=required` required).
  * A short-form AskCard whose props have no `value` is wired as a question card: `question`, `options` and an optional
  * `prompt` (the question when omitted) and `questionId` (the id, or "ask") are given, and the expansion binds the pick,
- * reads /staged, /sent and /answered and answers the question.
+ * reads /staged, /sent and /answered and answers the question. A CallDiff's language given by an alias ("ts", "sh") is
+ * expanded to the language's name, in either form, so a renderer reads only the names.
  */
 export function fenceSpec(body: string, info: string): { spec: unknown } | { issue: UiBlockIssue } {
   const form = shortForm(info);
@@ -683,6 +694,7 @@ export function fenceSpec(body: string, info: string): { spec: unknown } | { iss
   } catch (error) {
     return { issue: { path: '', message: `the gitspace-ui block is not JSON: ${error instanceof Error ? error.message : String(error)}` } };
   }
+  canonicalLanguages(form === null ? parsed : { type: form.component, props: parsed });
   if (form === null) return { spec: parsed };
   if (!isRecord(parsed)) return { issue: { path: '', message: `a short-form block holds one JSON object: the props of ${form.component}` } };
   const element: Record<string, unknown> = { type: form.component, props: parsed, children: [] };
@@ -694,6 +706,18 @@ export function fenceSpec(body: string, info: string): { spec: unknown } | { iss
   element.props = { prompt: parsed.question, ...parsed, questionId, options: { $state: '/options' }, value: { $bindState: '/answer' }, staged: { $state: `/staged/${questionId}` }, sent: { $state: `/sent/${questionId}` }, answered: { $state: '/answered' } };
   element.on = { answer: { action: 'answer_question', params: { questionId, question: parsed.question, answer: { $state: '/answer' }, label } } };
   return { spec: { root: 'block', elements: { block: element }, state: { answer: '', options: parsed.options } } };
+}
+
+/** Writes a CallDiff's language alias or differently cased name as the language's name, wherever the element is: in
+ * "elements", in a Sequence frame or in a short form's props. */
+function canonicalLanguages(value: unknown): void {
+  if (Array.isArray(value)) value.forEach(canonicalLanguages);
+  if (!isRecord(value)) return;
+  if (value.type === 'CallDiff' && isRecord(value.props) && typeof value.props.language === 'string') {
+    const read = codeLanguage.safeParse(value.props.language);
+    if (read.success) value.props.language = read.data;
+  }
+  Object.values(value).forEach(canonicalLanguages);
 }
 
 /** Validates every block in Markdown. Issue paths start with `block <n>` (1-based, counting only these fences). The
@@ -1277,7 +1301,8 @@ function isGitSpaceStatePath(statePath: string): boolean {
   return first !== undefined && GITSPACE_STATE_ROOTS.has(first);
 }
 
-function readState(state: unknown, statePath: string): unknown {
+/** The value at a state path (a JSON pointer), or undefined when the state has none. */
+export function readState(state: unknown, statePath: string): unknown {
   let current = state;
   for (const segment of stateSegments(statePath)) {
     if (Array.isArray(current) && /^\d+$/.test(segment)) current = current[Number(segment)];
@@ -1670,25 +1695,6 @@ const spec = (value: Record<string, unknown>): string => JSON.stringify(value);
 
 export const UI_BLOCK_EXAMPLES: readonly UiBlockExample[] = [
   {
-    title: 'Results of a run',
-    when: 'You measured something: the headline numbers as Stats, the comparison as a Chart, and where the numbers came from as a RunTag.',
-    fence: 'gitspace-ui',
-    body: spec({
-      root: 'card',
-      elements: {
-        card: { type: 'Card', props: { title: 'Cold start after the cache change', description: 'Median of 20 runs per build' }, children: ['tiles', 'chart', 'run'] },
-        tiles: { type: 'Stats', props: { tiles: { $state: '/tiles' } }, children: [] },
-        chart: { type: 'Chart', props: { kind: 'columns', unit: 'ms', series: { $state: '/series' }, rows: { $state: '/rows' } }, children: [] },
-        run: { type: 'RunTag', props: { commit: '4f2c9a1', machine: 'darktop', sample: 'n=20', label: 'scripts/bench-cold.ts' }, children: [] },
-      },
-      state: {
-        tiles: [{ label: 'p50', value: '1.8 s', detail: 'was 3.1 s', tone: 'good' }, { label: 'p95', value: '2.6 s', detail: 'was 4.4 s', tone: 'good' }, { label: 'Memory', value: '92 MB', detail: 'was 88 MB', tone: 'neutral' }],
-        series: [{ key: 'before', label: 'Before', color: 'gray' }, { key: 'after', label: 'After', color: 'green' }],
-        rows: [{ label: 'p50', values: { before: 3100, after: 1800 } }, { label: 'p95', values: { before: 4400, after: 2600 } }],
-      },
-    }),
-  },
-  {
     title: 'Values over time',
     when: 'A measure that changes over time or over a sequence (memory per turn, latency per release): a line Chart, one line per series.',
     fence: 'gitspace-ui Chart',
@@ -1696,16 +1702,6 @@ export const UI_BLOCK_EXAMPLES: readonly UiBlockExample[] = [
       title: 'Memory per turn (the workspace object resets at 128 MB)', kind: 'line', unit: 'bytes', max: 134217728,
       series: [{ key: 'read', label: 'Read per turn', color: 'blue' }, { key: 'held', label: 'Held after the turn', color: 'violet' }],
       rows: [{ label: 'turn 1', values: { read: 31457280, held: 8388608 } }, { label: 'turn 2', values: { read: 32505856, held: 9437184 } }, { label: 'migrated', values: { read: 11534336, held: 4194304 } }, { label: 'turn 4', values: { read: 11665408, held: 4194304 } }],
-    }),
-  },
-  {
-    title: 'Options compared',
-    when: 'Several options against the same properties: a Table, the recommended one named in the text before it.',
-    fence: 'gitspace-ui Table',
-    body: spec({
-      columns: [{ key: 'store', label: 'Store' }, { key: 'read', label: 'Read', align: 'right', mono: true }, { key: 'consistency', label: 'Consistency' }, { key: 'cost', label: 'Cost / month', align: 'right', mono: true }],
-      rows: [{ store: 'Workers KV', read: '4 ms', consistency: 'eventual, up to 60 s', cost: '$5' }, { store: 'Durable Object', read: '11 ms', consistency: 'strong', cost: '$12' }, { store: 'D1', read: '19 ms', consistency: 'strong', cost: '$5' }],
-      caption: 'Where replies are cached: reads measured from the worker in the same region',
     }),
   },
   {
@@ -1780,22 +1776,203 @@ export const UI_BLOCK_EXAMPLES: readonly UiBlockExample[] = [
     fence: 'mermaid',
     body: 'flowchart LR\n  push[Push to develop] --> launch[Launch] --> live[Live]',
   },
-  {
-    title: 'A walkthrough to play',
-    when: 'A change or an incident explained in order, as a short narrated video: a Sequence. One point per frame, a plain voice line each. A frame may show a block of the same message again by { "ref": "<its id>" } in place of its content.',
-    fence: 'gitspace-ui Sequence id=cache-walkthrough ask',
-    body: spec({
-      title: 'Where a reply is cached now',
-      frames: [
-        { content: { type: 'Markdown', props: { content: '**Replies are cached in a Durable Object**, not in Workers KV.' }, children: [] }, say: 'Replies are cached in one Durable Object now, not in Workers KV.' },
-        { content: { type: 'Mermaid', props: { source: 'flowchart LR\n  worker --> cache[(Durable Object)] --> reply' }, children: [] }, say: 'The worker asks the object first; only a miss goes to the model.', hold: 5 },
-        { content: { type: 'Stats', props: { tiles: [{ label: 'Read', value: '11 ms', detail: 'was 4 ms', tone: 'bad' }, { label: 'Stale replies', value: '0', detail: 'was 3 a day', tone: 'good' }] }, children: [] }, say: 'Reads are seven milliseconds slower, and no reply is stale any more.' },
-      ],
-    }),
-  },
 ];
 
 const FENCE = '```';
+
+/** One short-form fence: `info` names the component and its options, `props` are its body. */
+const shortBlock = (info: string, props: Record<string, unknown>): string => `${FENCE}gitspace-ui ${info}\n${JSON.stringify(props)}\n${FENCE}`;
+
+/** A whole chat reply for one common situation in the `gitspace-ui` skill: a sentence or two, the blocks in the short
+ * form, then what they mean or what comes next. Every reply passes `validateMarkdownBlocks` (tested). They follow one
+ * fictional app, Shelf, a neighbourhood library's book-lending service, through one change: overdue reminders. */
+export interface UiReplyExample { title: string; situation: string; reply: string }
+
+export const UI_REPLY_EXAMPLES: readonly UiReplyExample[] = [
+  {
+    title: 'A fix explained',
+    situation: 'The code path before and after as a CallDiff, then one sentence per change.',
+    reply: [
+      'Borrowers got the same overdue email twice on nights the reminder job retried: the retry ran the whole loop again, and nothing recorded which emails had gone out. Now each loan is claimed before its email is sent.',
+      shortBlock('CallDiff', {
+        title: 'sendReminders, before and after',
+        lines: [
+          { depth: 0, code: 'sendReminders(night)', change: 'same', path: 'apps/api/src/reminders.ts' },
+          { depth: 1, code: 'const overdue = await loans.overdue(night)', change: 'same' },
+          { depth: 1, code: 'for (const loan of overdue)', change: 'same' },
+          { depth: 2, code: 'await mail.send(loan.borrower, overdueEmail(loan))', change: 'removed', note: 'sent again on every retry' },
+          { depth: 2, code: 'if (!(await loans.claimReminder(loan.id))) continue', change: 'added', note: 'one run wins each loan', path: 'apps/api/src/loans.ts' },
+          { depth: 2, code: 'await mail.send(loan.borrower, overdueEmail(loan))', change: 'added', note: 'only for a loan this run claimed' },
+        ],
+      }),
+      '- `loans.claimReminder` sets `reminded_at` only where it is still empty and says whether this run set it, so exactly one run claims each loan.\n- `mail.send` runs only after a claim succeeds, so a retry skips every email already sent.',
+      'A new test runs the job twice over the same night and expects one email per loan; it fails without the claim and passes with it.',
+    ].join('\n\n'),
+  },
+  {
+    title: 'Results reported',
+    situation: 'Measured numbers as MetricDelta (or Stats for headline numbers alone), and the test run as the TestReport `tools.blocks({ op: "testReport", jobId })` returns.',
+    reply: [
+      'I replayed last Tuesday\'s 206 overdue loans on staging, before and after the fix:',
+      shortBlock('MetricDelta', {
+        metrics: [
+          { label: 'Emails sent', before: 412, after: 206, unit: 'count', better: 'lower' },
+          { label: 'Borrowers emailed twice', before: 198, after: 0, unit: 'count', better: 'lower' },
+          { label: 'Run time', before: 47800, after: 49100, unit: 'ms', better: 'lower' },
+        ],
+      }),
+      'Every overdue loan got exactly one email. The run is 1.3 s slower, from one extra write per loan; it still finishes well inside its 30-minute window. The suite passes:',
+      shortBlock('TestReport', { runner: 'bun test', passed: 118, failed: 0, skipped: 2, durationMs: 2410, failures: [], flaky: null, note: null }),
+      'The 2 skipped tests are for SMS reminders, off until we choose how reminders are sent.',
+    ].join('\n\n'),
+  },
+  {
+    title: 'Options compared, then the person decides',
+    situation: 'The options scored as Tradeoffs with your recommendation, then the question as an AskCard with id=… ask=required. The AskCard ends the reply: nothing waits, and their pick comes with their next message.',
+    reply: [
+      'Reminders work; what is left is how they reach borrowers. I recommend one daily digest per borrower: the fewest messages, and it still names every overdue book.',
+      shortBlock('Tradeoffs', {
+        question: 'How should borrowers hear about overdue books?',
+        options: [{ id: 'digest', label: 'Daily digest email' }, { id: 'per-loan', label: 'One email per book' }, { id: 'sms', label: 'SMS' }],
+        criteria: [
+          { label: 'Few messages', scores: [3, 1, 2] },
+          { label: 'Clear which book is late', scores: [2, 3, 2] },
+          { label: 'Running cost', scores: [3, 3, 1], note: 'SMS is about $40 a month at today\'s volume' },
+          { label: 'Time to build', scores: [2, 3, 0], note: 'SMS needs phone numbers, which Shelf does not collect' },
+        ],
+        recommended: 'digest',
+        note: 'Scores are my judgement at today\'s volume of about 200 overdue loans a night.',
+      }),
+      'SMS reaches people fastest, but it needs a new sign-up field before it can send anything. Which should I build?',
+      shortBlock('AskCard id=reminder-channel ask=required', {
+        question: 'How should borrowers hear about overdue books?',
+        options: [
+          { value: 'digest', label: 'Daily digest email', description: 'One email per borrower listing every overdue book' },
+          { value: 'per-loan', label: 'One email per book' },
+          { value: 'sms', label: 'SMS', description: 'About $40 a month; collect phone numbers first' },
+        ],
+      }),
+    ].join('\n\n'),
+  },
+  {
+    title: 'A failed deploy or an incident',
+    situation: 'What happened, and when, as a Timeline; the command that failed as the CommandRun `tools.blocks({ op: "commandRun", jobId })` returns; then what you changed so it cannot recur.',
+    reply: [
+      'Last night\'s v1.8 deploy failed, and for about 30 seconds 31% of API requests failed with it. v1.7 is still live, the migration applied nothing, and no data was lost.',
+      shortBlock('Timeline', {
+        title: 'v1.8 deploy, 12 November (UTC)',
+        events: [
+          { at: '2026-11-12T02:00:04Z', kind: 'deploy', label: 'v1.8 deploy starts' },
+          { at: '2026-11-12T02:00:11Z', kind: 'note', label: 'Migration 0014 waits for its lock', detail: 'The nightly reminder run held a long transaction on loans.' },
+          { at: '2026-11-12T02:00:13Z', kind: 'error', label: 'Loan requests queue behind the migration', detail: 'Every read of loans waited for the same lock; 31% of requests timed out.' },
+          { at: '2026-11-12T02:00:41Z', kind: 'alert', label: 'Migration hits its 30 s lock timeout' },
+          { at: '2026-11-12T02:00:42Z', kind: 'fix', label: 'Deploy aborted; v1.7 serves normally', detail: 'Errors back to 0 by 02:00:50.' },
+        ],
+      }),
+      'The deploy started during the nightly reminder run. Its migration waited for a lock on loans, and every loan request queued behind it until the migration gave up:',
+      shortBlock('CommandRun', {
+        command: 'bun run deploy --env production', exitCode: 1, durationMs: 38012,
+        output: 'Building api… done in 6.1s\nRunning migrations\nApplying 0014_loan_reminders.sql\nALTER TABLE loans ADD COLUMN reminded_at timestamptz;\nerror: canceling statement due to lock timeout\n  at migrate (apps/api/scripts/migrate.ts:38:11)\nMigration 0014 failed; nothing was applied.\nDeploy aborted: v1.7 stays live.',
+        truncated: false, jobId: 'job:7', cwd: 'apps/api',
+      }),
+      'Two changes so it cannot happen again: deploys now wait for the reminder run to finish, and migrations set a 5 s lock timeout, so a blocked migration gives up before requests pile up. I will deploy v1.8 again at 09:00 UTC unless you want another time.',
+    ].join('\n\n'),
+  },
+  {
+    title: 'A schema change',
+    situation: 'The tables a migration touches as a SchemaDiff, then what it costs to run and to roll back.',
+    reply: [
+      'Migration 0014 adds what the reminder claim needs: one empty column on loans, an index for the nightly query, and a log of every reminder sent.',
+      shortBlock('SchemaDiff', {
+        title: 'Migration 0014: loan reminders',
+        tables: [
+          {
+            name: 'loans', change: 'changed', rows: '84k rows', cost: 'lock',
+            columns: [
+              { name: 'id', type: 'uuid', change: 'same', key: 'primary' },
+              { name: 'due_on', type: 'date', change: 'same' },
+              { name: 'returned_at', type: 'timestamptz', change: 'same', nullable: true },
+              { name: 'reminded_at', type: 'timestamptz', change: 'added', nullable: true, note: 'set by the claim; empty until a reminder goes out' },
+            ],
+            indexes: [{ name: 'loans_overdue_idx', columns: ['due_on'], change: 'added' }],
+          },
+          {
+            name: 'reminders', change: 'added', cost: 'none',
+            columns: [
+              { name: 'id', type: 'uuid', change: 'added', key: 'primary' },
+              { name: 'loan_id', type: 'uuid', change: 'added', references: 'loans.id' },
+              { name: 'sent_at', type: 'timestamptz', change: 'added' },
+              { name: 'channel', type: 'text', change: 'added', note: '"email" for now' },
+            ],
+          },
+        ],
+      }),
+      'A nullable column without a default is added without rewriting the table, and the index is built concurrently, so loans is locked only for a moment. Rolling back drops the column, the index and the table; nothing else reads them yet.',
+    ].join('\n\n'),
+  },
+  {
+    title: 'A change walkthrough',
+    situation: 'The blocks the change needs, each with an id, then a Sequence that plays them in order: a frame shows an earlier block again by { "ref": "<its id>" } rather than copying it.',
+    reply: [
+      'Here is the reminders change: the code path, what it did to last Tuesday\'s run, and a short narrated walkthrough of both.',
+      shortBlock('CallDiff id=claim-path', {
+        lines: [
+          { depth: 0, code: 'for (const loan of overdue)', change: 'same', path: 'apps/api/src/reminders.ts' },
+          { depth: 1, code: 'await mail.send(loan.borrower, overdueEmail(loan))', change: 'removed', note: 'sent again on every retry' },
+          { depth: 1, code: 'if (!(await loans.claimReminder(loan.id))) continue', change: 'added', note: 'one run wins each loan' },
+          { depth: 1, code: 'await mail.send(loan.borrower, overdueEmail(loan))', change: 'added' },
+        ],
+      }),
+      shortBlock('Stats id=reminder-numbers', {
+        tiles: [{ label: 'Emails per night', value: 206, detail: 'was 412', tone: 'good' }, { label: 'Borrowers emailed twice', value: 0, detail: 'was 198', tone: 'good' }],
+      }),
+      shortBlock('Sequence', {
+        title: 'One overdue email per loan',
+        frames: [
+          { content: { type: 'Markdown', props: { content: '**One overdue email per loan**, even when the nightly run retries.' }, children: [] }, say: 'This change stops borrowers getting the same overdue email twice.' },
+          { content: { ref: 'claim-path' }, say: 'Each loan is claimed before its email goes out. A retry finds the loan claimed and skips it.' },
+          { content: { type: 'Markdown', props: { content: '`claimReminder` sets `reminded_at` only where it is still empty: one update, so two runs never both win.' }, children: [] }, say: 'The claim is a single update on a new column, so two runs can never claim the same loan.' },
+          { content: { ref: 'reminder-numbers' }, say: 'On last Tuesday\'s loans, emails halved and nobody got two.', hold: 5 },
+        ],
+      }),
+      'Play it for the narrated version, or read the two blocks above it. Next is the migration that adds `reminded_at`.',
+    ].join('\n\n'),
+  },
+  {
+    title: 'Answering the person\'s comments',
+    situation: 'Their message holds Comment on “…” lines, each with its { "comment": { "id" } }. One Reply block per comment, then go on with the work.',
+    reply: [
+      'Both answered below; the second one found a gap, which I have fixed.',
+      shortBlock('Reply', { comment: 'cm-4f1a9c2e7b30', quote: 'Run time', text: 'Yes. The run has a 30-minute window and takes under a minute; the extra 1.3 s is one update per loan.' }),
+      shortBlock('Reply', { comment: 'cm-9d03b6e1a57c', quote: 'one extra write per loan', text: 'Then the loan stayed claimed and that borrower got no email that night. Now a failed send clears `reminded_at`, so the next run tries again.' }),
+      'The fix is in `reminders.ts`, with a test where the mail service fails; the suite passes. Next is the digest email.',
+    ].join('\n\n'),
+  },
+  {
+    title: 'Finished work summarised',
+    situation: 'What changed as the ChangeSet `tools.blocks({ op: "changeSet" })` returns and the final test run as a TestReport, then anything the person should check before it ships.',
+    reply: [
+      'Overdue reminders are done on `overdue-reminders`: each loan is claimed before its email goes out, so a retry never sends twice, and borrowers get one daily digest.',
+      shortBlock('ChangeSet', {
+        base: 'main', head: 'overdue-reminders',
+        files: [
+          { path: 'apps/api/migrations/0014_loan_reminders.sql', added: 9, removed: 0, status: 'added' },
+          { path: 'apps/api/src/digest-email.ts', added: 38, removed: 0, status: 'added' },
+          { path: 'apps/api/src/loans.ts', added: 12, removed: 2, status: 'modified' },
+          { path: 'apps/api/src/reminders.ts', added: 41, removed: 18, status: 'modified' },
+          { path: 'apps/api/test/reminders.test.ts', added: 71, removed: 0, status: 'added' },
+          { path: 'apps/web/src/LoanCard.tsx', added: 7, removed: 3, status: 'modified' },
+        ],
+        groups: [
+          { name: 'apps/api', paths: ['apps/api/migrations/0014_loan_reminders.sql', 'apps/api/src/digest-email.ts', 'apps/api/src/loans.ts', 'apps/api/src/reminders.ts', 'apps/api/test/reminders.test.ts'] },
+          { name: 'apps/web', paths: ['apps/web/src/LoanCard.tsx'] },
+        ],
+      }),
+      shortBlock('TestReport', { runner: 'bun test', passed: 124, failed: 0, skipped: 0, durationMs: 2630, failures: [], flaky: null, note: null }),
+      'The only change people see is on a loan\'s card in the app: when its last reminder went out. It is ready to merge; deploy after 02:30 UTC, when the reminder run has finished.',
+    ].join('\n\n'),
+  },
+];
 
 /** The props the drawing brief shows for its most used components: each is a valid short-form block (tested), with the
  * fields it leaves out. */
@@ -1806,41 +1983,39 @@ const BRIEF_SHAPES: readonly { component: string; options?: string; props: Recor
   { component: 'Stats', props: { tiles: [{ label: 'p50', value: '1.8 s', detail: 'was 3.1 s', tone: 'good' }] }, also: 'tone neutral|good|bad' },
   { component: 'MetricDelta', props: { metrics: [{ label: 'p95', before: 4400, after: 2600, unit: 'ms', better: 'lower' }] }, also: 'trend; unit ms|seconds|count|percent|bytes|usd|tokens' },
   { component: 'Chart', props: { kind: 'line', unit: 'ms', series: [{ key: 'p50', label: 'p50', color: 'blue' }], rows: [{ label: 'v1', values: { p50: 3100 } }, { label: 'v2', values: { p50: 1800 } }] }, also: 'title, max; kind bars|columns|line|stacked' },
-  { component: 'Tradeoffs', props: { question: 'Where do replies live?', options: [{ id: 'kv', label: 'KV' }, { id: 'do', label: 'Durable Object' }], criteria: [{ label: 'Consistency', scores: [1, 3] }], recommended: 'do' }, also: 'note; scores 0–3 per option' },
-  { component: 'AskCard', options: 'id=cache ask=required', props: { question: 'Which cache keeps replies?', options: [{ value: 'kv', label: 'Workers KV' }, { value: 'do', label: 'Durable Object', description: 'strong, one region' }] }, also: 'prompt (Markdown)' },
+  { component: 'Tradeoffs', props: { question: 'Where do replies live?', options: [{ id: 'kv', label: 'KV' }, { id: 'do', label: 'Durable Object' }], criteria: [{ label: 'Consistency', scores: [1, 3] }], recommended: 'do', note: 'Scores 0–3.' }, also: 'criterion note' },
+  { component: 'AskCard', options: 'id=cache ask=required', props: { question: 'Which cache keeps replies?', options: [{ value: 'kv', label: 'Workers KV' }, { value: 'do', label: 'Durable Object' }] }, also: 'prompt (Markdown); option description' },
   { component: 'Timeline', props: { events: [{ at: '2026-11-16T09:12:00Z', kind: 'deploy', label: 'v41 live' }, { at: '2026-11-16T09:20:00Z', kind: 'error', label: '5xx spike' }] }, also: 'title, detail; kind deploy|error|alert|fix|note' },
-  { component: 'Sequence', props: { title: 'Fix', frames: [{ content: { type: 'Markdown', props: { content: '**Cached**.' }, children: [] }, say: 'Replies are cached now.' }, { content: { ref: 'cache-path' }, say: 'Reads hit it first.' }] }, also: 'caption, hold; content is one element or { "ref": "<id>" }' },
+  { component: 'Sequence', props: { title: 'Fix', frames: [{ content: { type: 'Markdown', props: { content: '**Cached**.' }, children: [] }, say: 'Replies are cached now.' }, { content: { ref: 'cache-path' }, say: 'Reads hit it first.' }] }, also: 'caption, hold' },
   { component: 'Reply', props: { comment: 'cm-0123456789ab', quote: 'the p95 tile', text: 'p95 of 20 runs.' } },
-  { component: 'Svg', props: { svg: '<svg viewBox="0 0 80 30"><rect width="80" height="30" rx="6" fill="none" stroke="var(--border)"/><text x="8" y="20" fill="currentColor">cache</text></svg>' }, also: 'or a ```svg fence' },
+  { component: 'Svg', props: { svg: '<svg viewBox="0 0 80 30"><text x="8" y="20" fill="currentColor">cache</text></svg>' }, also: 'or a ```svg fence' },
 ];
 
 /** Every agent's instruction about blocks, main agents and subagents alike: when to draw, the short form and the props
  * of the most used components. The `gitspace-ui` skill is the reference for the rest. */
 export const UI_BLOCK_BRIEF = [
-  'Blocks: GitSpace draws blocks you write in Markdown, in chat and in every Markdown field (goal, journal, Change Guide, plan step). Draw when a picture says it better than prose: a sentence first, then the block; one idea per block.',
+  'Blocks: GitSpace draws blocks you write in Markdown, in chat and every Markdown field (goal, journal, Change Guide, plan step). Draw when a picture says it better than prose: a sentence first, then the block; one idea per block. Draw even when the person will paste the result elsewhere: every block has Copy as Markdown.',
   `When to draw:
-- explaining a fix: CallDiff (the code path before and after) and StateFlow (state moving between services)
-- numbers or results: Stats (headline numbers), MetricDelta (before → after), Chart (comparison; kind "line" over time)
-- options: Tradeoffs (scored; the person picks) or Table
-- a decision the person must make: AskCard with ask=required
-- a schema change: SchemaDiff
-- a sequence of events: Timeline
-- a walkthrough: Sequence (narrated frames)
-- a diagram: Mermaid (a few boxes) or Svg in theme colours only (currentColor, var(--border), var(--accent), var(--muted-foreground)…)
-- answering the person's comments: Reply
+- a fix: CallDiff (code path before and after), StateFlow (state between services)
+- numbers: Stats (headlines), MetricDelta (before → after), Chart (kind "line" over time)
+- options: Tradeoffs; a schema change: SchemaDiff; events: Timeline; a walkthrough: Sequence
+- a diagram: Mermaid (a few boxes) or Svg (theme colours only: currentColor, var(--border)…)
+- answering comments: Reply
+Prefer the specific block to a Table: before/after numbers → MetricDelta, schema changes → SchemaDiff, events in time → Timeline, options → Tradeoffs.
+When the person must choose, compare the options, recommend one, then end the reply with an AskCard ask=required holding the choices; don't leave the decision in prose (example reply "Options compared, then the person decides").
 Show real data with builders: \`tools.blocks({ op })\`, op diff, excerpt, changeSet, commandRun or testReport, returns a ready fence; paste it, add notes.`,
-  `Short form: a fence whose info string names one component holds just its props, as one JSON object:
+  `Short form: a fence naming one component holds just its props, as one JSON object:
 ${FENCE}gitspace-ui CallDiff id=cache-path
 {"title":"…","lines":[…]}
 ${FENCE}
-After the component, optionally: id=<id> (once per message) names the block; ask invites a response; ask=required (needs an id) makes it a question: the workspace shows Needs you; their pick comes with their next message. There is no ask tool: end your reply with that block; nothing waits. If they write in the chat instead, the question closes.`,
+After the component, optionally: id=<id> (once per message); ask invites a response; ask=required (needs an id) makes it a question the workspace shows as Needs you; their pick comes with their next message. There is no ask tool and nothing waits; if they write in the chat instead, the question closes.`,
   `Props (each JSON is a valid short-form body; "also" names optional fields):
 ${BRIEF_SHAPES.map((shape) => `- ${shape.component}${shape.options === undefined ? '' : ` ${shape.options}`} ${JSON.stringify(shape.props)}${shape.also === undefined ? '' : `; also: ${shape.also}`}`).join('\n')}`,
-  'Anything else (layouts with children, state, actions; FlowMap, Checklist, BeforeAfter and other components): read skill://gitspace-ui. GitSpace checks every block: an invalid one in your reply gets a fix step (fix_block); a tool write holding one is refused. A person\'s comments on your message arrive as "Comment on “…”: …" lines with { "comment": { "id" } }; answer each with its own Reply block, then go on.',
+  'Anything else (layouts, state, actions, other components) and example replies: read skill://gitspace-ui. GitSpace checks every block; an invalid one in your reply gets a fix step (fix_block), and a tool write holding one is refused. A person\'s comments on your message arrive as "Comment on “…”: …" lines with { "comment": { "id" } }; answer each with its own Reply block, then go on.',
 ].join('\n\n');
 
 /** The skill's description: what an agent sees in a skill list, so it names the moments to read the skill. */
-export const UI_SKILL_DESCRIPTION = 'The reference for GitSpace blocks beyond the drawing brief: layouts with children, state and actions, refs, Sequences, every component\'s props, actions and expressions, and worked examples. Read before you draw a block the brief does not cover.';
+export const UI_SKILL_DESCRIPTION = 'The reference for GitSpace blocks beyond the drawing brief: layouts with children, state and actions, refs, Sequences, every component\'s props, actions and expressions, worked examples, and example replies for common situations. Read before you draw a block the brief does not cover.';
 
 /** The reference for writing blocks; the body of the `gitspace-ui` skill. It adds to `UI_BLOCK_BRIEF` and repeats none of
  * it. */
@@ -1854,6 +2029,7 @@ export function uiBlockPrompt(): string {
   const actionLines = [...actionByName].map(([name, action]) => `- ${name} ${renderSchema(z.toJSONSchema(action.params, { io: 'input' }))} — ${action.description}${Object.hasOwn(builtInActions, name) ? ' (built in)' : ''}`);
   const functionLines = Object.entries(functions).map(([name, fn]) => `- ${name}: ${fn.description}`);
   const examples = UI_BLOCK_EXAMPLES.map((example) => `### ${example.title}\n${example.when}\n${fence}${example.fence}\n${example.body}\n${fence}`).join('\n\n');
+  const replies = UI_REPLY_EXAMPLES.map((example) => `### ${example.title}\n_${example.situation}_\n\n${example.reply}`).join('\n\n');
   return `The reference for GitSpace blocks. The drawing brief in your instructions has when to draw, the short form, the props of the most used components, asks, fixes and comments; this has the rest.
 
 ## Forms
@@ -1863,6 +2039,8 @@ export function uiBlockPrompt(): string {
 - ${fence}mermaid: a Mermaid diagram, at most 16 KiB.
 
 A problem's path, such as \`block 2/elements/table/props/columns/0/align\`, counts blocks in order among these fences, then points into the full form (a short-form block's element is "block").
+
+Every block has Copy as Markdown beside its expand button: the person gets the block as plain Markdown (a table, a list, a code or diff fence) to paste into Slack or GitHub, so draw even when they will paste your answer elsewhere. A CallDiff's \`language\` also takes the short names Markdown fences use (ts, js, py, sh, yml, md…). A Tradeoffs \`note\` is one short line under the comparison: how it was scored, or what a score depends on.
 
 ## Other components
 - Where numbers came from: a RunTag. Parts of a total: a Chart with kind "stacked".
@@ -1882,6 +2060,11 @@ Show real data, never retyped: the \`blocks\` tool (tools.blocks({ op, … }) fr
 - changeSet { base? } → ChangeSet: every file changed against the same base, with its status and +/- counts, grouped by area: its top-level package (the first of its one- and two-deep folders holding package.json, go.mod, Cargo.toml, pyproject.toml or another manifest), else its top-level folder.
 - commandRun { jobId } or { process, on? } → CommandRun: a finished bash job of this conversation (the "job:…" id its handle names) or an exited proc process: its command, exit code, duration and its last 60 lines of output.
 - testReport { jobId } or { process, on? } → TestReport: the passed, failed and skipped counts, failures (name, file, message) and flaky tests of a finished test run, read from the summaries of vitest, bun test, jest, pytest and go test. Output none of them wrote answers \`unrecognised: true\`: only the counts it states in words (null where it states none), no failures, and a note saying so.
+
+## Example replies
+Whole replies for common situations, all about one fictional app, Shelf. Each reads the same way: a sentence or two, then the block, then what it means or what comes next. Blocks are in the short form; TestReport, CommandRun and ChangeSet are pasted as tools.blocks returns them.
+
+${replies}
 
 ## Examples
 Each passes GitSpace's checks; copy their shape.

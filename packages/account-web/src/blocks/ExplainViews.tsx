@@ -186,7 +186,7 @@ export function TimelineView({ title, events }: Props<'Timeline'>) {
 
 const SCORE = [badgeColors.red, badgeColors.amber, badgeColors.lime, badgeColors.green];
 
-export function TradeoffsView({ question, options, criteria, recommended }: Props<'Tradeoffs'>) {
+export function TradeoffsView({ question, options, criteria, recommended, note }: Props<'Tradeoffs'>) {
   const { execute } = useActions();
   const [picked, setPicked] = useState<string | null>(null);
   const totals = options.map((_, column) => criteria.reduce((sum, criterion) => sum + (criterion.scores[column] ?? 0), 0));
@@ -214,6 +214,7 @@ export function TradeoffsView({ question, options, criteria, recommended }: Prop
         </td>)}</tr>
       </tbody>
     </table>
+    {note ? <p className="text-caption text-muted-foreground">{note}</p> : null}
   </figure>;
 }
 
