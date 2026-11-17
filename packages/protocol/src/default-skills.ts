@@ -36,6 +36,7 @@ Read the arguments with \`await tools.describe('space_guide', 'put')\`, then \`p
 
 Every guide you write carries a \`walkthrough\`: a gitspace-ui spec whose root is a Sequence of 2 to 30 frames in reading order. Each frame shows one part of the guide by ref, with one or two spoken sentences as its \`say\`:
 
+- \`{ "ref": "overview" }\`: the guide at a glance, its title and its sections with their kinds, to open the tour;
 - \`{ "ref": "section:<section id>" }\`: the section's title, summary and diagram;
 - \`{ "ref": "diagram:<section id>" }\`: the section's diagram alone;
 - \`{ "ref": "exhibit:<section id>:<path>" }\`: an exhibit's lines, by its repository path;
@@ -44,7 +45,7 @@ Every guide you write carries a \`walkthrough\`: a gitspace-ui spec whose root i
 
 \`{ "root": "tour", "elements": { "tour": { "type": "Sequence", "props": { "title": "<guide title>", "frames": [{ "content": { "ref": "section:store" }, "say": "Reads now go through the cache." }, { "content": { "ref": "exhibit:store:src/store.ts" }, "say": "Here the store checks the cache first." }] }, "children": [] } } }\`
 
-Follow the sections' order: a section, then its diagram or the exhibit that carries it. A ref that names nothing in the guide is refused with its path.
+Open with the overview, then follow the sections' order: a section, then its diagram or the exhibit that carries it. A ref that names nothing in the guide is refused with its path.
 
 ## Hard rules
 

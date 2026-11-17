@@ -441,7 +441,7 @@ const changeGuideNarrativeFields = {
   intro: z.string().trim().max(16_384).optional().describe('The guide\'s opening, in Markdown.'),
   captures: z.array(evidenceReferenceSchema).max(64).optional().describe('Screenshots, videos or browser captures shown with the intro.'),
   map: changeMapSchema.optional().describe('The change as areas of the codebase and the paths between them.'),
-  walkthrough: guideWalkthroughSchema.optional().describe('The guide played as a walkthrough: a gitspace-ui spec { "root", "elements" } whose root is a Sequence of 2–30 frames in reading order, each { "content": …, "say": "one or two spoken sentences" }. A frame\'s content is { "ref": "section:<id>" } (a section\'s title, summary and diagram), { "ref": "diagram:<id>" } (its diagram alone), { "ref": "exhibit:<sectionId>:<path>" } (an exhibit\'s lines), { "ref": "<block id>" } of a block element in the guide\'s Markdown, or one element. Without one the guide plays one built from its sections.'),
+  walkthrough: guideWalkthroughSchema.optional().describe('The guide played as a walkthrough: a gitspace-ui spec { "root", "elements" } whose root is a Sequence of 2–30 frames in reading order, each { "content": …, "say": "one or two spoken sentences" }. A frame\'s content is { "ref": "overview" } (the guide at a glance: its title and its sections with their kinds), { "ref": "section:<id>" } (a section\'s title, summary and diagram), { "ref": "diagram:<id>" } (its diagram), { "ref": "exhibit:<sectionId>:<path>" } (an exhibit\'s lines), { "ref": "<block id>" } of a block element in the guide\'s Markdown, or one element. Without one the guide plays one built from its sections.'),
 };
 
 /** What an intro capture shows. */

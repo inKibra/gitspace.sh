@@ -7,6 +7,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { QuestionCardsContext, type QuestionCards } from '../QuestionCards.js';
+import { SpeechContext, type Speech, type SpeechClip } from '../speech.js';
 import { ComposerStagingProvider } from '../chat/staging.js';
 import { BlockActionsProvider } from './BlockActions.js';
 import { MessageBlockDocument } from './BlockDocument.js';
@@ -95,6 +96,89 @@ describe('Sequence player', () => {
     await press('Frame 2: note');
     expect(player().textContent).toContain('The shared note');
     expect(player().textContent).not.toContain('could not be drawn');
+  });
+});
+
+/** An audio element whose playback the test drives: `play()` answers with `playResult`, and the test ends it. */
+class FakeAudio {
+  static made: FakeAudio[] = [];
+  static playResult: () => Promise<void> = () => Promise.resolve();
+  playbackRate = 1;
+  duration = 6;
+  paused = true;
+  onended: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+  constructor(readonly src: string) { FakeAudio.made.push(this); }
+  play(): Promise<void> { this.paused = false; return FakeAudio.playResult(); }
+  pause(): void { this.paused = true; }
+}
+
+describe('Sequence player with a voice', () => {
+  const frames = [{ content: text('First'), say: 'One.' }, { content: text('Second'), say: 'Two.' }, { content: text('Third'), say: 'Three.' }];
+  let asked: string[];
+  beforeEach(() => {
+    asked = [];
+    FakeAudio.made = [];
+    FakeAudio.playResult = () => Promise.resolve();
+    vi.stubGlobal('Audio', FakeAudio);
+  });
+
+  async function play(clip: (text: string) => Promise<SpeechClip | null>): Promise<void> {
+    const speech: Speech = {
+      voice: { id: 'model:athena', label: 'Athena' }, voices: [{ id: 'model:athena', label: 'Athena' }], setBrowserVoice: () => undefined,
+      clip: (line) => { asked.push(line); return clip(line); },
+    };
+    await act(async () => root.render(<SpeechContext.Provider value={speech}><UiBlock spec={walkthrough(frames)} /></SpeechContext.Provider>));
+    await press('Play The walk');
+  }
+  function voiceOff(): string | null {
+    return player().querySelector('[data-sequence-voice-off]')?.textContent ?? null;
+  }
+
+  it('speaks each frame\'s clip, moves on at the clip\'s end, and makes the next frames\' clips while one plays', async () => {
+    await play(async (line) => ({ url: `/clips/${line}`, durationMs: 6000 }));
+    expect(FakeAudio.made.map((audio) => audio.src)).toEqual(['/clips/One.']);
+    expect(asked).toEqual(['One.', 'Two.', 'Three.']);
+    expect(player().dataset.sequenceVoice).toBe('speech');
+    // The clip is still playing: the frame stays.
+    await advance(7_000);
+    expect(player().dataset.sequenceFrame).toBe('0');
+    await act(async () => { FakeAudio.made[0]?.onended?.(); });
+    await advance(500);
+    expect(player().dataset.sequenceFrame).toBe('1');
+    expect(FakeAudio.made.map((audio) => audio.src)).toEqual(['/clips/One.', '/clips/Two.']);
+    expect(voiceOff()).toBeNull();
+  });
+
+  it('shows a clip that fails on timing, with a note that the voice is off for the frame, and moves on', async () => {
+    await play(async () => { throw new Error('synthesis failed'); });
+    expect(player().dataset.sequenceVoice).toBe('timing');
+    expect(voiceOff()).toContain('Voice off for this frame: the clip did not load');
+    expect(player().querySelector('[data-sequence-caption]')?.textContent).toContain('One.');
+    await advance(4_500);
+    expect(player().dataset.sequenceFrame).toBe('1');
+  });
+
+  it('shows a frame whose sound the browser refuses on timing, with the voice-off note, and moves on', async () => {
+    FakeAudio.playResult = () => Promise.reject(new DOMException('play() failed because the user didn\'t interact with the document first.', 'NotAllowedError'));
+    await play(async (line) => ({ url: `/clips/${line}`, durationMs: 6000 }));
+    expect(FakeAudio.made).toHaveLength(1);
+    expect(player().dataset.sequenceVoice).toBe('timing');
+    expect(voiceOff()).toContain('Voice off for this frame: the browser blocked sound');
+    await advance(4_500);
+    expect(player().dataset.sequenceFrame).toBe('1');
+    expect(player().dataset.sequencePlaying).toBe('true');
+  });
+
+  it('waits for a slow clip only so long, then shows the line on timing and moves on', async () => {
+    await play(() => Promise.withResolvers<SpeechClip | null>().promise);
+    expect(player().textContent).toContain('Preparing the voice');
+    await advance(9_900);
+    expect(player().dataset.sequenceFrame).toBe('0');
+    await advance(200);
+    expect(voiceOff()).toContain('Voice off for this frame: the clip was not ready in time');
+    await advance(2_000);
+    expect(player().dataset.sequenceFrame).toBe('1');
   });
 });
 

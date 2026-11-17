@@ -97,10 +97,13 @@ old anchors; new comments use this layer.
 
 ## 6. Change Guide walkthrough
 
-`space_guide.put` takes an optional `walkthrough`: a `Sequence` whose frames are the sections' diagrams and exhibits by
-reference, each with a spoken line. The `review-guide-narrator` skill writes it with every Guide. A Guide without one
-(older revisions) plays a walkthrough built from its sections' summaries and diagrams. Shares carry the walkthrough;
-they still carry no comments.
+`space_guide.put` takes an optional `walkthrough`: a `Sequence` whose frames are the guide at a glance (`overview`) and
+the sections, their diagrams and exhibits by reference, each with a spoken line. The `review-guide-narrator` skill
+writes it with every Guide. A Guide without one (older revisions) plays a walkthrough built from it: the overview, then
+each section's diagram, else its first exhibit, else the section, each saying the section's title and the first
+sentence of its summary. The player makes the next frames' clips while one plays, and a frame whose clip fails, is
+refused or is late shows its line on its reading time with a note that the voice is off. Shares carry the
+walkthrough; they still carry no comments.
 
 ## 7. Build order
 

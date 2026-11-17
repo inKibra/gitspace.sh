@@ -76,6 +76,10 @@ body { overflow: hidden; }
 @keyframes status-pulse { 50% { opacity: .4; } }
 @media (prefers-reduced-motion: reduce) { .status-dot[data-pulse] { animation: none; } }
 
+/* ── Sequence player: how far the frame showing has played (blocks/SequenceView.tsx sets its duration) ── */
+.sequence-progress { transform-origin: left; animation: sequence-progress linear forwards; }
+@keyframes sequence-progress { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+
 /* ── Narrow viewports: inspector overlays the conversation ── */
 @media (max-width: 1100px) {
   .inspector-resize-handle { display: none; }

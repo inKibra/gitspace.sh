@@ -510,7 +510,7 @@ const components = {
         hold: z.number().min(0.5).max(60).nullish().describe('Seconds the frame stays at least'),
       })).min(2).max(30),
     }),
-    description: 'A narrated walkthrough played like a short video: one frame at a time, each with a voice line (`say`) the person hears and reads as a subtitle. It shows frame 1 as a still with a play button and never plays by itself; the person steps through, changes speed or mutes. A frame lasts its speech, its `hold`, or 4 s without a voice. Each frame shows one thing: Markdown, Svg, Mermaid, CallDiff, StateFlow, Image, Video or any component except a Sequence, or a block of this document by { "ref": "<id>" }. Write 2 to 30 frames, one point each, in the order you would explain it.',
+    description: 'A narrated walkthrough played like a short video: one frame at a time, each with a voice line (`say`) the person hears and reads as a subtitle. It shows frame 1 as a still with a play button and never plays by itself; the person steps through, changes speed or mutes. A frame lasts its speech and at least its `hold`; without a voice, its `hold` or the time its line takes to read. Each frame shows one thing: Markdown, Svg, Mermaid, CallDiff, StateFlow, Image, Video or any component except a Sequence, or a block of this document by { "ref": "<id>" }. Write 2 to 30 frames, one point each, in the order you would explain it.',
   },
   Reply: {
     props: z.strictObject({

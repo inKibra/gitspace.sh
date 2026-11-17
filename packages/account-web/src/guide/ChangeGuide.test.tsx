@@ -371,6 +371,36 @@ describe('Change Guide tab', () => {
     await vi.waitFor(() => expect(container.querySelectorAll('[data-range-lines]').length).toBe(2));
     expect(loadDiff.mock.calls.filter(([path]) => path === 'ui/panel.tsx')).toHaveLength(1);
   });
+
+  it('plays a guide written without a walkthrough as its overview, then each section\'s diagram or else its first exhibit', async () => {
+    const stats = JSON.stringify({ root: 'stats', elements: { stats: { type: 'Stats', props: { tiles: [{ label: 'Brews queued', value: 3 }] }, children: [] } }, state: {} });
+    const [schedule, heat] = sections as [ChangeGuideSection, ChangeGuideSection];
+    const drawn: ChangeGuideView = { ...guide, sections: [schedule, { ...heat, diagram: `\`\`\`gitspace-ui\n${stats}\n\`\`\`` }] };
+    await surface({ guide: drawn });
+    expect(button('Play the walkthrough').dataset.walkthrough).toBe('built');
+    await act(async () => button('Play the walkthrough').click());
+    const dialog = (): Element => {
+      const found = document.querySelector('[role="dialog"]');
+      if (!found) throw new Error('no walkthrough dialog');
+      return found;
+    };
+    const frame = async (number: number): Promise<void> => {
+      const target = [...dialog().querySelectorAll<HTMLButtonElement>('button[aria-label]')].find((node) => node.getAttribute('aria-label')?.startsWith(`Frame ${number}:`));
+      await act(async () => target?.click());
+    };
+    const overview = dialog().querySelector('[data-walkthrough-overview]');
+    expect([...overview?.querySelectorAll('[data-walkthrough-card]') ?? []].map((card) => card.textContent)).toEqual([
+      '§1 · BehaviorPressing brew schedules itBrews are scheduled, not started.', '§2 · DecisionThe heater follows the schedule',
+    ]);
+    // The section without a diagram shows its first exhibit's diff.
+    await frame(2);
+    const exhibit = dialog().querySelector('[data-walkthrough-exhibit="schedule:ui/panel.tsx"]');
+    expect(exhibit?.textContent).toContain('Pressing brew schedules it');
+    await vi.waitFor(() => expect([...exhibit?.querySelectorAll('diffs-container') ?? []].map((diff) => diff.shadowRoot?.textContent ?? '').join('')).toContain('brewButton'));
+    // The section with a diagram shows it.
+    await frame(3);
+    expect(dialog().querySelector('[data-walkthrough-diagram="heat"]')?.textContent).toContain('Brews queued');
+  });
 });
 
 describe('Change Guide revisions', () => {

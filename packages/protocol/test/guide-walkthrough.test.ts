@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test';
+import { z } from 'zod';
 import { builtWalkthrough, walkthroughIssues, type GuideParts } from '../src/guide-walkthrough.js';
 import { changeGuideAgentDraftSchema, changeGuideViewSchema, submitChangeGuideInputSchema } from '../src/inspector-contract.js';
 
@@ -23,6 +24,33 @@ describe('Change Guide walkthrough', () => {
   it('accepts the walkthrough built for a guide written without one', () => {
     const built = builtWalkthrough(guide);
     expect(walkthroughIssues(built, guide)).toEqual([]);
+  });
+
+  it('builds an overview, then each section\'s diagram, else its first exhibit, else the section, saying whole short sentences', () => {
+    const long = 'The parser used to read every file as version one, which silently dropped the new header fields and left the importer guessing at the encoding of each record it met';
+    const parts: GuideParts = {
+      title: 'Parser v2',
+      intro: `${long}. It now reads v2.`,
+      sections: [
+        { ...guide.sections[0]!, summary: 'The parser reads v2 headers, e.g. the `version` line in parse.ts. Older files still read as v1.' },
+        { id: 'cache', title: 'Cache parsed files', kind: 'risk', explanation: 'Keeps each parsed file.', why: 'Re-parsing was slow.', summary: `${long}.`, requirementIds: [],
+          exhibits: [{ path: 'src/cache.ts', blobId: null, note: 'The cache.', slowRead: false }, { path: 'src/evict.ts', blobId: null, note: 'Eviction.', slowRead: false }] },
+        { id: 'notes', title: 'Release notes', kind: 'mechanical', explanation: 'Notes the change.', why: 'Readers ask.', requirementIds: [], exhibits: [] },
+      ],
+    };
+    const built = builtWalkthrough(parts);
+    expect(walkthroughIssues(built, parts)).toEqual([]);
+    const frames = z.object({ elements: z.object({ walkthrough: z.object({ props: z.object({ frames: z.array(z.object({ content: z.object({ ref: z.string() }), say: z.string() })) }) }) }) })
+      .parse(built).elements.walkthrough.props.frames;
+    expect(frames).toEqual([
+      // The intro's first sentence is too long to speak whole, so it is left out.
+      { content: { ref: 'overview' }, say: 'Parser v2. It has 3 sections.' },
+      { content: { ref: 'diagram:parse' }, say: 'Section 1: Parse headers. The parser reads v2 headers, e.g. the version line in parse.ts.' },
+      // Without a diagram, the first exhibit; a summary too long to speak whole gives way to the explanation.
+      { content: { ref: 'exhibit:cache:src/cache.ts' }, say: 'Section 2: Cache parsed files. Keeps each parsed file.' },
+      { content: { ref: 'section:notes' }, say: 'Section 3: Release notes. Notes the change.' },
+    ]);
+    for (const frame of frames) expect(frame.say).not.toMatch(/…$/u);
   });
 
   it('accepts frames showing a section, a diagram, an exhibit, a block element of the guide and one element', () => {
