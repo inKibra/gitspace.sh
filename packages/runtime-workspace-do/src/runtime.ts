@@ -352,7 +352,7 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
   const messageDecisions = recordMessageDecisions ? createMessageDecisions(options.storage.sql, recordMessageDecisions) : undefined;
   /** A failed pass keeps its decisions for the next one; it is only logged. */
   const unrecordedDecisions = (error: unknown) => { console.error(JSON.stringify({ event: 'message_decisions_unrecorded', workspaceId: options.identity.workspaceId, error: error instanceof Error ? error.message : String(error) })); };
-  const controls = createSessionControls({ ...runtime, ...options.session, setWorkspacePhase: options.setWorkspacePhase, loadAgentDefinitions, browser: options.browser, history, admitInference: options.admitInference, ...(messageDecisions ? { holdDecisions: messageDecisions.hold } : {}) });
+  const controls = createSessionControls({ ...runtime, ...options.session, setWorkspacePhase: options.setWorkspacePhase, recordDecision: options.recordDecision, loadAgentDefinitions, browser: options.browser, history, admitInference: options.admitInference, ...(messageDecisions ? { holdDecisions: messageDecisions.hold } : {}) });
   const invokeConversationTool = createConversationTools({ ...options, ...runtime, storage, catalog: options.session.catalog, refreshDefinitions: controls.loadDefinitions });
   const automations = createAutomationRequests({ ...options, harness, storage, configureModel: runtime.configureModel, stop: id => runtime.lifecycle.stop(id), async wake() { harness.resume(); options.waitUntil(harness.waitForIdle(BACKGROUND_CONTEXT)); } });
   const replica = createReplicaStore(options.storage);
@@ -555,9 +555,9 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
     const qa = RuntimeQaDocumentSchema.parse({ items: await options.qa.list() });
     const committedCode = await cloudFiles.snapshot();
     const status = workspaceStatus(committedCode ?? null);
-    // The staged comments, and the lookup's revision: a reader asks the lookup again (`commentLookup`) when it moves.
+    // The staged comments and answers, and the lookup's revision: a reader asks the lookup again (`commentLookup`) when it moves.
     const [staged, lookup] = await Promise.all([harness.snapshot(StagedCommentsDoc, BACKGROUND_CONTEXT), harness.snapshot(CommentLookupDoc, BACKGROUND_CONTEXT)]);
-    const comments: CommentsDocument = { staged: staged?.items ?? [], lookupRevision: lookup?.revision ?? 0 };
+    const comments: CommentsDocument = { staged: staged?.items ?? [], answers: staged?.answers ?? [], lookupRevision: lookup?.revision ?? 0 };
     const next = RuntimeSnapshotSchema.parse({ version: 1, ...options.identity, cursor: snapshot.cursor + 1, conversations, tasks, attachments: attachments.list(), questions: questions?.items ?? [], documents: { 'gitspace.workspace': workspace ?? null, 'gitspace.agents': subagents, 'gitspace.qa': qa, 'gitspace.code': committedCode ?? null, 'gitspace.status': status, 'gitspace.draft': drafts.snapshot(), 'gitspace.comments': comments, 'gitspace.browsers': options.browsers ? await options.browsers() : null } });
     const ops = diffRevisions(snapshot, next);
     // An unchanged projection publishes nothing: no replica rewrite, no cursor advance, no browser notice.
@@ -907,7 +907,7 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
         const approval = question.kind === 'approval' ? RuntimeApprovalAnswerSchema.safeParse(input.answer) : null;
         if (approval && !approval.success) throw new Error('An approval answer is { approved, note }');
         // A person's answer also replies to the conversation's other open questions.
-        if (actor.person) await closeRepliedQuestions(tx, conversationId, question.id);
+        if (actor.person) await closeRepliedQuestions(tx, conversationId, [question.id]);
         const closure = { answer: input.answer, ...(text === undefined ? {} : { text }) };
         if (!approval?.data) return { closure, value: null };
         const settled = await answerPlan(tx, conversationId, input.questionId, approval.data);

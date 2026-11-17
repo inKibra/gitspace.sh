@@ -3,11 +3,13 @@ import type { JsonValue } from '@earendil-works/chord/json';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { z } from 'zod';
 import { RuntimeApprovalAnswerSchema, RuntimeLifecycleApprovalAnswerSchema, RuntimeTakeoverQuestionSchema, TAKEOVER_ANSWERS, askAnswerParts, questionState, type RuntimeQuestionClosed } from '@gitspace/protocol-runtime';
+import type { SentAnswer } from '@gitspace/protocol-runtime/comments';
+import { PendingAskAnswerSchema } from '@gitspace/protocol-runtime/session-controls';
 import { openerAt, piMessageRowId, type AskAnswerer } from '@gitspace/blocks';
 import { blockAskQuestionId, requiredBlockAsks } from '@gitspace/protocol/gitspace-ui';
-import { BlockAsksDoc, QuestionsDoc, type Question } from './documents.js';
+import { BlockAsksDoc, QuestionsDoc, StagedCommentsDoc, WorkspaceDoc, type Question } from './documents.js';
 import { turnOpeners } from './transcript-rows.js';
-import { withdrawPlan } from './plan.js';
+import { answerPlan, withdrawPlan, type PlanDecision } from './plan.js';
 import type { ConversationEvent } from './conversation-lifecycle.js';
 
 /**
@@ -53,7 +55,7 @@ export async function postQuestion(tx: Tx, question: Omit<Question, 'askedAt' | 
 /** What an asking call returns: the question is posted, and the round ends the agent's turn (`terminate`). */
 export function questionPosted(id: string, what: string): ToolExecutionResult {
   return {
-    output: [{ type: 'text', text: `Posted ${what} to the user as question ${id}. Your turn ends here: do not wait or poll for it. The answer arrives as your next message, an event naming question ${id}; if the user dismisses it instead, that message says so. If they write in the chat instead, the question closes unanswered (nothing is approved) and their message is your next input.` }],
+    output: [{ type: 'text', text: `Posted ${what} to the user as question ${id}. Your turn ends here: do not wait or poll for it. The answer arrives as your next message: the user's message with an "Answer to …" line whose data names question ${id}, or an event naming it; if the user dismisses it instead, that message says so. If they write in the chat without answering it, the question closes unanswered (nothing is approved) and their message is your next input.` }],
     details: { questionId: id },
     control: { terminate: true },
   };
@@ -192,6 +194,7 @@ export async function settleQuestion(tx: Tx, conversationId: ConversationId, que
     if (closure.answeredBy) question.answeredBy = closure.answeredBy;
     text = closure.text ?? answerText(question, closure.answer, closure.answeredBy);
   }
+  await dropStagedAnswers(tx, [question.id]);
   const sender = question.answeredBy ? { id: 'project-agent', name: `Project agent for ${question.answeredBy.for ?? 'the user'}` } : { id: 'user', name: 'The user' };
   return { conversationId: question.conversationId, requestId: `question-closed:${question.id}`, kind: 'question', sender, text,
     payload: { questionId: question.id, kind: question.kind, state: questionState(question), answer: question.answer, ...(question.answeredBy ? { answeredBy: question.answeredBy } : {}), ...(question.closed ? { closed: question.closed } : {}) } };
@@ -201,32 +204,103 @@ export async function settleQuestion(tx: Tx, conversationId: ConversationId, que
  * proposal among them is withdrawn. The conversation hears nothing: it is stopped. */
 export async function closeConversationQuestions(tx: Tx, conversations: ReadonlyMap<string, ConversationId>): Promise<void> {
   const at = new Date().toISOString();
+  const closed: string[] = [];
   for (const question of (await tx.doc(QuestionsDoc)).items) {
     const id = conversations.get(question.conversationId);
     if (id === undefined || questionState(question) !== 'open') continue;
     question.closed = { reason: 'stopped', at };
+    closed.push(question.id);
     if (question.kind === 'approval') await withdrawPlan(tx, id, question.id);
   }
+  await dropStagedAnswers(tx, closed);
 }
 
 /**
- * The person's own input to conversation `conversationId` (their message, or their answer to question `answered`) is
- * their reply to everything it asked: its other open questions close as `replied` in `tx`, the commit that takes the
- * input. The conversation hears that input, not an event per question. Closing approves and runs nothing: a proposed
- * plan stays proposed and unapproved for the agent to revise or propose again, and a lifecycle approval or take-over
- * card is declined. A take-over card whose tab the person holds stays open: their handback ends it. The conversation's
- * newest entry is recorded (`BlockAsksDoc.replied`): a block ask in a reply up to it whose question is not posted yet
- * is posted closed (`repairBlockAsks`). Reads before it writes, so it runs before the input is admitted in `tx`.
+ * The person's own input to conversation `conversationId` (their message, with the answers it carries to questions
+ * `answered`) is their reply to everything it asked: its other open questions close as `replied` in `tx`, the commit
+ * that takes the input. The conversation hears that input, not an event per question. Closing approves and runs
+ * nothing: a proposed plan stays proposed and unapproved for the agent to revise or propose again, and a lifecycle
+ * approval or take-over card is declined. A take-over card whose tab the person holds stays open: their handback ends
+ * it. The conversation's newest entry is recorded (`BlockAsksDoc.replied`): a block ask in a reply up to it whose
+ * question is not posted yet is posted closed (`repairBlockAsks`). Reads before it writes, so it runs before the input
+ * is admitted in `tx`.
  */
-export async function closeRepliedQuestions(tx: Tx, conversationId: ConversationId, answered?: string): Promise<void> {
+export async function closeRepliedQuestions(tx: Tx, conversationId: ConversationId, answered: readonly string[] = []): Promise<void> {
   const latest = await tx.latestEntryId(conversationId);
   const asks = await tx.doc(BlockAsksDoc);
   const at = new Date().toISOString();
+  const closed: string[] = [];
   for (const question of (await tx.doc(QuestionsDoc)).items) {
-    if (question.conversationId !== String(conversationId) || question.id === answered || questionState(question) !== 'open' || question.takeover?.holder === 'you') continue;
+    if (question.conversationId !== String(conversationId) || answered.includes(question.id) || questionState(question) !== 'open' || question.takeover?.holder === 'you') continue;
     question.closed = { reason: 'replied', at };
+    closed.push(question.id);
   }
   if (latest !== undefined) asks.replied = { ...asks.replied, [String(conversationId)]: Number(latest) };
+  await dropStagedAnswers(tx, closed);
+}
+
+/** A question that closed or was answered takes no staged answer: one staged for it leaves the staged answers. */
+async function dropStagedAnswers(tx: Tx, ids: readonly string[]): Promise<void> {
+  if (ids.length === 0) return;
+  const staged = await tx.doc(StagedCommentsDoc);
+  if (staged.answers?.some(item => ids.includes(item.questionId))) staged.answers = staged.answers.filter(item => !ids.includes(item.questionId));
+}
+
+/**
+ * `answer` as question `question` takes it from a person's message: an ask's parts, or a proposed plan's `{ approved,
+ * note }` (approving needs `canApprove`). Every other question is a permission prompt (a tool's approval, a lifecycle
+ * approval, a take-over request), answered on its card at once.
+ */
+export function messageAnswer(question: Question, answer: unknown, canApprove: boolean): JsonValue {
+  if (question.kind === 'ask') {
+    const parts = z.array(PendingAskAnswerSchema).min(1).safeParse(answer);
+    if (!parts.success) throw new Error(`An answer to question ${question.id} is a list of { id, selectedOptions, customInput }`);
+    return parts.data.map(part => ({ id: part.id, selectedOptions: [...part.selectedOptions], customInput: part.customInput }));
+  }
+  if (question.kind === 'approval' && !question.tool) {
+    if (!canApprove) throw new Error('Human approval capability required');
+    const approval = RuntimeApprovalAnswerSchema.safeParse(answer);
+    if (!approval.success) throw new Error('An approval answer is { approved, note }');
+    return approval.data;
+  }
+  throw new Error(`Question ${question.id} is answered on its card, not with a message`);
+}
+
+/**
+ * Records the answers a person's message carries (`prompt` `answers`, each staged for its question) in `tx`, the commit
+ * that takes the message, after `closeRepliedQuestions`: each names an open question of conversation `conversationId`,
+ * which is answered; a proposed plan is approved or rejected (`answerPlan`), and an approved plan moves the workspace to
+ * code. The answers leave the staged answers. The conversation hears them in the message, not as events. Returns each
+ * answer with its question's prompt, for the message, the plan decisions, and whether a plan was approved.
+ */
+export async function answerFromMessage(tx: Tx, conversationId: ConversationId, sent: readonly SentAnswer[], canApprove: boolean): Promise<{ answers: { prompt: string; sent: SentAnswer }[]; decisions: PlanDecision[]; approved: boolean }> {
+  const staged = await tx.doc(StagedCommentsDoc);
+  const questions = (await tx.doc(QuestionsDoc)).items;
+  const at = new Date().toISOString();
+  const answers: { prompt: string; sent: SentAnswer }[] = [];
+  const decisions: PlanDecision[] = [];
+  let approved = false;
+  for (const { questionId, answer: given } of sent) {
+    if (!staged.answers?.some(item => item.questionId === questionId)) throw new Error('An answer in this message is no longer staged');
+    const question = questions.find(item => item.id === questionId);
+    if (!question) throw new Error(`Question ${questionId} is not one this workspace's agents asked`);
+    if (question.conversationId !== String(conversationId)) throw new Error(`Question ${questionId} belongs to another conversation`);
+    if (questionState(question) !== 'open') throw new Error(questionRefusal(question));
+    const answer = messageAnswer(question, given, canApprove);
+    question.answer = answer;
+    question.answeredAt = at;
+    answers.push({ prompt: question.prompt, sent: { questionId, answer } });
+    const approval = RuntimeApprovalAnswerSchema.safeParse(answer);
+    if (question.kind !== 'approval' || !approval.success) continue;
+    const decision = await answerPlan(tx, conversationId, questionId, approval.data);
+    if (!decision) continue;
+    decisions.push(decision);
+    if (!approval.data.approved) continue;
+    approved = true;
+    (await tx.doc(WorkspaceDoc)).phase = 'code';
+  }
+  staged.answers = (staged.answers ?? []).filter(item => !sent.some(answer => answer.questionId === item.questionId));
+  return { answers, decisions, approved };
 }
 
 /**

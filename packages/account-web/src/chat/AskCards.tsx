@@ -3,7 +3,9 @@ import type { PendingAskAnswer } from '@gitspace/protocol';
 import { askAnswerParts, questionState, RuntimeApprovalAnswerSchema, type RuntimeApprovalAnswer, type RuntimeQuestion } from '@gitspace/protocol-runtime';
 import { AskUserQuestions, Badge, Button, badgeColors, useShape, type AskUserAnswer } from '@gitspace/ui';
 import { Check, Lock01, MessageQuestionCircle } from '@untitledui/icons';
-import { useContext, useState } from 'react';
+import { useContext, useEffect, useRef, useState } from 'react';
+import { answerShown } from '@gitspace/protocol-runtime/comments';
+import { useComposerStaging } from './staging.js';
 import { GitSpaceMarkdown } from '../GitSpaceMarkdown.js';
 import { rpcErrorMessage } from '../rpc-error-message.js';
 import { LifecycleApprovalCard } from '../LifecycleApprovalCard.js';
@@ -123,15 +125,33 @@ function storedAnswers(item: AskBlock, question: RuntimeQuestion): AskBlock['que
   });
 }
 
+/** A staged answer as the card's picks: an approval's decision and note, or an ask's chosen options and written text,
+ * question by question. */
+function stagedPicks(item: AskBlock, answer: unknown): Record<string, AskUserAnswer> {
+  const approval = RuntimeApprovalAnswerSchema.safeParse(answer);
+  if (approval.success) return {
+    [APPROVAL_DECISION]: { questionId: APPROVAL_DECISION, selectedIds: [approval.data.approved ? APPROVE : REJECT] },
+    ...(approval.data.note ? { [APPROVAL_NOTE]: { questionId: APPROVAL_NOTE, selectedIds: [], otherText: approval.data.note } } : {}),
+  };
+  const parts = askAnswerParts(answer);
+  return Object.fromEntries(item.questions.flatMap((question, index) => {
+    const part = parts[index];
+    return part ? [[question.id, { questionId: question.id, selectedIds: part.selectedOptions, ...(part.customInput ? { otherText: part.customInput } : {}) }]] : [];
+  }));
+}
+
 /**
  * An ask or propose_plan card. One that posted a workspace question (`questionId`) shows that question's state: open,
- * the interactive card with Dismiss, answered through the workspace's questions (a plan as `{ approved, note }`, an ask
- * as session command `answerAsk`); answered, read only with its stored answer; closed, read only with why. A question
- * not in the snapshot yet was just posted and shows open. A card without one settled by its call's result.
- * `plainPrompt`: the prompts are plain text, shown with their line breaks.
+ * the interactive card with Dismiss, where a pick stages the answer for the person's next message (a plan as
+ * `{ approved, note }`, an ask as its parts), which answers it; the card stays whole with the staged picks marked, and
+ * a new pick replaces them. A tool's approval (a machine-attach request, the project agent's batch) is a permission
+ * prompt, answered at once. Answered, read only with its stored answer; closed, read only with why. A question not in
+ * the snapshot yet was just posted and shows open. A card without one settled by its call's result. `plainPrompt`: the
+ * prompts are plain text, shown with their line breaks.
  */
 export function AskBlockView({ item, onAnswer, plainPrompt = false, state, onStateChange }: { item: AskBlock; onAnswer?: TurnTranscriptProps['onAnswer']; plainPrompt?: boolean } & ItemInteractionProps) {
   const cards = useContext(QuestionCardsContext);
+  const staging = useComposerStaging();
   const [local, setLocal] = useState<TranscriptItemState>({});
   const interaction = state ?? local;
   const { submitting = false, error = null } = interaction;
@@ -141,6 +161,16 @@ export function AskBlockView({ item, onAnswer, plainPrompt = false, state, onSta
   };
   const { questionId } = item;
   const question = questionId === undefined ? undefined : cards?.questions.find((entry) => entry.id === questionId);
+  // The picks being made give way to the staged answer whenever it changes: staged, replaced (here or in another tab),
+  // or taken back, which opens the card again.
+  const stagedAt = questionId === undefined ? undefined : staging?.answers.find((entry) => entry.questionId === questionId)?.stagedAt;
+  const shownStage = useRef(stagedAt);
+  useEffect(() => {
+    if (shownStage.current === stagedAt) return;
+    shownStage.current = stagedAt;
+    if (onStateChange) onStateChange({ answers: undefined });
+    else setLocal((previous) => ({ ...previous, answers: undefined }));
+  }, [stagedAt, onStateChange]);
   const stored = question ? questionState(question) : 'open';
   if (question && stored !== 'open') {
     const ended = stored === 'closed' && question.closed ? CLOSED_REASON[question.closed.reason] : 'answered';
@@ -148,13 +178,20 @@ export function AskBlockView({ item, onAnswer, plainPrompt = false, state, onSta
   }
   if (questionId === undefined && item.status !== 'pending') return <div className="flex min-w-0 flex-col gap-1.5"><AskOrigin item={item} waiting={false} answeredBy={item.answeredBy} ended={item.status} /><AnsweredAsk item={item} ended={item.status} answered={item.status === 'answered'} /></div>;
   const approval = (question?.kind ?? (item.kind === 'plan' ? 'approval' : 'ask')) === 'approval';
-  const answer = questionId !== undefined && cards ? async (answers: PendingAskAnswer[]) => {
-    if (!approval) { await cards.request({ type: 'answerAsk', id: questionId, answers }); return; }
+  const permission = question?.kind === 'approval' && question.tool !== undefined;
+  const staged = questionId === undefined || permission ? undefined : staging?.answers.find((entry) => entry.questionId === questionId);
+  const approvalReply = (answers: PendingAskAnswer[]): RuntimeApprovalAnswer => {
     const decision = answers.find((entry) => entry.id === APPROVAL_DECISION)?.selectedOptions[0];
     if (decision !== APPROVE && decision !== REJECT) throw new Error('Choose Approve or Reject.');
-    const reply: RuntimeApprovalAnswer = { approved: decision === APPROVE, note: answers.find((entry) => entry.id === APPROVAL_NOTE)?.customInput?.trim() || null };
-    await cards.answer(questionId, reply);
-  } : onAnswer;
+    return { approved: decision === APPROVE, note: answers.find((entry) => entry.id === APPROVAL_NOTE)?.customInput?.trim() || null };
+  };
+  const answer = questionId === undefined || !cards ? onAnswer
+    : permission ? async (answers: PendingAskAnswer[]) => { await cards.answer(questionId, approvalReply(answers)); }
+    : staging ? async (answers: PendingAskAnswer[]) => {
+      await staging.stageAnswer(questionId, approval ? approvalReply(answers) : answers.map((entry) => ({ id: entry.id, selectedOptions: [...entry.selectedOptions], customInput: entry.customInput })));
+      update({ submitting: false });
+    }
+    : undefined;
   const complete = (answers: Record<string, AskUserAnswer>): void => {
     if (!answer || submitting) return;
     update({ submitting: true, error: null });
@@ -174,18 +211,21 @@ export function AskBlockView({ item, onAnswer, plainPrompt = false, state, onSta
     });
   };
   const decisionPrompt = item.kind === 'plan' ? item.questions.find((question) => question.id === APPROVAL_DECISION)?.prompt : undefined;
-  return <div className={`flex min-w-0 flex-col gap-1.5 ${submitting ? 'pointer-events-none opacity-60' : ''}`} aria-busy={submitting || undefined}>
+  // The picks shown: the ones being made, else the staged answer's, else what the card was asked with.
+  const picks = interaction.answers ?? (staged ? stagedPicks(item, staged.answer) : Object.fromEntries(item.questions.flatMap((question) => question.answer === undefined ? [] : [[question.id, { questionId: question.id, selectedIds: Array.isArray(question.answer) ? question.answer : [question.answer] }]])));
+  return <div className={`flex min-w-0 flex-col gap-1.5 ${submitting ? 'pointer-events-none opacity-60' : ''}`} aria-busy={submitting || undefined} data-ask-staged={staged ? '' : undefined}>
     <AskOrigin item={item} waiting answeredBy={undefined} ended="pending" />
     <AskUserQuestions
       questions={item.questions.map((question) => ({ id: question.id, title: question.prompt, options: (question.options ?? []).map((option) => ({ id: option.id, title: option.title, description: option.description ?? option.preview })), multiSelect: question.multiple, allowOther: question.written !== false, skippable: question.written === false ? question.optional === true : question.optional, freeText: !(question.options?.length), layout: question.options?.some((option) => option.description || option.preview) ? 'stacked' : 'inline' }))}
-      defaultAnswers={Object.fromEntries(item.questions.flatMap((question) => question.answer === undefined ? [] : [[question.id, { questionId: question.id, selectedIds: Array.isArray(question.answer) ? question.answer : [question.answer] }]]))}
-      answers={interaction.answers}
+      answers={picks}
       onAnswersChange={(answers) => update({ answers })}
       currentIndex={interaction.questionIndex}
       onCurrentIndexChange={(questionIndex) => update({ questionIndex })}
       onComplete={answer ? complete : undefined}
       renderTitle={(prompt) => <div className="max-h-80 overflow-y-auto">{plainPrompt ? <p className="whitespace-pre-wrap text-[14px] leading-relaxed text-foreground [overflow-wrap:anywhere]">{prompt}</p> : prompt === decisionPrompt ? <><PlanPrompt prompt={prompt} />{item.steps?.length ? <ProposedSteps steps={item.steps} /> : null}</> : <GitSpaceMarkdown>{prompt}</GitSpaceMarkdown>}</div>}
     />
+    {staged ? <span className="flex flex-wrap items-center gap-2 px-1 text-caption"><span className="text-foreground [overflow-wrap:anywhere]">{answerShown(staged.answer)}</span><Badge size="compact" variant="dot" color="amber">staged · in your message</Badge></span> : null}
+    {questionId !== undefined && cards && !permission ? <span className="px-1 text-caption text-muted-foreground">Your answer goes with your next message.</span> : null}
     {questionId !== undefined && cards ? <div className="flex justify-end"><Button variant="ghost" size="sm" disabled={submitting} onClick={dismiss}>Dismiss</Button></div> : null}
     {error ? <p role="alert" className="mt-2 text-caption text-destructive [overflow-wrap:anywhere]">{error}</p> : null}
   </div>;

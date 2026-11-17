@@ -2,9 +2,9 @@
 // block keeps its own json-render state, seeded from the spec's `state`; its actions run the surface's BlockActions. It
 // opens in the lightbox, drawn again at the dialog's width from the same state. An element with an id may be drawn
 // again by a BlockRef or a Sequence frame of the same document. An element with an ask shows it above the block; a
-// required ask in a stored chat message is a workspace question, answered through the block's own choice. A block of a
-// stored chat message takes comments (comments/CommentLayer.tsx) on itself, its items and text selected in it, unless
-// it asks a question.
+// required ask in a stored chat message is a workspace question: the block's own choice stages an answer to it, which
+// the person's next message carries. A block of a stored chat message takes comments (comments/CommentLayer.tsx) on
+// itself, its items and text selected in it, unless it asks a question.
 import { askAnswerParts, questionState, type RuntimeQuestion } from '@gitspace/protocol-runtime';
 import { blockAskQuestionId, fenceSpec, gitspaceUiCatalog, parseBlockRef, validateUiSpec } from '@gitspace/protocol/gitspace-ui';
 import { Badge } from '@gitspace/ui';
@@ -16,11 +16,12 @@ import type { z } from 'zod';
 import { Lightbox } from '../Lightbox.js';
 import { CLOSED_REASON, QuestionCardsContext } from '../QuestionCards.js';
 import { useBlockActions, type BlockActionName, type BlockActions, type BlockState } from './BlockActions.js';
-import { BlockAnswersQuestion, BlockDocument, BlockQuestionClosed, BlockRendering, OtherDocumentRef, blockingIssues, conforms, type BlockRenderingValue } from './BlockDocument.js';
+import { BlockDocument, BlockQuestionClosed, BlockRendering, BlockStagedAnswer, OtherDocumentRef, blockingIssues, conforms, type BlockRenderingValue } from './BlockDocument.js';
 import { BlockErrorCard } from './BlockFrames.js';
 import { BLOCK_COMPONENTS, blockCatalog, blockFunctions } from './registry.js';
 import { SvgBlock } from './SvgBlock.js';
 import { BlockCommentButton, BlockMarker, CommentBlock, blockKey, type CommentBlockValue } from '../comments/CommentLayer.js';
+import { useComposerStaging } from '../chat/staging.js';
 
 const NO_REFS: readonly string[] = [];
 
@@ -86,20 +87,20 @@ function DrawnBlock({ spec, refs }: { spec: Spec; refs: readonly string[] }) {
     }
     return null;
   }, [asks, messageId, cards]);
-  // While its question is open, the block's choice answers it as the person answers any question; elsewhere the
-  // choice stages in the composer.
-  const answersQuestion = asked !== null && cards !== null && questionState(asked.question) === 'open';
+  // While its question is open, the block's choice stages an answer to it for the person's next message (the
+  // workspace's staged answers), which answers it; elsewhere the choice stages in the composer as a chip of its own.
+  const staging = useComposerStaging();
+  const stagesAnswer = asked !== null && staging !== null && questionState(asked.question) === 'open';
+  const stagedAnswer = asked ? staging?.answers.find((answer) => answer.questionId === asked.question.id) : undefined;
+  const staged = stagedAnswer ? askAnswerParts(stagedAnswer.answer).map((part) => part.selectedOptions[0] ?? part.customInput).find((label) => label) ?? null : null;
   // Once its question closed unanswered (the person replied in chat, dismissed it, stopped the conversation), the block
   // is locked: it says why, and none of its choices takes an answer or stages one.
   const closed = asked?.question.closed ? CLOSED_REASON[asked.question.closed.reason] : null;
   const actions = useMemo((): BlockActions | null => {
-    if (!answersQuestion || !asked || !cards) return surface;
-    const answer = async (label: string, block: BlockState): Promise<void> => {
-      await cards.request({ type: 'answerAsk', id: asked.question.id, answers: [{ id: asked.ask.id, selectedOptions: [label], customInput: null }] });
-      block.setAnswered(label);
-    };
-    return { ...surface, stage: (params, block) => answer(params.label, block), answer_question: (params, block) => answer(params.label, block), record_decision: (params, block) => answer(params.choice, block) };
-  }, [surface, asked, cards, answersQuestion]);
+    if (!stagesAnswer || !asked || !staging) return surface;
+    const pick = (label: string): Promise<void> => staging.stageAnswer(asked.question.id, [{ id: asked.ask.id, selectedOptions: [label], customInput: null }]);
+    return { ...surface, stage: (params) => pick(params.label), answer_question: (params) => pick(params.label), record_decision: (params) => pick(params.choice) };
+  }, [surface, asked, staging, stagesAnswer]);
   const actionsRef = useRef(actions);
   useEffect(() => { actionsRef.current = actions; }, [actions]);
   const store = useMemo(() => createStateStore(structuredClone(spec.state ?? {})), [spec]);
@@ -128,7 +129,7 @@ function DrawnBlock({ spec, refs }: { spec: Spec; refs: readonly string[] }) {
     };
   }, [spec, refs, messageId, title]);
   return <JSONUIProvider registry={registry} store={store} handlers={handlers} functions={blockFunctions}>
-    <BlockRendering.Provider value={rendering}><BlockAnswersQuestion.Provider value={answersQuestion}><BlockQuestionClosed.Provider value={closed}><CommentBlock.Provider value={comments}>
+    <BlockRendering.Provider value={rendering}><BlockStagedAnswer.Provider value={stagesAnswer ? staged : null}><BlockQuestionClosed.Provider value={closed}><CommentBlock.Provider value={comments}>
       <Lightbox label={typeof title === 'string' && title ? title : 'Block'} mode="fill" className="my-2" actions={<BlockCommentButton />}
         expanded={<div className="mx-auto flex w-full min-w-0 max-w-5xl flex-col gap-1.5"><div inert={closed !== null} className="min-w-0"><Renderer spec={spec} registry={registry} /></div><Notices /></div>}>
         <div data-gitspace-block="gitspace-ui" data-comment-block={comments?.key} data-comment-kind={comments?.kind} data-comment-ask={comments?.asks ? '' : undefined} className="flex min-w-0 flex-col gap-1.5">
@@ -138,25 +139,28 @@ function DrawnBlock({ spec, refs }: { spec: Spec; refs: readonly string[] }) {
           <BlockMarker />
         </div>
       </Lightbox>
-    </CommentBlock.Provider></BlockQuestionClosed.Provider></BlockAnswersQuestion.Provider></BlockRendering.Provider>
+    </CommentBlock.Provider></BlockQuestionClosed.Provider></BlockStagedAnswer.Provider></BlockRendering.Provider>
   </JSONUIProvider>;
 }
 
 /**
  * What a block asks of the person, above it. A required ask reads "Needs your answer" while its workspace question is
- * open (or, with no question, until the block's own choice is answered or sent), and why when the question closed
- * unanswered. An optional ask is a quiet invitation.
+ * open with no answer staged (or, with no question, until the block's own choice is staged), "Answer in your message"
+ * while one waits for the person's next message, and why when the question closed unanswered. An optional ask is a
+ * quiet invitation.
  */
 function AskMarkers({ asks, asked }: { asks: readonly BlockAsk[]; asked: AskQuestion | null }) {
   const answered = useStateValue<unknown>('/answered');
   const sent = useStateValue<unknown>('/sent');
   const staged = useStateValue<unknown>('/staged');
+  const stagedAnswer = useContext(BlockStagedAnswer);
   const [anySent, anyStaged] = [sent, staged].map((value) => typeof value === 'object' && value !== null && Object.values(value).some((entry) => entry !== null && entry !== undefined && entry !== ''));
   const local = answered || anySent ? 'answered' : anyStaged ? 'staged' : 'open';
   return <div className="flex flex-col gap-1">{asks.map((ask, index) => {
     if (!ask.required) return ask.prompt ? <p key={index} className="flex items-center gap-1.5 px-1 text-caption text-muted-foreground"><MessageQuestionCircle width={13} height={13} className="shrink-0" />{ask.prompt}</p> : null;
     const question = asked?.ask.id === ask.id ? asked.question : null;
-    const state = question ? questionState(question) : local;
+    const stored = question ? questionState(question) : local;
+    const state = stored === 'open' && question && stagedAnswer !== null ? 'staged' : stored;
     if (state === 'answered' || answered) return null;
     if (question?.closed) return <div key={index} data-block-ask="closed" className="flex flex-wrap items-center gap-2 px-1"><Badge size="compact" variant="dot" color="gray">{CLOSED_REASON[question.closed.reason]}</Badge></div>;
     return <div key={index} data-block-ask={state} className="flex flex-wrap items-center gap-2 px-1">

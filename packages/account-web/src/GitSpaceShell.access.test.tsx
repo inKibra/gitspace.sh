@@ -182,7 +182,7 @@ it('reports a disconnected provider as a toast whose Connect opens Inference →
   const rejects = async (): Promise<never> => { throw new Error('not called'); };
   const sessionControls: NonNullable<GitSpaceShellProps['sessionControls']> = {
     value: { sessionId: 'session-a', role: null, roleLabel: null, roles: [], provider: 'anthropic', models: [{ provider: 'anthropic', id: 'claude', name: 'Claude', contextWindow: null, unavailable: null }], model: 'claude', thinking: null, fastMode: false, planMode: false, context: null, cost: 0, todos: [], queue: { steering: [], followUp: [] }, pendingAsk: null, goal: null, history: [], historyAnchorId: null },
-    onCycleRole: rejects, onSetModel: rejects, onSetThinking: rejects, onSetFast: rejects, onSetGoal: rejects, onCompact: rejects, onClearQueue: rejects, onRemoveQueuedMessage: rejects, onPromoteQueuedMessage: rejects, onDismissAutomationRun: rejects, onAnswerAsk: rejects, onStop: rejects, onNavigateTree: rejects,
+    onCycleRole: rejects, onSetModel: rejects, onSetThinking: rejects, onSetFast: rejects, onSetGoal: rejects, onCompact: rejects, onClearQueue: rejects, onRemoveQueuedMessage: rejects, onPromoteQueuedMessage: rejects, onDismissAutomationRun: rejects, onStop: rejects, onNavigateTree: rejects,
   };
   await act(() => root.render(<GitSpaceShell {...verticalSliceFixture} sessionControls={sessionControls} providers={[{ id: 'anthropic', name: 'Anthropic', hasAuth: false }]} />));
   const toast = toasts().find((item) => item.textContent?.includes('Anthropic isn’t connected in this inference profile'));

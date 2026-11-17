@@ -392,7 +392,7 @@ const OPERATOR_PROCEDURES: Readonly<Record<string, true>> = {
   'storageIncidents.resume': true, 'storageIncidents.pause': true, 'storageIncidents.inspect': true,
 };
 export const OPERATOR_SESSION_COMMANDS = [
-  'answerAsk', 'browserEverything', 'browserTakeOver', 'browserResume', 'browserTabGroup', 'browserShareCreate', 'browserShareConnect',
+  'answerAsk', 'stageAnswer', 'browserEverything', 'browserTakeOver', 'browserResume', 'browserTabGroup', 'browserShareCreate', 'browserShareConnect',
   'browserCaptureShareCreate', 'browserCommentAdd', 'browserCommentReply', 'browserCommentResolve',
 ] as const;
 export const OPERATOR_QA_ACTIONS = ['file', 'share'] as const;

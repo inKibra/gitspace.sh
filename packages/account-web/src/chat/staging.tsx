@@ -3,23 +3,26 @@
 // conversation and the Inspector, so a block in either stages into the same composer. Sending puts the message's text
 // first, then one line per chip ("Decided: …", "Answered: …", "Review batch: …"), and hands the staged decisions to the
 // send, which carries them to the workspace: it journals each as a `decision` entry citing the message once the message
-// is in the conversation. Comments are staged in the workspace (comments/CommentLayer.tsx), not here: their chips show
-// the workspace's staged comments, and the send names them for the workspace to add to the message.
+// is in the conversation. Comments and answers to the workspace's questions are staged in the workspace (its staged
+// comments and answers, comments/CommentLayer.tsx and `stageAnswer`), not here: their chips show what the workspace
+// staged, and the send carries them for the workspace to add to the message; it answers the questions as it takes it.
 import { Button } from '@gitspace/ui';
-import { commentExcerpt, commentsMessage, type SentComment } from '@gitspace/protocol-runtime/comments';
+import { answerShown, answersMessage, commentExcerpt, commentsMessage, type SentAnswer, type SentComment, type StagedAnswer } from '@gitspace/protocol-runtime/comments';
 import { RuntimeMessageDecisionSchema, type RuntimeMessageDecision } from '@gitspace/protocol-runtime/session-controls';
 import { Annotation, CheckCircle, GitPullRequest, MessageChatCircle, MessageQuestionCircle, XClose } from '@untitledui/icons';
 import { createContext, useCallback, useContext, useMemo, useRef, useState, type ComponentType, type ReactNode, type SVGProps } from 'react';
 import { BlockActionsProvider, type BlockActions, type BlockState } from '../blocks/BlockActions.js';
 import { CommentLayer } from '../comments/context.js';
+import { QuestionCardsContext } from '../QuestionCards.js';
 
 export type JsonValue = string | number | boolean | null | readonly JsonValue[] | { readonly [key: string]: JsonValue };
 
 export interface StagedChip {
   /** One chip per key: staging the same key again replaces the chip in place. */
   key: string;
-  /** comment: a staged comment of the workspace; its key is the comment's id. */
-  kind: 'decision' | 'answer' | 'review' | 'message' | 'comment';
+  /** comment: a staged comment of the workspace; its key is the comment's id. question: the workspace's staged answer
+   * to one of its questions; its key is the question's id. */
+  kind: 'decision' | 'answer' | 'review' | 'message' | 'comment' | 'question';
   label: string;
   detail?: string;
   /** Sent with the chip's line as JSON when not null. */
@@ -34,26 +37,37 @@ export interface StagedBlock {
   answers?: boolean;
 }
 
+/** A staged answer as a send carries it: the answer, and its question's prompt for the message's line. */
+export interface ShownAnswer { prompt: string; sent: SentAnswer }
+
 export interface ComposerStaging {
   chips: readonly StagedChip[];
   stage(chip: StagedChip, block?: StagedBlock): void;
-  /** Removes the chip; its block shows it as no longer staged. A comment's chip takes the comment back. */
+  /** Removes the chip; its block shows it as no longer staged. A comment's chip takes the comment back, an answer's
+   * chip the answer, and its question's card opens again. */
   unstage(key: string): void;
-  /** The message a send of `text` delivers: the text, the chips' lines, then the staged comments' lines and data. */
+  /** The workspace's staged answers to its open questions. */
+  answers: readonly StagedAnswer[];
+  /** Stages an answer to the workspace's open question `questionId` for the next message, replacing one staged before. */
+  stageAnswer(questionId: string, answer: SentAnswer['answer']): Promise<void>;
+  /** The message a send of `text` delivers: the text, the chips' lines, the staged answers' lines and data, then the
+   * staged comments' lines and data. */
   message(text: string): string;
-  /** Sends `text` with the staged chips as one message through `send`, with the staged decisions and comments; once it
-   * went, the chips leave the composer and their blocks show them sent. A failed send keeps the chips. */
-  deliver(text: string, send: (message: string, decisions: RuntimeMessageDecision[], comments: readonly SentComment[]) => Promise<void>): Promise<void>;
+  /** Sends `text` with the staged chips as one message through `send`, with the staged decisions, comments and
+   * answers; once it went, the chips leave the composer and their blocks show them sent. A failed send keeps the chips. */
+  deliver(text: string, send: (message: string, decisions: RuntimeMessageDecision[], comments: readonly SentComment[], answers: readonly ShownAnswer[]) => Promise<void>): Promise<void>;
 }
 
-const SENT: Record<StagedChip['kind'], string> = { decision: 'Decided', answer: 'Answered', review: 'Review batch', message: 'Message', comment: 'Comment' };
+const SENT: Record<StagedChip['kind'], string> = { decision: 'Decided', answer: 'Answered', review: 'Review batch', message: 'Message', comment: 'Comment', question: 'Answer' };
 const CHIP: Record<StagedChip['kind'], { label: string; icon: ComponentType<SVGProps<SVGSVGElement>> }> = {
   decision: { label: 'Decision', icon: CheckCircle },
   answer: { label: 'Answer', icon: MessageQuestionCircle },
   review: { label: 'Review batch', icon: GitPullRequest },
   message: { label: 'Message', icon: MessageChatCircle },
   comment: { label: 'Comment', icon: Annotation },
+  question: { label: 'Answer', icon: MessageQuestionCircle },
 };
+const NO_ANSWERS: readonly StagedAnswer[] = [];
 const ID = /^[A-Za-z0-9._:-]{1,128}$/u;
 
 function chipHead(chip: StagedChip): string {
@@ -93,7 +107,8 @@ interface Staged { chip: StagedChip; block?: StagedBlock }
 
 const ComposerStagingContext = createContext<ComposerStaging | null>(null);
 
-export function ComposerStagingProvider({ children }: { children: ReactNode }) {
+/** `answers`: the workspace's staged answers (the snapshot's `gitspace.comments`). */
+export function ComposerStagingProvider({ children, answers = NO_ANSWERS }: { children: ReactNode; answers?: readonly StagedAnswer[] }) {
   const [staged, setStaged] = useState<readonly Staged[]>([]);
   const current = useRef(staged);
   current.current = staged;
@@ -103,6 +118,15 @@ export function ComposerStagingProvider({ children }: { children: ReactNode }) {
   const latestComments = useRef(comments);
   latestComments.current = comments;
   const remove = layer?.remove;
+  // The workspace's staged answers to the questions it has, as the send carries them.
+  const cards = useContext(QuestionCardsContext);
+  const request = cards?.request;
+  const shown = useMemo(() => answers.flatMap((answer): ShownAnswer[] => {
+    const question = cards?.questions.find((item) => item.id === answer.questionId);
+    return question ? [{ prompt: question.prompt, sent: { questionId: answer.questionId, answer: answer.answer } }] : [];
+  }), [answers, cards?.questions]);
+  const latestAnswers = useRef(shown);
+  latestAnswers.current = shown;
 
   const stage = useCallback((chip: StagedChip, block?: StagedBlock) => {
     const previous = current.current.find((item) => item.chip.key === chip.key);
@@ -114,21 +138,27 @@ export function ComposerStagingProvider({ children }: { children: ReactNode }) {
     setStaged(current.current);
   }, []);
 
+  const stageAnswer = useCallback(async (questionId: string, answer: SentAnswer['answer']) => {
+    if (!request) throw new Error('Answering is not available here.');
+    await request({ type: 'stageAnswer', questionId, answer });
+  }, [request]);
+
   const unstage = useCallback((key: string) => {
     if (remove && latestComments.current.some((comment) => comment.id === key)) { void remove(key); return; }
+    if (request && latestAnswers.current.some((answer) => answer.sent.questionId === key)) { void request({ type: 'unstageAnswer', questionId: key }); return; }
     const item = current.current.find((candidate) => candidate.chip.key === key);
     if (!item) return;
     item.block?.state.setStaged(item.block.key, null);
     current.current = current.current.filter((candidate) => candidate !== item);
     setStaged(current.current);
-  }, [remove]);
+  }, [remove, request]);
 
-  const message = useCallback((text: string) => commentsMessage(stagedMessage(text, current.current.map((item) => item.chip)), latestComments.current), []);
+  const message = useCallback((text: string) => commentsMessage(answersMessage(stagedMessage(text, current.current.map((item) => item.chip)), latestAnswers.current), latestComments.current), []);
 
-  const deliver = useCallback(async (text: string, send: (message: string, decisions: RuntimeMessageDecision[], comments: readonly SentComment[]) => Promise<void>) => {
+  const deliver = useCallback(async (text: string, send: (message: string, decisions: RuntimeMessageDecision[], comments: readonly SentComment[], answers: readonly ShownAnswer[]) => Promise<void>) => {
     const going = current.current;
     const decisions = going.flatMap((item) => item.chip.kind === 'decision' ? [messageDecision(item.chip)] : []);
-    await send(stagedMessage(text, going.map((item) => item.chip)), decisions, latestComments.current);
+    await send(stagedMessage(text, going.map((item) => item.chip)), decisions, latestComments.current, latestAnswers.current);
     for (const { chip, block } of going) {
       block?.state.setStaged(block.key, null);
       block?.state.setSent(block.key, chip.label);
@@ -138,8 +168,12 @@ export function ComposerStagingProvider({ children }: { children: ReactNode }) {
     setStaged(current.current);
   }, []);
 
-  const chips = useMemo(() => [...staged.map((item) => item.chip), ...comments.map((comment): StagedChip => ({ key: comment.id, kind: 'comment', label: commentExcerpt(comment.note, 60), detail: `on “${commentExcerpt(comment.anchor.quote, 40)}”`, payload: null }))], [staged, comments]);
-  const value = useMemo<ComposerStaging>(() => ({ chips, stage, unstage, message, deliver }), [chips, stage, unstage, message, deliver]);
+  const chips = useMemo(() => [
+    ...staged.map((item) => item.chip),
+    ...shown.map(({ prompt, sent }): StagedChip => ({ key: sent.questionId, kind: 'question', label: commentExcerpt(answerShown(sent.answer), 60), detail: `to “${commentExcerpt(prompt, 40)}”`, payload: null })),
+    ...comments.map((comment): StagedChip => ({ key: comment.id, kind: 'comment', label: commentExcerpt(comment.note, 60), detail: `on “${commentExcerpt(comment.anchor.quote, 40)}”`, payload: null })),
+  ], [staged, shown, comments]);
+  const value = useMemo<ComposerStaging>(() => ({ chips, stage, unstage, answers, stageAnswer, message, deliver }), [chips, stage, unstage, answers, stageAnswer, message, deliver]);
   return <ComposerStagingContext.Provider value={value}>{children}</ComposerStagingContext.Provider>;
 }
 

@@ -8,7 +8,7 @@ import { RuntimeBrowserStatusSchema, RuntimeBrowserArtifactPageSchema, RuntimeBr
 import { RuntimeBrowserConnectedTabSchema, RuntimeBrowserShareExpirySchema, RuntimeBrowserShareSchema } from './browser-share.js';
 import { RuntimeBrowserCommentAnchorSchema, RuntimeBrowserCommentPageSchema, RuntimeBrowserCommentSourceSchema, RuntimeBrowserCommentStatusSchema, RuntimeBrowserCommentTextSchema, RuntimeBrowserCommentThreadSchema, RuntimeBrowserCommentThreadViewSchema } from './browser-comments.js';
 import { RuntimeBrowserCaptureShareExpirySchema, RuntimeBrowserCaptureShareSchema } from './browser-capture-share.js';
-import { CommentAnchorSchema, CommentIdSchema, CommentLookupSchema, CommentNoteSchema, STAGED_COMMENTS_MAX } from './comments.js';
+import { CommentAnchorSchema, CommentIdSchema, CommentLookupSchema, CommentNoteSchema, STAGED_ANSWERS_MAX, STAGED_COMMENTS_MAX, SentAnswerSchema } from './comments.js';
 export { SessionUsageReportSchema, UsageTotalsSchema, type SessionUsageReport, type UsageTotals } from './usage.js';
 
 export const ModelSelectionIntentSchema = z.discriminatedUnion('kind', [
@@ -56,9 +56,9 @@ export const RuntimeMessageDecisionSchema = z.object({
 }).strict();
 export type RuntimeMessageDecision = z.infer<typeof RuntimeMessageDecisionSchema>;
 /** A staged choice's data in a sent message: the `~~~json` block right under its "Decided: …", "Answered: …",
- * "Review batch: …", "Message: …" or "Comment on …" line. The agent reads it; anything shown to people replaces each
- * match with `$1`, the line alone. */
-export const STAGED_CHOICE_DATA = /^((?:(?:Decided|Answered|Review batch|Message): |Comment on )[^\n]*)\n~~~json\n[\s\S]*?\n~~~$/gmu;
+ * "Review batch: …", "Message: …", "Comment on …" or "Answer to …" line. The agent reads it; anything shown to people
+ * replaces each match with `$1`, the line alone. */
+export const STAGED_CHOICE_DATA = /^((?:(?:Decided|Answered|Review batch|Message): |Comment on |Answer to )[^\n]*)\n~~~json\n[\s\S]*?\n~~~$/gmu;
 export const RuntimeSessionCommandSchema = z.union([
   z.object({ type: z.literal('browserStatus'), machineId: z.string().optional() }),
   z.object({ type: z.literal('browserRevoke'), machineId: z.string().optional(), groupId: z.string().uuid() }),
@@ -107,13 +107,19 @@ export const RuntimeSessionCommandSchema = z.union([
   z.object({ type: z.literal('browserTabGroup'), pairingId: z.string().uuid() }),
   z.object({ type: z.literal('browserArtifact'), machineId: z.string().optional(), artifactId: z.string(), offset: z.number().int().nonnegative(), limit: z.number().int().min(1).max(65536) }),
   z.object({ type: z.enum(simple) }),
-  /** `comments`: the staged comments (`stageComment`) the message carries; they leave the staged comments once it is in the conversation's inbox. */
-  z.object({ type: z.literal('prompt'), text: z.string(), draftRevision: z.number().int().nonnegative().optional(), draftText: z.string().optional(), streamingBehavior: z.enum(['steer', 'followUp']).optional(), decisions: z.array(RuntimeMessageDecisionSchema).max(32).optional(), comments: z.array(CommentIdSchema).max(STAGED_COMMENTS_MAX).optional() }),
+  /** `comments`: the staged comments (`stageComment`) the message carries; they leave the staged comments once it is in
+   * the conversation's inbox. `answers`: the person's staged answers (`stageAnswer`) it carries; the commit that takes it
+   * answers each question, and they leave the staged answers. A message with answers may have no text. */
+  z.object({ type: z.literal('prompt'), text: z.string(), draftRevision: z.number().int().nonnegative().optional(), draftText: z.string().optional(), streamingBehavior: z.enum(['steer', 'followUp']).optional(), decisions: z.array(RuntimeMessageDecisionSchema).max(32).optional(), comments: z.array(CommentIdSchema).max(STAGED_COMMENTS_MAX).optional(), answers: z.array(SentAnswerSchema).max(STAGED_ANSWERS_MAX).optional() }),
   /** Comments (comments.ts): stage one on what the agent wrote, change a staged one's note, or take one back; the
    * lookup's sent comments on some turns and the replies to them. */
   z.object({ type: z.literal('stageComment'), anchor: CommentAnchorSchema, note: CommentNoteSchema }),
   z.object({ type: z.literal('editComment'), id: CommentIdSchema, note: CommentNoteSchema }),
   z.object({ type: z.literal('unstageComment'), id: CommentIdSchema }),
+  /** A person's answer to an open question of the conversation, staged for their next message (replacing one staged
+   * for it before), or taken back. */
+  z.object({ type: z.literal('stageAnswer'), questionId: z.string().min(1).max(512), answer: RuntimeJsonSchema }),
+  z.object({ type: z.literal('unstageAnswer'), questionId: z.string().min(1).max(512) }),
   z.object({ type: z.literal('commentLookup'), turnIds: z.array(z.string().min(1)).max(256) }),
   z.object({ type: z.literal('setWorkspacePhase'), phase: z.enum(['plan', 'code', 'review', 'ship']) }),
   z.object({ type: z.literal('cycleRole'), direction: z.enum(['forward', 'backward']) }),

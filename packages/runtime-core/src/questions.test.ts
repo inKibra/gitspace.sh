@@ -8,7 +8,7 @@ import { BACKGROUND_CONTEXT as context } from '@earendil-works/chord/context';
 import { createAssistantMessageEventStream, createModels, type Api, type AssistantMessage, type Model } from '@earendil-works/pi-ai';
 import { RuntimeIdentitySchema, RuntimeQuestionSchema, questionState } from '@gitspace/protocol-runtime';
 import { createRuntimeHarness } from './harness.js';
-import { PlanDoc, QuestionsDoc, type Question } from './documents.js';
+import { PlanDoc, QuestionsDoc, StagedCommentsDoc, WorkspaceDoc, type Question } from './documents.js';
 import { createSessionControls } from './session-controls.js';
 import { createAutomationRequests } from './automation-requests.js';
 
@@ -189,6 +189,85 @@ test('the person answering one question through its card answers it and closes t
     expect(await f.states()).toEqual({ [first.id]: ['answered', null], [second.id]: ['closed', 'replied'] });
     const [, next] = await f.received(2);
     expect(next).toContain(`The user answered your question (question ${first.id}).`);
+    await f.root.waitForIdle(context);
+  } finally { await f.harness.close(context); }
+});
+
+const UPLOADS = [{ id: 'bucket', selectedOptions: ['uploads'], customInput: null }];
+
+test('a staged answer starts no turn and survives a restart; the person\'s message carries it: the question is answered, the others close as replied, one input holds both, and the stage clears', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'gitspace-staged-answers-'));
+  onTestFinished(() => rm(directory, { recursive: true, force: true }));
+  const reply: AssistantMessage['content'] = [{ type: 'text', text: `Two things:\n\n${askBlock('bucket')}\n\n${askBlock('region')}` }];
+  const before = await open(await openNodeJsonlStorage(directory, context), reply);
+  let first: Question | undefined;
+  let second: Question | undefined;
+  try {
+    await before.root.submit({ type: 'input', requestId: 'buckets', content: 'Move the files' }, context);
+    await before.root.waitForIdle(context);
+    [first, second] = await before.posted(2);
+    if (!first || !second) throw new Error('The reply did not ask twice');
+    const id = String(before.root.id);
+    await before.controls.execute(id, { type: 'stageAnswer', questionId: first.id, answer: [{ id: 'bucket', selectedOptions: ['assets'], customInput: null }] }, false, 'browser');
+    // Changing the pick replaces the staged answer.
+    await before.controls.execute(id, { type: 'stageAnswer', questionId: first.id, answer: UPLOADS }, false, 'browser');
+    expect(await before.states()).toEqual({ [first.id]: ['open', null], [second.id]: ['open', null] });
+    await before.root.waitForIdle(context);
+    expect(before.requests).toHaveLength(1);
+  } finally { await before.harness.close(context); }
+  const after = await open(await openNodeJsonlStorage(directory, context), reply);
+  try {
+    await after.lifecycle.recover();
+    after.harness.resume();
+    if (!first || !second) throw new Error('The reply did not ask twice');
+    expect((await after.harness.snapshot(StagedCommentsDoc, context))?.answers).toEqual([{ questionId: first.id, answer: UPLOADS, stagedAt: expect.any(String), deviceId: 'browser' }]);
+    await after.controls.execute(String(after.root.id), { type: 'prompt', text: 'Then sync them.', answers: [{ questionId: first.id, answer: UPLOADS }] }, false, 'browser');
+    expect(await after.states()).toEqual({ [first.id]: ['answered', null], [second.id]: ['closed', 'replied'] });
+    expect((await after.questions()).find(item => item.id === first?.id)?.answer).toEqual(UPLOADS);
+    expect((await after.harness.snapshot(StagedCommentsDoc, context))?.answers).toEqual([]);
+    const [next] = await after.received(1);
+    expect(next).toContain('Then sync them.');
+    expect(next).toContain('Answer to “Which bucket?”: uploads');
+    expect(next).toContain(`\\"questionId\\": \\"${first.id}\\"`);
+    await after.root.waitForIdle(context);
+    // One input, one request: the answer is no event of its own.
+    expect(after.requests).toHaveLength(1);
+  } finally { await after.harness.close(context); }
+});
+
+test('a message with only a staged answer answers its question; an answer not staged is refused', async () => {
+  const f = await open(new MemoryStorage());
+  try {
+    const id = String(f.root.id);
+    await f.root.submit({ type: 'input', requestId: 'buckets', content: 'Move the files' }, context);
+    const question = await f.asked();
+    await expect(f.controls.execute(id, { type: 'prompt', text: '', answers: [{ questionId: question.id, answer: UPLOADS }] }, false, 'browser')).rejects.toThrow('An answer in this message is no longer staged');
+    await f.controls.execute(id, { type: 'stageAnswer', questionId: question.id, answer: UPLOADS }, false, 'browser');
+    await f.controls.execute(id, { type: 'prompt', text: '', answers: [{ questionId: question.id, answer: UPLOADS }] }, false, 'browser');
+    expect(await f.states()).toEqual({ [question.id]: ['answered', null] });
+    const [, next] = await f.received(2);
+    expect(next).toContain('Answer to “Which bucket?”: uploads');
+    await f.root.waitForIdle(context);
+  } finally { await f.harness.close(context); }
+});
+
+test('a plan approval staged as Approve is approved when the message carrying it is taken, not when it is staged', async () => {
+  const f = await open(new MemoryStorage(), [{ type: 'toolCall', id: 'plan-call', name: 'propose_plan', arguments: { prompt: 'Move the files to uploads', choices: ['Approve', 'Reject'], steps: [{ id: 'move', title: 'Move the files', detail: 'Copy, then delete.' }] } }]);
+  try {
+    const id = String(f.root.id);
+    await f.root.submit({ type: 'input', requestId: 'plan', content: 'Plan the move' }, context);
+    const plan = await f.asked();
+    const approve = { approved: true, note: null };
+    await expect(f.controls.execute(id, { type: 'stageAnswer', questionId: plan.id, answer: approve }, false, 'browser')).rejects.toThrow('Human approval capability required');
+    await f.controls.execute(id, { type: 'stageAnswer', questionId: plan.id, answer: approve }, true, 'browser');
+    expect(await f.harness.snapshot(PlanDoc, f.root.id, context)).toMatchObject({ status: 'proposed', questionId: plan.id });
+    expect(await f.states()).toEqual({ [plan.id]: ['open', null] });
+    await f.controls.execute(id, { type: 'prompt', text: 'Go ahead.', answers: [{ questionId: plan.id, answer: approve }] }, true, 'browser');
+    expect(await f.harness.snapshot(PlanDoc, f.root.id, context)).toMatchObject({ status: 'approved', questionId: plan.id, revision: 1 });
+    expect((await f.harness.snapshot(WorkspaceDoc, context))?.phase).toBe('code');
+    expect(await f.states()).toEqual({ [plan.id]: ['answered', null] });
+    const [, next] = await f.received(2);
+    expect(next).toContain('Answer to “Move the files to uploads”: Approve');
     await f.root.waitForIdle(context);
   } finally { await f.harness.close(context); }
 });

@@ -89,9 +89,9 @@ export function OtherDocumentRef({ document, id }: { document: string; id: strin
 /** Set around the frame a Sequence shows: whether the Sequence is playing, so a clip in the frame plays with it. */
 export const SequenceFrame = createContext<{ playing: boolean } | null>(null);
 
-/** True inside a block whose choice answers its open workspace question at once; false where a choice stages in the
- * person's message bar. */
-export const BlockAnswersQuestion = createContext(false);
+/** Inside a block whose open workspace question has an answer staged for the person's next message: the chosen option's
+ * label (or the written answer). Null elsewhere. */
+export const BlockStagedAnswer = createContext<string | null>(null);
 
 /** Inside a block whose workspace question closed unanswered: why, as a closed question card says it (`CLOSED_REASON`).
  * The block then takes no choice. Null elsewhere. */

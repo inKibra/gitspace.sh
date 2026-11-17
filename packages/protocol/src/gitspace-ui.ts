@@ -1833,7 +1833,7 @@ Show real data with builders: \`tools.blocks({ op })\`, op diff, excerpt, change
 ${FENCE}gitspace-ui CallDiff id=cache-path
 {"title":"…","lines":[…]}
 ${FENCE}
-After the component, optionally: id=<id> (once per message) names the block; ask invites a response; ask=required (needs an id) makes it a question: the workspace shows Needs you and the person's pick arrives as your next message. There is no ask tool: end your reply with that block; nothing waits. If they write in the chat instead, the question closes.`,
+After the component, optionally: id=<id> (once per message) names the block; ask invites a response; ask=required (needs an id) makes it a question: the workspace shows Needs you; their pick comes with their next message. There is no ask tool: end your reply with that block; nothing waits. If they write in the chat instead, the question closes.`,
   `Props (each JSON is a valid short-form body; "also" names optional fields):
 ${BRIEF_SHAPES.map((shape) => `- ${shape.component}${shape.options === undefined ? '' : ` ${shape.options}`} ${JSON.stringify(shape.props)}${shape.also === undefined ? '' : `; also: ${shape.also}`}`).join('\n')}`,
   'Anything else (layouts with children, state, actions; FlowMap, Checklist, BeforeAfter and other components): read skill://gitspace-ui. GitSpace checks every block: an invalid one in your reply gets a fix step (fix_block); a tool write holding one is refused. A person\'s comments on your message arrive as "Comment on “…”: …" lines with { "comment": { "id" } }; answer each with its own Reply block, then go on.',

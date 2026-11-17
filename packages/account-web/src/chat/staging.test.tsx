@@ -7,6 +7,8 @@ import type { BlockState } from '../blocks/BlockActions.js';
 import { StandaloneComposer as Composer } from '../Composer.js';
 import type { GitSpaceShellProps } from '../GitSpaceShell.js';
 import { ComposerStagingProvider, useComposerStaging, workspaceBlockActions, type ComposerStaging } from './staging.js';
+import { QuestionCardsContext, type QuestionCards } from '../QuestionCards.js';
+import { SessionControlSchema, type RuntimeSessionCommand } from '@gitspace/protocol-runtime/session-controls';
 
 vi.mock('../device-session.js', () => ({ currentDevice: vi.fn(async () => null), deviceRejected: vi.fn() }));
 
@@ -148,4 +150,28 @@ it('stages a block\'s choices under keys of their own block, and a failed sign-o
   await expect(actions.accept_requirement?.({ id: 'req-1', accepted: true, label: null, checkedPath: '/rows/0/checked' }, first)).rejects.toThrow('The goal changed.');
   expect(setAcceptance).toHaveBeenCalledWith('req-1', true);
   expect(first.set).toHaveBeenCalledWith('/rows/0/checked', false);
+});
+
+it('shows the workspace\'s staged answer as a chip with its question; a send with only that answer carries it, and removing the chip takes it back', async () => {
+  const onSend = vi.fn<NonNullable<GitSpaceShellProps['onSend']>>(async () => undefined);
+  const requested: RuntimeSessionCommand[] = [];
+  const cards: QuestionCards = {
+    questions: [{ id: 'block-ask:m1:bucket', conversationId: 'main', kind: 'ask', prompt: 'Which bucket?', choices: ['assets', 'uploads'], answer: null }],
+    async request(command) { requested.push(command); return { control: SessionControlSchema.parse({ sessionId: 'main', role: null, roleLabel: null, roles: [], provider: null, models: [], model: null, thinking: null, fastMode: false, planMode: false, context: null, cost: 0, todos: [], queue: { steering: [], followUp: [] }, historyAnchorId: null, history: [], goal: null, pendingAsk: null }) }; },
+    async answer() { throw new Error('no answer expected'); }, watch: () => null,
+  };
+  const answer = [{ id: 'bucket', selectedOptions: ['uploads'], customInput: null }];
+  await act(() => root.render(<QuestionCardsContext.Provider value={cards}><ComposerStagingProvider answers={[{ questionId: 'block-ask:m1:bucket', answer, stagedAt: '2026-11-16T10:00:00.000Z', deviceId: 'browser' }]}>
+    <Probe />
+    <Composer workspace={verticalSliceFixture.workspace} running={false} pending={false} onSend={onSend} />
+  </ComposerStagingProvider></QuestionCardsContext.Provider>));
+  expect(chips()).toEqual(['Answer uploads']);
+  expect(container.textContent).toContain('to “Which bucket?”');
+  await send();
+  expect(onSend).toHaveBeenCalledOnce();
+  const [text, , , , , answers] = onSend.mock.calls[0]!;
+  expect(text).toBe('');
+  expect(answers).toEqual([{ questionId: 'block-ask:m1:bucket', answer }]);
+  await act(async () => { container.querySelector<HTMLButtonElement>('button[aria-label="Remove answer uploads"]')!.click(); });
+  expect(requested).toEqual([{ type: 'unstageAnswer', questionId: 'block-ask:m1:bucket' }]);
 });

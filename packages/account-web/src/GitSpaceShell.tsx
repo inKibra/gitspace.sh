@@ -1,8 +1,9 @@
 import { rpcErrorMessage } from './rpc-error-message.js';
 import type { AskBlock, TransportBlock, TurnBlock } from '@gitspace/blocks';
-import type { PendingAskAnswer, SessionControlView } from '@gitspace/protocol';
+import type { SessionControlView } from '@gitspace/protocol';
 import type { AgentSessionRenderState, SessionHistoryPage, SessionHistoryPageRequest } from '@gitspace/protocol-agent';
 import type { RuntimeMessageDecision, SessionControlView as RuntimeSessionControlView } from '@gitspace/protocol-runtime/session-controls';
+import type { SentAnswer } from '@gitspace/protocol-runtime/comments';
 import type { WorkspaceStatusColor, WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
 import type { RemoteBranchState, WorkspaceLifecycle } from '@gitspace/protocol/project-authority';
 import {
@@ -137,7 +138,6 @@ export interface SessionControlsProps {
   onPromoteQueuedMessage(index: number): Promise<void>;
   /** Cancels an automation run waiting in this conversation's queue, then rereads the queue it left. */
   onDismissAutomationRun(runId: string): Promise<void>;
-  onAnswerAsk(id: string, answers: PendingAskAnswer[]): Promise<void>;
   onStop(): Promise<void>;
   onNavigateTree(entryId: string): Promise<void>;
   onReadHistory?(request: SessionHistoryPageRequest, signal: AbortSignal): Promise<SessionHistoryPage>;
@@ -166,8 +166,9 @@ export interface GitSpaceShellProps {
   machines?: Array<{ id: string; label: string }>;
   /** `text` names each attachment with an `<attachment … />` tag (`chatAttachmentTag`); the files are already in the
    * drive. `decisions`: the decisions staged in the composer that go with the message; `comments`: the ids of the
-   * staged comments that go with it, whose lines and data the workspace adds after `text`. */
-  onSend?: (text: string, behavior?: SendBehavior, draft?: Pick<WorkspaceDraftCapture, 'draftRevision' | 'text'>, decisions?: RuntimeMessageDecision[], comments?: readonly string[]) => void | Promise<void>;
+   * staged comments that go with it, whose lines and data the workspace adds after `text`; `answers`: the staged
+   * answers that go with it, which the workspace records as their questions' answers and adds after `text`. */
+  onSend?: (text: string, behavior?: SendBehavior, draft?: Pick<WorkspaceDraftCapture, 'draftRevision' | 'text'>, decisions?: RuntimeMessageDecision[], comments?: readonly string[], answers?: readonly SentAnswer[]) => void | Promise<void>;
   draft?: WorkspaceDraftBinding;
   /** Present when composer attachments may be uploaded into the session's drive under `uploads/<date>/`. */
   artifactUpload?: ArtifactUploadClient;
@@ -390,7 +391,6 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onR
   }), [transcript, turns, sessionControls]);
   const outbox = useOutbox(outboxArrivals);
   const pendingAsk = sessionControls?.value.pendingAsk ?? null;
-  const answerInline = pendingAsk?.source === 'ask-tool' && sessionControls ? (answers: PendingAskAnswer[]) => sessionControls.onAnswerAsk(pendingAsk.id, answers) : undefined;
   // GitSpace's own questions (a machine-attach approval, the project agent's batch of answers) have no ask call in the
   // transcript to attach to. Their prompts are plain text, one line per item. Inside a cloud workspace the card answers
   // and is dismissed through its workspace question (`questionId`).
@@ -500,8 +500,8 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onR
       {access
         ? <div className="mx-auto flex w-full max-w-3xl flex-col items-center px-6 pb-[calc(var(--composer-overlay-height)+2rem)] pt-10">{access.card}</div>
         : transcript
-          ? <VirtualTranscript history={transcript} transport={transport} onAnswer={answerInline} tail={<OutgoingMessages outbox={outbox} />} />
-          : <TurnTranscript turns={turns} transport={transport} onAnswer={answerInline} tail={<OutgoingMessages outbox={outbox} />} />}
+          ? <VirtualTranscript history={transcript} transport={transport} tail={<OutgoingMessages outbox={outbox} />} />
+          : <TurnTranscript turns={turns} transport={transport} tail={<OutgoingMessages outbox={outbox} />} />}
     </ScrollArea>
     <div ref={composerOverlay} className="pointer-events-none absolute inset-x-0 bottom-0 z-20 flex justify-center px-6 pb-4">
       <div className="w-full max-w-xl">
@@ -512,7 +512,7 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onR
                     {pendingAsk.links.map((link) => <ResourceLink key={link.uri} href={link.uri} className="text-foreground underline underline-offset-2">{link.label}</ResourceLink>)}
                   </nav>
                 : null}
-              <AskBlockView key={standaloneAsk.id} item={standaloneAsk} plainPrompt onAnswer={(answers) => sessionControls.onAnswerAsk(pendingAsk.id, answers)} />
+              <AskBlockView key={standaloneAsk.id} item={standaloneAsk} plainPrompt />
             </div>
           : null}
         {access

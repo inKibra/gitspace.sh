@@ -6,8 +6,10 @@ import { AssistantEntry, UserEntry, type Conversation, type Cursor, type EntryRe
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { PI_ENTRY_ORDINALS, openerAt, piMessageRowId, piSessionId, turnRowId, userRowId } from '@gitspace/blocks';
 import { blockReplies } from '@gitspace/protocol/gitspace-ui';
-import { STAGED_COMMENTS_MAX, messageComments, type CommentAnchor, type CommentLookup, type StagedComment } from '@gitspace/protocol-runtime/comments';
-import { CommentLookupDoc, StagedCommentsDoc } from './documents.js';
+import { STAGED_ANSWERS_MAX, STAGED_COMMENTS_MAX, messageComments, type CommentAnchor, type CommentLookup, type StagedComment } from '@gitspace/protocol-runtime/comments';
+import { questionState } from '@gitspace/protocol-runtime';
+import { CommentLookupDoc, QuestionsDoc, StagedCommentsDoc } from './documents.js';
+import { messageAnswer, questionRefusal } from './questions.js';
 import { turnOpeners } from './transcript-rows.js';
 
 /** Entries one scan reads. */
@@ -74,6 +76,31 @@ export async function stagedComments(harness: Harness, ids: readonly string[]): 
   const found = items.filter(item => ids.includes(item.id));
   if (found.length !== new Set(ids).size) throw new Error('A comment in this message is no longer staged');
   return found;
+}
+
+/** Stages a person's answer to the open question `questionId` of the conversation for their next message, replacing
+ * one staged for it before. The answer must be one the question takes from a message (`messageAnswer`). */
+export async function stageAnswer(harness: Harness, conversation: Conversation, questionId: string, answer: unknown, canApprove: boolean, deviceId: string | null): Promise<void> {
+  await harness.commit(async tx => {
+    const question = (await tx.doc(QuestionsDoc)).items.find(item => item.id === questionId);
+    if (!question) throw new Error(`Question ${questionId} is not one this workspace's agents asked`);
+    if (question.conversationId !== String(conversation.id)) throw new Error(`Question ${questionId} belongs to another conversation`);
+    if (questionState(question) !== 'open') throw new Error(questionRefusal(question));
+    const staged = await tx.doc(StagedCommentsDoc);
+    const answers = staged.answers ?? [];
+    const next = { questionId, answer: messageAnswer(question, answer, canApprove), stagedAt: new Date().toISOString(), deviceId };
+    if (answers.some(item => item.questionId === questionId)) { staged.answers = answers.map(item => item.questionId === questionId ? next : item); return; }
+    if (answers.length >= STAGED_ANSWERS_MAX) throw new Error(`At most ${STAGED_ANSWERS_MAX} answers wait for a message`);
+    staged.answers = [...answers, next];
+  }, BACKGROUND_CONTEXT);
+}
+
+/** Takes a staged answer back: its question waits for an answer again. */
+export async function unstageAnswer(harness: Harness, questionId: string): Promise<void> {
+  await harness.commit(async tx => {
+    const staged = await tx.doc(StagedCommentsDoc);
+    staged.answers = (staged.answers ?? []).filter(item => item.questionId !== questionId);
+  }, BACKGROUND_CONTEXT);
 }
 
 /**

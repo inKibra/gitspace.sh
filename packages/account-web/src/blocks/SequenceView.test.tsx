@@ -1,11 +1,13 @@
 // @vitest-environment happy-dom
 import type { RuntimeQuestion } from '@gitspace/protocol-runtime';
+import type { StagedAnswer } from '@gitspace/protocol-runtime/comments';
 import type { RuntimeSessionCommand, RuntimeSessionResult } from '@gitspace/protocol-runtime/session-controls';
 import { blockAskQuestionId } from '@gitspace/protocol/gitspace-ui';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { QuestionCardsContext, type QuestionCards } from '../QuestionCards.js';
+import { ComposerStagingProvider } from '../chat/staging.js';
 import { BlockActionsProvider } from './BlockActions.js';
 import { MessageBlockDocument } from './BlockDocument.js';
 import { UiBlock } from './UiBlock.js';
@@ -111,46 +113,60 @@ describe('a required ask in a stored message', () => {
   };
   const question = (answer: RuntimeQuestion['answer']): RuntimeQuestion => ({ id: blockAskQuestionId('message-1', 'ship'), conversationId: 'c1', kind: 'ask', prompt: 'Ship the cache today?', choices: ['Ship it', 'Hold it'], answer });
 
-  async function draw(questions: readonly RuntimeQuestion[], request: (command: RuntimeSessionCommand) => Promise<RuntimeSessionResult>, staged: string[]): Promise<void> {
-    const cards: QuestionCards = { questions, request, answer: async () => undefined, watch: () => null };
-    await act(async () => root.render(<QuestionCardsContext.Provider value={cards}>
+  async function draw(questions: readonly RuntimeQuestion[], request: (command: RuntimeSessionCommand) => Promise<RuntimeSessionResult>, staged: string[], answers: readonly StagedAnswer[] = []): Promise<void> {
+    const cards: QuestionCards = { questions, request, answer: async () => { throw new Error('no answer expected'); }, watch: () => null };
+    await act(async () => root.render(<QuestionCardsContext.Provider value={cards}><ComposerStagingProvider answers={answers}>
       <BlockActionsProvider actions={{ answer_question: (params) => { staged.push(params.label); } }}>
         <MessageBlockDocument messageId="message-1" text="" pending={false}><UiBlock spec={card} /></MessageBlockDocument>
       </BlockActionsProvider>
-    </QuestionCardsContext.Provider>));
+    </ComposerStagingProvider></QuestionCardsContext.Provider>));
+  }
+  function option(label: string): HTMLElement {
+    const found = [...container.querySelectorAll<HTMLElement>('button, [role="radio"], [role="option"]')].find((element) => element.textContent?.includes(label));
+    if (!found) throw new Error(`no option; the page reads: ${container.textContent ?? ''}`);
+    return found;
   }
 
-  it('answers its open workspace question through the existing answer command when the person picks a choice', async () => {
+  it('stages an answer to its open workspace question when the person picks a choice: no answer command, and the card stays whole and changeable', async () => {
     const commands: RuntimeSessionCommand[] = [];
     const staged: string[] = [];
-    // The command stays in flight: what matters is the command the pick sends.
-    await draw([question(null)], (command) => { commands.push(command); return Promise.withResolvers<RuntimeSessionResult>().promise; }, staged);
+    const respond = async (command: RuntimeSessionCommand): Promise<RuntimeSessionResult> => { commands.push(command); return Promise.withResolvers<RuntimeSessionResult>().promise; };
+    await draw([question(null)], respond, staged);
     expect(container.querySelector('[data-block-ask="open"]')?.textContent).toContain('Needs your answer');
-    expect(container.textContent).toContain('Picking an answer answers the question');
-    expect(container.textContent).not.toContain('message bar');
-    const option = [...container.querySelectorAll<HTMLElement>('button, [role="radio"], [role="option"]')].find((element) => element.textContent?.includes('Ship it'));
-    if (!option) throw new Error(`no option; the page reads: ${container.textContent ?? ''}`);
-    await act(async () => { option.click(); });
+    expect(container.textContent).toContain('Your answer goes with your next message.');
+    expect(container.textContent).not.toContain('Picking an answer');
+    await act(async () => { option('Ship it').click(); });
     await advance(50);
-    expect(commands).toEqual([{ type: 'answerAsk', id: blockAskQuestionId('message-1', 'ship'), answers: [{ id: 'ship', selectedOptions: ['Ship it'], customInput: null }] }]);
+    const id = blockAskQuestionId('message-1', 'ship');
+    expect(commands).toEqual([{ type: 'stageAnswer', questionId: id, answer: [{ id: 'ship', selectedOptions: ['Ship it'], customInput: null }] }]);
     expect(staged).toEqual([]);
+    // Staged: the question still waits, the whole card stays with the pick marked, and another pick replaces it.
+    await draw([question(null)], respond, staged, [{ questionId: id, answer: [{ id: 'ship', selectedOptions: ['Ship it'], customInput: null }], stagedAt: '2026-11-16T10:00:00.000Z', deviceId: 'browser' }]);
+    expect(container.querySelector('[data-block-ask="staged"]')?.textContent).toContain('Answer in your message');
+    expect(container.textContent).toContain('staged · in your message');
+    expect(option('Ship it').getAttribute('aria-checked')).toBe('true');
+    expect(option('Hold it').getAttribute('aria-checked')).toBe('false');
+    await act(async () => { option('Hold it').click(); });
+    await advance(50);
+    expect(commands.at(-1)).toEqual({ type: 'stageAnswer', questionId: id, answer: [{ id: 'ship', selectedOptions: ['Hold it'], customInput: null }] });
   });
 
-  it('shows an answered question answered, with no flag', async () => {
+  it('once answered is locked: the question, the chosen option checked and the other struck through, with no flag', async () => {
     await draw([question([{ selectedOptions: ['Hold it'], customInput: null }])], async () => { throw new Error('no command expected'); }, []);
     await advance(50);
     expect(container.querySelector('[data-block-ask]')).toBeNull();
-    expect(container.textContent).toContain('Hold it');
-    expect(container.textContent).toContain('answered · the agent continues');
+    expect(container.querySelector('section')?.getAttribute('aria-label')).toBe('Ship the cache?, Answered');
+    const rows = [...container.querySelectorAll('section li')];
+    expect(rows.find((row) => row.textContent === 'Hold it')?.querySelector('[aria-label="Chosen"]')).not.toBeNull();
+    expect(rows.find((row) => row.textContent === 'Ship it')?.className).toContain('line-through');
+    expect(container.querySelectorAll('[role="radio"], [role="option"]')).toHaveLength(0);
   });
 
   it('stages the choice in the message bar, and says so, while the workspace has no question for it', async () => {
     const staged: string[] = [];
     await draw([], async () => { throw new Error('no command expected'); }, staged);
-    expect(container.textContent).toContain('Picking an answer puts it in your message bar');
-    const option = [...container.querySelectorAll<HTMLElement>('button, [role="radio"], [role="option"]')].find((element) => element.textContent?.includes('Hold it'));
-    if (!option) throw new Error(`no option; the page reads: ${container.textContent ?? ''}`);
-    await act(async () => { option.click(); });
+    expect(container.textContent).toContain('Your answer goes with your next message.');
+    await act(async () => { option('Hold it').click(); });
     await advance(50);
     expect(staged).toEqual(['Hold it']);
   });

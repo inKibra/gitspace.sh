@@ -20,6 +20,7 @@ import { useRetainedQueryValue } from './useRetainedRead.js';
 import { rpcClient } from './rpc-client.js';
 import { ComposerStagingProvider, RequirementAcceptance } from './chat/staging.js';
 import { CommentLayerProvider } from './comments/CommentLayer.js';
+import { CommentsDocumentSchema } from '@gitspace/protocol-runtime/comments';
 import { artifactUploadRpcClient } from './artifact-upload-rpc.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
 import { runtimeScope, runtimeTurns } from './runtime-shell-adapter.js';
@@ -235,7 +236,6 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, reads, 
       // The withdrawn message leaves the agent's queue without changing anything the controls reread on.
       await run({ type: 'control' });
     },
-    onAnswerAsk: async (id, answers) => { await run({ type: 'answerAsk', id, answers }); },
     onStop: async () => { await run({ type: 'stop' }); },
     onNavigateTree: async entryId => { await run({ type: 'navigateTree', entryId }); transcript.refresh(); },
     onReadHistory: async (request, signal) => { const result = await run({ type: 'historyPage', request }, signal); if (!result.historyPage) throw new Error('The runtime did not return a history page.'); return result.historyPage; },
@@ -296,6 +296,8 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, reads, 
       if (response.status === 'error') throw response.error;
     },
     watch: (card, onClose) => <BrowserWatchDialog identity={identity} request={sessionCommand} target={{ source: card.source, groupId: card.groupId, targetId: card.targetId, title: card.title, url: card.url, label: card.browser }} focusInChrome={card.source === 'chrome'} takeover onClose={onClose} /> }), [snapshot.questions, sessionCommand, identity]);
+  // The staged answers to the workspace's questions, which wait as chips for the next message.
+  const stagedAnswers = useMemo(() => CommentsDocumentSchema.safeParse(snapshot.documents['gitspace.comments']).data?.answers ?? [], [snapshot.documents]);
   const deploymentError = deployment.state === 'failure' ? rpcErrorMessage(deployment.error, 'Read deployment status') : null;
   const relationsError = reads.relations.error !== null ? rpcErrorMessage(reads.relations.error, "Load this project's workspaces") : null;
   useToasts([
@@ -315,11 +317,11 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, reads, 
   return <>
     <QuestionCardsContext.Provider value={questionCards}>
     <CommentLayerProvider conversationId={conversationId} document={snapshot.documents['gitspace.comments']} rows={transcript.rows} latest={!transcript.hasAfter} request={sessionCommand}>
-    <ComposerStagingProvider>
+    <ComposerStagingProvider answers={stagedAnswers}>
     <RequirementAcceptance.Provider value={acceptRequirement}>
     <SpeechProvider projectId={identity.projectId} workspaceId={identity.workspaceId}>
     {/* No onSend, so a closed composer, until the draft binding exists: text typed before it would be replaced by the workspace draft. A session command in flight only holds the send (sendPending); the box stays editable. */}
-    <GitSpaceShell project={{ id: inspection.project.id, name: inspection.project.name, repository: inspection.project.repositoryReference ?? '', connected }} {...scope} mainAgent={{ id: value?.sessionId ?? conversationId ?? 'root', title: conversation?.title ?? 'Workspace agent', state: conversation?.status === 'running' ? 'running' : conversation?.status === 'waiting' ? 'permission-needed' : 'waiting', model: value?.model ?? '', controlsAvailable: true, recovering: !value, failed: conversation?.status === 'failed', errorMessage: conversation?.error ?? null, retry: conversation?.retry ?? null }} turns={turns} transcript={conversationId ? transcript : undefined} history={conversationId ? { loading: transcript.initialLoading, saved: transcript.saved, error: transcript.error, onRetry: transcript.refresh } : undefined} transport={[]} artifacts={[]} sessionControls={controls} skills={reads.skills} providers={reads.providers.value} draft={draft} sendPending={session.pending} onSend={value && draft ? async (text, streamingBehavior, draft, decisions, comments) => { await run({ type: 'prompt', text, streamingBehavior, draftRevision: draft?.draftRevision, draftText: draft?.text, decisions: decisions?.length ? decisions : undefined, comments: comments?.length ? [...comments] : undefined }); } : undefined}
+    <GitSpaceShell project={{ id: inspection.project.id, name: inspection.project.name, repository: inspection.project.repositoryReference ?? '', connected }} {...scope} mainAgent={{ id: value?.sessionId ?? conversationId ?? 'root', title: conversation?.title ?? 'Workspace agent', state: conversation?.status === 'running' ? 'running' : conversation?.status === 'waiting' ? 'permission-needed' : 'waiting', model: value?.model ?? '', controlsAvailable: true, recovering: !value, failed: conversation?.status === 'failed', errorMessage: conversation?.error ?? null, retry: conversation?.retry ?? null }} turns={turns} transcript={conversationId ? transcript : undefined} history={conversationId ? { loading: transcript.initialLoading, saved: transcript.saved, error: transcript.error, onRetry: transcript.refresh } : undefined} transport={[]} artifacts={[]} sessionControls={controls} skills={reads.skills} providers={reads.providers.value} draft={draft} sendPending={session.pending} onSend={value && draft ? async (text, streamingBehavior, draft, decisions, comments, answers) => { await run({ type: 'prompt', text, streamingBehavior, draftRevision: draft?.draftRevision, draftText: draft?.text, decisions: decisions?.length ? decisions : undefined, comments: comments?.length ? [...comments] : undefined, answers: answers?.length ? [...answers] : undefined }); } : undefined}
       onRetryAgent={async () => { await run({ type: 'resume' }); }} onContinueAgent={async () => { await run({ type: 'continue' }); }} onOpenSettings={props.onOpenSettings} onSelectProject={props.onSelectProject} onSelectWorkspace={props.onSelectWorkspace}
       controlsError={session.error ?? (reads.providers.error !== null ? rpcErrorMessage(reads.providers.error, 'Load provider authentication') : inference?.error) ?? undefined}
       onRetryControls={() => { void run({ type: 'control' }).catch(() => {}); void reads.providers.refetch(); void inference?.refresh(); }}

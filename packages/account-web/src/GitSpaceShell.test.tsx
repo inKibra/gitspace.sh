@@ -133,7 +133,7 @@ describe('GitSpaceShell', () => {
     };
     const sessionControls: NonNullable<GitSpaceShellProps['sessionControls']> = {
       value: { sessionId: 'session-a', role: null, roleLabel: null, roles: [], provider: 'anthropic', models: [], model: null, thinking: null, fastMode: false, planMode: true, context: null, cost: 0, todos: [], queue: { steering: [], followUp: [] }, pendingAsk, goal: null, history: [], historyAnchorId: null },
-      onCycleRole: rejects, onSetModel: rejects, onSetThinking: rejects, onSetFast: rejects, onSetGoal: rejects, onCompact: rejects, onClearQueue: rejects, onRemoveQueuedMessage: rejects, onPromoteQueuedMessage: rejects, onDismissAutomationRun: rejects, onAnswerAsk: rejects, onStop: rejects, onNavigateTree: rejects,
+      onCycleRole: rejects, onSetModel: rejects, onSetThinking: rejects, onSetFast: rejects, onSetGoal: rejects, onCompact: rejects, onClearQueue: rejects, onRemoveQueuedMessage: rejects, onPromoteQueuedMessage: rejects, onDismissAutomationRun: rejects, onStop: rejects, onNavigateTree: rejects,
     };
     const html = renderToStaticMarkup(<GitSpaceShell {...verticalSliceFixture} sessionControls={sessionControls} />);
     expect(html).toContain('Attach Darktop to this workspace?');

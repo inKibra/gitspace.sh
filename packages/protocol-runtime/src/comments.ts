@@ -2,7 +2,11 @@
 // it waits in the workspace's staged comments (a runtime document) and goes with their next message as a "Comment: …"
 // line followed by its data; the agent answers it with a gitspace-ui Reply block naming its id. Comments live in those
 // messages only: the runtime's lookup (comment → anchor → message, reply → comment) is derived from the transcript.
+// A person's answer to an open question waits beside them (a staged answer) and goes with their next message as an
+// "Answer to …" line followed by its data; the runtime records it as the question's answer in the commit that takes
+// the message.
 import { z } from 'zod';
+import { RuntimeApprovalAnswerSchema, RuntimeJsonSchema, askAnswerParts } from './base.js';
 
 /** What a comment quotes, as people read it. */
 export const COMMENT_QUOTE_MAX = 280;
@@ -54,9 +58,19 @@ export type SentComment = z.infer<typeof SentCommentSchema>;
 export const StagedCommentSchema = SentCommentSchema.extend({ stagedAt: z.iso.datetime(), deviceId: z.string().min(1).nullable() });
 export type StagedComment = z.infer<typeof StagedCommentSchema>;
 
-/** The snapshot's `gitspace.comments` document: the staged comments, oldest first, and the lookup's revision, which
- * moves whenever a sent comment or a reply joins the lookup. */
-export const CommentsDocumentSchema = z.object({ staged: z.array(StagedCommentSchema).max(STAGED_COMMENTS_MAX), lookupRevision: z.number().int().nonnegative() });
+/** A person's answer to an open question as a message carries it: an ask's parts (`{ id, selectedOptions,
+ * customInput }` per question it asks), a plan approval's `{ approved, note }`. */
+export const SentAnswerSchema = z.object({ questionId: z.string().min(1).max(512), answer: RuntimeJsonSchema }).strict();
+export type SentAnswer = z.infer<typeof SentAnswerSchema>;
+/** An answer waiting for the person's next message, one per question: staging another answer replaces it. */
+export const StagedAnswerSchema = SentAnswerSchema.extend({ stagedAt: z.iso.datetime(), deviceId: z.string().min(1).nullable() });
+export type StagedAnswer = z.infer<typeof StagedAnswerSchema>;
+/** Answers staged at once in a workspace. */
+export const STAGED_ANSWERS_MAX = 32;
+
+/** The snapshot's `gitspace.comments` document: the staged comments and answers, oldest first, and the lookup's
+ * revision, which moves whenever a sent comment or a reply joins the lookup. */
+export const CommentsDocumentSchema = z.object({ staged: z.array(StagedCommentSchema).max(STAGED_COMMENTS_MAX), answers: z.array(StagedAnswerSchema).max(STAGED_ANSWERS_MAX).default([]), lookupRevision: z.number().int().nonnegative() });
 export type CommentsDocument = z.infer<typeof CommentsDocumentSchema>;
 
 /** A sent comment in the lookup: its anchor, and the person's message row that carries it. */
@@ -82,6 +96,20 @@ const CommentDataSchema = z.object({ comment: SentCommentSchema });
 /** The message a send delivers with staged comments: the person's text, then each comment's line and data. */
 export function commentsMessage(text: string, comments: readonly SentComment[]): string {
   const lines = comments.map((comment) => `Comment on “${commentExcerpt(comment.anchor.quote, 80)}”: ${commentExcerpt(comment.note, 160)}\n~~~json\n${JSON.stringify({ comment: { id: comment.id, note: comment.note, anchor: comment.anchor } }, null, 2)}\n~~~`);
+  return [text.trim(), lines.join('\n')].filter(Boolean).join('\n\n');
+}
+
+/** An answer as people read it: a plan approval's decision and note, an ask's chosen options and written text. */
+export function answerShown(answer: unknown): string {
+  const approval = RuntimeApprovalAnswerSchema.safeParse(answer);
+  if (approval.success) return [approval.data.approved ? 'Approve' : 'Reject', approval.data.note].filter(Boolean).join(' · ');
+  return askAnswerParts(answer).map((part) => [...part.selectedOptions, ...part.customInput?.trim() ? [part.customInput.trim()] : []].join('; ')).filter(Boolean).join(' · ');
+}
+
+/** The message a send delivers with staged answers: the person's text, then each answer's line (the question's
+ * prompt and the answer, as people read them) and data. */
+export function answersMessage(text: string, answers: readonly { prompt: string; sent: SentAnswer }[]): string {
+  const lines = answers.map(({ prompt, sent }) => `Answer to “${commentExcerpt(prompt, 80)}”: ${commentExcerpt(answerShown(sent.answer), 160)}\n~~~json\n${JSON.stringify({ answer: sent }, null, 2)}\n~~~`);
   return [text.trim(), lines.join('\n')].filter(Boolean).join('\n\n');
 }
 

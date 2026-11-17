@@ -3,7 +3,7 @@ import { SERVICE_OFF } from '@gitspace/protocol/inference';
 import { automationEventCount, parseAutomationMessage, type AutomationMessage } from '@gitspace/protocol/automations-contract';
 import { captureMention, captureMentionIds, parseBrowserShareLink, withoutCaptureSummaries, type RuntimeBrowserCaptureView, type RuntimeBrowserConnectedTab, type RuntimeBrowserSharePreview } from '@gitspace/protocol-runtime';
 import { CHAT_ATTACHMENT_ACCEPT, chatAttachmentTag } from '@gitspace/protocol-runtime/chat-attachments';
-import { commentsMessage, type SentComment } from '@gitspace/protocol-runtime/comments';
+import { answersMessage, commentsMessage, type SentComment } from '@gitspace/protocol-runtime/comments';
 import type { RuntimeMessageDecision, RuntimeSessionCommand, RuntimeSessionResult } from '@gitspace/protocol-runtime/session-controls';
 import { Button, Dropdown, DropdownContent, DropdownMenu, DropdownTrigger, InputMessage, MenuItem, Select, SelectContent, SelectItem, SelectTrigger, ThinkingStep, ThinkingSteps, ThinkingStepsContent, ThinkingStepsHeader, badgeColors, useIcons, useShape, type IconName, type QueuedMessage } from '@gitspace/ui';
 import { Attachment01, CpuChip01, DotsHorizontal, XClose, Zap } from '@untitledui/icons';
@@ -20,7 +20,7 @@ import { useInference } from './InferenceContext.js';
 import type { WorkspaceDraftBinding } from './workspace-draft.js';
 import { uploadArtifactFile, uploadRejection, type ArtifactUploadClient } from './inspector/artifact-upload.js';
 import { previewShare } from './share/share-client.js';
-import { StagedChips, useComposerStaging } from './chat/staging.js';
+import { StagedChips, useComposerStaging, type ShownAnswer } from './chat/staging.js';
 import { OutgoingMessages, useOutbox, type Outbox, type OutgoingMessage, type SentMessage } from './chat/outbox.js';
 import { DictationControl } from './chat/dictation.js';
 import { Toasts, useToasts } from './toasts.js';
@@ -242,11 +242,11 @@ export function Composer({ workspace, controls, providers, skills = [], running,
         attached.push(chatAttachmentTag({ name: file.name, url: artifact.url, type: file.type, size: file.size, hash: artifact.hash }));
       }
       let body = '';
-      // The workspace adds the staged comments' lines and data after the message; the outbox matches the whole.
-      const deliver = async (message: string, decisions?: RuntimeMessageDecision[], comments: readonly SentComment[] = []) => {
+      // The workspace adds the staged answers' and comments' lines and data after the message; the outbox matches the whole.
+      const deliver = async (message: string, decisions?: RuntimeMessageDecision[], comments: readonly SentComment[] = [], answers: readonly ShownAnswer[] = []) => {
         const sent = [[...lead, message].join('\n'), ...attached].join('\n\n');
-        body = commentsMessage(sent, comments);
-        await onSend(sent, 'followUp', outgoing.draft, decisions, comments.map((comment) => comment.id));
+        body = commentsMessage(answersMessage(sent, answers), comments);
+        await onSend(sent, 'followUp', outgoing.draft, decisions, comments.map((comment) => comment.id), answers.map((answer) => answer.sent));
       };
       if (staging) await staging.deliver(outgoing.text, deliver);
       else await deliver(outgoing.text);

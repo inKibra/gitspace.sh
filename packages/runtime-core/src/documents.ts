@@ -3,7 +3,7 @@ import { defineDoc, type CheckpointInfo } from '@earendil-works/pi-durable';
 import type { JsonValue } from '@earendil-works/chord/json';
 import type { RuntimeAttachment } from '@gitspace/protocol-runtime';
 import type { AskAnswerer } from '@gitspace/blocks';
-import type { CommentAnchor, StagedComment } from '@gitspace/protocol-runtime/comments';
+import type { CommentAnchor, StagedAnswer, StagedComment } from '@gitspace/protocol-runtime/comments';
 /** A document stores a complete base after 32 deltas, so a load replays at most 32 changes; with no base, a load
  * replays every change the document ever had. Older revisions stay stored either way. */
 export function boundedReplay(_value: unknown, _ops: unknown, info: CheckpointInfo): boolean {
@@ -32,8 +32,9 @@ export const QuestionsDoc = defineDoc<{ items: Question[] }>({ kind: 'gitspace.q
  * the person last wrote to it (`closeRepliedQuestions`); a block ask in a reply up to that entry was replied to before
  * its question was posted, so it is posted closed. */
 export const BlockAsksDoc = defineDoc<{ through: number | null; replied?: Record<string, number> }>({ kind: 'gitspace.block-asks', version: 1, scope: 'session', initial: () => ({ through: null }), checkpointWhen: boundedReplay });
-/** The comments people staged for their next message, oldest first (comments.ts). */
-export const StagedCommentsDoc = defineDoc<{ items: StagedComment[] }>({ kind: 'gitspace.staged-comments', version: 1, scope: 'session', initial: () => ({ items: [] }), checkpointWhen: boundedReplay });
+/** What people staged for their next message, oldest first (comments.ts): comments, and answers to open questions (one
+ * per question). Documents from before staged answers have no `answers`. */
+export const StagedCommentsDoc = defineDoc<{ items: StagedComment[]; answers?: StagedAnswer[] }>({ kind: 'gitspace.staged-comments', version: 1, scope: 'session', initial: () => ({ items: [], answers: [] }), checkpointWhen: boundedReplay });
 /**
  * The comment lookup, derived from the transcript and written only by `repairCommentLookup`: each sent comment's anchor
  * and the person's message row carrying it, and each agent message row with Reply blocks and the comments they answer.

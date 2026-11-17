@@ -14,11 +14,12 @@ import { isSubagentTool, questionState, TAKEOVER_ANSWERS, TAKEOVER_CHOICES } fro
 import { RuntimeBrowserCaptureShareSchema, type RuntimeBrowserCaptureShare } from '@gitspace/protocol-runtime';
 import { BUILT_IN_AGENT_DEFINITIONS } from './builtin-agents.js';
 import type { ConversationLifecycle } from './conversation-lifecycle.js';
-import { closeConversationQuestions, closeRepliedQuestions, type QuestionClosure } from './questions.js';
+import { answerFromMessage, closeConversationQuestions, closeRepliedQuestions, type QuestionClosure } from './questions.js';
 import { AgentDefinitionContextDoc } from './subagent-state.js';
 import { modelRoleThinkingSchema, parseModelRoleSelector } from '@gitspace/protocol/inference';
-import { commentsMessage } from '@gitspace/protocol-runtime/comments';
-import { commentLookup, editStagedComment, stageComment, stagedComments, unstageComments } from './comments.js';
+import { answersMessage, commentsMessage } from '@gitspace/protocol-runtime/comments';
+import { commentLookup, editStagedComment, stageAnswer, stageComment, stagedComments, unstageAnswer, unstageComments } from './comments.js';
+import type { PlanDecision } from './plan.js';
 
 const ThinkingSchema = modelRoleThinkingSchema.unwrap();
 const ThinkingSelectionSchema = z.discriminatedUnion('source', [z.object({ source: z.literal('profile') }), z.object({ source: z.literal('conversation'), thinking: modelRoleThinkingSchema })]);
@@ -110,6 +111,8 @@ export type SessionControlServices = Pick<RuntimeHarnessOptions, 'admitInference
   loadAgentDefinitions?(): Promise<Array<{ path: string; content: string }>>;
   /** Keeps the decisions a person's prompt carries under the prompt's request id; called before the prompt is submitted. */
   holdDecisions?(conversationId: string, requestId: string, held: HeldDecisions): void;
+  /** Journals a plan's approval or rejection a person's message carried, as that person's device. */
+  recordDecision?(decision: PlanDecision & { deviceId: string }): Promise<void>;
   /** Answers each management command with what it returns; `stop`, `closeTab` and `focusTab` return nothing (null);
    * `tabGroup` the group's id. */
   browser?(conversationId: string, machineId: string | undefined, command: RuntimeBrowserManagement): Promise<RuntimeBrowserStatus | RuntimeBrowserArtifactPage | RuntimeBrowserOverview | RuntimeBrowserPreview | RuntimeBrowserCaptureView | RuntimeBrowserCaptureView[] | RuntimeBrowserShare | RuntimeBrowserShare[] | RuntimeBrowserConnectedTab | RuntimeBrowserCommentThreadView[] | RuntimeBrowserCommentThread | RuntimeBrowserCaptureShare | RuntimeBrowserCaptureShare[] | string | null>;
@@ -318,23 +321,34 @@ export function createSessionControls(services: SessionControlServices) {
         await services.lifecycle.userInput(String(target.id), async () => {
           const requestId = crypto.randomUUID();
           await applyInferenceThinking(target, await admitted(requestId));
-          // The staged comments the message carries go as its lines and data, and leave the staged comments once it is in.
-          const content = command.comments?.length ? commentsMessage(command.text, await stagedComments(harness, command.comments)) : command.text;
-          if (deviceId !== undefined && command.decisions?.length) services.holdDecisions?.(String(target.id), requestId, { deviceId, text: content, decisions: command.decisions });
-          const input: InputSubmissionDraft = { type: 'input', requestId, content, whenBusy: command.streamingBehavior ?? 'followUp' };
+          const comments = command.comments?.length ? await stagedComments(harness, command.comments) : [];
+          const answered = command.answers?.map(answer => answer.questionId) ?? [];
+          let decisions: PlanDecision[] = [];
+          let approved = false;
           // A person's message (one sent from a device) replies to the conversation's open questions, in the commit that
-          // takes it; a prompt with no device (an inspector's, a machine's) closes none.
+          // takes it; a prompt with no device (an inspector's, a machine's) closes none. The staged answers it carries
+          // answer their questions in that commit, and go as its lines and data after its text; the staged comments it
+          // carries go after them, and leave the staged comments once it is in.
           await target.commit(async tx => {
-            if (deviceId !== undefined) await closeRepliedQuestions(tx, target.id);
-            await target.submit(tx, input);
+            if (deviceId !== undefined) await closeRepliedQuestions(tx, target.id, answered);
+            const taken = command.answers?.length ? await answerFromMessage(tx, target.id, command.answers, canApprove) : { answers: [], decisions: [], approved: false };
+            decisions = taken.decisions;
+            approved = taken.approved;
+            const content = commentsMessage(answersMessage(command.text, taken.answers), comments);
+            if (deviceId !== undefined && command.decisions?.length) services.holdDecisions?.(String(target.id), requestId, { deviceId, text: content, decisions: command.decisions });
+            await target.submit(tx, { type: 'input', requestId, content, whenBusy: command.streamingBehavior ?? 'followUp' });
           }, ctx);
           if (command.comments?.length) await unstageComments(harness, command.comments);
+          if (approved) await services.setWorkspacePhase?.('code');
+          if (deviceId !== undefined) for (const decision of decisions) await services.recordDecision?.({ ...decision, deviceId });
         });
         break;
       }
       case 'stageComment': await stageComment(harness, target, command.anchor, command.note, deviceId ?? null); break;
       case 'editComment': await editStagedComment(harness, command.id, command.note); break;
       case 'unstageComment': await unstageComments(harness, [command.id]); break;
+      case 'stageAnswer': await stageAnswer(harness, target, command.questionId, command.answer, canApprove, deviceId ?? null); break;
+      case 'unstageAnswer': await unstageAnswer(harness, command.questionId); break;
       case 'setModel': { const catalog = await services.catalog(); if (!catalog.models.some(model => model.provider === command.provider && model.id === command.model)) throw new Error('Model is not admitted by the inference profile'); await services.configureModel(target.id, { provider: command.provider, modelId: command.model }); await mutate(draft => { draft.role = null; draft.selection = { kind: 'explicit', provider: command.provider, modelId: command.model }; }); break; }
       case 'setThinking': { const thinking = modelRoleThinkingSchema.parse(command.thinking); await target.configure({ thinkingLevel: thinking }, ctx); await mutate(draft => { draft.thinkingSelection = { source: 'conversation', thinking }; }); break; }
       case 'cycleRole': { const catalog = await services.catalog(); if (!catalog.roles.length) throw new Error('No configured inference roles'); const state = await harness.snapshot(SessionControlsDoc, target.id, ctx); const index = catalog.roles.findIndex(role => role.id === state?.role); const next = index < 0 ? command.direction === 'forward' ? 0 : catalog.roles.length - 1 : (index + (command.direction === 'forward' ? 1 : catalog.roles.length - 1)) % catalog.roles.length; const role = catalog.roles[next]!; await services.configureModel(target.id, { provider: role.provider, modelId: role.model }); await target.configure({ thinkingLevel: modelRoleThinkingSchema.parse(role.thinking) }, ctx); await mutate(draft => selectRole(draft, role.id)); break; }
@@ -395,7 +409,7 @@ export function createSessionControls(services: SessionControlServices) {
         if (question.conversationId !== String(target.id)) throw new Error(`Question ${command.id} belongs to another conversation`);
         const closure = askClosure(question, command.answers);
         // A person's answer (one sent from a device) also replies to the conversation's other open questions.
-        if (deviceId !== undefined) await closeRepliedQuestions(tx, conversationId, question.id);
+        if (deviceId !== undefined) await closeRepliedQuestions(tx, conversationId, [question.id]);
         return { closure, value: undefined };
       }); break;
       case 'dismissQuestion': await services.lifecycle.closeQuestion(command.id, async question => {

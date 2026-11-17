@@ -34,7 +34,7 @@ function controls(followUp: string[]): SessionControlsProps {
   const done = async (): Promise<void> => undefined;
   return {
     value: { ...control, queue: { steering: [], followUp } },
-    onCycleRole: done, onSetModel: done, onSetThinking: done, onSetFast: done, onSetGoal: done, onCompact: done, onClearQueue: done, onAnswerAsk: done, onStop: done, onNavigateTree: done,
+    onCycleRole: done, onSetModel: done, onSetThinking: done, onSetFast: done, onSetGoal: done, onCompact: done, onClearQueue: done, onStop: done, onNavigateTree: done,
     onRemoveQueuedMessage: done, onPromoteQueuedMessage: done, onDismissAutomationRun: done,
   };
 }

@@ -11,14 +11,14 @@ import { defineCatalog, type ComputedFunction } from '@json-render/core';
 import { useBoundProp, type Components } from '@json-render/react';
 import { schema } from '@json-render/react/schema';
 import { FileDiff, parsePatchFiles } from '@pierre/diffs';
-import { ArrowRight, Lock01, PauseCircle, PlayCircle } from '@untitledui/icons';
+import { ArrowRight, Check, Lock01, PauseCircle, PlayCircle } from '@untitledui/icons';
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { GitSpaceMarkdown } from '../GitSpaceMarkdown.js';
 import { useBlockActions } from './BlockActions.js';
 import { SvgBlock } from './SvgBlock.js';
 import { ChartView } from './ChartView.js';
 import { ChangeMapView } from '../guide/ChangeMap.js';
-import { BlockAnswersQuestion, BlockQuestionClosed, BlockRefView } from './BlockDocument.js';
+import { BlockQuestionClosed, BlockRefView, BlockStagedAnswer } from './BlockDocument.js';
 import { BudgetView, CallDiffView, CheckGridView, LogTableView, MetricDeltaView, RankView, SchemaDiffView, TimelineView, TradeoffsView, WorkspaceGraphView } from './ExplainViews.js';
 import { ImageView, VideoView } from './MediaBlocks.js';
 import { RoadmapView } from './RoadmapView.js';
@@ -172,19 +172,29 @@ function BeforeAfterView({ before, after, slider }: { before: Pane; after: Pane;
 
 interface AskOption { value: string; label: string; description?: string | null }
 
+/**
+ * A question card. Picking an option stages it for the person's next message (a workspace question's staged answer, or
+ * the block's own chip): the card stays whole with the pick marked, and another pick replaces it. Once sent or answered
+ * the card locks: the question, the chosen option checked and the rest struck through.
+ */
 function AskCardView({ questionId, question, prompt, options, value, staged, sent, answered, onPick }: { questionId: string; question: string; prompt: string; options: readonly AskOption[]; value: string; staged: string | null; sent: string | null; answered: string | null; onPick: (value: string) => void }) {
   const shape = useShape();
-  const answersQuestion = useContext(BlockAnswersQuestion);
+  const stagedAnswer = useContext(BlockStagedAnswer);
   const closed = useContext(BlockQuestionClosed);
   const surface = useBlockActions();
-  const canAnswer = answersQuestion || surface !== null;
-  const done = sent ?? answered ?? staged;
+  const pickOf = (label: string | null): AskOption | undefined => label === null ? undefined : options.find((option) => option.label === label || option.value === label);
+  const done = sent ?? answered;
   if (done) {
-    const status = sent ? 'sent with your message · the agent continues' : answered ? 'answered · the agent continues' : 'staged · in your message';
-    return <div className={`flex flex-col gap-1.5 border border-border bg-surface-2 px-3 py-2.5 ${shape.container}`}>
-      <span className="text-caption text-muted-foreground">{question}</span>
-      <span className="flex flex-wrap items-center gap-2 text-body font-medium">{options.find((option) => option.value === value)?.label ?? done}<Badge size="compact" variant="dot" color={staged && !sent && !answered ? 'amber' : 'green'}>{status}</Badge></span>
-    </div>;
+    const chosen = pickOf(done) ?? pickOf(value);
+    const status = sent ? 'Sent with your message' : 'Answered';
+    return <section aria-label={`${question}, ${status}`} className={`flex flex-col gap-2 border border-border bg-card px-3 py-2.5 ${shape.container}`}>
+      <span className="inline-flex items-center gap-1.5 text-caption text-muted-foreground"><Lock01 width={12} height={12} strokeWidth={1.5} />{question} · {status}</span>
+      <div className="text-body text-foreground"><GitSpaceMarkdown>{prompt}</GitSpaceMarkdown></div>
+      <ul className="flex flex-col gap-1">{options.map((option) => option === chosen
+        ? <li key={option.value} className="flex items-center gap-1.5 text-body text-foreground"><Check width={14} height={14} aria-label="Chosen" />{option.label}</li>
+        : <li key={option.value} className="pl-5 text-body text-muted-foreground line-through decoration-border">{option.label}</li>)}</ul>
+      {chosen ? null : <span className="text-body text-foreground">{done}</span>}
+    </section>;
   }
   // Its question closed unanswered: read only, like a closed question card, saying why.
   if (closed !== null) return <section aria-label={`${question}, ${closed}`} className={`flex flex-col gap-2 border border-border bg-card px-3 py-2.5 ${shape.container}`}>
@@ -192,14 +202,17 @@ function AskCardView({ questionId, question, prompt, options, value, staged, sen
     <div className="text-body text-foreground"><GitSpaceMarkdown>{prompt}</GitSpaceMarkdown></div>
     <ul className="flex flex-col gap-1">{options.map((option) => <li key={option.value} className="text-body text-muted-foreground">{option.label}</li>)}</ul>
   </section>;
-  return <div className="flex flex-col gap-1.5">
+  const picked = pickOf(stagedAnswer ?? staged);
+  return <div className="flex flex-col gap-1.5" data-ask-staged={picked ? picked.value : undefined}>
     {/* FLUID-GAP: AskUserQuestions submits a single-choice question when a row is picked; it has no button to relabel. */}
     <AskUserQuestions
       questions={[{ id: questionId, title: prompt, layout: 'stacked', options: options.map((option) => ({ id: option.value, title: option.label, description: option.description ?? undefined })) }]}
+      answers={{ [questionId]: { questionId, selectedIds: picked ? [picked.value] : [] } }}
       renderTitle={(title) => <div className="max-h-80 overflow-y-auto"><GitSpaceMarkdown>{title}</GitSpaceMarkdown></div>}
-      onComplete={(answers) => { const picked = answers[questionId]?.selectedIds[0]; if (picked) onPick(picked); }}
+      onComplete={(answers) => { const next = answers[questionId]?.selectedIds[0]; if (next) onPick(next); }}
     />
-    <span className="px-1 text-caption text-muted-foreground">{answersQuestion ? 'Picking an answer answers the question; the agent continues with it.' : canAnswer ? 'Picking an answer puts it in your message bar; it goes with what you write.' : 'Answering is not available here.'}</span>
+    {picked ? <span className="flex flex-wrap items-center gap-2 px-1 text-caption"><span className="text-foreground">{picked.label}</span><Badge size="compact" variant="dot" color="amber">staged · in your message</Badge></span> : null}
+    <span className="px-1 text-caption text-muted-foreground">{surface !== null ? 'Your answer goes with your next message.' : 'Answering is not available here.'}</span>
   </div>;
 }
 
