@@ -13,7 +13,7 @@ import { useCallback, useMemo, useState, type ReactNode } from 'react';
 import { DocumentRefs, RecordBlockDocument, SequenceStart } from '../blocks/BlockDocument.js';
 import { UiBlock } from '../blocks/UiBlock.js';
 import { GitSpaceMarkdown } from '../GitSpaceMarkdown.js';
-import { ExhibitDiff } from './ExhibitDiff.js';
+import { ExhibitDiff, GuideScrollRoot } from './ExhibitDiff.js';
 import { SECTION_KIND } from './GuideSection.js';
 
 /** The parts of a guide its walkthrough plays. */
@@ -24,6 +24,9 @@ export interface WalkthroughGuide {
   map?: ChangeMap | undefined;
   walkthrough?: GuideWalkthrough | undefined;
 }
+
+/** The player is a dialog over the page, outside the guide's scroll box: its exhibits load as they near the viewport. */
+const PLAYER_SCROLL_ROOT = { current: null };
 
 /** A section's number, kind and title, above a frame showing it or a part of it. */
 function SectionHeading({ section, number, large }: { section: ChangeGuideSection; number: number; large: boolean }) {
@@ -48,12 +51,16 @@ export function GuideWalkthroughButton({ guide, onLoadDiff }: { guide: Walkthrou
           <h2 className="text-[28px] font-semibold leading-tight text-foreground">{guide.title}</h2>
         </header>
         <ol className="grid grid-cols-[repeat(auto-fill,minmax(15rem,1fr))] gap-3">
-          {guide.sections.map((section, index) => <li key={section.id} data-walkthrough-card={section.id}
-            className="flex flex-col gap-1.5 rounded-lg bg-surface-1 p-3.5 shadow-[inset_0_0_0_1px_var(--border)]" style={{ borderLeft: `3px solid ${SECTION_KIND[section.kind].color}` }}>
-            <span className="text-caption text-muted-foreground">§{index + 1} · {SECTION_KIND[section.kind].label}</span>
-            <span className="text-body font-semibold leading-snug text-foreground">{section.title}</span>
-            {section.summary ? <span className="line-clamp-3 text-caption leading-relaxed text-muted-foreground">{firstSentence(section.summary) ?? section.summary}</span> : null}
-          </li>)}
+          {guide.sections.map((section, index) => {
+            // The summary's first prose sentence, in plain words; a summary that is only a list shows none.
+            const gist = firstSentence(section.summary);
+            return <li key={section.id} data-walkthrough-card={section.id}
+              className="flex flex-col gap-1.5 rounded-lg bg-surface-1 p-3.5 shadow-[inset_0_0_0_1px_var(--border)]" style={{ borderLeft: `3px solid ${SECTION_KIND[section.kind].color}` }}>
+              <span className="text-caption text-muted-foreground">§{index + 1} · {SECTION_KIND[section.kind].label}</span>
+              <span className="text-body font-semibold leading-snug text-foreground">{section.title}</span>
+              {gist ? <span className="line-clamp-3 text-caption leading-relaxed text-muted-foreground">{gist}</span> : null}
+            </li>;
+          })}
         </ol>
       </section>;
     }
@@ -82,9 +89,9 @@ export function GuideWalkthroughButton({ guide, onLoadDiff }: { guide: Walkthrou
       <PlayCircle width={14} height={14} />Play
     </Button>
     {playing ? <div hidden data-walkthrough-player="">
-      <RecordBlockDocument markdown={markdown}><DocumentRefs.Provider value={drawPart}><SequenceStart.Provider value={start}>
+      <RecordBlockDocument markdown={markdown}><DocumentRefs.Provider value={drawPart}><SequenceStart.Provider value={start}><GuideScrollRoot.Provider value={PLAYER_SCROLL_ROOT}>
         <UiBlock spec={spec} />
-      </SequenceStart.Provider></DocumentRefs.Provider></RecordBlockDocument>
+      </GuideScrollRoot.Provider></SequenceStart.Provider></DocumentRefs.Provider></RecordBlockDocument>
     </div> : null}
   </>;
 }

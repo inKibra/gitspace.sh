@@ -75,7 +75,12 @@ let container: HTMLDivElement;
 let animationDescriptor: PropertyDescriptor | undefined;
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
-  vi.stubGlobal('IntersectionObserver', class { constructor(private callback: (entries: unknown[]) => void) {} observe() { this.callback([{ isIntersecting: true }]); } disconnect() {} });
+  // An element is in view of its observer's root when the root holds it; with no root, the viewport holds everything.
+  vi.stubGlobal('IntersectionObserver', class {
+    constructor(private callback: (entries: unknown[]) => void, private options?: { root?: Element | null }) {}
+    observe(target: Element) { this.callback([{ isIntersecting: !this.options?.root || this.options.root.contains(target) }]); }
+    disconnect() {}
+  });
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
   animationDescriptor = Object.getOwnPropertyDescriptor(Element.prototype, 'getAnimations');
   if (!animationDescriptor) Object.defineProperty(Element.prototype, 'getAnimations', { configurable: true, value: () => [] });
@@ -375,7 +380,8 @@ describe('Change Guide tab', () => {
   it('plays a guide written without a walkthrough as its overview, then each section\'s diagram or else its first exhibit', async () => {
     const stats = JSON.stringify({ root: 'stats', elements: { stats: { type: 'Stats', props: { tiles: [{ label: 'Brews queued', value: 3 }] }, children: [] } }, state: {} });
     const [schedule, heat] = sections as [ChangeGuideSection, ChangeGuideSection];
-    const drawn: ChangeGuideView = { ...guide, sections: [schedule, { ...heat, diagram: `\`\`\`gitspace-ui\n${stats}\n\`\`\`` }] };
+    // The second section's summary is only a list: its card shows no Markdown.
+    const drawn: ChangeGuideView = { ...guide, sections: [schedule, { ...heat, summary: '- `firmware/heater.c` call site moved', diagram: `\`\`\`gitspace-ui\n${stats}\n\`\`\`` }] };
     await surface({ guide: drawn });
     expect(button('Play the walkthrough').dataset.walkthrough).toBe('built');
     await act(async () => button('Play the walkthrough').click());
@@ -392,11 +398,12 @@ describe('Change Guide tab', () => {
     expect([...overview?.querySelectorAll('[data-walkthrough-card]') ?? []].map((card) => card.textContent)).toEqual([
       '§1 · BehaviorPressing brew schedules itBrews are scheduled, not started.', '§2 · DecisionThe heater follows the schedule',
     ]);
-    // The section without a diagram shows its first exhibit's diff.
+    // The section without a diagram shows its first exhibit's diff, loaded in the dialog, outside the guide's scroll box.
     await frame(2);
     const exhibit = dialog().querySelector('[data-walkthrough-exhibit="schedule:ui/panel.tsx"]');
     expect(exhibit?.textContent).toContain('Pressing brew schedules it');
     await vi.waitFor(() => expect([...exhibit?.querySelectorAll('diffs-container') ?? []].map((diff) => diff.shadowRoot?.textContent ?? '').join('')).toContain('brewButton'));
+    expect(exhibit?.textContent).not.toContain('The diff loads as it nears the reading position');
     // The section with a diagram shows it.
     await frame(3);
     expect(dialog().querySelector('[data-walkthrough-diagram="heat"]')?.textContent).toContain('Brews queued');

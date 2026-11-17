@@ -9,8 +9,11 @@ export interface Speech {
   voice: { id: string; label: string } | null;
   voices: readonly { id: string; label: string; description?: string }[];
   setBrowserVoice(id: string | null): void;
-  /** A clip for `text` in the current voice; null when Speech is off or synthesis failed (the player then shows captions on timing). */
+  /** A clip for `text` in the current voice, made before the clips only prepared; null when Speech is off or synthesis
+   * failed (the player then shows captions on timing). */
   clip(text: string, signal: AbortSignal): Promise<SpeechClip | null>;
+  /** Makes the clips of `texts` ahead, in order, a few at a time; those not started when `signal` aborts are dropped. */
+  prepare(texts: readonly string[], signal: AbortSignal): void;
 }
 
 /** Null: no provider, captions only. */

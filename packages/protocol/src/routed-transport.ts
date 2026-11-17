@@ -66,6 +66,9 @@ export function createRoutedTransport(options: RoutedTransportOptions): ClientTr
   // Repository provisioning, image startup, waking a paused cache for an environment run and a machine's sync
   // capture can outlast ordinary queries. Keep those calls out of their batch and timeout budget.
   const provisioning = fetchTransport({ url: options.homeUrl, fetch, timeoutMs: 300_000 });
+  // A narration clip takes seconds to make, and a walkthrough asks for its next ones while one plays: each goes alone,
+  // so a clip answers when it is made, not when the slowest clip asked with it is, and none holds back other calls.
+  const speech = fetchTransport({ url: options.homeUrl, fetch, timeoutMs: 120_000 });
   const inspectorContext = batch();
   // A batch answers when its slowest call does. The account-wide states every page reads on load wait on the account
   // vault, and a workspace's runtime reads wait on its runtime opening: each gets its own batch, so neither holds
@@ -105,6 +108,7 @@ export function createRoutedTransport(options: RoutedTransportOptions): ClientTr
         (path.startsWith('machine.image.') && path !== 'machine.image.list')) return provisioning;
     if (path === 'inspector.view' || path === 'inspector.transcript' || path === 'inspector.transcriptPage' || path === 'inspector.transcriptContent' || path === 'inspector.availability') return inspectorContext;
     if (path === 'settings.state' || path === 'inference.list' || path === 'machine.image.list') return accountState;
+    if (path === 'speech.clip') return speech;
     if (path === 'runtime.watch' || path === 'runtime.session') {
       const workspace = input !== null && typeof input === 'object' && 'workspaceId' in input && typeof input.workspaceId === 'string' ? input.workspaceId : '';
       let runtime = runtimes.get(workspace);

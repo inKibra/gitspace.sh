@@ -53,6 +53,26 @@ describe('Change Guide walkthrough', () => {
     for (const frame of frames) expect(frame.say).not.toMatch(/…$/u);
   });
 
+  it('speaks only plain prose: the first prose paragraph after a list, without marks, and the title alone when there is none', () => {
+    const list = '- `pr-labels.yaml` release: `always()`, no needs, `GITHUB_TOKEN`\n- the label changes start no runs';
+    const parts: GuideParts = {
+      title: 'Release labels',
+      sections: [
+        { id: 'buttons', title: 'The `preview` buttons', kind: 'behavior', explanation: 'Unused.', why: '', requirementIds: [], exhibits: [],
+          summary: `${list}\n\n**Preview**, _ci_ and [verify](https://example.com/verify) are buttons; \`GITHUB_TOKEN\` marks the preview. More follows.` },
+        { id: 'labels', title: 'Labels', kind: 'mechanical', explanation: 'Three labels change:\n- one\n- two', why: '', requirementIds: [], exhibits: [], summary: list },
+      ],
+    };
+    const says = z.object({ elements: z.object({ walkthrough: z.object({ props: z.object({ frames: z.array(z.object({ say: z.string() })) }) }) }) })
+      .parse(builtWalkthrough(parts)).elements.walkthrough.props.frames.map((frame) => frame.say);
+    expect(says).toEqual([
+      'Release labels. It has 2 sections.',
+      'Section 1: The preview buttons. Preview, ci and verify are buttons; GITHUB_TOKEN marks the preview.',
+      // The summary is only a list, and the explanation's prose only leads into one.
+      'Section 2: Labels.',
+    ]);
+  });
+
   it('accepts frames showing a section, a diagram, an exhibit, a block element of the guide and one element', () => {
     const written = walk(
       { ref: 'section:parse' }, { ref: 'diagram:parse' }, { ref: 'exhibit:parse:src/parse.ts' }, { ref: 'hits' },

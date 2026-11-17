@@ -1,12 +1,14 @@
 // The Speech a workspace's content plays narration with (`speech.ts`): the voice of the project's inference profile,
 // unless this browser picked another voice of the same model, and clips of lines in it from `speech.clip`, kept in the
-// workspace's drive by the worker and here in memory per voice and text.
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+// workspace's drive by the worker and here in memory per voice and text (`speech-clips.ts`: a few made at a time, a
+// frame's own clip first).
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { DEFAULT_INFERENCE_PROFILE_ID, DEFAULT_SPEECH_SELECTOR, SERVICE_OFF, parseSpeechSelector, speechVoices } from '@gitspace/protocol/inference';
 import { currentDevice } from './device-session.js';
 import { useInference } from './InferenceContext.js';
 import { rpcClient } from './rpc-client.js';
 import { SpeechContext, type Speech, type SpeechClip } from './speech.js';
+import { speechClips } from './speech-clips.js';
 
 /** This browser's voice for an account's narration: a speech selector of the profile's model. */
 export function browserVoiceKey(accountId: string): string { return `gitspace.speech.voice:${accountId}`; }
@@ -32,13 +34,15 @@ export function SpeechProvider({ projectId, workspaceId, children }: { projectId
     });
     return () => { live = false; };
   }, []);
-  const clips = useRef(new Map<string, Promise<SpeechClip | null>>());
+  const [clips] = useState(speechClips);
   const speech = useMemo<Speech>(() => {
     const selector = configured === SERVICE_OFF ? null : parseSpeechSelector(configured);
     const model = selector ? `${selector.provider}/${selector.model}` : '';
     const voices = selector ? speechVoices(selector.provider, selector.model).map((voice) => ({ id: `${model}:${voice.id}`, label: voice.label, ...(voice.description ? { description: voice.description } : {}) })) : [];
     const chosen = voices.find((voice) => voice.id === override) ?? voices.find((voice) => voice.id === configured);
     const voice = chosen ? { id: chosen.id, label: chosen.label } : null;
+    const request = (text: string, id: string) => (): Promise<SpeechClip | null> => rpcClient.speech.clip({ workspace: { projectId, workspaceId }, text, voice: id })
+      .then((result) => result.status === 'ok' ? { url: result.value.url, durationMs: result.value.durationMs } : null);
     return {
       voice, voices,
       setBrowserVoice(id) {
@@ -51,18 +55,14 @@ export function SpeechProvider({ projectId, workspaceId, children }: { projectId
       },
       async clip(text, signal) {
         if (!voice) return null;
-        const key = `${voice.id}\n${text}`;
-        let pending = clips.current.get(key);
-        if (!pending) {
-          // Shared by every player of this line: one caller's abort does not cancel it.
-          pending = rpcClient.speech.clip({ workspace: { projectId, workspaceId }, text, voice: voice.id }).then((result) => result.status === 'ok' ? { url: result.value.url, durationMs: result.value.durationMs } : null, () => null);
-          clips.current.set(key, pending);
-          void pending.then((clip) => { if (!clip) clips.current.delete(key); });
-        }
-        const clip = await pending;
+        // Shared by every player of this line: one caller's abort does not cancel it.
+        const clip = await clips.clip(`${voice.id}\n${text}`, request(text, voice.id));
         return signal.aborted ? null : clip;
       },
+      prepare(texts, signal) {
+        if (voice) clips.prepare(texts.map((text) => ({ key: `${voice.id}\n${text}`, request: request(text, voice.id) })), signal);
+      },
     };
-  }, [configured, override, accountId, projectId, workspaceId]);
+  }, [configured, override, accountId, projectId, workspaceId, clips]);
   return <SpeechContext.Provider value={speech}>{children}</SpeechContext.Provider>;
 }

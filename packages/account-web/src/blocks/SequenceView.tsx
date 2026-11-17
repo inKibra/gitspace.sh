@@ -37,8 +37,6 @@ const CLIP_WAIT_MS = 10_000;
 const CLIP_SLACK_MS = 2_000;
 /** The least a frame whose voice failed still shows after it failed. */
 const FALLBACK_MIN_MS = 1_500;
-/** How many frames ahead the clips are made: a new clip takes about as long to make as three short frames take to play. */
-const PREFETCH_FRAMES = 3;
 const SPEEDS = ['0.75×', '1×', '1.25×', '1.5×'];
 /** Starting one player pauses the others, so two never speak at once. */
 const PLAY_EVENT = 'gitspace-sequence-play';
@@ -118,7 +116,8 @@ function SequencePlayer({ title, frames, large, startAt, autoPlay, onExpand }: S
   // One frame of playback: speak its line (or show it its reading time) and its hold, then move on. Every path ends in a
   // timer, so a playing frame always moves on.
   useEffect(() => {
-    if (!playing || !frame) return;
+    // Paused, the frame showing has no playback: no bar and no voice note from a frame played before.
+    if (!playing || !frame) { setPhase(null); return; }
     const controller = new AbortController();
     const timers: number[] = [];
     const after = (ms: number, run: () => void): void => { timers.push(window.setTimeout(run, ms)); };
@@ -172,8 +171,6 @@ function SequencePlayer({ title, frames, large, startAt, autoPlay, onExpand }: S
           after(ms + CLIP_SLACK_MS, () => finish(holdMs - (Date.now() - startedAt)));
         }, (error: unknown) => timing(error instanceof DOMException && error.name === 'NotAllowedError' ? 'refused' : 'failed'));
       }, () => timing('failed'));
-      // The next frames' clips are made while this one plays; one that fails here is asked for again by its frame.
-      for (const ahead of frames.slice(index + 1, index + 1 + PREFETCH_FRAMES)) if (ahead.say) void speech.clip(ahead.say, controller.signal).catch(() => null);
     }
     return () => {
       controller.abort();
@@ -181,6 +178,15 @@ function SequencePlayer({ title, frames, large, startAt, autoPlay, onExpand }: S
       silence();
     };
   }, [playing, index, frame, frames, rate, voiced, speech]);
+
+  // The clips of every later frame are made while this one plays, a few at a time after this frame's own; moving to
+  // another frame asks again from there.
+  useEffect(() => {
+    if (!playing || !voiced || !speech) return;
+    const controller = new AbortController();
+    speech.prepare(frames.slice(index + 1).flatMap((item) => item.say ? [item.say] : []), controller.signal);
+    return () => controller.abort();
+  }, [playing, index, frames, voiced, speech]);
 
   const total = frames.reduce((sum, item) => sum + readingMs(item) + FRAME_GAP_MS, 0);
   const go = (next: number): void => {

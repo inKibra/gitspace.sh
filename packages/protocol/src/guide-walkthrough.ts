@@ -114,14 +114,34 @@ export function walkthroughIssues(walkthrough: unknown, guide: GuideParts): UiBl
   return [...validateUiSpec(parsed.data).filter((issue) => !resolved.has(issue.path)), ...unresolved];
 }
 
-/** Markdown as plain spoken text: its words without marks, links as their words, block fences left out. */
+/** Inline Markdown as the words it reads as: code as its text, links and images as their words, emphasis, strikes and
+ * tags dropped. An underscore inside a word (`GITHUB_TOKEN`) stays. */
 function plainText(markdown: string): string {
   return markdown
-    .replace(/```[\s\S]*?```/gu, ' ')
+    .replace(/<[^>]+>/gu, ' ')
     .replace(/!?\[([^\]]*)\]\([^)]*\)/gu, '$1')
-    .replace(/[*_`#>]+/gu, '')
+    .replace(/`+([^`]*)`+/gu, '$1')
+    .replace(/(\*\*|~~)(.+?)\1/gu, '$2')
+    .replace(/\*(\S(?:.*?\S)?)\*/gu, '$1')
+    .replace(/(?<![\p{L}\p{N}_])(__?)(\S(?:.*?\S)?)\1(?![\p{L}\p{N}_])/gu, '$2')
     .replace(/\s+/gu, ' ')
     .trim();
+}
+
+/** A line that starts a block that is not prose: a list item, heading, quote, table row or rule. */
+const NOT_PROSE = /^\s*(?:[-*+]\s|\d+[.)]\s|#{1,6}\s|>|\||(?:[-*_]\s*){3,}$)/u;
+
+/** The first paragraph of `markdown` that is prose, as one line: fences, lists, headings, quotes and tables are skipped,
+ * and a paragraph ends where a list or other block starts under it. */
+function firstProse(markdown: string): string | null {
+  const blocks = markdown.replace(/^\s*(```|~~~)[\s\S]*?^\s*\1[^\n]*$/gmu, '').split(/\n\s*\n/u);
+  for (const block of blocks) {
+    const lines = block.split('\n').filter((line) => line.trim());
+    if (!lines[0] || NOT_PROSE.test(lines[0])) continue;
+    const end = lines.findIndex((line) => NOT_PROSE.test(line));
+    return lines.slice(0, end < 0 ? undefined : end).join(' ');
+  }
+  return null;
 }
 
 /** The longest sentence a built line speaks: about ten seconds of speech. A longer one is left out, never cut. */
@@ -136,12 +156,13 @@ function asSentence(text: string): string {
   return /[.!?…]["')\]]?$/u.test(text) ? text : `${text}.`;
 }
 
-/** The first sentence of `markdown`'s text; null when it has none or the first is longer than MAX_SENTENCE. A sentence
- * ends at a stop followed by a space and a word not in lower case, so "e.g. a", "v2.1" and "parse.ts" do not end one. */
+/** The first sentence of `markdown`'s first prose paragraph, as plain words; null when it has none, or the sentence is
+ * longer than MAX_SENTENCE or ends in a colon (it leads into a list). A sentence ends at a stop followed by a space and
+ * a word not in lower case, so "e.g. a", "v2.1" and "parse.ts" do not end one. */
 export function firstSentence(markdown: string | undefined): string | null {
-  const text = plainText(markdown ?? '');
+  const text = plainText(firstProse(markdown ?? '') ?? '');
   const sentence = (/^.+?(?<!\b(?:e\.g|i\.e|etc|vs|cf))[.!?]["')\]]?(?=\s+[^\s\p{Ll}])/u.exec(text)?.[0] ?? text).trim();
-  return sentence && sentence.length <= MAX_SENTENCE ? asSentence(sentence) : null;
+  return sentence && sentence.length <= MAX_SENTENCE && !sentence.endsWith(':') ? asSentence(sentence) : null;
 }
 
 /** The walkthrough of a guide written without one: the guide at a glance (`overview`), saying its title and the first

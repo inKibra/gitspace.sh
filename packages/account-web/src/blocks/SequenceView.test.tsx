@@ -60,6 +60,7 @@ describe('Sequence player', () => {
 
     await press('Play The walk');
     expect(player().dataset.sequencePlaying).toBe('true');
+    expect(player().dataset.sequenceVoice).toBe('timing');
     await advance(3_900);
     expect(player().dataset.sequenceFrame).toBe('0');
     // 4 s without a voice, then the gap between frames.
@@ -72,7 +73,6 @@ describe('Sequence player', () => {
     await advance(4_500);
     expect(player().dataset.sequenceFrame).toBe('2');
     expect(player().dataset.sequencePlaying).toBe('false');
-    expect(player().dataset.sequenceVoice).toBe('timing');
   });
 
   it('shows the error card in the place of a frame that fails its checks, and plays on to the next frame', async () => {
@@ -116,8 +116,10 @@ class FakeAudio {
 describe('Sequence player with a voice', () => {
   const frames = [{ content: text('First'), say: 'One.' }, { content: text('Second'), say: 'Two.' }, { content: text('Third'), say: 'Three.' }];
   let asked: string[];
+  let prepared: string[][];
   beforeEach(() => {
     asked = [];
+    prepared = [];
     FakeAudio.made = [];
     FakeAudio.playResult = () => Promise.resolve();
     vi.stubGlobal('Audio', FakeAudio);
@@ -127,6 +129,7 @@ describe('Sequence player with a voice', () => {
     const speech: Speech = {
       voice: { id: 'model:athena', label: 'Athena' }, voices: [{ id: 'model:athena', label: 'Athena' }], setBrowserVoice: () => undefined,
       clip: (line) => { asked.push(line); return clip(line); },
+      prepare: (texts) => { prepared.push([...texts]); },
     };
     await act(async () => root.render(<SpeechContext.Provider value={speech}><UiBlock spec={walkthrough(frames)} /></SpeechContext.Provider>));
     await press('Play The walk');
@@ -135,10 +138,11 @@ describe('Sequence player with a voice', () => {
     return player().querySelector('[data-sequence-voice-off]')?.textContent ?? null;
   }
 
-  it('speaks each frame\'s clip, moves on at the clip\'s end, and makes the next frames\' clips while one plays', async () => {
+  it('speaks each frame\'s clip, moves on at the clip\'s end, and makes every later frame\'s clip while one plays', async () => {
     await play(async (line) => ({ url: `/clips/${line}`, durationMs: 6000 }));
     expect(FakeAudio.made.map((audio) => audio.src)).toEqual(['/clips/One.']);
-    expect(asked).toEqual(['One.', 'Two.', 'Three.']);
+    expect(asked).toEqual(['One.']);
+    expect(prepared).toEqual([['Two.', 'Three.']]);
     expect(player().dataset.sequenceVoice).toBe('speech');
     // The clip is still playing: the frame stays.
     await advance(7_000);
@@ -147,16 +151,20 @@ describe('Sequence player with a voice', () => {
     await advance(500);
     expect(player().dataset.sequenceFrame).toBe('1');
     expect(FakeAudio.made.map((audio) => audio.src)).toEqual(['/clips/One.', '/clips/Two.']);
+    expect(prepared).toEqual([['Two.', 'Three.'], ['Three.']]);
     expect(voiceOff()).toBeNull();
   });
 
-  it('shows a clip that fails on timing, with a note that the voice is off for the frame, and moves on', async () => {
+  it('shows a clip that fails on timing, with a note that the voice is off for the frame, and moves on; paused, the note goes', async () => {
     await play(async () => { throw new Error('synthesis failed'); });
     expect(player().dataset.sequenceVoice).toBe('timing');
     expect(voiceOff()).toContain('Voice off for this frame: the clip did not load');
     expect(player().querySelector('[data-sequence-caption]')?.textContent).toContain('One.');
     await advance(4_500);
     expect(player().dataset.sequenceFrame).toBe('1');
+    await press('Pause');
+    await press('Frame 3: Three.');
+    expect(voiceOff()).toBeNull();
   });
 
   it('shows a frame whose sound the browser refuses on timing, with the voice-off note, and moves on', async () => {

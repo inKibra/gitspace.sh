@@ -155,6 +155,35 @@ it('separates explicit terminal machine targets from cloud authority in signed b
   ]));
 });
 
+it('sends each speech.clip alone: a clip answers when it is made, not with the clips asked beside it, and outlasts the batch timeout', async () => {
+  vi.useFakeTimers();
+  const sent: unknown[] = [];
+  const answers: Array<(response: Response) => void> = [];
+  async function fetcher(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+    const request = new Request(input, init);
+    const decoded = deserialize(await request.text());
+    if (!decoded.ok) throw new Error('Invalid envelope');
+    sent.push(decoded.value);
+    const { promise, resolve, reject } = Promise.withResolvers<Response>();
+    answers.push(resolve);
+    request.signal.addEventListener('abort', () => reject(request.signal.reason), { once: true });
+    return promise;
+  }
+  const transport = createRoutedTransport({ homeUrl: 'https://account.test/rpc', fetch: fetcher });
+  const settled: string[] = [];
+  for (const text of ['One.', 'Two.', 'Three.']) {
+    void transport.request({ v: 1, path: 'speech.clip', input: { text } }).then((outcome) => { settled.push(`${text} ${outcome.ok ? 'ok' : 'failed'}`); });
+  }
+  await vi.advanceTimersByTimeAsync(0);
+  expect(sent).toEqual(['One.', 'Two.', 'Three.'].map((text) => expect.objectContaining({ path: 'speech.clip', input: { text } })));
+  answers[1]?.(new Response('made'));
+  await vi.advanceTimersByTimeAsync(31_000);
+  expect(settled).toEqual(['Two. ok']);
+  answers[0]?.(new Response('made'));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(settled).toEqual(['Two. ok', 'One. ok']);
+});
+
 it('prompts a reload only for an account reply from another release, never for a machine reply a reload cannot change', async () => {
   const events: string[] = [];
   const machineRelease = 'machine-release-contract';
