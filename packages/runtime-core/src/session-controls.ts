@@ -1,4 +1,4 @@
-import { AgentDoc, InboxDoc, UsageDoc, defineDoc, defineExtension, type Harness, type Conversation, type ConversationId, type InputSubmissionDraft, type ModelRef, type EntryId } from '@earendil-works/pi-durable';
+import { AgentDoc, InboxDoc, UsageDoc, defineDoc, defineExtension, type Harness, type Conversation, type ConversationId, type InputSubmissionDraft, type ModelRef, type EntryId, type Storage } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { z } from 'zod';
 import { parse as parseYaml } from 'yaml';
@@ -102,6 +102,7 @@ export type SessionCatalog = { models: SessionControlView['models']; roles: Sess
 export type HeldDecisions = { deviceId: string; text: string; decisions: RuntimeMessageDecision[] };
 export type SessionControlServices = Pick<RuntimeHarnessOptions, 'admitInference' | 'setWorkspacePhase'> & {
   harness: Harness;
+  storage: Storage;
   root: Conversation;
   history: SessionHistoryService;
   lifecycle: ConversationLifecycle;
@@ -344,7 +345,7 @@ export function createSessionControls(services: SessionControlServices) {
         });
         break;
       }
-      case 'stageComment': await stageComment(harness, target, command.anchor, command.note, deviceId ?? null); break;
+      case 'stageComment': await stageComment(harness, services.storage, target, command.anchor, command.note, deviceId ?? null); break;
       case 'editComment': await editStagedComment(harness, command.id, command.note); break;
       case 'unstageComment': await unstageComments(harness, [command.id]); break;
       case 'stageAnswer': await stageAnswer(harness, target, command.questionId, command.answer, canApprove, deviceId ?? null); break;

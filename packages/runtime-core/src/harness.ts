@@ -382,5 +382,5 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
   await expireLegacyQuestions(harness);
   await repairAsks();
   await repairLookup();
-  return { harness, root, registry, configureModel, lifecycle, backgroundAgentTask };
+  return { harness, storage: options.storage, root, registry, configureModel, lifecycle, backgroundAgentTask };
 }

@@ -12,4 +12,4 @@ export * from './conversation-lifecycle.js';
 export { takeoverAsked } from './takeover.js';
 export { closeRepliedQuestions, postQuestion, questionRefusal, repairBlockAsks, replyQuestion, type QuestionClosure } from './questions.js';
 export { BLOCK_FIX_TRIES, BlockCorrectionEntry, BlockFixEntry, blockFixPrompt, correctedReply, invalidBlocks, type BlockCorrection, type InvalidBlock } from './block-fixes.js';
-export { commentLookup, rebuildCommentLookup, repairCommentLookup } from './comments.js';
+export { commentLookup, commentWindow, rebuildCommentLookup, repairCommentLookup } from './comments.js';

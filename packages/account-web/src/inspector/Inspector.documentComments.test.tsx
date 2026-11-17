@@ -63,7 +63,7 @@ async function request(command: RuntimeSessionCommand): Promise<RuntimeSessionRe
 }
 
 function draw(): void {
-  root.render(<CommentLayerProvider conversationId="main" document={{ staged: runtime.staged, lookupRevision: runtime.revision }} rows={runtime.rows} latest request={request}>
+  root.render(<CommentLayerProvider conversationId="main" document={{ staged: runtime.staged, lookupRevision: runtime.revision }} rows={runtime.rows} request={request}>
     <ComposerStagingProvider>
       <Toasts><Inspector {...props} /></Toasts>
       <Composer workspace={verticalSliceFixture.workspace} running={false} pending={false} onSend={onSend} />

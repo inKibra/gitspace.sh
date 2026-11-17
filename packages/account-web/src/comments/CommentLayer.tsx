@@ -1,9 +1,10 @@
-// Comments on what the agent wrote (docs/BLOCK-DOCUMENTS-DESIGN.md §3–§4): in its latest turn, the Goal and the Change
-// Guide. In a message: a passage selected anywhere (prose, or any text inside a block), a whole paragraph, heading, list
-// item or quote (from an icon beside it), an item inside a block (a table row, a step, a CallDiff line, a Sequence frame,
-// a checklist item), a whole block, or a tool call. Thinking and question blocks take none, and older turns take none:
-// selecting text there shows a hint. In the Goal and the Guide: an entity (a requirement, decision, plan step, section or
-// exhibit, CommentEntity), a passage or block inside one, or an exhibit's lines; these never lock. A comment is staged in
+// Comments on what the agent wrote (docs/BLOCK-DOCUMENTS-DESIGN.md §3–§4): since the last message from a person or the
+// project agent, the Goal and the Change Guide. In a message: a passage selected anywhere (prose, or any text inside a
+// block), a whole paragraph, heading, list item or quote (from an icon beside it), an item inside a block (a table row, a
+// step, a CallDiff line, a Sequence frame, a checklist item), a whole block, or a tool call. Thinking and question blocks
+// take none, and turns before that message take none: selecting text there shows a hint. In the Goal and the Guide: an
+// entity (a requirement, decision, plan step, section or exhibit, CommentEntity), a passage or block inside one, or an
+// exhibit's lines; these never lock. A comment is staged in
 // the workspace (the runtime's staged comments, so it survives reloads and shows in every tab), shows as a chip above the
 // composer and a pill in the margin (CommentMargin.tsx), and goes with the person's next message, which lists it. Sent
 // comments come from the runtime's comment lookup, their notes from the person's messages and their answers from the
@@ -27,15 +28,16 @@ import { EntityBlocks } from '../blocks/BlockDocument.js';
 import { CommentLayer, DocumentComments, DocumentNavigation, type CommentLayerValue, type CommentNote, type CommentScopeValue, type DocumentNote } from './context.js';
 
 /**
- * The rows that take new comments: walking back from the newest loaded row to the person's last message, the agent's
- * stored messages and its tool calls. None while newer rows than the loaded ones exist: the latest turn is not loaded.
+ * The rows that take new comments: the agent's stored messages and its tool calls in the turns of the comment window,
+ * which starts at turn `windowStart` (the snapshot's `gitspace.comments`, null before the first message) and runs
+ * through every later turn. A turn id ends in the ordinal of the input that opened it (`turnRowId`).
  */
-export function openRows(rows: readonly TranscriptRow[], latest: boolean): Set<string> {
+export function openRows(rows: readonly TranscriptRow[], windowStart: string | null): Set<string> {
   const open = new Set<string>();
-  if (!latest) return open;
-  for (let index = rows.length - 1; index >= 0; index--) {
-    const item = rows[index]?.item;
-    if (!item || (item.type === 'message' && item.role === 'user')) break;
+  if (windowStart === null) return open;
+  const start = Number(windowStart.slice(windowStart.lastIndexOf(':') + 1));
+  for (const { turnId, item } of rows) {
+    if (!(Number(turnId.slice(turnId.lastIndexOf(':') + 1)) >= start)) continue;
     if ((item.type === 'message' && item.role === 'assistant' && !item.pending) || item.type === 'tool-call') open.add(item.id);
   }
   return open;
@@ -64,14 +66,12 @@ async function rowText(request: (command: RuntimeSessionCommand) => Promise<Runt
 
 /** The comment layer of one open workspace's main conversation: its staged comments (the snapshot's
  * `gitspace.comments`), the sent ones on the loaded turns and on the Goal and the Change Guide (the runtime's lookup,
- * asked again when its revision moves), and the loaded rows that take new ones. A Goal or Guide comment's note and
- * replies are read from the transcript when their messages are not loaded. */
-export function CommentLayerProvider({ conversationId, document, rows, latest, generation = null, request, author = 'You', children }: {
+ * asked again when its revision moves), and the loaded rows that take new ones (in the document's comment window). A
+ * Goal or Guide comment's note and replies are read from the transcript when their messages are not loaded. */
+export function CommentLayerProvider({ conversationId, document, rows, generation = null, request, author = 'You', children }: {
   conversationId: string | undefined;
   document: unknown;
   rows: readonly TranscriptRow[];
-  /** The newest rows are loaded. */
-  latest: boolean;
   /** The transcript's generation, which reads rows that are not loaded. */
   generation?: string | null;
   request(command: RuntimeSessionCommand): Promise<RuntimeSessionResult>;
@@ -81,6 +81,7 @@ export function CommentLayerProvider({ conversationId, document, rows, latest, g
   const parsed = useMemo(() => CommentsDocumentSchema.safeParse(document ?? { staged: [], lookupRevision: 0 }), [document]);
   const staged = parsed.success ? parsed.data.staged : null;
   const revision = parsed.success ? parsed.data.lookupRevision : 0;
+  const windowStart = parsed.success ? parsed.data.window : null;
   const turnIds = useMemo(() => [...new Set(rows.map((row) => row.turnId))].slice(-LOOKUP_TURNS), [rows]);
   const turnKey = turnIds.join('\n');
   const [lookup, setLookup] = useState(NO_LOOKUP);
@@ -132,13 +133,13 @@ export function CommentLayerProvider({ conversationId, document, rows, latest, g
       .map((comment): CommentNote => ({ id: comment.id, anchor: comment.anchor, note: comment.note, state: 'staged', replies: [] }));
     return [...sent, ...waiting];
   }, [conversationId, lookup, byRow, read, staged]);
-  const open = useMemo(() => openRows(rows, latest), [rows, latest]);
+  const open = useMemo(() => openRows(rows, windowStart), [rows, windowStart]);
   const turnOf = useCallback((row: string) => byRow.get(row)?.turnId, [byRow]);
   const stage = useCallback(async (scope: Pick<CommentScopeValue, 'row' | 'document'>, target: CommentTarget, quote: string, note: string) => {
     const turnId = byRow.get(scope.row)?.turnId;
     let where: CommentDocument | null = scope.document;
     if (where === null && conversationId !== undefined && turnId !== undefined) where = { kind: 'turn', conversationId, turnId };
-    if (where === null) throw new Error('Comments go on the latest turn');
+    if (where === null) throw new Error('Comments go on what the agent wrote since the last message');
     await request({ type: 'stageComment', anchor: { document: where, target, quote: commentExcerpt(quote, COMMENT_QUOTE_MAX) }, note });
   }, [byRow, conversationId, request]);
   const edit = useCallback(async (id: string, note: string) => { await request({ type: 'editComment', id, note }); }, [request]);
@@ -657,8 +658,8 @@ interface Selected { rect: DOMRect; target: CommentTarget; quote: string; label:
  * A commentable part of a message (the message, or a block in its lightbox) or of a Goal or Guide entity: selecting text
  * in it shows a Comment button once the pointer is up, so dragging is never interrupted. A selection inside one block is
  * anchored to that block, else to the message or entity; one inside an entity drawn within this part is that entity's.
- * Question blocks take no comments. Where the message takes no new comments (an older turn), a selection shows a hint
- * instead. The button is drawn without moving any text.
+ * Question blocks take no comments. Where the message takes no new comments (before the last message), a selection
+ * shows a hint instead. The button is drawn without moving any text.
  */
 export function SelectionComments({ className = '', children }: { className?: string; children: ReactNode }) {
   const layer = useContext(CommentLayer);
@@ -728,8 +729,8 @@ export function SelectionComments({ className = '', children }: { className?: st
       <Annotation width={13} height={13} />Comment
     </button> : null}
     {hint && box ? <span role="status" data-comment-ui="" className={`pointer-events-none absolute z-30 select-none whitespace-nowrap rounded bg-surface-3 px-1.5 py-0.5 text-[11px] text-muted-foreground shadow-surface-1 ${hint.top > ROOM_ABOVE ? '-translate-y-full' : ''}`}
-      style={{ left: Math.max(0, Math.min(hint.left - box.left, box.width - 180)), top: hint.top > ROOM_ABOVE ? hint.top - box.top - 6 : hint.bottom - box.top + 6 }}>
-      Comments go on the latest turn
+      style={{ left: Math.max(0, Math.min(hint.left - box.left, box.width - 320)), top: hint.top > ROOM_ABOVE ? hint.top - box.top - 6 : hint.bottom - box.top + 6 }}>
+      Comments go on what the agent wrote since the last message
     </span> : null}
     {editing ? <NoteEditor quote={editing.selected.quote} label={editing.selected.label} at={editing.at} onCancel={() => setEditing(null)}
       onSave={async (note) => {
@@ -740,7 +741,7 @@ export function SelectionComments({ className = '', children }: { className?: st
   </div>;
 }
 
-/** One of the agent's messages in the chat: it takes comments while it is in the latest turn, on a selection or, for
+/** One of the agent's messages in the chat: it takes comments while it is in the comment window, on a selection or, for
  * a paragraph, heading, list item or quote, from the icon beside it. */
 export function CommentMessage({ row, children }: { row: string; children: ReactNode }) {
   const layer = useContext(CommentLayer);

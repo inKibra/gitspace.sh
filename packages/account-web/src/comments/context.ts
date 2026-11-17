@@ -22,14 +22,14 @@ export interface CommentScopeValue { row: string; editable: boolean; document: C
 export interface CommentLayerValue {
   conversationId: string;
   notes: readonly CommentNote[];
-  /** The rows that take new comments: everything the agent wrote since the person's last message (its stored messages,
-   * before, between and after its tool calls, and its tool calls). */
+  /** The rows that take new comments: everything the agent wrote since the last message from a person or the project
+   * agent, the comment window (its stored messages, before, between and after its tool calls, and its tool calls). */
   open: ReadonlySet<string>;
   /** The turn a loaded row is in. */
   turnOf(row: string): string | undefined;
   /** Who writes comments here, for the margin's initials. */
   author: string;
-  /** Stages a comment in a scope: on a row of the latest turn, or on the Goal or a Change Guide revision. */
+  /** Stages a comment in a scope: on a row of the comment window, or on the Goal or a Change Guide revision. */
   stage(scope: Pick<CommentScopeValue, 'row' | 'document'>, target: CommentTarget, quote: string, note: string): Promise<void>;
   edit(id: string, note: string): Promise<void>;
   remove(id: string): Promise<void>;

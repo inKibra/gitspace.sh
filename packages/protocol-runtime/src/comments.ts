@@ -23,7 +23,9 @@ export const CommentIdSchema = z.string().regex(/^cm-[0-9a-f]{12}$/u);
 const Reference = z.string().min(1).max(512);
 
 /** The document a comment is in: a chat turn (`turnId`, the transcript's turn row id), the workspace Goal at a revision,
- * or a Change Guide revision. A turn's comments go on its latest turn only; the Goal's and the Guide's never lock. */
+ * or a Change Guide revision. A conversation's comments go on the turns of its comment window: from the turn of the
+ * newest message a person or the project agent sent on (automated inputs open turns inside it); the Goal's and the
+ * Guide's never lock. */
 export const CommentDocumentSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('turn'), conversationId: z.string().min(1), turnId: z.string().min(1) }).strict(),
   z.object({ kind: z.literal('goal'), revision: z.number().int().nonnegative() }).strict(),
@@ -79,9 +81,10 @@ export type StagedAnswer = z.infer<typeof StagedAnswerSchema>;
 /** Answers staged at once in a workspace. */
 export const STAGED_ANSWERS_MAX = 32;
 
-/** The snapshot's `gitspace.comments` document: the staged comments and answers, oldest first, and the lookup's
- * revision, which moves whenever a sent comment or a reply joins the lookup. */
-export const CommentsDocumentSchema = z.object({ staged: z.array(StagedCommentSchema).max(STAGED_COMMENTS_MAX), answers: z.array(StagedAnswerSchema).max(STAGED_ANSWERS_MAX).default([]), lookupRevision: z.number().int().nonnegative() });
+/** The snapshot's `gitspace.comments` document: the staged comments and answers, oldest first, the lookup's revision,
+ * which moves whenever a sent comment or a reply joins the lookup, and `window`, the turn where the main conversation's
+ * comment window starts (null before its first message): rows of that turn and later turns take comments. */
+export const CommentsDocumentSchema = z.object({ staged: z.array(StagedCommentSchema).max(STAGED_COMMENTS_MAX), answers: z.array(StagedAnswerSchema).max(STAGED_ANSWERS_MAX).default([]), lookupRevision: z.number().int().nonnegative(), window: z.string().min(1).nullable().default(null) });
 export type CommentsDocument = z.infer<typeof CommentsDocumentSchema>;
 
 /** A sent comment in the lookup: its anchor, and the person's message row that carries it. */

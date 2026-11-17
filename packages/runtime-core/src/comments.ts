@@ -2,17 +2,17 @@
 // message, and the lookup derived from the transcript. A sent comment lives in the person's message only (its line and
 // data, `commentsMessage`), and a reply in the agent's message (a Reply block); the lookup holds pointers to them, is
 // updated after each commit that stores either, and can be rebuilt from the transcript at any time.
-import { AssistantEntry, UserEntry, type Conversation, type Cursor, type EntryRecord, type Harness, type Storage } from '@earendil-works/pi-durable';
+import { AssistantEntry, UserEntry, type Conversation, type ConversationId, type ConversationRecord, type Cursor, type EntryRecord, type Harness, type Storage } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
-import { PI_ENTRY_ORDINALS, openerAt, piMessageRowId, piSessionId, turnRowId, userRowId } from '@gitspace/blocks';
+import { PI_ENTRY_ORDINALS, openerAt, parseConversationEvents, piMessageRowId, piSessionId, turnRowId, userRowId } from '@gitspace/blocks';
 import { blockReplies } from '@gitspace/protocol/gitspace-ui';
 import { STAGED_ANSWERS_MAX, STAGED_COMMENTS_MAX, messageComments, type CommentAnchor, type CommentLookup, type OpenDocumentKind, type StagedComment } from '@gitspace/protocol-runtime/comments';
 import { questionState } from '@gitspace/protocol-runtime';
-import { CommentLookupDoc, QuestionsDoc, StagedCommentsDoc } from './documents.js';
+import { AutomationRequestsDoc, CommentLookupDoc, QuestionsDoc, StagedCommentsDoc } from './documents.js';
 import { messageAnswer, questionRefusal } from './questions.js';
-import { turnOpeners } from './transcript-rows.js';
+import { BLOCK_FIX_REQUEST, turnOpeners } from './transcript-rows.js';
 
-/** Entries one scan reads. */
+/** Conversations, entries or submissions one scan reads. */
 const SCAN_ENTRIES = 64;
 
 /** The text of a person's input entry. */
@@ -28,24 +28,50 @@ export function carriesComments(entry: EntryRecord): boolean {
   return AssistantEntry.is(entry) && (entry.model ?? []).some(message => message.role === 'assistant' && message.content.some(part => part.type === 'text' && blockReplies(part.text).length > 0));
 }
 
-/** The conversation's latest turn: the turn its newest input opened; null before its first input. */
-export async function latestTurn(conversation: Conversation): Promise<string | null> {
-  let cursor: Cursor | undefined;
-  do {
-    const page = await conversation.entries({}, SCAN_ENTRIES, cursor, BACKGROUND_CONTEXT);
-    const input = page.items.find(entry => UserEntry.is(entry));
-    if (input) return turnRowId(piSessionId(String(conversation.id)), Number(input.id) * PI_ENTRY_ORDINALS);
-    cursor = page.next;
-  } while (cursor);
-  return null;
+/**
+ * The turns of a conversation that take comments, oldest first: the one the newest input from a person or the project
+ * agent opened, and every turn an automated input opened after it. Empty before the first such input. Automated inputs
+ * are recorded as such where they are submitted: an automation run's instruction (a pull request's or CI batch, a
+ * schedule, a watch) by its request id in `AutomationRequestsDoc`, and delivered events (background jobs, processes,
+ * subagents, machines, workspace reports, browsers, answered questions) as an input of `<gitspace-event>` envelopes
+ * (`formatConversationEvents`). A block fix step opens no turn. A fork's turns before the fork are its parent's inputs.
+ */
+export async function commentWindow(harness: Harness, storage: Storage, conversationId: ConversationId): Promise<string[]> {
+  const automations = (await harness.snapshot(AutomationRequestsDoc, BACKGROUND_CONTEXT))?.requests ?? {};
+  const session = piSessionId(String(conversationId));
+  const turns: string[] = [];
+  let current: ConversationId | undefined = conversationId;
+  let through = Number.POSITIVE_INFINITY;
+  while (current !== undefined) {
+    let cursor: Cursor | undefined;
+    do {
+      const page = await storage.scanSubmissions({ conversationId: current, order: 'descending' }, SCAN_ENTRIES, cursor, BACKGROUND_CONTEXT);
+      // Newest placed input first: a steer is placed ahead of the follow-ups admitted before it.
+      const inputs = page.items.flatMap(record => record.type === 'input' && record.entry !== undefined && Number(record.entry) <= through && !record.requestId?.startsWith(BLOCK_FIX_REQUEST) ? [{ entry: record.entry, requestId: record.requestId }] : [])
+        .sort((left, right) => Number(right.entry) - Number(left.entry));
+      for (const input of inputs) {
+        turns.unshift(turnRowId(session, Number(input.entry) * PI_ENTRY_ORDINALS));
+        if (input.requestId !== undefined && automations[input.requestId]) continue;
+        const placed = await storage.entry(current, input.entry, BACKGROUND_CONTEXT);
+        if (placed && parseConversationEvents(inputText(placed.entry)) === null) return turns;
+      }
+      cursor = page.next;
+    } while (cursor);
+    const parent: ConversationRecord['parent'] = (await storage.conversation(current, BACKGROUND_CONTEXT))?.parent;
+    if (!parent) break;
+    through = Math.min(through, Number(parent.at));
+    current = parent.conversationId;
+  }
+  return [];
 }
 
-/** Stages a comment: on the latest turn of the conversation a turn anchor names, or on the Goal or a Change Guide
- * revision, whose comments never lock. */
-export async function stageComment(harness: Harness, conversation: Conversation, anchor: CommentAnchor, note: string, deviceId: string | null): Promise<StagedComment> {
+/** Stages a comment: on a turn of the comment window (`commentWindow`) of the conversation a turn anchor names, or on
+ * the Goal or a Change Guide revision, whose comments never lock. A comment staged in the window stays staged while
+ * automated inputs extend it. */
+export async function stageComment(harness: Harness, storage: Storage, conversation: Conversation, anchor: CommentAnchor, note: string, deviceId: string | null): Promise<StagedComment> {
   if (anchor.document.kind === 'turn') {
     if (anchor.document.conversationId !== String(conversation.id)) throw new Error('The comment names another conversation');
-    if (anchor.document.turnId !== await latestTurn(conversation)) throw new Error('Comments go on the latest turn');
+    if (!(await commentWindow(harness, storage, conversation.id)).includes(anchor.document.turnId)) throw new Error('Comments go on what the agent wrote since the last message');
   }
   const comment: StagedComment = { id: `cm-${crypto.randomUUID().replaceAll('-', '').slice(0, 12)}`, anchor, note, stagedAt: new Date().toISOString(), deviceId };
   await harness.commit(async tx => {

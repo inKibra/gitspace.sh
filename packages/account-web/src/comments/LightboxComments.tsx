@@ -69,7 +69,7 @@ export function LightboxComments({ children }: { children: ReactNode }) {
         className={`${shape.input} w-full resize-y border border-border bg-surface-2 px-2.5 py-1.5 text-body text-foreground`} />
       {state.error ? <p role="alert" className="text-caption text-destructive">{state.error}</p> : null}
       <Button variant="primary" size="compact" type="button" className="self-start" disabled={!draft.trim() || state.saving} onClick={add}>Comment</Button>
-    </div> : <p className="border-t border-border pt-3 text-caption text-muted-foreground">Comments go on the latest turn.</p>}
+    </div> : <p className="border-t border-border pt-3 text-caption text-muted-foreground">Comments go on what the agent wrote since the last message.</p>}
   </div>;
   const content = <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-auto">
     <SelectionComments className="flex min-h-0 flex-1 flex-col"><div data-comment-block={block.key} data-comment-kind={block.kind} className="flex min-h-0 min-w-0 flex-1 flex-col">{children}</div></SelectionComments>

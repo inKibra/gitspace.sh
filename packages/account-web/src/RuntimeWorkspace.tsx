@@ -316,7 +316,7 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, reads, 
   useRepositoryBridgeToasts(bridged, installApp, () => props.onOpenSettings?.('github'));
   return <>
     <QuestionCardsContext.Provider value={questionCards}>
-    <CommentLayerProvider conversationId={conversationId} document={snapshot.documents['gitspace.comments']} rows={transcript.rows} latest={!transcript.hasAfter} generation={transcript.generation} request={sessionCommand}>
+    <CommentLayerProvider conversationId={conversationId} document={snapshot.documents['gitspace.comments']} rows={transcript.rows} generation={transcript.generation} request={sessionCommand}>
     <ComposerStagingProvider answers={stagedAnswers}>
     <RequirementAcceptance.Provider value={acceptRequirement}>
     <SpeechProvider projectId={identity.projectId} workspaceId={identity.workspaceId}>

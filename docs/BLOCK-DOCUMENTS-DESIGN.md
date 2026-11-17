@@ -15,7 +15,7 @@ sections (`section:<id>`) and their exhibits (`exhibit:<sectionId>:<path>`), and
 
 | Document | Id | Lifespan | Comments |
 |---|---|---|---|
-| Chat turn | conversation id + turn id | fixed once the next input arrives | latest turn only; lock when sent |
+| Chat turn | conversation id + turn id | fixed once the next input arrives | what the agent wrote since the last message (§4); lock when sent |
 | Goal | workspace + goal revision | revised in place (`SpaceContextDO.putGoal`) | stay open across turns |
 | Change Guide | workspace + guide revision | immutable revisions (`putChangeGuide`) | stay open; carry forward unchanged sections |
 | Drive doc | drive path + content hash | versioned files | stay open; outdated when the file changes |
@@ -67,7 +67,13 @@ message; nothing else stores them, and they exist exactly as long as those messa
 the messages drops the comments with them).
 
 1. **Stage.** A comment is written against an anchor and kept with the composer draft (a durable runtime document, so
-   it survives reloads and shows in every tab). It shows as a chip above the composer and a pill in the margin.
+   it survives reloads and shows in every tab). It shows as a chip above the composer and a pill in the margin. A
+   chat comment goes on what the agent wrote since the newest message from a person (including one that only sends
+   staged answers or comments) or the project agent: the **comment window**. Automated inputs (background job, PR or
+   CI batch, machine, wake-up and watch notices; the hidden block-fix step) open turns inside the window, not a new
+   one, so the agent's replies to them take comments and comments staged before them stay. Before the first such
+   message nothing takes comments. The runtime's `commentWindow` (`runtime-core/src/comments.ts`) decides both the
+   check on `stageComment` and, published as `window` in the snapshot's `gitspace.comments`, the browser's lock.
 2. **Send.** The next message carries every staged comment: the person's text, plus each comment as its quote, note
    and anchor in the structured data the composer already uses for staged choices.
 3. **Reply.** The agent answers a comment with a `Reply { comment, … }` block in its message. The reply shows in the
