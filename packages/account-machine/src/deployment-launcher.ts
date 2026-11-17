@@ -63,8 +63,10 @@ export async function buildWorkspaceTarget<T extends BuiltArtifact>(
     await rm(resultPath, { force: true });
   }
 }
+/** Build checkouts keep Git LFS files as pointers: the build repository has no LFS server, and no build step reads LFS
+ * media (only `marketing/**` media is LFS-tracked). Every git call here unsets the LFS filter and skips its smudge. */
 async function git(cwd: string, args: string[]): Promise<string> {
-  const child = Bun.spawn(['git', ...args], { cwd, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', timeout: 10 * 60_000, killSignal: 'SIGKILL' });
+  const child = Bun.spawn(['git', '-c', 'filter.lfs.smudge=', '-c', 'filter.lfs.process=', '-c', 'filter.lfs.required=false', ...args], { cwd, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_LFS_SKIP_SMUDGE: '1' }, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', timeout: 10 * 60_000, killSignal: 'SIGKILL' });
   const [code, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
   if (code !== 0) throw new Error(`git ${args[0]} failed: ${stderr.trim() || `exited with ${code}`}`);
   return stdout.trim();

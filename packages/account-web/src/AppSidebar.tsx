@@ -368,6 +368,8 @@ function StateCounts({ items }: { items: readonly RowItem[] }) {
 
 interface ProjectRowsProps extends Pick<AppSidebarProps, 'selected' | 'deployment' | 'onSelectProject' | 'onSelectWorkspace' | 'onReleaseMachines' | 'releasePendingSpaceId' | 'onArchive' | 'onRestore' | 'onDelete' | 'onRename' | 'onNewWorkspace' | 'onOpenProjectSettings' | 'onOpenProjectAutomations'> {
   project: SidebarProject;
+  /** Archived or being deleted: the row is dimmed and offers no new workspace. */
+  archived: boolean;
   collapsed: boolean;
   onCollapse(projectId: string, collapsed: boolean): void;
   filter: SidebarFilter;
@@ -377,7 +379,7 @@ interface ProjectRowsProps extends Pick<AppSidebarProps, 'selected' | 'deploymen
   stackStatuses: ReadonlyMap<string, StackStatus>;
 }
 
-function ProjectRows({ project, collapsed, onCollapse, selected, deployment, onSelectProject, onSelectWorkspace, onReleaseMachines, releasePendingSpaceId, onArchive, onRestore, onDelete, onRename, onNewWorkspace, onOpenProjectSettings, onOpenProjectAutomations, filter, groupBy, hovered, onHover, stackStatuses }: ProjectRowsProps) {
+function ProjectRows({ project, archived: projectArchived, collapsed, onCollapse, selected, deployment, onSelectProject, onSelectWorkspace, onReleaseMachines, releasePendingSpaceId, onArchive, onRestore, onDelete, onRename, onNewWorkspace, onOpenProjectSettings, onOpenProjectAutomations, filter, groupBy, hovered, onHover, stackStatuses }: ProjectRowsProps) {
   const { base, workspaces, graph } = project;
   const [showArchived, setShowArchived] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
@@ -389,7 +391,7 @@ function ProjectRows({ project, collapsed, onCollapse, selected, deployment, onS
   const open = !collapsed || (selected?.projectId === project.id && selected.workspaceId !== null);
   const baseSummary = project.baseSummary ?? base;
   const baseReleased = baseSummary && !baseSummary.closedAt && baseSummary.holder.kind === 'released';
-  const createWorkspace = onNewWorkspace && project.lifecycle !== 'archived' && project.lifecycle !== 'deleting' ? () => onNewWorkspace(project.id) : undefined;
+  const createWorkspace = onNewWorkspace && !projectArchived ? () => onNewWorkspace(project.id) : undefined;
   const names = new Map(items.map((item) => [item.id, item.name]));
   const byId = new Map(items.map((item) => [item.id, item]));
   const caption = (item: RowItem) => {
@@ -440,7 +442,7 @@ function ProjectRows({ project, collapsed, onCollapse, selected, deployment, onS
   };
   return <SidebarMenuItem>
     <SpaceSummaryContext.Provider value={baseSummary}>
-      <SidebarMenuButton className={baseReleased ? 'text-muted-foreground' : undefined} icon={SpaceStatusGlyph} isActive={baseSelected} title={[baseSummary ? `Base · ${summaryLabel(baseSummary)}${baseReleased ? ' · released' : ''}` : project.lifecycle === 'cloud-only' ? 'Saved in your account · no checkout' : `${project.name} · Status unknown`, project.error].filter(Boolean).join(' · ')} aria-description={project.error ?? undefined} onClick={() => onSelectProject?.(project.id)}>{project.name}<StateCounts items={items} />{project.operations?.length ? <ProjectOperationsGlyph operations={project.operations} /> : null}{project.remote?.behind ? <BehindOriginGlyph branch={base?.branch ?? null} /> : null}{baseReleased ? <span className="ml-1 truncate text-caption text-muted-foreground/70">· released</span> : null}</SidebarMenuButton>
+      <SidebarMenuButton className={projectArchived ? 'opacity-60' : baseReleased ? 'text-muted-foreground' : undefined} icon={SpaceStatusGlyph} isActive={baseSelected} title={[baseSummary ? `Base · ${summaryLabel(baseSummary)}${baseReleased ? ' · released' : ''}` : project.lifecycle === 'cloud-only' ? 'Saved in your account · no checkout' : `${project.name} · Status unknown`, project.error].filter(Boolean).join(' · ')} aria-description={project.error ?? undefined} onClick={() => onSelectProject?.(project.id)}>{project.name}<StateCounts items={items} />{project.operations?.length ? <ProjectOperationsGlyph operations={project.operations} /> : null}{project.remote?.behind ? <BehindOriginGlyph branch={base?.branch ?? null} /> : null}{baseReleased ? <span className="ml-1 truncate text-caption text-muted-foreground/70">· released</span> : null}</SidebarMenuButton>
     </SpaceSummaryContext.Provider>
     <SidebarMenuActions showOnHover={open}>
       <SidebarMenuAction aria-label={`${open ? 'Collapse' : 'Expand'} ${project.name}`} aria-expanded={open} onClick={() => onCollapse(project.id, open)}><ChevronRight width={16} height={16} strokeWidth={1.5} className={open ? 'rotate-90 transition-[rotate] duration-80' : 'transition-[rotate] duration-80'} /></SidebarMenuAction>
@@ -460,6 +462,8 @@ function ProjectRows({ project, collapsed, onCollapse, selected, deployment, onS
 }
 
 const COLLAPSED_PROJECTS_KEY = 'gitspace.sidebar.collapsedProjects';
+/** Project lifecycles the sidebar folds into its Archived projects group. */
+const ARCHIVED_PROJECT: Record<string, true> = { archived: true, deleting: true };
 
 /** Project ids whose workspaces the user folded away; missing, malformed, or unreadable storage folds nothing. */
 function readCollapsedProjects(): ReadonlySet<string> {
@@ -484,6 +488,9 @@ export function AppSidebar({ view, onView, selected, selectedSummary, projects, 
   const [filter, setFilter] = useState<SidebarFilter>('all');
   const [groupBy, setGroupBy] = useState(readGroupBy);
   const [hovered, setHovered] = useState<string | null>(null);
+  const [showArchivedProjects, setShowArchivedProjects] = useState(false);
+  // Archived projects start folded; the ones the user opened, not stored.
+  const [openArchivedProjects, setOpenArchivedProjects] = useState<ReadonlySet<string>>(new Set());
   const collapseProject = (projectId: string, collapse: boolean): void => {
     const next = new Set(collapsedProjects);
     if (collapse) next.add(projectId);
@@ -500,7 +507,17 @@ export function AppSidebar({ view, onView, selected, selectedSummary, projects, 
       ? { ...project, baseSummary: selectedSummary }
       : { ...project, workspaces: project.workspaces.map((workspace) => workspace.id === selected.workspaceId ? { ...workspace, summary: selectedSummary } : workspace) }
     : project);
-  const all = shown.flatMap((project) => project.workspaces.filter((workspace) => !workspace.closedAt).map((workspace) => rowItem(workspace, undefined)));
+  const active = shown.filter((project) => !ARCHIVED_PROJECT[project.lifecycle ?? '']);
+  const archivedProjects = shown.filter((project) => ARCHIVED_PROJECT[project.lifecycle ?? '']);
+  const archivedOpen = showArchivedProjects || archivedProjects.some((project) => project.id === selected?.projectId);
+  const collapseArchivedProject = (projectId: string, collapse: boolean): void => {
+    const next = new Set(openArchivedProjects);
+    if (collapse) next.delete(projectId);
+    else next.add(projectId);
+    setOpenArchivedProjects(next);
+  };
+  const all = active.flatMap((project) => project.workspaces.filter((workspace) => !workspace.closedAt).map((workspace) => rowItem(workspace, undefined)));
+  const rowProps = { selected, deployment, onSelectProject, onSelectWorkspace, onReleaseMachines, releasePendingSpaceId, onArchive, onRestore, onDelete, onRename, onNewWorkspace, onOpenProjectSettings, onOpenProjectAutomations, filter, groupBy, hovered, onHover: setHovered, stackStatuses };
   return <Sidebar variant="inset">
     <SidebarHeader>
       <nav aria-label="Navigate" className="flex items-center justify-between px-0.5">
@@ -545,8 +562,12 @@ export function AppSidebar({ view, onView, selected, selectedSummary, projects, 
           </Tooltip> : null}
         </SidebarGroupActions>
         <SidebarMenu>
-          {shown.map((project) => <ProjectRows key={project.id} project={project} collapsed={collapsedProjects.has(project.id)} onCollapse={collapseProject} selected={selected} deployment={deployment} onSelectProject={onSelectProject} onSelectWorkspace={onSelectWorkspace} onReleaseMachines={onReleaseMachines} releasePendingSpaceId={releasePendingSpaceId} onArchive={onArchive} onRestore={onRestore} onDelete={onDelete} onRename={onRename} onNewWorkspace={onNewWorkspace} onOpenProjectSettings={onOpenProjectSettings} onOpenProjectAutomations={onOpenProjectAutomations}
-            filter={filter} groupBy={groupBy} hovered={hovered} onHover={setHovered} stackStatuses={stackStatuses} />)}
+          {active.map((project) => <ProjectRows key={project.id} {...rowProps} project={project} archived={false} collapsed={collapsedProjects.has(project.id)} onCollapse={collapseProject} />)}
+          {archivedProjects.length ? <SidebarMenuItem>
+            <SidebarMenuButton icon={ArchiveGlyph} aria-expanded={archivedOpen} onClick={() => setShowArchivedProjects((value) => !value)}>Archived projects</SidebarMenuButton>
+            <SidebarMenuBadge>{archivedProjects.length}</SidebarMenuBadge>
+          </SidebarMenuItem> : null}
+          {archivedOpen ? archivedProjects.map((project) => <ProjectRows key={project.id} {...rowProps} project={project} archived collapsed={!openArchivedProjects.has(project.id)} onCollapse={collapseArchivedProject} />) : null}
         </SidebarMenu>
       </SidebarGroup>
     </SidebarContent>

@@ -145,6 +145,73 @@ describe('canonical cache deployment sources', () => {
     } finally { journal.close(); }
   });
 
+  it('checks out a canonical commit that tracks an LFS file whose object is unavailable, leaving the pointer', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gitspace-lfs-launch-'));
+    roots.push(root);
+    const origin = join(root, 'origin');
+    const pointer = 'version https://git-lfs.github.com/spec/v1\noid sha256:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\nsize 12345\n';
+    await mkdir(join(origin, 'packages/deployment/src'), { recursive: true });
+    await mkdir(join(origin, 'packages/protocol'), { recursive: true });
+    await mkdir(join(origin, 'packages/account-web'), { recursive: true });
+    await mkdir(join(origin, 'marketing'), { recursive: true });
+    await writeFile(join(origin, 'package.json'), JSON.stringify({ name: 'lfs-source-fixture', private: true }));
+    await writeFile(join(origin, 'packages/protocol/package.json'), JSON.stringify({ name: '@gitspace/protocol' }));
+    await writeFile(join(origin, 'packages/account-web/package.json'), JSON.stringify({ name: '@gitspace/account-web', gitspace: { inferenceVersion: 1 } }));
+    await writeFile(join(origin, '.gitattributes'), 'marketing/** filter=lfs diff=lfs merge=lfs -text\n');
+    await writeFile(join(origin, 'marketing/clip.mp4'), pointer);
+    await writeFile(join(origin, 'packages/deployment/src/builders.ts'), `
+      import { mkdir, readFile, writeFile } from 'node:fs/promises';
+      import { join } from 'node:path';
+      export async function buildFrontendTree(root, output) {
+        await mkdir(output, { recursive: true });
+        const content = await readFile(join(root, 'marketing/clip.mp4'));
+        await writeFile(join(output, 'index.html'), content);
+        return { path: output, hash: 'sha256:' + new Bun.CryptoHasher('sha256').update(content).digest('hex') };
+      }
+    `);
+    for (const command of [
+      [process.execPath, 'install', '--lockfile-only', '--ignore-scripts'],
+      ['git', 'init', '-b', 'main'],
+      ['git', '-c', 'filter.lfs.clean=', '-c', 'filter.lfs.process=', '-c', 'filter.lfs.required=false', 'add', '.'],
+      ['git', '-c', 'user.name=Lfs Test', '-c', 'user.email=lfs@example.invalid', 'commit', '-m', 'source'],
+    ]) {
+      const child = Bun.spawn(command, { cwd: origin, stdout: 'pipe', stderr: 'pipe' });
+      if (await child.exited !== 0) throw new Error(await new Response(child.stderr).text());
+    }
+    const commit = (await new Response(Bun.spawn(['git', 'rev-parse', 'HEAD'], { cwd: origin, stdout: 'pipe' }).stdout).text()).trim();
+    // A machine whose global git config requires an LFS smudge that cannot fetch the object.
+    const globalConfig = join(root, 'gitconfig');
+    await writeFile(globalConfig, '[filter "lfs"]\n\tsmudge = false\n\tprocess = false\n\trequired = true\n');
+    const previousGlobal = process.env.GIT_CONFIG_GLOBAL;
+    process.env.GIT_CONFIG_GLOBAL = globalConfig;
+    const uploaded = new Map<string, string>();
+    let staged: ReleaseRecord | null = null;
+    const launcher = new DeploymentLauncher({
+      attachments: () => [], machineId: 'builder', buildRoot: join(root, 'builds'),
+      blobs: { put: async (key, bytes) => { uploaded.set(key, new TextDecoder().decode(bytes)); return `sha256:${new Bun.CryptoHasher('sha256').update(bytes).digest('hex')}`; } },
+      authority: {
+        deploymentStatus: async () => accountStatus(staged ? [staged] : []),
+        reportLaunchProgress: async () => {},
+        stageRelease: async input => {
+          staged = releaseRecordSchema.parse({ ...input, builtBy: 'builder', createdAt: new Date().toISOString(), status: { worker: 'skipped', frontend: 'pending', machines: {} }, error: null });
+          return staged;
+        },
+        launchRelease: async sha => {
+          if (!staged || staged.sha !== sha) throw new Error('Release was not staged');
+          return { record: staged, desired: { worker: null, machine: null, frontend: sha, updatedAt: new Date().toISOString() } };
+        },
+      },
+    });
+    try {
+      const record = await launcher.launchAndWait({ source: { kind: 'canonical', repository: origin, branch: 'main', commit }, targets: ['frontend'] });
+      expect(record.source).toMatchObject({ kind: 'canonical', commit });
+      expect([...uploaded.entries()].find(([key]) => key.endsWith('/index.html'))?.[1]).toBe(pointer);
+    } finally {
+      if (previousGlobal === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+      else process.env.GIT_CONFIG_GLOBAL = previousGlobal;
+    }
+  });
+
   it('uploads each worker module the manifest pins, then the manifest, and stages the manifest as the worker artifact', async () => {
     const root = mkdtempSync(join(tmpdir(), 'gitspace-worker-launch-'));
     roots.push(root);

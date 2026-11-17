@@ -208,3 +208,47 @@ describe('AppSidebar stacks', () => {
     expect(html).not.toContain('on bakery-api · ');
   });
 });
+
+describe('AppSidebar archived projects', () => {
+  const status = { ...verticalSliceFixture.baseSpace.status, primaryColor: 'green' as const };
+  const running = { holder: { kind: 'cloud' as const }, closedAt: null, status, freshness: 'fresh' as const };
+  const projects: SidebarProject[] = [
+    { id: 'live', name: 'Live project', lifecycle: 'active', workspaces: [{ id: 'live-work', projectId: 'live', name: 'Live work', branch: 'live', closedAt: null }] },
+    { id: 'import-check', name: 'Import check', lifecycle: 'archived', workspaces: [{ id: 'import-work', projectId: 'import-check', name: 'Import work', branch: 'import', closedAt: null, summary: running }] },
+    { id: 'block-fluency', name: 'Block fluency eval', lifecycle: 'deleting', workspaces: [{ id: 'fluency-work', projectId: 'block-fluency', name: 'Fluency work', branch: 'fluency', closedAt: null, summary: running }] },
+  ];
+  const render = (selected: AppSidebarProps['selected']) => renderToStaticMarkup(<SidebarProvider persist={false}><AppSidebar {...base} selected={selected} projects={projects} onNewWorkspace={() => undefined} deployment={null} /></SidebarProvider>);
+  const count = (html: string, label: string) => Number(html.match(new RegExp(`${label}<span[^>]*>(\\d+)<`, 'u'))?.[1]);
+
+  it('folds archived and deleting projects into one collapsed group after the project list, with their count', () => {
+    const html = render(null);
+    expect(html).toContain('Live project');
+    expect(html).not.toContain('Import check');
+    expect(html).not.toContain('Block fluency eval');
+    expect(html).toMatch(/aria-expanded="false"[^>]*>.*?Archived projects.*?data-sidebar="menu-badge"[^>]*>2</u);
+    expect(html.indexOf('Live project')).toBeLessThan(html.indexOf('Archived projects'));
+  });
+
+  it('opens the group on its selected project, dimmed, folded, without a new workspace button', () => {
+    const html = render({ projectId: 'import-check', workspaceId: null });
+    expect(html).toMatch(/aria-expanded="true"[^>]*>.*?Archived projects/u);
+    expect(html).toContain('Import check');
+    expect(html).toContain('Block fluency eval');
+    expect(html).toContain('aria-label="New workspace in Live project"');
+    expect(html).not.toContain('aria-label="New workspace in Import check"');
+    expect(html).toContain('aria-label="Expand Import check"');
+    expect(html).toMatch(/<button[^>]*class="[^"]*opacity-60[^"]*"[^>]*>(?:(?!<\/button>).)*Import check/u);
+  });
+
+  it('opens the group on a selected workspace of an archived project', () => {
+    const html = render({ projectId: 'import-check', workspaceId: 'import-work' });
+    expect(html).toMatch(/aria-expanded="true"[^>]*>.*?Archived projects/u);
+    expect(html).toContain('data-workspace="import-work"');
+  });
+
+  it('leaves archived projects and their workspaces out of the header counts', () => {
+    const html = render({ projectId: 'import-check', workspaceId: null });
+    expect(count(html, 'All')).toBe(1);
+    expect(count(html, 'Running')).toBe(0);
+  });
+});

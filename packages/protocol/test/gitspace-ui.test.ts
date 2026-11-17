@@ -372,7 +372,8 @@ describe('The drawing brief', () => {
   });
 
   it('asks for a required AskCard on decisions, names the example reply, prefers specific blocks and Copy as Markdown', () => {
-    expect(UI_BLOCK_BRIEF).toContain('When the person must choose, compare the options, recommend one, then end the reply with an AskCard ask=required holding the choices; don\'t leave the decision in prose');
+    expect(UI_BLOCK_BRIEF).toContain('AskCard ask=required only when they\'ll decide ("let me pick") or you\'re blocked on their pick: compare, recommend one, end with it');
+    expect(UI_BLOCK_BRIEF).toContain('Asked for yours? Recommend and continue.');
     const decision = UI_REPLY_EXAMPLES.find((example) => example.title === 'Options compared, then the person decides');
     expect(UI_BLOCK_BRIEF).toContain(`example reply "${decision?.title ?? 'missing'}"`);
     expect(UI_BLOCK_BRIEF).toContain('Prefer the specific block to a Table: before/after numbers → MetricDelta, schema changes → SchemaDiff, events in time → Timeline, options → Tradeoffs.');
