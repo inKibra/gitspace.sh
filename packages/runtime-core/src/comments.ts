@@ -66,8 +66,8 @@ export async function commentWindow(harness: Harness, storage: Storage, conversa
 }
 
 /** Stages a comment: on a turn of the comment window (`commentWindow`) of the conversation a turn anchor names, or on
- * the Goal or a Change Guide revision, whose comments never lock. A comment staged in the window stays staged while
- * automated inputs extend it. */
+ * the Goal, a Change Guide revision or a drive doc, whose comments never lock. A comment staged in the window stays
+ * staged while automated inputs extend it. */
 export async function stageComment(harness: Harness, storage: Storage, conversation: Conversation, anchor: CommentAnchor, note: string, deviceId: string | null): Promise<StagedComment> {
   if (anchor.document.kind === 'turn') {
     if (anchor.document.conversationId !== String(conversation.id)) throw new Error('The comment names another conversation');
@@ -206,15 +206,19 @@ export async function rebuildCommentLookup(harness: Harness, storage: Storage): 
 }
 
 /** The lookup's comments on the turns `turnIds` and on every revision of the open documents `documents` (the Goal, the
- * Change Guide), and the replies to them, with the comments the replies in those turns answer. */
-export async function commentLookup(harness: Harness, turnIds: readonly string[], documents: readonly OpenDocumentKind[] = []): Promise<CommentLookup> {
+ * Change Guide, drive docs: only those of the files `drivePaths` names when it is given), and the replies to them, with
+ * the comments the replies in those turns answer. */
+export async function commentLookup(harness: Harness, turnIds: readonly string[], documents: readonly OpenDocumentKind[] = [], drivePaths?: readonly string[]): Promise<CommentLookup> {
   const lookup = await harness.snapshot(CommentLookupDoc, BACKGROUND_CONTEXT);
   if (!lookup) return { comments: [], replies: [] };
   const turns = new Set(turnIds);
   const local = new Map(Object.entries(lookup.replies).filter(([row]) => turnIds.some(turn => row.startsWith(`${turn}:`))));
   const answered = new Set([...local.values()].flat());
-  const comments = Object.entries(lookup.comments).filter(([id, { anchor: { document } }]) =>
-    (document.kind === 'turn' ? turns.has(document.turnId) : documents.includes(document.kind)) || answered.has(id));
+  const comments = Object.entries(lookup.comments).filter(([id, { anchor: { document } }]) => {
+    if (answered.has(id)) return true;
+    if (document.kind === 'turn') return turns.has(document.turnId);
+    return documents.includes(document.kind) && (document.kind !== 'drive' || drivePaths === undefined || drivePaths.includes(document.path));
+  });
   const ids = new Set(comments.map(([id]) => id));
   return {
     comments: comments.map(([id, comment]) => ({ id, ...comment })),

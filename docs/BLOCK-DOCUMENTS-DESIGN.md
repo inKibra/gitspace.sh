@@ -1,6 +1,6 @@
 # Block documents and comments
 
-Status: slices A–D built (D, the Goal and Change Guide: SIMPLIFICATION 287, 2026-11-17); E proposed. Decided with the user: one document model for chat turns, the Goal, the Change Guide
+Status: slices A–E built (D, the Goal and Change Guide: SIMPLIFICATION 287, 2026-11-17; E, drive docs and the sidebar preview: SIMPLIFICATION 292, 2026-11-17). Decided with the user: one document model for chat turns, the Goal, the Change Guide
 and drive docs; comments are the one way a person responds to what an agent wrote; threads reuse chat comments;
 requirements stay the agent's to track (the optional acceptance button stays as it is, nothing waits on it); every
 Change Guide gets a walkthrough.
@@ -54,8 +54,10 @@ type CommentAnchor = {
 };
 ```
 
-- `text` is a W3C-style text-quote selector inside `within` (a block id or entity ref, or the whole document). It is
-  found again by exact match with prefix and suffix; when it is gone the comment is **outdated** and shows its quote.
+- `text` is a W3C-style text-quote selector inside `within` (a block id or entity ref, or the whole document). Its
+  prefix and suffix (up to 32 characters each) come only from the paragraph, list item, heading or fenced block the
+  quote starts and ends in, so editing a neighbouring paragraph never moves or outdates it. It is found again by exact
+  match with prefix and suffix under the same bound; when it is gone the comment is **outdated** and shows its quote.
 - A comment on a Guide revision carries forward to the next revision when its section's `contentHash` is unchanged;
   otherwise it stays on its revision, shown as outdated on the new one with a link to the old.
 - `lines` replaces review threads' `line` and `hunk` anchors for exhibits.

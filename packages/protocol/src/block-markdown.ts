@@ -4,7 +4,7 @@
 // An element whose props fail the catalog's checks, an unknown component and anything that is not a spec are written as
 // their title and a JSON code block; blockMarkdown never throws.
 import type { z } from 'zod';
-import { gitspaceUiCatalog, isRecord, parseBlockRef, parseSvg, readState } from './gitspace-ui.js';
+import { extractBlocks, fenceSpec, gitspaceUiCatalog, isRecord, parseBlockRef, parseSvg, readState, type UiBlock } from './gitspace-ui.js';
 import type { ChangeGuideSection, EvidenceReference, GoalRequirement, JournalEntryView } from './inspector-contract.js';
 
 const components = gitspaceUiCatalog.components;
@@ -444,4 +444,74 @@ export function guideSectionMarkdown(section: ChangeGuideSection, number: number
   const evidence = section.evidence ?? [];
   if (evidence.length > 0) parts.push(['**Evidence**', ...evidence.map((reference) => `- ${evidenceMarkdown(reference)}`)].join('\n'));
   return parts.join('\n\n');
+}
+
+// A message as one line of plain text: what a sidebar row shows of a workspace's last message.
+
+/** A fence that is not a block (a code sample), open to its closing line or to the end of the text. */
+const CODE_FENCE = /^ {0,3}(`{3,}|~{3,})[^\n]*(?:(?:\n[\s\S]*?)?\n {0,3}\1[ \t]*(?=\n|(?![\s\S]))|[\s\S]*)/gmu;
+
+/** Markdown prose as plain text on one line: no markup, links as their text, images as their alt text. */
+function plainProse(markdown: string): string {
+  return markdown
+    .replace(/<[^>\n]+>/gu, ' ')
+    .replace(/!\[([^\]\n]*)\]\([^)\n]*\)/gu, '$1')
+    .replace(/\[([^\]\n]+)\](?:\([^)\n]*\)|\[[^\]\n]*\])/gu, '$1')
+    .replace(/`([^`\n]+)`/gu, '$1')
+    .replace(/^ {0,3}(?:#{1,6}[ \t]+|>[ \t]?|[-*+][ \t]+(?:\[[ xX]\][ \t]+)?|\d+[.)][ \t]+)/gmu, '')
+    .replace(/^ {0,3}(?:[-*_][ \t]*){3,}$/gmu, '')
+    .replace(/^[ \t]*\|?[ \t]*:?-{3,}:?[ \t]*(?:\|[ \t]*:?-{3,}:?[ \t]*)*\|?[ \t]*$/gmu, '')
+    .replace(/\|/gu, ' ')
+    .replace(/(\*\*|__|~~)(\S(?:[^\n]*?\S)?)\1/gu, '$2')
+    .replace(/\*(\S(?:[^*\n]*?\S)?)\*/gu, '$1')
+    .replace(/(?<!\w)_(\S(?:[^_\n]*?\S)?)_(?!\w)/gu, '$1')
+    .replace(/\\([\\`*_{}[\]()#+\-.!>|~])/gu, '$1')
+    .replace(/\s+/gu, ' ')
+    .trim();
+}
+
+/** A block as its kind and title ("Timeline: Deploy", "Tradeoffs: Where do replies live?"): a gitspace-ui block's root
+ * component and its title, question, label or (a Reply's) text; a drawing or a diagram by what it is. */
+function blockSummary(block: UiBlock): string {
+  if (block.kind === 'svg') return 'Drawing';
+  if (block.kind === 'mermaid') return 'Diagram';
+  const read = fenceSpec(block.body, block.info);
+  const spec = 'spec' in read ? read.spec : null;
+  const root = isRecord(spec) && isRecord(spec.elements) && typeof spec.root === 'string' ? spec.elements[spec.root] : undefined;
+  const kind = isRecord(root) && typeof root.type === 'string' ? root.type : block.info.split(/\s+/u)[0] || 'Block';
+  const props = isRecord(root) && isRecord(root.props) ? root.props : {};
+  const named = [props.title, props.question, props.label, props.text].find((value) => typeof value === 'string' && value.trim() !== '');
+  return typeof named === 'string' ? `${kind}: ${plainProse(named)}` : kind;
+}
+
+/**
+ * A message as one line of plain text, at most `max` characters (cut with "…"): its prose without Markdown, each
+ * gitspace-ui, svg or mermaid block as its kind and title (`blockSummary`) and each code sample as "Code", never JSON
+ * or fences. Prose runs on with spaces; a block stands apart, with " · " on each side.
+ */
+export function messagePreview(markdown: string, max: number): string {
+  const parts: { block: boolean; text: string }[] = [];
+  const prose = (text: string): void => {
+    let at = 0;
+    for (const code of text.matchAll(CODE_FENCE)) {
+      parts.push({ block: false, text: plainProse(text.slice(at, code.index)) }, { block: true, text: 'Code' });
+      at = code.index + code[0].length;
+    }
+    parts.push({ block: false, text: plainProse(text.slice(at)) });
+  };
+  let at = 0;
+  for (const block of extractBlocks(markdown)) {
+    prose(markdown.slice(at, block.start));
+    parts.push({ block: true, text: blockSummary(block) });
+    at = block.end;
+  }
+  prose(markdown.slice(at));
+  let line = '';
+  let previous: { block: boolean } | null = null;
+  for (const part of parts) {
+    if (part.text === '') continue;
+    line += previous === null ? part.text : `${previous.block || part.block ? ' · ' : ' '}${part.text}`;
+    previous = part;
+  }
+  return line.length > max ? `${line.slice(0, max - 1).trimEnd()}…` : line;
 }

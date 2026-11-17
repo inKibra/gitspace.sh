@@ -207,8 +207,8 @@ export interface GitSpaceShellProps {
   onOpenSettings?: (section?: 'source' | 'github') => void;
   onNavigateView?: (view: AppView) => void;
   skills?: readonly SkillView[];
-  /** `guideSection`: open the Change Guide at the section of this guide entity (`section:<id>`, `exhibit:<section id>:<path>`; a new `serial` opens it again). */
-  renderInspector?: (onClose: () => void, initialView: 'environment' | 'browser' | 'goal' | undefined, resource: ResourceRequest | undefined, openTerminal: (name: string) => void, guideSection?: { entity: string; serial: number }) => ReactNode;
+  /** `guideSection`: open the Change Guide at the section of this guide entity (`section:<id>`, `exhibit:<section id>:<path>`; a new `serial` opens it again). `driveFocus`: open the drive file a comment is on, scrolled to its anchor (a new `serial` opens it again). */
+  renderInspector?: (onClose: () => void, initialView: 'environment' | 'browser' | 'goal' | undefined, resource: ResourceRequest | undefined, openTerminal: (name: string) => void, guideSection?: { entity: string; serial: number }, driveFocus?: { anchor: CommentAnchor; serial: number }) => ReactNode;
   renderEnvironmentStatus?: (onInspect: () => void, onRevealTerminal: (name: string) => void) => ReactNode;
   /** Signed-in user shown in the sidebar footer. */
   user?: { name: string; handle?: string | null };
@@ -674,6 +674,7 @@ function Shell({ project, projects, workspace, baseSpace, workspaces, mainAgent,
   const openEnvironment = (): void => { setInspectorSection('environment'); setInspectorOpen(true); };
   const [resourceRequest, setResourceRequest] = useState<{ spaceId: string; request: ResourceRequest } | null>(null);
   const [guideSection, setGuideSection] = useState<{ spaceId: string; entity: string; serial: number } | null>(null);
+  const [driveFocus, setDriveFocus] = useState<{ spaceId: string; anchor: CommentAnchor; serial: number } | null>(null);
   const [inspectorWidth, setInspectorWidth] = useState(() => {
     if (typeof window === 'undefined') return 560;
     const stored = Number(window.localStorage.getItem('gitspace:inspector-width'));
@@ -768,11 +769,17 @@ function Shell({ project, projects, workspace, baseSpace, workspaces, mainAgent,
   // guide's, since a section id may itself contain `:`.
   const openGuideEntity = (entity: string): void => { setGuideSection((current) => ({ spaceId: workspace.id, entity, serial: (current?.serial ?? 0) + 1 })); setInspectorSection(undefined); setInspectorOpen(true); };
   // A comment on the Goal opens the Goal tab: the Inspector follows its initial view when it changes, so it is cleared
-  // for a frame first and a second link to the Goal opens it again.
+  // for a frame first and a second link to the Goal opens it again. A comment on a drive doc opens its file.
   const openDocument = (anchor: CommentAnchor): void => {
     if (anchor.document.kind === 'guide') {
       const entity = anchorEntity(anchor);
       if (entity?.startsWith('section:') || entity?.startsWith('exhibit:')) openGuideEntity(entity);
+      return;
+    }
+    if (anchor.document.kind === 'drive') {
+      setDriveFocus((current) => ({ spaceId: workspace.id, anchor, serial: (current?.serial ?? 0) + 1 }));
+      setInspectorSection(undefined);
+      setInspectorOpen(true);
       return;
     }
     setInspectorSection(undefined);
@@ -814,7 +821,7 @@ function Shell({ project, projects, workspace, baseSpace, workspaces, mainAgent,
               </div>
               {inspectorOpen && renderInspector ? <InspectorResizeHandle width={inspectorWidth} onWidth={updateInspectorWidth} /> : null}
               {/* Opaque in every state: on narrow viewports the pane overlays the conversation, so a transparent loading or error state would still swallow its clicks. */}
-              {inspectorOpen && renderInspector ? <aside className="inspector-pane flex min-w-0 flex-col bg-surface-2" aria-label="Inspector"><InspectorLayout.Provider value={{ full: inspectorFull, onFull: setInspectorFull }}>{renderInspector(() => { setInspectorOpen(false); setInspectorFull(false); setInspectorSection(undefined); setResourceRequest(null); setGuideSection(null); }, inspectorSection, resourceRequest?.spaceId === workspace.id ? resourceRequest.request : undefined, (name) => { setRequestedTerminal({ spaceId: workspace.id, name }); setTerminalOpen(true); }, guideSection?.spaceId === workspace.id ? { entity: guideSection.entity, serial: guideSection.serial } : undefined)}</InspectorLayout.Provider></aside> : null}
+              {inspectorOpen && renderInspector ? <aside className="inspector-pane flex min-w-0 flex-col bg-surface-2" aria-label="Inspector"><InspectorLayout.Provider value={{ full: inspectorFull, onFull: setInspectorFull }}>{renderInspector(() => { setInspectorOpen(false); setInspectorFull(false); setInspectorSection(undefined); setResourceRequest(null); setGuideSection(null); setDriveFocus(null); }, inspectorSection, resourceRequest?.spaceId === workspace.id ? resourceRequest.request : undefined, (name) => { setRequestedTerminal({ spaceId: workspace.id, name }); setTerminalOpen(true); }, guideSection?.spaceId === workspace.id ? { entity: guideSection.entity, serial: guideSection.serial } : undefined, driveFocus?.spaceId === workspace.id ? { anchor: driveFocus.anchor, serial: driveFocus.serial } : undefined)}</InspectorLayout.Provider></aside> : null}
             </div>
             {terminalOpen && terminals ? <><TerminalResizeHandle height={terminalHeight} onHeight={setTerminalHeight} /><section className="min-h-0 min-w-0 overflow-hidden"><WorkspaceTerminals key={terminals.spaceId} {...terminals} requestedName={requestedTerminal?.spaceId === workspace.id ? requestedTerminal.name : terminals.requestedName} onAttachMachine={renderInspector ? openEnvironment : undefined} onClose={() => setTerminalOpen(false)} /></section></> : null}
           </div>

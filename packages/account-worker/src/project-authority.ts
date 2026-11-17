@@ -361,9 +361,9 @@ function projectMcpGrant(row: ProjectMcpGrantRow): ProjectMcpGrant {
   };
 }
 
-/** One workspace's status as it sends it: the row, what its main conversation waits on, its main agent's latest message,
- * and the snapshot cursor that orders its sends. */
-export type WorkspaceStatusSend = WorkspaceStatusRow & { waitingOn: WorkspaceReport['waitingOn']; lastReply: WorkspaceReport['lastReply']; lastReplySource?: WorkspaceReport['lastReplySource']; cursor: number };
+/** One workspace's status as it sends it: the row (with its last-message preview), what its main conversation waits on,
+ * its main agent's latest message, and the snapshot cursor that orders its sends. */
+export type WorkspaceStatusSend = z.input<typeof workspaceStatusRowSchema> & { waitingOn: WorkspaceReport['waitingOn']; lastReply: WorkspaceReport['lastReply']; lastReplySource?: WorkspaceReport['lastReplySource']; cursor: number };
 
 export class UserProjectIndexDO extends BudgetedDurableObject {
   private readonly directory: AccountDirectoryProjection;
@@ -400,7 +400,7 @@ export class UserProjectIndexDO extends BudgetedDurableObject {
         try { this.ctx.storage.sql.exec(`ALTER TABLE user_projects ADD COLUMN ${column}`); }
         catch (error) { if (!(error instanceof Error) || !/duplicate column name/u.test(error.message)) throw error; }
       }
-      for (const column of ['waiting_json TEXT', 'since TEXT', 'last_reply TEXT', 'status_cursor INTEGER', 'last_reply_source TEXT']) {
+      for (const column of ['waiting_json TEXT', 'since TEXT', 'last_reply TEXT', 'status_cursor INTEGER', 'last_reply_source TEXT', 'preview TEXT']) {
         try { this.ctx.storage.sql.exec(`ALTER TABLE workspace_statuses ADD COLUMN ${column}`); }
         catch (error) { if (!(error instanceof Error) || !/duplicate column name/u.test(error.message)) throw error; }
       }
@@ -415,27 +415,27 @@ export class UserProjectIndexDO extends BudgetedDurableObject {
 
 
   /** A workspace's status, what its main conversation waits on, or its main agent's latest message changed: keep its one
-   * row, and send a changed status to every open tab. `since` moves only when its activity (the status color) or what it
-   * waits on changes, not its machine or sync counts or its latest message. A workspace's sends can arrive out of order;
-   * one older than the row (by its snapshot `cursor`, which only grows) is dropped. */
+   * row, and send a changed status or preview to every open tab. `since` moves only when its activity (the status color)
+   * or what it waits on changes, not its machine or sync counts or its latest message. A workspace's sends can arrive out
+   * of order; one older than the row (by its snapshot `cursor`, which only grows) is dropped. */
   setWorkspaceStatus(row: WorkspaceStatusSend): void {
-    const { projectId, workspaceId, status } = workspaceStatusRowSchema.parse(row);
+    const { projectId, workspaceId, status, preview } = workspaceStatusRowSchema.parse(row);
     const cursor = z.number().int().nonnegative().parse(row.cursor);
     const summary = JSON.stringify(status);
     const waiting = JSON.stringify(WorkspaceReportSchema.shape.waitingOn.parse(row.waitingOn));
     const lastReply = WorkspaceReportSchema.shape.lastReply.parse(row.lastReply);
     const source = JSON.stringify(WorkspaceReportSchema.shape.lastReplySource.parse(row.lastReplySource ?? null));
-    const stored = this.ctx.storage.sql.exec<{ summary: string; waiting_json: string | null; since: string | null; last_reply: string | null; last_reply_source: string | null; status_cursor: number | null }>('SELECT summary,waiting_json,since,last_reply,last_reply_source,status_cursor FROM workspace_statuses WHERE workspace_id=?', workspaceId).toArray()[0];
+    const stored = this.ctx.storage.sql.exec<{ summary: string; waiting_json: string | null; since: string | null; last_reply: string | null; last_reply_source: string | null; status_cursor: number | null; preview: string | null }>('SELECT summary,waiting_json,since,last_reply,last_reply_source,status_cursor,preview FROM workspace_statuses WHERE workspace_id=?', workspaceId).toArray()[0];
     if (stored?.status_cursor != null && cursor < stored.status_cursor) return;
-    if (stored?.summary === summary && (stored.waiting_json ?? 'null') === waiting && stored.last_reply === lastReply && (stored.last_reply_source ?? 'null') === source) {
+    if (stored?.summary === summary && (stored.waiting_json ?? 'null') === waiting && stored.last_reply === lastReply && (stored.last_reply_source ?? 'null') === source && stored.preview === preview) {
       this.ctx.storage.sql.exec('UPDATE workspace_statuses SET status_cursor=? WHERE workspace_id=?', cursor, workspaceId);
       return;
     }
     const activityChanged = !stored || (stored.waiting_json ?? 'null') !== waiting || workspaceStatusRowSchema.shape.status.parse(JSON.parse(stored.summary)).primaryColor !== status.primaryColor;
     const since = activityChanged ? new Date().toISOString() : stored?.since ?? null;
-    this.ctx.storage.sql.exec('INSERT INTO workspace_statuses(workspace_id,project_id,summary,waiting_json,since,last_reply,last_reply_source,status_cursor) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(workspace_id) DO UPDATE SET project_id=excluded.project_id,summary=excluded.summary,waiting_json=excluded.waiting_json,since=excluded.since,last_reply=excluded.last_reply,last_reply_source=excluded.last_reply_source,status_cursor=excluded.status_cursor', workspaceId, projectId, summary, waiting, since, lastReply, source, cursor);
-    if (stored?.summary === summary) return;
-    const message = JSON.stringify({ type: 'status', projectId, workspaceId, status });
+    this.ctx.storage.sql.exec('INSERT INTO workspace_statuses(workspace_id,project_id,summary,waiting_json,since,last_reply,last_reply_source,status_cursor,preview) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(workspace_id) DO UPDATE SET project_id=excluded.project_id,summary=excluded.summary,waiting_json=excluded.waiting_json,since=excluded.since,last_reply=excluded.last_reply,last_reply_source=excluded.last_reply_source,status_cursor=excluded.status_cursor,preview=excluded.preview', workspaceId, projectId, summary, waiting, since, lastReply, source, cursor, preview);
+    if (stored?.summary === summary && stored.preview === preview) return;
+    const message = JSON.stringify({ type: 'status', projectId, workspaceId, status, preview });
     for (const socket of this.ctx.getWebSockets()) {
       if (socket.readyState !== WebSocket.OPEN) continue;
       try { socket.send(message); } catch { /* A reconnecting tab reads every row again. */ }
@@ -488,8 +488,8 @@ export class UserProjectIndexDO extends BudgetedDurableObject {
   }
 
   private workspaceStatuses(): WorkspaceStatusRow[] {
-    return this.ctx.storage.sql.exec<{ workspace_id: string; project_id: string; summary: string }>('SELECT workspace_id,project_id,summary FROM workspace_statuses').toArray()
-      .map(row => workspaceStatusRowSchema.parse({ projectId: row.project_id, workspaceId: row.workspace_id, status: JSON.parse(row.summary) }));
+    return this.ctx.storage.sql.exec<{ workspace_id: string; project_id: string; summary: string; preview: string | null }>('SELECT workspace_id,project_id,summary,preview FROM workspace_statuses').toArray()
+      .map(row => workspaceStatusRowSchema.parse({ projectId: row.project_id, workspaceId: row.workspace_id, status: JSON.parse(row.summary), preview: row.preview }));
   }
 
   /** A project's automation counts and newest runs, pushed by its automations object on every change; `day` is the UTC

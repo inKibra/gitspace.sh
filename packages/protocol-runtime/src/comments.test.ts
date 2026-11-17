@@ -21,6 +21,13 @@ describe('a text-quote anchor', () => {
   test('is missing once its text is gone', () => {
     expect(findTextQuote(reply.replaceAll('Use KV', 'Use D1'), quote)).toBeNull();
   });
+
+  test('takes its prefix and suffix from its own block only', () => {
+    const text = 'Ship it. Cache in KV now. Then measure.';
+    const breaks = [text.indexOf('Cache'), text.indexOf('Then')];
+    const at = text.indexOf('KV');
+    expect(textQuoteAt(text, at, at + 2, breaks)).toEqual({ exact: 'KV', prefix: 'Cache in ', suffix: ' now.' });
+  });
 });
 
 describe('comments in a message', () => {

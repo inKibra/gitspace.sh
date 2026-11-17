@@ -80,6 +80,8 @@ export interface SidebarSpaceSummary {
   refreshing?: boolean;
   /** Set while the cloud definition is still being created or its creation failed; no placement or runtime applies. */
   creation?: WorkspaceCreationState;
+  /** The main agent's latest message as one line of plain text (the status row's `preview`); null before one. */
+  preview?: string | null;
 }
 
 function summaryLabel(summary: SidebarSpaceSummary): string {
@@ -343,7 +345,8 @@ function WorkspaceRow({ item, kin, selected, inset, guides, meta, flags, dimmed,
         : <span onDoubleClick={onStartRename ? (event) => { event.preventDefault(); onStartRename(); } : undefined} className={`min-w-0 truncate text-body ${released ? 'text-muted-foreground' : item.state === 'needs-you' || selected ? 'font-medium text-foreground' : 'text-foreground/90'}`}>{item.name}</span>}
       {flags}
     </span>
-    <span className="relative flex min-w-0 items-center gap-1.5 pl-[22px] text-[11px] text-muted-foreground">{meta}</span>
+    {/* The second line is as tall as a pull request chip, its tallest part, whatever it holds: a preview never changes the row's height. */}
+    <span className="relative flex min-h-[18px] min-w-0 items-center gap-1.5 pl-[22px] text-[11px] text-muted-foreground">{meta}{summary?.preview && !summary.closedAt ? <span data-workspace-preview="" className="min-w-0 flex-1 truncate text-muted-foreground/90">{summary.preview}</span> : null}</span>
   </>;
   return <SidebarMenuSubItem data-workspace={item.id} data-relation={kin}>
     {renaming ? <div className={className} style={{ paddingLeft: inset }}>{body}</div>
@@ -502,10 +505,11 @@ export function AppSidebar({ view, onView, selected, selectedSummary, projects, 
     setGroupBy(next);
     try { window.localStorage.setItem(GROUP_BY_KEY, next); } catch { /* private mode */ }
   };
+  // The open pane's status shows on its row; the row keeps the directory's last-message preview.
   const shown = projects.map((project) => selectedSummary && selected?.projectId === project.id
     ? selected.workspaceId === null
       ? { ...project, baseSummary: selectedSummary }
-      : { ...project, workspaces: project.workspaces.map((workspace) => workspace.id === selected.workspaceId ? { ...workspace, summary: selectedSummary } : workspace) }
+      : { ...project, workspaces: project.workspaces.map((workspace) => workspace.id === selected.workspaceId ? { ...workspace, summary: { ...selectedSummary, preview: selectedSummary.preview ?? workspace.summary?.preview ?? null } } : workspace) }
     : project);
   const active = shown.filter((project) => !ARCHIVED_PROJECT[project.lifecycle ?? '']);
   const archivedProjects = shown.filter((project) => ARCHIVED_PROJECT[project.lifecycle ?? '']);

@@ -111,14 +111,16 @@ export function useWorkspaceProjection(projects: readonly Pick<ProjectLifecycleV
         const summaries = new Map<string, SidebarSpaceSummary>();
         // Every workspace's status is the row it pushed to the account; no workspace is read to show it.
         const summarize = (id: string, closedAt: Date | null, previous: SidebarSpaceSummary | undefined): SidebarSpaceSummary => {
-          const status = closedAt ? undefined : statuses.get(id);
+          const row = closedAt ? undefined : statuses.get(id);
+          const status = row?.status;
+          const preview = row?.preview ?? null;
           // Cloud-only projects have canonical workspaces before their first runtime opens; neither needs a machine.
           if (project.lifecycle === 'cloud-only' || (definitionsById.get(id)?.cloudRuntime ?? previous?.holder.kind === 'cloud')) {
-            return { closedAt, holder: { kind: 'cloud' }, status, freshness: status ? 'fresh' : 'unknown', refreshing: false };
+            return { closedAt, holder: { kind: 'cloud' }, status, preview, freshness: status ? 'fresh' : 'unknown', refreshing: false };
           }
           const placement = placements.get(id);
           if (closedAt) return { closedAt, holder: { kind: 'released' }, generation: placement?.generation, freshness: 'fresh' };
-          if (!placement) return { closedAt, holder: { kind: 'unknown' }, status, freshness: status ? 'fresh' : 'unknown', refreshing: false, detail: 'Placement unavailable' };
+          if (!placement) return { closedAt, holder: { kind: 'unknown' }, status, preview, freshness: status ? 'fresh' : 'unknown', refreshing: false, detail: 'Placement unavailable' };
           const machine = machines.get(placement.holderId);
           const released = placement.state === 'closed' || (placement.holderId === 'unassigned' && placement.state !== 'opening');
           const compatible = !previous?.closedAt && previous?.holder.kind === 'held' && previous.holder.machineId === placement.holderId && previous.generation === placement.generation;
@@ -129,7 +131,7 @@ export function useWorkspaceProjection(projects: readonly Pick<ProjectLifecycleV
           };
           if (released) return summary;
           const detail = placement.state === 'opening' ? 'Opening' : placement.state === 'closing' ? 'Closing' : placement.state !== 'open' ? 'Status unknown' : null;
-          return { ...summary, status, freshness: status ? 'fresh' : 'unknown', refreshing: false, detail };
+          return { ...summary, status, preview, freshness: status ? 'fresh' : 'unknown', refreshing: false, detail };
         };
         const base = definitions.find((space) => space.kind === 'base' && space.lifecycle !== 'deleting');
         if (base || (!value && prior?.baseSummary)) summaries.set(project.id, summarize(project.id, base ? base.archivedAt ? new Date(base.archivedAt) : null : prior?.baseSummary?.closedAt ?? null, prior?.baseSummary));
@@ -166,10 +168,12 @@ export function useWorkspaceProjection(projects: readonly Pick<ProjectLifecycleV
       let changed = false;
       const apply = (id: string, summary: SidebarSpaceSummary | undefined): SidebarSpaceSummary | undefined => {
         if (!summary || (summary.holder.kind !== 'cloud' && summary.holder.kind !== 'held') || summary.closedAt) return summary;
-        const status = statuses.get(id);
-        if (status === summary.status) return summary;
+        const row = statuses.get(id);
+        const status = row?.status;
+        const preview = row?.preview ?? null;
+        if (status === summary.status && preview === (summary.preview ?? null)) return summary;
         changed = true;
-        return { ...summary, status, freshness: status ? 'fresh' : 'unknown' };
+        return { ...summary, status, preview, freshness: status ? 'fresh' : 'unknown' };
       };
       const next = Object.fromEntries(Object.entries(accepted.current).map(([projectId, project]) => [projectId,
         { ...project, baseSummary: apply(projectId, project.baseSummary), workspaces: project.workspaces.map(space => ({ ...space, summary: apply(space.id, space.summary) })) }]));

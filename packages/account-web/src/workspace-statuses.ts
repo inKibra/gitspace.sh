@@ -1,6 +1,5 @@
 import { z } from 'zod';
 import { workspaceStatusRowSchema, type WorkspaceStatusRow, type workspaceStatusMessageSchema } from '@gitspace/protocol/account-directory';
-import type { WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
 import { ACCOUNT_GROUP, savedCopy, schemaForm, type SavedCopy } from './first-paint-cache.js';
 
 /** The sidebar's status rows: every row when the directory socket opens, then one row per change. Until the socket's
@@ -12,19 +11,20 @@ export class WorkspaceStatuses {
 
   constructor(private readonly saved?: SavedCopy<WorkspaceStatusRow[]>) {}
 
-  receive(message: z.infer<typeof workspaceStatusMessageSchema>): void {
+  receive(message: z.input<typeof workspaceStatusMessageSchema>): void {
     if (message.type === 'statuses') {
       this.rows.clear();
-      for (const row of message.rows) this.rows.set(row.workspaceId, row);
-    } else this.rows.set(message.workspaceId, { projectId: message.projectId, workspaceId: message.workspaceId, status: message.status });
+      for (const row of message.rows) this.rows.set(row.workspaceId, { ...row, preview: row.preview ?? null });
+    } else this.rows.set(message.workspaceId, { projectId: message.projectId, workspaceId: message.workspaceId, status: message.status, preview: message.preview ?? null });
     this.received = true;
     this.saved?.write([...this.rows.values()]);
     for (const listener of [...this.listeners]) listener();
   }
 
-  get(workspaceId: string): WorkspaceStatusSummary | undefined {
+  /** A workspace's status row: its status and its last-message preview. */
+  get(workspaceId: string): Pick<WorkspaceStatusRow, 'status' | 'preview'> | undefined {
     if (!this.received && this.rows.size === 0) for (const row of this.saved?.read() ?? []) this.rows.set(row.workspaceId, row);
-    return this.rows.get(workspaceId)?.status;
+    return this.rows.get(workspaceId);
   }
 
   subscribe(listener: () => void): () => void {

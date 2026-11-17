@@ -57,7 +57,8 @@ function MermaidDiagram({ source }: { source: string }) {
       <Button variant="secondary" size="icon-compact" type="button" aria-label="Download the diagram as SVG" onClick={download}><Download01 width={14} height={14} /></Button>
     </>}
     expanded={<div role="img" aria-label="Mermaid diagram" className="[&>svg]:!h-full [&>svg]:!w-full [&>svg]:!max-w-none" style={{ width: drawn.width, height: drawn.height }} dangerouslySetInnerHTML={{ __html: drawn.svg }} />}>
-    <div data-gitspace-block="mermaid" role="img" aria-label="Mermaid diagram" className="flex justify-center [&>svg]:h-auto [&>svg]:max-w-full" dangerouslySetInnerHTML={{ __html: drawn.svg }} />
+    {/* The top padding keeps the actions (Lightbox, top right) off the drawing. */}
+    <div data-gitspace-block="mermaid" role="img" aria-label="Mermaid diagram" className="flex justify-center pt-9 [&>svg]:h-auto [&>svg]:max-w-full" dangerouslySetInnerHTML={{ __html: drawn.svg }} />
   </Lightbox>;
 }
 

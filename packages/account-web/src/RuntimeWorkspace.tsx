@@ -20,7 +20,7 @@ import { useRetainedQueryValue } from './useRetainedRead.js';
 import { rpcClient } from './rpc-client.js';
 import { ComposerStagingProvider, RequirementAcceptance } from './chat/staging.js';
 import { CommentLayerProvider } from './comments/CommentLayer.js';
-import { CommentsDocumentSchema } from '@gitspace/protocol-runtime/comments';
+import { CommentsDocumentSchema, type CommentAnchor } from '@gitspace/protocol-runtime/comments';
 import { artifactUploadRpcClient } from './artifact-upload-rpc.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
 import { runtimeScope, runtimeTurns } from './runtime-shell-adapter.js';
@@ -58,6 +58,8 @@ export interface RuntimeInspectorContext {
   resourceRequest?: ResourceRequest;
   /** Open the Change Guide at the section of this guide entity (a block or a comment in the chat asked to). */
   guideSection?: { entity: string; serial: number };
+  /** Open the drive file a comment is on, scrolled to its anchor (a comment in the chat asked to). */
+  driveFocus?: { anchor: CommentAnchor; serial: number };
   /** Opens the terminal panel on `machineId` and selects the named terminal, such as an interactive setup run. */
   onOpenTerminal(machineId: string, name: string): void;
 }
@@ -359,7 +361,7 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, reads, 
         send: async (machineId, name, data) => { const result = await rpcClient.terminals.send({ spaceId, machineId, name, data }); if (result.status === 'error') throw result.error; },
         stop: async (machineId, name) => { const result = await rpcClient.terminals.stop({ spaceId, machineId, name }); if (result.status === 'error') throw result.error; },
       }}
-      renderInspector={(onClose, initialView, resourceRequest, openTerminal, guideSection) => props.renderInspector({ snapshot, conversationId, sessionId: value?.sessionId ?? conversationId ?? null, controls: value, turns, scope: scope.workspace, workspaces: scope.workspaces, onClose, onAskAgent: ask, onCompose: draft ? text => draft.onChange(/\S$/u.test(draft.text) ? `${draft.text} ${text}` : `${draft.text}${text}`) : undefined, onSetRelations: relationsEditable ? setRelations : undefined, initialView, resourceRequest, guideSection, onOpenTerminal: (machineId, name) => { selectTerminalMachine(machineId); openTerminal(name); } })}
+      renderInspector={(onClose, initialView, resourceRequest, openTerminal, guideSection, driveFocus) => props.renderInspector({ snapshot, conversationId, sessionId: value?.sessionId ?? conversationId ?? null, controls: value, turns, scope: scope.workspace, workspaces: scope.workspaces, onClose, onAskAgent: ask, onCompose: draft ? text => draft.onChange(/\S$/u.test(draft.text) ? `${draft.text} ${text}` : `${draft.text}${text}`) : undefined, onSetRelations: relationsEditable ? setRelations : undefined, initialView, resourceRequest, guideSection, driveFocus, onOpenTerminal: (machineId, name) => { selectTerminalMachine(machineId); openTerminal(name); } })}
     />
     </SpeechProvider>
     </RequirementAcceptance.Provider>

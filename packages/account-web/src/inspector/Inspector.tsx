@@ -4,7 +4,8 @@ import { Button, TabsSubtle, TabsSubtleItem, TabsSubtlePanel, Tooltip, ThinkingI
 import { browserCaptureFolder, type EvidenceReference, type InspectorOverview, type JournalEntryView, type RepositoryDiffView, type RepositoryFileView, type RepositoryMode, type RepositoryTreeEntry, type ReviewThreadView, type SessionUsageReport, type ServiceView } from '@gitspace/protocol';
 import type { GitLfsHeldBack } from '@gitspace/protocol-workspace';
 import { AlertCircle, Archive, ArrowLeft, Expand06, File02, FileCode02, Globe01, Minimize02, Tool02, XClose } from '@untitledui/icons';
-import { useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import type { CommentAnchor } from '@gitspace/protocol-runtime/comments';
 import { rpcErrorMessage } from '../rpc-error-message.js';
 import { EmptyState, type AgentScopeView, type WorkspaceView } from '../GitSpaceShell.js';
 import { useToasts, type Toast } from '../toasts.js';
@@ -86,6 +87,9 @@ export interface InspectorProps {
   resourceRequest?: ResourceRequest;
   /** Opens the Change Guide at the section of this guide entity (`section:<id>`, `exhibit:<section id>:<path>`), asked from outside the Inspector (a chat block, a comment); a new serial opens it again. */
   guideSection?: { entity: string; serial: number };
+  /** Opens the drive file a drive doc comment is on, scrolled to its anchor, asked from outside the Inspector (a comment
+   * linked from the chat); a new serial opens it again. */
+  driveFocus?: { anchor: CommentAnchor; serial: number };
   onRequestResource?(uri: string, signal?: AbortSignal): Promise<InspectorArtifactContent>;
   artifactActions?: ArtifactActionsHandlers;
   /** Present when the viewer may upload files into the drive this space writes. */
@@ -232,6 +236,14 @@ export function Inspector(props: InspectorProps) {
       ? artifacts.find((reference) => reference.url === activeDocument.target.slice(8)) ?? null
       : [...artifacts, ...evidence.filter((reference): reference is ArtifactReference => reference.kind === 'artifact')].find((reference) => artifactId(reference) === activeDocument.target) ?? null
     : null;
+  // An earlier version of the drive file shown, by hash: what a comment on it was written on.
+  const onRequestArtifact = props.onRequestArtifact;
+  const readVersion = useCallback(async (hash: string): Promise<string | null> => {
+    if (!activeArtifact) return null;
+    const content = await onRequestArtifact({ ...activeArtifact, hash });
+    content.dispose?.();
+    return content.source;
+  }, [activeArtifact, onRequestArtifact]);
   // Read recorded usage when requested, not on every Inspector mount.
   useEffect(() => { if (runtimeAvailable && view === 'usage') props.usage.load(); }, [view, runtimeAvailable]);
   useEffect(() => { if (runtimeAvailable && view === 'agents') props.agentSetup.load(); }, [view, runtimeAvailable, props.agentSetup.sessionId]);
@@ -310,6 +322,19 @@ export function Inspector(props: InspectorProps) {
     if (section) openGuideSection(section.id);
     else setView('guide');
   }, [props.guideSection?.serial]);
+  // The drive file a comment is on, as the drive lists it now (once listed); the Drive tab when it lists it no longer.
+  const driveFocused = useRef(0);
+  useEffect(() => {
+    const focus = props.driveFocus;
+    if (!focus || focus.anchor.document.kind !== 'drive' || driveFocused.current === focus.serial) return;
+    const path = focus.anchor.document.path;
+    const reference = artifacts.find((candidate) => candidate.url === path);
+    if (!reference && artifacts.length === 0) return;
+    driveFocused.current = focus.serial;
+    if (!reference) { setView('artifacts'); return; }
+    openDocument({ id: `artifact-current:${reference.url}`, kind: 'artifact', label: reference.label, target: `current:${reference.url}` });
+    void loadArtifact(reference);
+  }, [props.driveFocus?.serial, artifacts]);
   const chooseMode = (mode: RepositoryMode): void => { if (!activeDocument || activeDocument.kind !== 'file') return; setFileModes((current) => ({ ...current, [activeDocument.id]: mode })); if (mode === 'current') props.onRequestRepositoryFile(activeDocument.target, mode); else props.onRequestRepositoryDiff(activeDocument.target, mode); };
   const counts: Partial<Record<InspectorPermanentView, number>> = { browser: props.browserCount || undefined, subagents: props.subagents.length, files: props.repositoryEntries.filter((entry) => entry.kind === 'file' && entry.status !== 'clean').length, artifacts: artifacts.length, services: props.runtimeServices === undefined ? props.services.length : undefined, issues: props.issues ? openIssueCount(props.issues.document) : undefined };
   for (const tab of permanentTabs) if (props.sectionErrors?.[tab.id] && !props.sectionErrors[tab.id]!.retained) delete counts[tab.id];
@@ -322,6 +347,7 @@ export function Inspector(props: InspectorProps) {
   let documentBody: ReactNode = null;
   if (activeDocument?.kind === 'resource') documentBody = <ResourceDocument key={`${props.overview.spaceId}:${activeDocument.target}`} uri={activeDocument.target} mode={artifactModeById[activeDocument.id] ?? 'preview'} onRequest={props.onRequestResource} artifactReferences={artifacts} artifactContent={artifactContent} onRequestArtifact={loadArtifact} />;
   else if (activeDocument?.kind === 'artifact') {
+    const focus = props.driveFocus?.anchor.document.kind === 'drive' && props.driveFocus.anchor.document.path === activeArtifact?.url ? props.driveFocus : null;
     documentBody = activeArtifact ? <ArtifactDocument
       reference={activeArtifact}
       content={artifactContent[artifactId(activeArtifact)] ?? null}
@@ -331,6 +357,7 @@ export function Inspector(props: InspectorProps) {
       artifactReferences={artifacts}
       artifactContent={artifactContent}
       onRequest={loadArtifact}
+      drive={{ readVersion, focus }}
     /> : <Padded><EmptyState icon={ic(File02, 22)} title="File is no longer available" description="The drive no longer lists this file. Close it, or open another from the drive." /></Padded>;
   } else if (activeDocument?.kind === 'file' && displayedFile && (displayedFile.binary || REPOSITORY_FILE_TYPES[displayedFile.path.split('.').at(-1)?.toLowerCase() ?? ''])) {
     documentBody = <RepositoryBinaryFile file={displayedFile} />;

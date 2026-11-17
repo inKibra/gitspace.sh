@@ -163,6 +163,7 @@ export function TimelineView({ title, events }: Props<'Timeline'>) {
   const span = end - start || 1;
   const time = (at: string) => new Date(at).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
   const current = ordered[selected];
+  const along = current ? ((Date.parse(current.at) - start) / span) * 100 : 0;
   return <figure className="flex flex-col gap-2 rounded-lg bg-surface-1 p-3 shadow-surface-1">
     {title ? <figcaption className="text-caption text-muted-foreground">{title}</figcaption> : null}
     <div className="relative mx-2 mt-7 h-10">
@@ -175,7 +176,8 @@ export function TimelineView({ title, events }: Props<'Timeline'>) {
           </button>
         </Tooltip>;
       })}
-      {current ? <span className="pointer-events-none absolute -top-6 -translate-x-1/2 whitespace-nowrap rounded-full px-2 text-[11px] font-medium" style={{ left: `${((Date.parse(current.at) - start) / span) * 100}%`, color: EVENT[current.kind].tone, background: tint(EVENT[current.kind].tone, 14) }}>{current.label}</span> : null}
+      {/* The label shifts by as much of its width as its event is along the line, so it never leaves the card. */}
+      {current ? <span className="pointer-events-none absolute -top-6 whitespace-nowrap rounded-full px-2 text-[11px] font-medium" style={{ left: `${along}%`, transform: `translateX(-${along}%)`, color: EVENT[current.kind].tone, background: tint(EVENT[current.kind].tone, 14) }}>{current.label}</span> : null}
     </div>
     <div className="flex justify-between text-[10.5px] tabular-nums text-muted-foreground"><span>{time(ordered[0]?.at ?? '')}</span><span>{time(ordered.at(-1)?.at ?? '')}</span></div>
     {current?.detail ? <p className="text-caption text-foreground/85"><span className="font-semibold tabular-nums">{time(current.at)}</span> · {current.detail}</p> : null}

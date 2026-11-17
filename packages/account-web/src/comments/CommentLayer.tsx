@@ -1,14 +1,14 @@
 // Comments on what the agent wrote (docs/BLOCK-DOCUMENTS-DESIGN.md §3–§4): since the last message from a person or the
-// project agent, the Goal and the Change Guide. In a message: a passage selected anywhere (prose, or any text inside a
-// block), a whole paragraph, heading, list item or quote (from an icon beside it), an item inside a block (a table row, a
-// step, a CallDiff line, a Sequence frame, a checklist item), a whole block, or a tool call. Thinking and question blocks
-// take none, and turns before that message take none: selecting text there shows a hint. In the Goal and the Guide: an
-// entity (a requirement, decision, plan step, section or exhibit, CommentEntity), a passage or block inside one, or an
-// exhibit's lines; these never lock. A comment is staged in
-// the workspace (the runtime's staged comments, so it survives reloads and shows in every tab), shows as a chip above the
-// composer and a pill in the margin (CommentMargin.tsx), and goes with the person's next message, which lists it. Sent
-// comments come from the runtime's comment lookup, their notes from the person's messages and their answers from the
-// agent's Reply blocks.
+// project agent, the Goal, the Change Guide and drive docs. In a message: a passage selected anywhere (prose, or any text
+// inside a block), a whole paragraph, heading, list item or quote (from an icon beside it), an item inside a block (a
+// table row, a step, a CallDiff line, a Sequence frame, a checklist item), a whole block, or a tool call. Thinking and
+// question blocks take none, and turns before that message take none: selecting text there shows a hint. In the Goal and
+// the Guide: an entity (a requirement, decision, plan step, section or exhibit, CommentEntity), a passage or block inside
+// one, or an exhibit's lines; in a drive doc (the entity `drive`): a passage or a block. These never lock. A comment is
+// staged in the workspace (the runtime's staged comments, so it survives reloads and shows in every tab), shows as a chip
+// above the composer and a pill in the margin (CommentMargin.tsx), and goes with the person's next message, which lists
+// it. Sent comments come from the runtime's comment lookup, their notes from the person's messages and their answers from
+// the agent's Reply blocks.
 //
 // The chat wraps each of the agent's messages in CommentMessage; a drawn block sets CommentBlock (and
 // data-comment-block on its element) so its items and the selections inside it know where they are.
@@ -46,8 +46,9 @@ export function openRows(rows: readonly TranscriptRow[], windowStart: string | n
 const NO_LOOKUP: CommentLookup = { comments: [], replies: [] };
 /** Turns one lookup asks about: the newest loaded ones. */
 const LOOKUP_TURNS = 256;
-/** The documents whose comments the layer always reads, whichever turns are loaded. */
-const OPEN_DOCUMENTS: OpenDocumentKind[] = ['goal', 'guide'];
+/** The documents whose comments the layer always reads, whichever turns are loaded: drive docs' only for the files
+ * shown (`showDrive`). */
+const OPEN_DOCUMENTS: OpenDocumentKind[] = ['goal', 'guide', 'drive'];
 /** Pages of a row's text read for a comment on the Goal or the Guide whose message is not loaded. */
 const ROW_PAGES = 8;
 
@@ -65,9 +66,10 @@ async function rowText(request: (command: RuntimeSessionCommand) => Promise<Runt
 }
 
 /** The comment layer of one open workspace's main conversation: its staged comments (the snapshot's
- * `gitspace.comments`), the sent ones on the loaded turns and on the Goal and the Change Guide (the runtime's lookup,
- * asked again when its revision moves), and the loaded rows that take new ones (in the document's comment window). A
- * Goal or Guide comment's note and replies are read from the transcript when their messages are not loaded. */
+ * `gitspace.comments`), the sent ones on the loaded turns, on the Goal and the Change Guide and on the drive docs shown
+ * (the runtime's lookup, asked again when its revision moves or another drive doc shows), and the loaded rows that take
+ * new ones (in the document's comment window). A Goal, Guide or drive doc comment's note and replies are read from the
+ * transcript when their messages are not loaded. */
 export function CommentLayerProvider({ conversationId, document, rows, generation = null, request, author = 'You', children }: {
   conversationId: string | undefined;
   document: unknown;
@@ -84,18 +86,34 @@ export function CommentLayerProvider({ conversationId, document, rows, generatio
   const windowStart = parsed.success ? parsed.data.window : null;
   const turnIds = useMemo(() => [...new Set(rows.map((row) => row.turnId))].slice(-LOOKUP_TURNS), [rows]);
   const turnKey = turnIds.join('\n');
+  // The drive docs shown, each with how many views show it.
+  const shownDrives = useRef(new Map<string, number>());
+  const [drivePaths, setDrivePaths] = useState<readonly string[]>([]);
+  const showDrive = useCallback((path: string) => {
+    const shown = shownDrives.current;
+    shown.set(path, (shown.get(path) ?? 0) + 1);
+    setDrivePaths([...shown.keys()].sort());
+    return () => {
+      const views = (shown.get(path) ?? 1) - 1;
+      if (views > 0) shown.set(path, views);
+      else shown.delete(path);
+      setDrivePaths([...shown.keys()].sort());
+    };
+  }, []);
+  const driveKey = drivePaths.join('\n');
   const [lookup, setLookup] = useState(NO_LOOKUP);
-  const ask = useRef({ request, turnIds });
-  ask.current = { request, turnIds };
+  const ask = useRef({ request, turnIds, drivePaths });
+  ask.current = { request, turnIds, drivePaths };
   useEffect(() => {
     if (conversationId === undefined) return;
     let live = true;
     // A failed read keeps the comments already shown; the next revision or loaded turn asks again.
-    ask.current.request({ type: 'commentLookup', turnIds: ask.current.turnIds, documents: OPEN_DOCUMENTS }).then((result) => { if (live && result.commentLookup) setLookup(result.commentLookup); }, () => {});
+    ask.current.request({ type: 'commentLookup', turnIds: ask.current.turnIds, documents: OPEN_DOCUMENTS, drivePaths: [...ask.current.drivePaths] }).then((result) => { if (live && result.commentLookup) setLookup(result.commentLookup); }, () => {});
     return () => { live = false; };
-  }, [conversationId, turnKey, revision]);
+  }, [conversationId, turnKey, revision, driveKey]);
   const byRow = useMemo(() => new Map(rows.map((row) => [row.id, row])), [rows]);
-  // The rows a Goal or Guide comment needs that are not loaded: the person's message carrying it and the replies to it.
+  // The rows a Goal, Guide or drive doc comment needs that are not loaded: the person's message carrying it and the
+  // replies to it.
   const [read, setRead] = useState<ReadonlyMap<string, string>>(new Map());
   const reading = useRef(new Set<string>());
   const unloaded = useMemo(() => {
@@ -144,8 +162,8 @@ export function CommentLayerProvider({ conversationId, document, rows, generatio
   }, [byRow, conversationId, request]);
   const edit = useCallback(async (id: string, note: string) => { await request({ type: 'editComment', id, note }); }, [request]);
   const remove = useCallback(async (id: string) => { await request({ type: 'unstageComment', id }); }, [request]);
-  const value = useMemo((): CommentLayerValue | null => conversationId === undefined ? null : { conversationId, notes, open, turnOf, author, stage, edit, remove },
-    [conversationId, notes, open, turnOf, author, stage, edit, remove]);
+  const value = useMemo((): CommentLayerValue | null => conversationId === undefined ? null : { conversationId, notes, open, turnOf, author, stage, edit, remove, showDrive },
+    [conversationId, notes, open, turnOf, author, stage, edit, remove, showDrive]);
   return <CommentLayer.Provider value={value}>{children}</CommentLayer.Provider>;
 }
 
@@ -194,8 +212,9 @@ const COMMENT_UI = '[data-comment-ui], [data-comment-editor]';
 const BLOCK_TAGS: Record<string, true> = { P: true, LI: true, DIV: true, H1: true, H2: true, H3: true, H4: true, H5: true, H6: true, TD: true, TH: true, TR: true, PRE: true, BLOCKQUOTE: true, SECTION: true, ARTICLE: true, FIGURE: true, FIGCAPTION: true, UL: true, OL: true, TABLE: true };
 
 /** An element's text as quotes read it: runs of white space as one space, a space between blocks; `places` maps each
- * character back to the text node and offset it came from. */
-export interface FlatText { text: string; places: readonly { node: Text; offset: number }[]; nodes: readonly { node: Text; offsets: readonly number[] }[] }
+ * character back to the text node and offset it came from; `breaks`: where in `text` each block after the first starts,
+ * which bounds a quote's prefix and suffix (`textQuoteAt`). */
+export interface FlatText { text: string; places: readonly { node: Text; offset: number }[]; nodes: readonly { node: Text; offsets: readonly number[] }[]; breaks: readonly number[] }
 
 function blockOf(node: Node): Element | null {
   let element = node.parentElement;
@@ -207,12 +226,16 @@ export function flatText(within: Element): FlatText {
   const walker = document.createTreeWalker(within, NodeFilter.SHOW_TEXT, { acceptNode: (node) => node.parentElement?.closest(COMMENT_UI) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT });
   const places: { node: Text; offset: number }[] = [];
   const nodes: { node: Text; offsets: number[] }[] = [];
+  const breaks: number[] = [];
   let text = '';
   let previous: Text | null = null;
   for (let node = walker.nextNode(); node; node = walker.nextNode()) {
     if (!(node instanceof Text)) continue;
     // A new block starts a new word.
-    if (previous && text && !text.endsWith(' ') && blockOf(previous) !== blockOf(node)) { text += ' '; places.push({ node: previous, offset: previous.data.length }); }
+    if (previous && text && blockOf(previous) !== blockOf(node)) {
+      if (!text.endsWith(' ')) { text += ' '; places.push({ node: previous, offset: previous.data.length }); }
+      if (breaks[breaks.length - 1] !== text.length) breaks.push(text.length);
+    }
     const offsets: number[] = [];
     for (let offset = 0; offset < node.data.length; offset++) {
       offsets.push(text.length);
@@ -225,7 +248,7 @@ export function flatText(within: Element): FlatText {
     nodes.push({ node, offsets });
     previous = node;
   }
-  return { text, places, nodes };
+  return { text, places, nodes, breaks };
 }
 
 /** The index in `flat` of a DOM boundary point inside its element. */
@@ -259,13 +282,13 @@ function textTarget(flat: FlatText, start: number, end: number, within: string):
   while (from < to && flat.text[from] === ' ') from++;
   while (to > from && flat.text[to - 1] === ' ') to--;
   if (to - from < 2) return null;
-  const quote = textQuoteAt(flat.text, from, to);
+  const quote = textQuoteAt(flat.text, from, to, flat.breaks);
   return { target: { kind: 'text', within, ...quote }, quote: quote.exact };
 }
 
-/** The element a comment's target names inside `root`: the message, the block, its item, the tool call, or the Goal or
- * Guide entity (an exhibit for its lines). */
-function targetElement(root: ParentNode, target: CommentTarget): Element | null {
+/** The element a comment's target names inside `root`: the message, the block, its item, the tool call, or the Goal,
+ * Guide or drive doc entity (an exhibit for its lines). */
+export function targetElement(root: ParentNode, target: CommentTarget): Element | null {
   const named = (attribute: string, value: string) => root.querySelector(`[${attribute}="${CSS.escape(value)}"]`);
   if (target.kind === 'entity') {
     const row = target.ref.startsWith('tool-call:') ? target.ref.slice('tool-call:'.length) : null;
@@ -281,9 +304,10 @@ function targetElement(root: ParentNode, target: CommentTarget): Element | null 
   return block;
 }
 
-/** Paragraphs, headings, list items and quotes of the agent's prose, never inside a block, an item or the comment UI. */
+/** Paragraphs, headings, list items and quotes of the agent's prose, never inside a block, an item, a drawing (a
+ * Mermaid diagram's labels are paragraphs in its SVG) or the comment UI. */
 const PROSE = 'p, h1, h2, h3, h4, h5, h6, li, blockquote';
-const NOT_PROSE = '[data-comment-block], [data-comment-item], [data-comment-ui], [data-comment-editor], [data-call]';
+const NOT_PROSE = '[data-comment-block], [data-comment-item], [data-comment-ui], [data-comment-editor], [data-call], svg';
 
 /** Where a comment is on the page: the element it names, and for a passage its range; `whole`: the passage is all of a
  * paragraph, heading, list item or quote, which is marked rather than its text highlighted. Null when it is not drawn
@@ -293,7 +317,7 @@ export function locateAnchor(root: ParentNode, anchor: CommentAnchor): { element
   if (!element) return null;
   if (anchor.target.kind !== 'text') return { element, range: null, whole: null };
   const flat = flatText(element);
-  const found = findTextQuote(flat.text, anchor.target);
+  const found = findTextQuote(flat.text, anchor.target, flat.breaks);
   const range = found ? flatRange(flat, found.start, found.end) : null;
   if (!range) return null;
   const container = range.commonAncestorContainer;
@@ -312,12 +336,14 @@ export function showAnchor(anchor: CommentAnchor): void {
 const NAVIGATION_FRAMES = 90;
 
 /** Shows what a comment is about: in the chat, scrolls to it; on the Goal or the Guide, opens it in the Inspector first
- * and scrolls once it is drawn. */
+ * and scrolls once it is drawn; on a drive doc, opens the file in the Inspector, which scrolls to it once drawn
+ * (DriveDocument). */
 export function useShowAnchor(): (anchor: CommentAnchor) => void {
   const navigate = useContext(DocumentNavigation);
   return useCallback((anchor: CommentAnchor) => {
     if (anchor.document.kind === 'turn' || !navigate) { showAnchor(anchor); return; }
     navigate(anchor);
+    if (anchor.document.kind === 'drive') return;
     let frames = 0;
     const scroll = (): void => {
       if (locateAnchor(document, anchor)) showAnchor(anchor);
@@ -327,16 +353,18 @@ export function useShowAnchor(): (anchor: CommentAnchor) => void {
   }, [navigate]);
 }
 
-/** The comments here: a block's (`block`), an item's of it (`path`), or a tool call's (`call`). */
+/** The comments here: a block's (`block`), an item's of it (`path`), or a tool call's (`call`); in a Goal, Guide or
+ * drive doc, among the comments it shows (another drive doc's blocks have the same keys). */
 export function useCommentsAt(place: { block: string; path?: string } | { call: string }): CommentNote[] {
   const layer = useContext(CommentLayer);
-  return useMemo(() => (layer?.notes ?? []).filter(({ anchor: { target } }) => {
+  const shown = useContext(DocumentComments)?.notes ?? layer?.notes;
+  return useMemo(() => (shown ?? []).filter(({ anchor: { target } }) => {
     if ('call' in place) return target.kind === 'entity' && target.ref === `tool-call:${place.call}`;
     if (place.path !== undefined) return target.kind === 'item' && target.block === place.block && target.path === place.path;
     if (target.kind === 'block') return target.id === place.block;
     if (target.kind === 'text') return target.within === place.block;
     return (target.kind === 'item' || target.kind === 'time' || target.kind === 'frame') && target.block === place.block;
-  }), [layer?.notes, 'call' in place ? place.call : place.block, 'path' in place ? place.path : undefined]);
+  }), [shown, 'call' in place ? place.call : place.block, 'path' in place ? place.path : undefined]);
 }
 
 /** Where a note editor opens: what it is about (`place`), and the chat's comment margin when it is drawn beside the
@@ -755,7 +783,8 @@ export function CommentMessage({ row, children }: { row: string; children: React
   </div></CommentScope.Provider>;
 }
 
-/** The comments a sent message carried: each quote and note, linking back to what it is about. */
+/** The comments a sent message carried: each quote and note, linking back to what it is about (a drive doc's named by
+ * its file). */
 export function SentComments({ comments }: { comments: readonly SentComment[] }) {
   const shape = useShape();
   const show = useShowAnchor();
@@ -764,7 +793,7 @@ export function SentComments({ comments }: { comments: readonly SentComment[] })
     {comments.map(({ id, anchor, note }) => <li key={id} data-sent-comment={id} className={`${shape.container} flex min-w-0 flex-col gap-1 bg-background/60 px-2.5 py-1.5 text-left`}>
       <button type="button" className="flex min-w-0 items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground" onClick={() => show(anchor)}>
         <Annotation width={12} height={12} className="shrink-0" />
-        <span className="min-w-0 truncate">{anchorLabel(anchor)}</span>
+        <span className="min-w-0 truncate">{anchor.document.kind === 'drive' ? `${driveFileName(anchor.document.path)} · ` : ''}{anchorLabel(anchor)}</span>
         <ArrowUpRight width={11} height={11} className="shrink-0" />
       </button>
       {anchor.quote ? <blockquote className="border-l-2 border-border pl-2 text-caption italic text-muted-foreground [overflow-wrap:anywhere]">{commentExcerpt(anchor.quote, 140)}</blockquote> : null}
@@ -791,14 +820,21 @@ export function ReplyView({ comment, quote, text }: { comment: string; quote: st
   </div>;
 }
 
+/** A drive file's name, as people read it, from its drive URL. */
+export function driveFileName(path: string): string {
+  const name = path.split('/').at(-1) ?? path;
+  try { return decodeURIComponent(name); } catch { return name; }
+}
+
 /**
  * An entity of the Goal or a Change Guide revision (`requirement:<id>`, `decision:<entry id>`, `step:<id>`,
- * `section:<id>`, `exhibit:<section id>:<path>`) as a commentable part of its document (DocumentComments): its comment
- * icon (in the column's gutter level with its first line while hovered), a selection or a paragraph's icon inside it,
- * and the blocks of its Markdown. It never locks; where its document takes no comments (an older Guide revision), it
+ * `section:<id>`, `exhibit:<section id>:<path>`), or a drive doc (`drive`), as a commentable part of its document
+ * (DocumentComments): its comment icon (in the column's gutter level with its first line while hovered; none without
+ * `label`, a drive doc, which takes comments on its passages and blocks only), a selection or a paragraph's icon inside
+ * it, and the blocks of its Markdown. It never locks; where its document takes no comments (an older Guide revision), it
  * is only marked so its comments find it.
  */
-export function CommentEntity({ entity, label, quote, className = '', children }: { entity: string; label: string; quote: string; className?: string; children: ReactNode }) {
+export function CommentEntity({ entity, label, quote, className = '', children }: { entity: string; label?: string; quote?: string; className?: string; children: ReactNode }) {
   const layer = useContext(CommentLayer);
   const where = useContext(DocumentComments)?.document ?? null;
   const [element, setElement] = useState<HTMLDivElement | null>(null);
@@ -807,8 +843,8 @@ export function CommentEntity({ entity, label, quote, className = '', children }
   // The layout classes go on the box that holds the entity's own content, not on the box that also holds its icons.
   return <CommentScope.Provider value={scope}><div ref={setElement} data-comment-target={entity} data-comment-entity={entity} className="relative min-w-0">
     <SelectionComments className={className}><EntityBlocks entity={entity}>{children}</EntityBlocks></SelectionComments>
-    <GutterTrigger anchor="[data-comment-entity]" label={label} quote={quote} inlineClassName="absolute -left-5 top-0.5 opacity-60 hover:opacity-100 focus-visible:opacity-100"
-      targetFor={() => ({ kind: 'entity', ref: entity })} />
+    {label === undefined ? null : <GutterTrigger anchor="[data-comment-entity]" label={label} quote={quote ?? label} inlineClassName="absolute -left-5 top-0.5 opacity-60 hover:opacity-100 focus-visible:opacity-100"
+      targetFor={() => ({ kind: 'entity', ref: entity })} />}
     {element ? <ProseHandles container={element} scope={scope} /> : null}
   </div></CommentScope.Provider>;
 }
@@ -823,8 +859,9 @@ export function TargetCommentEditor({ target, quote, label, around, onClose }: {
   return <NoteEditor quote={quote} label={label} at={at} onCancel={onClose} onSave={async (note) => { await layer.stage(scope, target, quote, note); onClose(); }} />;
 }
 
-/** A Goal or Guide comment with its replies, under what it is on: its place, its quote (as written, for an outdated
- * one), the person's note and the agent's Reply blocks. Folded, one line. */
+/** A Goal, Guide or drive doc comment with its replies, under what it is on: its place, its quote (as written, for an
+ * outdated one, with the revision or file version it was written on), the person's note and the agent's Reply blocks.
+ * Folded, one line. */
 function DocumentThread({ note, folded, onUnfold }: { note: DocumentNote; folded: boolean; onUnfold(): void }) {
   const shape = useShape();
   const layer = useContext(CommentLayer);
@@ -847,7 +884,8 @@ function DocumentThread({ note, folded, onUnfold }: { note: DocumentNote; folded
       <Annotation width={12} height={12} className="shrink-0" />
       <span>{anchorLabel(note.anchor)}</span>
       {note.outdated ? <Badge size="compact" variant="dot" color="amber">Outdated</Badge> : null}
-      {note.outdated && onShowRevision ? <button type="button" className="underline-offset-2 hover:text-foreground hover:underline" onClick={() => onShowRevision(note.revision)}>as written on r{note.revision}</button> : null}
+      {note.outdated && note.version !== undefined ? <span data-thread-version="">as written in {note.version}</span>
+        : note.outdated && onShowRevision ? <button type="button" className="underline-offset-2 hover:text-foreground hover:underline" onClick={() => onShowRevision(note.revision)}>as written on r{note.revision}</button> : null}
       <span className="flex-1" />
       <Badge size="compact" variant="dot" color={note.state === 'staged' ? 'amber' : 'gray'}>{note.state === 'staged' ? 'in your next message' : 'sent'}</Badge>
       {note.state === 'staged' && layer ? <button type="button" aria-label="Remove comment" className="rounded p-0.5 hover:bg-surface-2 hover:text-foreground"
@@ -863,16 +901,18 @@ function DocumentThread({ note, folded, onUnfold }: { note: DocumentNote; folded
   </article>;
 }
 
-/** The comment threads on a Goal or Guide entity (and on passages, blocks and lines inside it), in order: the newest
- * open, older ones folded to one line until opened. No resolve: a thread stays until what it is on changes (then it
- * shows outdated) or its messages leave the transcript. */
+/** Comment threads in order: the newest open, older ones folded to one line until opened. No resolve: a thread stays
+ * until what it is on changes (then it shows outdated) or its messages leave the transcript. */
+export function DocumentThreads({ notes }: { notes: readonly DocumentNote[] }) {
+  const [unfolded, setUnfolded] = useState<ReadonlySet<string>>(new Set());
+  return <>{notes.map((note, index) => <DocumentThread key={note.id} note={note} folded={index < notes.length - 1 && note.state === 'sent' && !unfolded.has(note.id)}
+    onUnfold={() => setUnfolded((current) => new Set(current).add(note.id))} />)}</>;
+}
+
+/** The comment threads on a Goal or Guide entity (and on passages, blocks and lines inside it). */
 export function EntityThreads({ entity, className = '' }: { entity: string; className?: string }) {
   const notes = useContext(DocumentComments)?.notes;
-  const [unfolded, setUnfolded] = useState<ReadonlySet<string>>(new Set());
   const threads = useMemo(() => (notes ?? []).filter((note) => anchorEntity(note.anchor) === entity), [notes, entity]);
   if (threads.length === 0) return null;
-  return <div data-entity-threads={entity} data-comment-ui="" className={`flex min-w-0 flex-col gap-1 ${className}`}>
-    {threads.map((note, index) => <DocumentThread key={note.id} note={note} folded={index < threads.length - 1 && note.state === 'sent' && !unfolded.has(note.id)}
-      onUnfold={() => setUnfolded((current) => new Set(current).add(note.id))} />)}
-  </div>;
+  return <div data-entity-threads={entity} data-comment-ui="" className={`flex min-w-0 flex-col gap-1 ${className}`}><DocumentThreads notes={threads} /></div>;
 }

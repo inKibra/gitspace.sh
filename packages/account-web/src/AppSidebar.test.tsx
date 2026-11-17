@@ -131,6 +131,24 @@ describe('AppSidebar selected status', () => {
     expect(html).not.toContain('Cloudflare 1234');
   });
 
+  it('shows each workspace\'s last-message preview on its second line, the selected one\'s too, truncated in place', () => {
+    const status = { ...verticalSliceFixture.baseSpace.status, primaryColor: 'blue' as const };
+    const row = { projectId: 'active', branch: 'main', closedAt: null };
+    const html = renderToStaticMarkup(<SidebarProvider persist={false}><AppSidebar
+      {...base}
+      selected={{ projectId: 'active', workspaceId: 'open' }}
+      selectedSummary={{ holder: { kind: 'cloud' }, closedAt: null, status, freshness: 'fresh' }}
+      projects={[{ id: 'active', name: 'Active project', workspaces: [
+        { ...row, id: 'open', name: 'Open workspace', summary: { holder: { kind: 'cloud' }, closedAt: null, status, freshness: 'fresh', preview: 'The migration failed. · Timeline: Deploy' } },
+        { ...row, id: 'other', name: 'Other workspace', branch: 'other', summary: { holder: { kind: 'cloud' }, closedAt: null, status, freshness: 'fresh', preview: 'Tests pass. · Tradeoffs: Where do replies live?' } },
+      ] }]}
+      deployment={null}
+    /></SidebarProvider>);
+    const previews = [...html.matchAll(/<span data-workspace-preview="" class="([^"]*)">([^<]*)<\/span>/gu)];
+    expect(previews.map((match) => match[2])).toEqual(['The migration failed. · Timeline: Deploy', 'Tests pass. · Tradeoffs: Where do replies live?']);
+    expect(previews.every((match) => match[1]?.includes('truncate'))).toBe(true);
+  });
+
   it('marks the projects and workspaces whose origin is ahead of their copy, apart from their status', () => {
     const checkedAt = '2026-10-17T12:00:00.000Z';
     const definition = (id: string, behind: boolean): CloudWorkspaceDefinition => ({

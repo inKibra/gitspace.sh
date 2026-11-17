@@ -60,8 +60,12 @@ export function applyAccountDirectoryMessage(current: AccountDirectorySnapshot |
   };
 }
 
-/** One workspace's status row, sent on the directory socket when it changes. */
-export const workspaceStatusRowSchema = z.object({ projectId: z.string().min(1), workspaceId: z.string().min(1), status: WorkspaceStatusSummarySchema });
+/** Characters of a workspace's last-message preview. */
+export const WORKSPACE_PREVIEW_MAX = 160;
+/** One workspace's status row, sent on the directory socket when it changes. `preview`: its main agent's latest message
+ * as one line of plain text (`messagePreview`: no Markdown, a block as its kind and title); null before the first one
+ * and in rows stored before previews. */
+export const workspaceStatusRowSchema = z.object({ projectId: z.string().min(1), workspaceId: z.string().min(1), status: WorkspaceStatusSummarySchema, preview: z.string().max(WORKSPACE_PREVIEW_MAX).nullable().default(null) });
 export type WorkspaceStatusRow = z.infer<typeof workspaceStatusRowSchema>;
 /** `statuses`: every row, once per socket open; `status`: one row that changed. */
 export const workspaceStatusMessageSchema = z.discriminatedUnion('type', [

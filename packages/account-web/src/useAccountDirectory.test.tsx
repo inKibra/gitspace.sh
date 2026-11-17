@@ -148,30 +148,34 @@ it('populates every project and holder independently of the selected pane', asyn
 it('shows a cloud workspace by its status row, without its stale legacy placement or any machine', async () => {
   const scene = fixture();
   scene.cloud.add('a-work');
-  statuses.receive({ type: 'statuses', rows: [{ projectId: 'a', workspaceId: 'a-work', status: waiting }] });
+  statuses.receive({ type: 'statuses', rows: [{ projectId: 'a', workspaceId: 'a-work', status: waiting, preview: 'The migration failed. · Timeline: Deploy' }] });
   await act(async () => { root.render(<Probe scene={scene} />); });
-  expect(workspaceSummary()).toEqual({ closedAt: null, holder: { kind: 'cloud' }, status: waiting, freshness: 'fresh', refreshing: false });
+  expect(workspaceSummary()).toEqual({ closedAt: null, holder: { kind: 'cloud' }, status: waiting, preview: 'The migration failed. · Timeline: Deploy', freshness: 'fresh', refreshing: false });
   expect(directory.a?.baseSummary?.holder).toEqual({ kind: 'held', machineId: 'desk', label: 'Desk machine' });
   expect(row('Alpha work').getAttribute('title')).toBe('feature · Waiting');
   expect(container.textContent).not.toContain('Desk machine');
 });
 
-it('updates one unopened cloud row from its status message', async () => {
+it('updates one unopened cloud row and its last-message preview from its status message', async () => {
   const scene = fixture();
   scene.projects[0]!.lifecycle = 'cloud-only';
   scene.machines.length = 0;
   await act(async () => { root.render(<Probe scene={scene} view="projects" />); });
   expect(directory.a?.workspaces[0]?.summary).toMatchObject({ holder: { kind: 'cloud' }, status: working, freshness: 'fresh' });
   await act(async () => { statuses.receive({ type: 'status', projectId: 'a', workspaceId: 'a-work', status: waiting }); });
-  expect(directory.a?.workspaces[0]?.summary).toMatchObject({ holder: { kind: 'cloud' }, status: waiting, freshness: 'fresh' });
+  expect(directory.a?.workspaces[0]?.summary).toMatchObject({ holder: { kind: 'cloud' }, status: waiting, freshness: 'fresh', preview: null });
   expect(directory.a?.baseSummary?.status).toEqual(working);
   expect(row('Alpha work').getAttribute('title')).toBe('feature · Waiting');
+  // A new last message with the same status shows its preview.
+  await act(async () => { statuses.receive({ type: 'status', projectId: 'a', workspaceId: 'a-work', status: waiting, preview: 'Rolled back. · Timeline: Deploy' }); });
+  expect(directory.a?.workspaces[0]?.summary).toMatchObject({ status: waiting, preview: 'Rolled back. · Timeline: Deploy' });
+  expect(row('Alpha work').textContent).toContain('Rolled back. · Timeline: Deploy');
 });
 
 it('shows a machine-held workspace by its status row and updates it when the row changes', async () => {
   const scene = fixture();
   await act(async () => { root.render(<Probe scene={scene} />); });
-  expect(workspaceSummary()).toEqual({ closedAt: null, generation: 1, holder: { kind: 'held', machineId: 'desk', label: 'Desk machine' }, status: working, freshness: 'fresh', refreshing: false, detail: null });
+  expect(workspaceSummary()).toEqual({ closedAt: null, generation: 1, holder: { kind: 'held', machineId: 'desk', label: 'Desk machine' }, status: working, preview: null, freshness: 'fresh', refreshing: false, detail: null });
   expect(row('Alpha work').getAttribute('title')).toBe('feature · Working');
   await act(async () => { statuses.receive({ type: 'status', projectId: 'a', workspaceId: 'a-work', status: waiting }); });
   expect(workspaceSummary()).toMatchObject({ holder: { kind: 'held', machineId: 'desk' }, status: waiting, freshness: 'fresh' });

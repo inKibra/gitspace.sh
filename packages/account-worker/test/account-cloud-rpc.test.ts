@@ -74,7 +74,7 @@ describe('cloud lifecycle inspection and explicit authorization', () => {
     expect(body).not.toContain(privateCause);
   });
 
-  it('sends a tab every status row when it connects, then each changed row once', async () => {
+  it('sends a tab every status row when it connects, then each changed row or preview once', async () => {
     const fixture = await account();
     const { projectId, spaceId } = await inspectorWorkspace(fixture.userId);
     const index = env.USER_PROJECTS.getByName(fixture.userId);
@@ -90,17 +90,23 @@ describe('cloud lifecycle inspection and explicit authorization', () => {
       if (parsed.success) messages.push(parsed.data);
     });
     socket.accept();
-    await vi.waitFor(() => expect(messages).toEqual([{ type: 'statuses', rows: expect.arrayContaining([{ projectId, workspaceId: spaceId, status: idle }]) }]));
+    await vi.waitFor(() => expect(messages).toEqual([{ type: 'statuses', rows: expect.arrayContaining([{ projectId, workspaceId: spaceId, status: idle, preview: null }]) }]));
     const working = { ...idle, primaryColor: 'green' as const, agents: { green: 1, blue: 0, orange: 0, red: 0 } };
     await index.setWorkspaceStatus({ projectId, workspaceId: spaceId, status: working, waitingOn: null, lastReply: null, cursor: 2 });
     await index.setWorkspaceStatus({ projectId, workspaceId: spaceId, status: working, waitingOn: null, lastReply: null, cursor: 3 });
-    await vi.waitFor(() => expect(messages.slice(1)).toEqual([{ type: 'status', projectId, workspaceId: spaceId, status: working }]));
+    await vi.waitFor(() => expect(messages.slice(1)).toEqual([{ type: 'status', projectId, workspaceId: spaceId, status: working, preview: null }]));
     // A turn's end and its last message, sent a moment apart, arrive out of order: the older send is dropped.
-    await index.setWorkspaceStatus({ projectId, workspaceId: spaceId, status: idle, waitingOn: null, lastReply: 'Done.', lastReplySource: { conversationId: '1', ordinal: 5120, characters: 5 }, cursor: 5 });
+    await index.setWorkspaceStatus({ projectId, workspaceId: spaceId, status: idle, preview: 'Done. · Timeline: Deploy', waitingOn: null, lastReply: 'Done.', lastReplySource: { conversationId: '1', ordinal: 5120, characters: 5 }, cursor: 5 });
     await index.setWorkspaceStatus({ projectId, workspaceId: spaceId, status: working, waitingOn: null, lastReply: 'Done.', cursor: 4 });
     // The row keeps where the whole reply is, for the board's cut note.
     expect((await index.projectWorkspaceStatuses(projectId))[spaceId]).toMatchObject({ status: idle, lastReply: 'Done.', lastReplySource: { conversationId: '1', ordinal: 5120, characters: 5 } });
-    await vi.waitFor(() => expect(messages.slice(1)).toEqual([{ type: 'status', projectId, workspaceId: spaceId, status: working }, { type: 'status', projectId, workspaceId: spaceId, status: idle }]));
+    // A new last message with the status unchanged sends its preview.
+    await index.setWorkspaceStatus({ projectId, workspaceId: spaceId, status: idle, preview: 'Rolled back.', waitingOn: null, lastReply: 'Rolled back.', cursor: 6 });
+    await vi.waitFor(() => expect(messages.slice(1)).toEqual([
+      { type: 'status', projectId, workspaceId: spaceId, status: working, preview: null },
+      { type: 'status', projectId, workspaceId: spaceId, status: idle, preview: 'Done. · Timeline: Deploy' },
+      { type: 'status', projectId, workspaceId: spaceId, status: idle, preview: 'Rolled back.' },
+    ]));
     socket.close();
   });
 

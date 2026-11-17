@@ -234,6 +234,7 @@ export function LiveInspector({
     initialView={initialView}
     resourceRequest={resourceRequest}
     guideSection={runtimeContext.guideSection}
+    driveFocus={runtimeContext.driveFocus}
     onRequestResource={(uri, signal) => loadInspectorResource({
       readArtifact: (input, options) => rpcClient.inspector.artifacts.read(input, options),
       artifactFile: async (input, options) => {

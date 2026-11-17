@@ -24,6 +24,8 @@ import { notifyMachines } from './machine-notices.js';
 import { notifyBrowsers } from './live-notices.js';
 import { noticeStackHead } from './stack-notices.js';
 import { workspaceLiveKey } from '@gitspace/protocol/live-notice';
+import { WORKSPACE_PREVIEW_MAX } from '@gitspace/protocol/account-directory';
+import { messagePreview } from '@gitspace/protocol/block-markdown';
 import { originAccess, originReadCredentials } from './origin-access.js';
 import { remoteDefaultBranch } from './cloud-project.js';
 import { createRuntimeImages } from './runtime-images.js';
@@ -151,6 +153,9 @@ export async function createAccountWorkspaceRuntime(
     waitUntil('workspace status', sent.catch(() => {}));
     return sent;
   }, error => console.error('Workspace status was not sent', { workspaceId: identity.workspaceId, error }));
+  // The sidebar's preview of the main agent's latest message, made once per message, and the one this instance last sent.
+  let preview: { reply: string | null; text: string | null } = { reply: null, text: null };
+  let sentPreview: string | null | undefined;
   runtime = await createWorkspaceRuntime({
     ...inference,
     workspacePhase,
@@ -172,16 +177,18 @@ export async function createAccountWorkspaceRuntime(
       const current = metadata();
       await journalMessageDecisions(env, identity, current.kind === 'base' ? 'project' : current.phase ?? 'plan', sent);
     },
-    published: (snapshot, report) => {
+    published: (snapshot, report, reply) => {
       const summary = report.summary;
-      // Sent when the status or what the board shows changed, or while an earlier send is still owed. Sends run in the
-      // background and can arrive out of order (a turn's last message, then its end, a moment apart), so each carries the
-      // snapshot's cursor and the account keeps the newest.
+      if (reply !== preview.reply) preview = { reply, text: reply === null ? null : messagePreview(reply, WORKSPACE_PREVIEW_MAX) || null };
+      // Sent when the status, what the board shows or the preview changed, or while an earlier send is still owed. Sends
+      // run in the background and can arrive out of order (a turn's last message, then its end, a moment apart), so each
+      // carries the snapshot's cursor and the account keeps the newest.
       const previous = readWorkspaceReport(ctx.storage);
-      const reportChanged = JSON.stringify(previous?.waitingOn ?? null) !== JSON.stringify(report.waitingOn) || (previous?.lastReply ?? null) !== report.lastReply || JSON.stringify(previous?.lastReplySource ?? null) !== JSON.stringify(report.lastReplySource);
+      const reportChanged = JSON.stringify(previous?.waitingOn ?? null) !== JSON.stringify(report.waitingOn) || (previous?.lastReply ?? null) !== report.lastReply || JSON.stringify(previous?.lastReplySource ?? null) !== JSON.stringify(report.lastReplySource) || sentPreview !== preview.text;
       const statusChanged = storeWorkspaceStatus(ctx.storage, summary);
       if (statusChanged || reportChanged || status.owed()) {
-        status.send({ ...identity, status: summary, waitingOn: report.waitingOn, lastReply: report.lastReply, lastReplySource: report.lastReplySource, cursor: snapshot.cursor });
+        status.send({ ...identity, status: summary, preview: preview.text, waitingOn: report.waitingOn, lastReply: report.lastReply, lastReplySource: report.lastReplySource, cursor: snapshot.cursor });
+        sentPreview = preview.text;
       }
       storeWorkspaceReport(ctx.storage, report);
       watch.published(report);

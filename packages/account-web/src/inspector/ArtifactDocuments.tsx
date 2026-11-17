@@ -1,17 +1,19 @@
 import { RESOURCE_TEXT_PREVIEW_BYTES } from '@gitspace/protocol/resource-uri';
-import { Button, ScrollArea, Select, SelectTrigger, ThinkingIndicator, useShape } from '@gitspace/ui';
+import type { CommentAnchor } from '@gitspace/protocol-runtime/comments';
+import { Button, Select, SelectTrigger, ThinkingIndicator, useShape } from '@gitspace/ui';
 import { AlertCircle, Archive, File02 } from '@untitledui/icons';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { rpcErrorMessage } from '../rpc-error-message.js';
-import { GitSpaceMarkdown } from '../GitSpaceMarkdown.js';
 import { EmptyState } from '../GitSpaceShell.js';
 import { type InspectorArtifactContent, selectOptions, type ArtifactReference, type LoadStatus, ic, artifactId, Padded } from './inspector-shared.js';
 import type { InspectorProps } from './Inspector.js';
 import { PdfPreview } from './FilesSurface.js';
+import { MarkdownFileDocument } from './MarkdownFileDocument.js';
 
-/** A Markdown drive or repository file: links and images relative to it name the files beside it. */
-function MarkdownArtifact({ source, documentUrl }: { source: string; documentUrl: string }) {
-  return <ScrollArea className="min-h-0 flex-1" viewportClassName="h-full"><article className="mx-auto w-full max-w-3xl px-6 py-6"><GitSpaceMarkdown documentUri={documentUrl}>{source}</GitSpaceMarkdown></article></ScrollArea>;
+/** A drive file's comments: how to read an earlier version of it by hash, and the comment to scroll to. */
+export interface DriveFileComments {
+  readVersion(hash: string): Promise<string | null>;
+  focus: { anchor: CommentAnchor; serial: number } | null;
 }
 function SourceArtifact({ source }: { source: string }) {
   // FLUID-GAP: code viewer — the registry has no read-only code block; plain <pre> on Fluid tokens.
@@ -44,7 +46,8 @@ function MiniAppArtifact({ source, dataReferences, content, onLoad }: {
   </div>;
 }
 
-export function ArtifactDocument({ reference, content, status, error, mode, artifactReferences, artifactContent, onRequest }: {
+/** A drive file's view. `drive`: a Markdown file takes comments as a drive doc at this version. */
+export function ArtifactDocument({ reference, content, status, error, mode, artifactReferences, artifactContent, onRequest, drive }: {
   reference: ArtifactReference;
   content: InspectorArtifactContent | null;
   status: LoadStatus;
@@ -53,21 +56,24 @@ export function ArtifactDocument({ reference, content, status, error, mode, arti
   artifactReferences: readonly ArtifactReference[];
   artifactContent: Readonly<Record<string, InspectorArtifactContent>>;
   onRequest(reference: ArtifactReference): Promise<void>;
+  drive?: DriveFileComments;
 }) {
   // Pinned evidence and transcript resources share the same preview renderers below.
   if (status === 'loading' || status === undefined) return <div className="flex flex-1 items-center justify-center p-6"><ThinkingIndicator aria-label={`Loading ${reference.label}…`} /></div>;
   if (status === 'error') return <Padded><EmptyState icon={ic(AlertCircle, 22)} title="Artifact could not load" description={error ?? 'The artifact read failed.'} action={<Button variant="secondary" size="compact" type="button" onClick={() => void onRequest(reference)}>Retry</Button>} /></Padded>;
   if (!content) return <Padded><EmptyState icon={ic(Archive, 22)} title="Artifact bytes are unavailable" description="The authority returned no readable content." /></Padded>;
-  return <ArtifactPreview reference={reference} content={content} mode={mode} artifactReferences={artifactReferences} artifactContent={artifactContent} onRequest={onRequest} />;
+  return <ArtifactPreview reference={reference} content={content} mode={mode} artifactReferences={artifactReferences} artifactContent={artifactContent} onRequest={onRequest} drive={drive ? { ...drive, file: { path: reference.url, hash: reference.hash } } : null} />;
 }
 
-function ArtifactPreview({ reference, content, mode, artifactReferences, artifactContent, onRequest }: {
+function ArtifactPreview({ reference, content, mode, artifactReferences, artifactContent, onRequest, drive }: {
   reference: Pick<ArtifactReference, 'url' | 'label' | 'mediaType'>;
   content: InspectorArtifactContent;
   mode: 'preview' | 'source';
   artifactReferences: readonly ArtifactReference[];
   artifactContent: Readonly<Record<string, InspectorArtifactContent>>;
   onRequest(reference: ArtifactReference): Promise<void>;
+  /** The drive file version a Markdown file's comments are on; null for a file shown by its address alone. */
+  drive: (DriveFileComments & { file: { path: string; hash: string } }) | null;
 }) {
   const shape = useShape();
   const download = content.downloadUrl ? <a href={content.downloadUrl} download={reference.label} className="text-body text-primary underline">Download {reference.label}</a> : undefined;
@@ -84,7 +90,9 @@ function ArtifactPreview({ reference, content, mode, artifactReferences, artifac
     try { pretty = JSON.stringify(JSON.parse(content.source), null, 2); } catch { /* Render original text. */ }
     return <SourceArtifact source={pretty} />;
   }
-  if ((mediaType === 'text/markdown' || reference.url.endsWith('.md')) && content.source !== null) return <MarkdownArtifact source={content.source} documentUrl={reference.url} />;
+  if ((mediaType === 'text/markdown' || reference.url.endsWith('.md')) && content.source !== null) {
+    return <MarkdownFileDocument markdown={content.source} documentUrl={reference.url} file={drive?.file ?? null} readVersion={drive?.readVersion} focus={drive?.focus ?? null} />;
+  }
   return content.source !== null ? <SourceArtifact source={content.source} /> : <Padded><EmptyState icon={ic(Archive, 22)} title="Preview is unavailable" description="This artifact type has no inline renderer." action={download} /></Padded>;
 }
 
@@ -117,5 +125,5 @@ export function ResourceDocument({ uri, mode, onRequest, artifactReferences, art
   }, [uri, attempt]);
   if (!result) return <div className="flex flex-1 items-center justify-center p-6"><ThinkingIndicator aria-label={`Loading ${uri}…`} /></div>;
   if ('error' in result) return <Padded><EmptyState icon={ic(AlertCircle, 22)} title="Resource could not load" description={`${uri}: ${result.error}`} action={<Button variant="secondary" size="compact" type="button" onClick={() => setAttempt((value) => value + 1)}>Retry</Button>} /></Padded>;
-  return <ArtifactPreview reference={{ url: uri, label: uri, mediaType: result.content.mediaType }} content={result.content} mode={mode} artifactReferences={artifactReferences} artifactContent={artifactContent} onRequest={onRequestArtifact} />;
+  return <ArtifactPreview reference={{ url: uri, label: uri, mediaType: result.content.mediaType }} content={result.content} mode={mode} artifactReferences={artifactReferences} artifactContent={artifactContent} onRequest={onRequestArtifact} drive={null} />;
 }

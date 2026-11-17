@@ -23,24 +23,28 @@ export const CommentIdSchema = z.string().regex(/^cm-[0-9a-f]{12}$/u);
 const Reference = z.string().min(1).max(512);
 
 /** The document a comment is in: a chat turn (`turnId`, the transcript's turn row id), the workspace Goal at a revision,
- * or a Change Guide revision. A conversation's comments go on the turns of its comment window: from the turn of the
- * newest message a person or the project agent sent on (automated inputs open turns inside it); the Goal's and the
- * Guide's never lock. */
+ * a Change Guide revision, or a drive doc (a Markdown file of a drive) at a version: `path`, the file's drive URL
+ * (`drive://workspace/…`, `drive://base/…`, as the drive lists it), and `hash`, the version's content hash as the drive
+ * reports it (`sha256:…`). A conversation's comments go on the turns of its comment window: from the turn of the
+ * newest message a person or the project agent sent on (automated inputs open turns inside it); the Goal's, the
+ * Guide's and a drive doc's never lock. */
 export const CommentDocumentSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('turn'), conversationId: z.string().min(1), turnId: z.string().min(1) }).strict(),
   z.object({ kind: z.literal('goal'), revision: z.number().int().nonnegative() }).strict(),
   z.object({ kind: z.literal('guide'), revision: z.number().int().positive() }).strict(),
+  z.object({ kind: z.literal('drive'), path: z.string().min(1).max(4096), hash: z.string().min(1).max(128) }).strict(),
 ]);
 export type CommentDocument = z.infer<typeof CommentDocumentSchema>;
 /** The documents whose comments stay open across turns. */
-export const OPEN_DOCUMENT_KINDS = ['goal', 'guide'] as const;
+export const OPEN_DOCUMENT_KINDS = ['goal', 'guide', 'drive'] as const;
 export type OpenDocumentKind = (typeof OPEN_DOCUMENT_KINDS)[number];
 
 /**
  * Where in its document a comment is. In a chat turn a message is `message:<row id>`, a tool call `tool-call:<row id>`,
  * and a gitspace-ui block `<message row id>#<element id>` (its root element's id), or `<message row id>#@<hash>` for a
  * block whose root has no id. In the Goal and a Change Guide an entity is `requirement:<id>`, `decision:<entry id>`,
- * `section:<id>` or `exhibit:<section id>:<path>`, and a block in one of its Markdown fields `<entity>#<element id>`.
+ * `section:<id>` or `exhibit:<section id>:<path>`, and a block in one of its Markdown fields `<entity>#<element id>`. A
+ * drive doc is the one entity `drive`: a passage is within `drive`, a block `drive#<element id>`.
  * `item`: a row, step, line or frame of a block (`path` as `rows/2`, `label` as people read it). `text`: a text-quote
  * selector inside `within` (a message, an entity or a block), found again by `findTextQuote`. `lines`: lines of an
  * exhibit's diff on one side, at the file's blob there. `time`: a moment of a video; `frame`: a frame of a Sequence.
@@ -107,9 +111,14 @@ export function commentExcerpt(value: string, max: number): string {
 const COMMENT_DATA = /^Comment on [^\n]*\n~~~json\n([\s\S]*?)\n~~~$/gmu;
 const CommentDataSchema = z.object({ comment: SentCommentSchema });
 
-/** The message a send delivers with staged comments: the person's text, then each comment's line and data. */
+/** The message a send delivers with staged comments: the person's text, then each comment's line and data. A drive
+ * doc's comment line names the file. */
 export function commentsMessage(text: string, comments: readonly SentComment[]): string {
-  const lines = comments.map((comment) => `Comment on “${commentExcerpt(comment.anchor.quote, 80)}”: ${commentExcerpt(comment.note, 160)}\n~~~json\n${JSON.stringify({ comment: { id: comment.id, note: comment.note, anchor: comment.anchor } }, null, 2)}\n~~~`);
+  const lines = comments.map((comment) => {
+    const { document } = comment.anchor;
+    const where = document.kind === 'drive' ? ` in ${document.path}` : '';
+    return `Comment on “${commentExcerpt(comment.anchor.quote, 80)}”${where}: ${commentExcerpt(comment.note, 160)}\n~~~json\n${JSON.stringify({ comment: { id: comment.id, note: comment.note, anchor: comment.anchor } }, null, 2)}\n~~~`;
+  });
   return [text.trim(), lines.join('\n')].filter(Boolean).join('\n\n');
 }
 
@@ -155,28 +164,38 @@ export function withoutComments(text: string): string {
   return stripped === text ? text : stripped.trimEnd();
 }
 
-/** A text-quote selector: the selected text and up to `COMMENT_CONTEXT` characters on each side. */
+/** A text-quote selector: the selected text and up to `COMMENT_CONTEXT` characters on each side, from within the block
+ * it starts or ends in. */
 export interface TextQuote { exact: string; prefix: string; suffix: string }
 
-/** The selector for `text[start, end)`. */
-export function textQuoteAt(text: string, start: number, end: number): TextQuote {
-  return { exact: text.slice(start, end), prefix: text.slice(Math.max(0, start - COMMENT_CONTEXT), start), suffix: text.slice(end, end + COMMENT_CONTEXT) };
+/** The selector for `text[start, end)`. `breaks`: the offsets in `text` where a block (a paragraph, list item, heading
+ * or fenced block) starts; the prefix starts no earlier than the block `start` is in, the suffix ends no later than the
+ * block `end` is in, without the spaces between that block and the next. */
+export function textQuoteAt(text: string, start: number, end: number, breaks: readonly number[] = []): TextQuote {
+  let from = 0;
+  let to = text.length;
+  for (const at of breaks) {
+    if (at <= start) from = Math.max(from, at);
+    else if (at >= end) to = Math.min(to, at);
+  }
+  while (to > end && text[to - 1] === ' ') to--;
+  return { exact: text.slice(start, end), prefix: text.slice(Math.max(from, start - COMMENT_CONTEXT), start), suffix: text.slice(end, Math.min(to, end + COMMENT_CONTEXT)) };
 }
 
 /**
- * Where `quote` is in `text`: of the places its exact text appears, the one whose surroundings agree longest with its
- * prefix and suffix (the first on a tie), so text changed elsewhere never moves it. Null when the exact text is gone:
- * the comment is outdated.
+ * Where `quote` is in `text`: of the places its exact text appears, the one whose surroundings within their blocks
+ * (`breaks`, as for `textQuoteAt`) agree longest with its prefix and suffix (the first on a tie), so text changed
+ * elsewhere never moves it. Null when the exact text is gone: the comment is outdated.
  */
-export function findTextQuote(text: string, quote: TextQuote): { start: number; end: number } | null {
+export function findTextQuote(text: string, quote: TextQuote, breaks: readonly number[] = []): { start: number; end: number } | null {
   if (!quote.exact) return null;
   let best: { start: number; score: number } | null = null;
   for (let start = text.indexOf(quote.exact); start !== -1; start = text.indexOf(quote.exact, start + 1)) {
+    const around = textQuoteAt(text, start, start + quote.exact.length, breaks);
     let before = 0;
-    while (before < quote.prefix.length && text[start - 1 - before] === quote.prefix[quote.prefix.length - 1 - before]) before++;
-    const end = start + quote.exact.length;
+    while (before < quote.prefix.length && before < around.prefix.length && around.prefix[around.prefix.length - 1 - before] === quote.prefix[quote.prefix.length - 1 - before]) before++;
     let after = 0;
-    while (after < quote.suffix.length && text[end + after] === quote.suffix[after]) after++;
+    while (after < quote.suffix.length && after < around.suffix.length && around.suffix[after] === quote.suffix[after]) after++;
     if (best === null || before + after > best.score) best = { start, score: before + after };
   }
   return best === null ? null : { start: best.start, end: best.start + quote.exact.length };

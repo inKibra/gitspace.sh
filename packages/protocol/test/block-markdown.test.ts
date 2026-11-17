@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { blockMarkdown, decisionMarkdown, evidenceMarkdown, guideSectionMarkdown, requirementMarkdown } from '../src/block-markdown.js';
+import { blockMarkdown, decisionMarkdown, evidenceMarkdown, guideSectionMarkdown, messagePreview, requirementMarkdown } from '../src/block-markdown.js';
 import type { EvidenceReference, JournalEntryView } from '../src/inspector-contract.js';
 import { extractBlocks, fenceSpec, gitspaceUiCatalog } from '../src/gitspace-ui.js';
 
@@ -208,5 +208,20 @@ describe('record Markdown', () => {
       '### §2 Parse headers', '*behavior*', 'Reads v2.', 'Checks the version first.', '**Why:** v2 files carry one.', '> **Risk:** v1 files still load.', diagram,
       '- `src/parse.ts`: The check.\n  - lines 3–9: version', '**Evidence**\n- **Tests**: run `run-7`, exit code 0',
     ].join('\n\n'));
+  });
+});
+
+describe('messagePreview', () => {
+  it('reads prose and a Timeline block as plain text with the block as its kind and title, never JSON or fences', () => {
+    const timeline = JSON.stringify({ title: 'Deploy', events: [{ at: '2026-11-17T09:00:00Z', kind: 'deploy', label: 'Started' }, { at: '2026-11-17T09:04:00Z', kind: 'error', label: 'Migration failed' }] });
+    const message = `## Deploy failed\n\nThe **migration** step failed on [the orders table](drive://workspace/notes/orders.md).\n\n${fence}gitspace-ui Timeline id=deploy\n${timeline}\n${fence}\n\nI'll rerun it with \`--lock-timeout\`.`;
+    expect(messagePreview(message, 200)).toBe('Deploy failed The migration step failed on the orders table. · Timeline: Deploy · I\'ll rerun it with --lock-timeout.');
+  });
+
+  it('names a full-form block by its question, a diagram and a code sample by what they are, and cuts a long line', () => {
+    const tradeoffs = JSON.stringify(one('Tradeoffs', { question: 'Where do replies live?', options: [{ id: 'a', label: 'Transcript' }, { id: 'b', label: 'Table' }], criteria: [{ label: 'Simple', scores: [3, 1] }] }));
+    const message = `- Compared:\n\n${fence}gitspace-ui\n${tradeoffs}\n${fence}\n\n${fence}mermaid\ngraph TD; A-->B\n${fence}\n\n${fence}ts\nconst x = 1;\n${fence}`;
+    expect(messagePreview(message, 200)).toBe('Compared: · Tradeoffs: Where do replies live? · Diagram · Code');
+    expect(messagePreview(`${'word '.repeat(40)}`, 20)).toBe('word word word word…');
   });
 });

@@ -223,3 +223,26 @@ test('a comment on a Goal requirement or a Guide exhibit\'s lines stages on any 
     expect(f.reports).toEqual([]);
   } finally { await f.harness.close(context); }
 });
+
+test('a comment on a drive doc stages on any turn, its line names the file, it stays open after the send, and the lookup finds it by its file\'s path', async () => {
+  const f = await open();
+  try {
+    const plan: CommentAnchor = { document: { kind: 'drive', path: 'drive://workspace/notes/plan.md', hash: `sha256:${'a'.repeat(64)}` }, target: { kind: 'text', within: 'drive', exact: 'Ship on Friday', prefix: 'We ', suffix: '.' }, quote: 'Ship on Friday' };
+    const notes: CommentAnchor = { document: { kind: 'drive', path: 'drive://workspace/notes/meeting.md', hash: `sha256:${'b'.repeat(64)}` }, target: { kind: 'block', id: 'drive#deploy' }, quote: 'Timeline: Deploy' };
+    await f.send('Start.');
+    await f.controls.execute(f.conversationId, { type: 'stageComment', anchor: plan, note: 'Which Friday?' });
+    await f.controls.execute(f.conversationId, { type: 'stageComment', anchor: notes, note: 'Why so long?' });
+    const staged = await f.staged();
+    await f.send('Two drive comments.', staged.map((comment) => comment.id));
+    const sent = lastText(f.requests.at(-1) ?? []);
+    expect(sent).toContain('Comment on “Ship on Friday” in drive://workspace/notes/plan.md: Which Friday?');
+    expect(messageComments(sent).map((comment) => comment.anchor)).toEqual([plan, notes]);
+    await f.controls.execute(f.conversationId, { type: 'stageComment', anchor: plan, note: 'And the hour?' });
+    expect((await f.staged()).map((comment) => comment.note)).toEqual(['And the hour?']);
+    await f.settled();
+    expect((await commentLookup(f.harness, [], ['drive'], ['drive://workspace/notes/plan.md'])).comments.map((comment) => comment.anchor)).toEqual([plan]);
+    expect((await commentLookup(f.harness, [], ['drive'])).comments.map((comment) => comment.anchor)).toEqual([plan, notes]);
+    expect((await commentLookup(f.harness, [], ['goal', 'guide'])).comments).toEqual([]);
+    expect(f.reports).toEqual([]);
+  } finally { await f.harness.close(context); }
+});

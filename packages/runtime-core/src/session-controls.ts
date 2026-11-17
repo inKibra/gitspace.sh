@@ -462,7 +462,7 @@ export function createSessionControls(services: SessionControlServices) {
     if (command.type === 'transcriptPage') result.transcriptPage = await services.history.transcriptPage(target.id, command.request);
     if (command.type === 'transcriptContent') result.transcriptContent = await services.history.transcriptContent(target.id, command.request);
     if (command.type === 'usage') result.usage = await services.history.usage(target.id, harness);
-    if (command.type === 'commentLookup') result.commentLookup = await commentLookup(harness, command.turnIds, command.documents);
+    if (command.type === 'commentLookup') result.commentLookup = await commentLookup(harness, command.turnIds, command.documents, command.drivePaths);
     return result;
   }
   return { execute, control, conversation, loadDefinitions };
