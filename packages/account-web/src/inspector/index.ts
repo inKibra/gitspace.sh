@@ -1,6 +1,5 @@
 export { Inspector } from './Inspector.js';
 export type {
-  CreateInspectorThread,
   InspectorPermanentView,
   InspectorProps,
   InspectorUsageState,

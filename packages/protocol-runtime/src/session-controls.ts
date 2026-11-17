@@ -8,7 +8,7 @@ import { RuntimeBrowserStatusSchema, RuntimeBrowserArtifactPageSchema, RuntimeBr
 import { RuntimeBrowserConnectedTabSchema, RuntimeBrowserShareExpirySchema, RuntimeBrowserShareSchema } from './browser-share.js';
 import { RuntimeBrowserCommentAnchorSchema, RuntimeBrowserCommentPageSchema, RuntimeBrowserCommentSourceSchema, RuntimeBrowserCommentStatusSchema, RuntimeBrowserCommentTextSchema, RuntimeBrowserCommentThreadSchema, RuntimeBrowserCommentThreadViewSchema } from './browser-comments.js';
 import { RuntimeBrowserCaptureShareExpirySchema, RuntimeBrowserCaptureShareSchema } from './browser-capture-share.js';
-import { CommentAnchorSchema, CommentIdSchema, CommentLookupSchema, CommentNoteSchema, STAGED_ANSWERS_MAX, STAGED_COMMENTS_MAX, SentAnswerSchema } from './comments.js';
+import { CommentAnchorSchema, CommentIdSchema, CommentLookupSchema, CommentNoteSchema, OPEN_DOCUMENT_KINDS, STAGED_ANSWERS_MAX, STAGED_COMMENTS_MAX, SentAnswerSchema } from './comments.js';
 export { SessionUsageReportSchema, UsageTotalsSchema, type SessionUsageReport, type UsageTotals } from './usage.js';
 
 export const ModelSelectionIntentSchema = z.discriminatedUnion('kind', [
@@ -112,7 +112,8 @@ export const RuntimeSessionCommandSchema = z.union([
    * answers each question, and they leave the staged answers. A message with answers may have no text. */
   z.object({ type: z.literal('prompt'), text: z.string(), draftRevision: z.number().int().nonnegative().optional(), draftText: z.string().optional(), streamingBehavior: z.enum(['steer', 'followUp']).optional(), decisions: z.array(RuntimeMessageDecisionSchema).max(32).optional(), comments: z.array(CommentIdSchema).max(STAGED_COMMENTS_MAX).optional(), answers: z.array(SentAnswerSchema).max(STAGED_ANSWERS_MAX).optional() }),
   /** Comments (comments.ts): stage one on what the agent wrote, change a staged one's note, or take one back; the
-   * lookup's sent comments on some turns and the replies to them. */
+   * lookup's sent comments on some turns and on every revision of the `documents` named (the Goal, the Change Guide),
+   * and the replies to them. */
   z.object({ type: z.literal('stageComment'), anchor: CommentAnchorSchema, note: CommentNoteSchema }),
   z.object({ type: z.literal('editComment'), id: CommentIdSchema, note: CommentNoteSchema }),
   z.object({ type: z.literal('unstageComment'), id: CommentIdSchema }),
@@ -120,7 +121,7 @@ export const RuntimeSessionCommandSchema = z.union([
    * for it before), or taken back. */
   z.object({ type: z.literal('stageAnswer'), questionId: z.string().min(1).max(512), answer: RuntimeJsonSchema }),
   z.object({ type: z.literal('unstageAnswer'), questionId: z.string().min(1).max(512) }),
-  z.object({ type: z.literal('commentLookup'), turnIds: z.array(z.string().min(1)).max(256) }),
+  z.object({ type: z.literal('commentLookup'), turnIds: z.array(z.string().min(1)).max(256), documents: z.array(z.enum(OPEN_DOCUMENT_KINDS)).max(OPEN_DOCUMENT_KINDS.length).optional() }),
   z.object({ type: z.literal('setWorkspacePhase'), phase: z.enum(['plan', 'code', 'review', 'ship']) }),
   z.object({ type: z.literal('cycleRole'), direction: z.enum(['forward', 'backward']) }),
   z.object({ type: z.literal('setModel'), provider: z.string(), model: z.string() }),

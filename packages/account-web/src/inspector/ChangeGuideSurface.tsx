@@ -1,7 +1,10 @@
 import { Button, ScrollArea } from '@gitspace/ui';
 import type { ChangeGuideRevisionSummary, ChangeGuideView, EvidenceReference, GoalRecordView, RepositoryDiffView } from '@gitspace/protocol';
 import { File02 } from '@untitledui/icons';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { CommentMarginLayout } from '../comments/CommentMargin.js';
+import { CommentLayer, DocumentComments, type DocumentCommentsValue } from '../comments/context.js';
+import { guideNotes } from '../comments/document-notes.js';
 import { BlockActionsProvider } from '../blocks/BlockActions.js';
 import { useComposerStaging, workspaceBlockActions } from '../chat/staging.js';
 import { EmptyState, type AgentScopeView, type WorkspaceView } from '../GitSpaceShell.js';
@@ -65,16 +68,32 @@ export function ChangeGuideSurface({ guide, reviewerId, review, goal, onSetAccep
     void revisions.list().then((entries) => { if (active) setList(entries); }, (cause: unknown) => { if (active) setRevisionError(rpcErrorMessage(cause, 'inspector.guide.revisions')); });
     return () => { active = false; };
   }, [latest]);
+  // The revisions the shown one's comments were written on, read to carry each forward or show it outdated.
+  const layer = useContext(CommentLayer);
+  const commentRevisions = [...new Set((layer?.notes ?? []).flatMap(({ anchor: { document } }) => document.kind === 'guide' && document.revision < shownRevision ? [document.revision] : []))].sort((a, b) => a - b);
+  const commentKey = commentRevisions.join(',');
   useEffect(() => {
     if (!revisions) return;
-    for (const revision of [shownRevision, since]) {
+    for (const revision of [shownRevision, since, ...commentRevisions]) {
       if (revision === null || revision === latest || loaded.has(revision)) continue;
       void revisions.get(revision).then(
         (view) => setLoaded((current) => new Map(current).set(view.revision, view)),
         (cause: unknown) => setRevisionError(rpcErrorMessage(cause, 'inspector.guide.get')),
       );
     }
-  }, [shownRevision, since, latest]);
+  }, [shownRevision, since, latest, commentKey]);
+  const notes = useMemo(() => {
+    if (!shown) return [];
+    const earlierSections = new Map([...loaded].map(([revision, view]) => [revision, view.sections]));
+    if (guide) earlierSections.set(guide.revision, guide.sections);
+    return guideNotes(layer?.notes ?? [], shown.revision, shown.sections, earlierSections);
+  }, [layer?.notes, shown, loaded, guide]);
+  // Only the latest revision takes new comments; an older one shows its comments read-only.
+  const documentComments = useMemo((): DocumentCommentsValue => ({
+    document: shown && shown.revision === latest ? { kind: 'guide', revision: shown.revision } : null,
+    notes,
+    onShowRevision: (revision) => setViewing(revision === latest ? null : revision),
+  }), [shown, latest, notes]);
   const viewKey = shown ? `${shown.projectId}:${shown.spaceId}:${shown.revision}` : 'empty';
   const scrollRef = useRef<HTMLElement | null>(null);
   const openRef = useRef<readonly string[]>([]);
@@ -125,7 +144,7 @@ export function ChangeGuideSurface({ guide, reviewerId, review, goal, onSetAccep
   const firstUnread = shown.sections.find((section) => !readIds.has(section.id)) ?? shown.sections[0];
   return <ScrollArea ref={(element) => { scrollRef.current = element?.querySelector<HTMLElement>('[data-slot="scroll-area-viewport"]') ?? null; }} className="min-h-0 flex-1" viewportClassName="h-full">
     <GuideScrollRoot.Provider value={scrollRef}>
-      <BlockActionsProvider actions={blockActions}>
+      <BlockActionsProvider actions={blockActions}><DocumentComments.Provider value={documentComments}><CommentMarginLayout columnMax={1120} notes={notes}>
         <GuideDocument key={viewKey} guide={shown} kicker={`Change Guide · revision ${shown.revision}`} workspace={workspace} captures={captures} comparison={comparison} focusSection={focus}
           onLoadDiff={(path) => onLoadDiff(path, { revision: shown.revision })}
           actions={<>
@@ -134,7 +153,7 @@ export function ChangeGuideSurface({ guide, reviewerId, review, goal, onSetAccep
             {revisionError ? <p role="alert" className="w-full text-caption text-destructive">{revisionError}</p> : null}
           </>}
           initialOpen={guideViewCache.get(viewKey)?.open ?? (firstUnread ? [firstUnread.id] : [])} onOpenChange={(open) => { openRef.current = [...open]; }} />
-      </BlockActionsProvider>
+      </CommentMarginLayout></DocumentComments.Provider></BlockActionsProvider>
     </GuideScrollRoot.Provider>
   </ScrollArea>;
 }

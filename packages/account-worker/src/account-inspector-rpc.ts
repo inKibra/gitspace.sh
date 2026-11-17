@@ -42,9 +42,6 @@ import {
   inspectorListGuideSharesContract,
   inspectorCreateGuideShareContract,
   inspectorRevokeGuideShareContract,
-  inspectorCreateReviewThreadContract,
-  inspectorAppendReviewMessageContract,
-  inspectorResolveReviewThreadContract,
   inspectorRepositoryTreeContract,
   inspectorRepositoryStatusContract,
   inspectorRepositoryFileContract,
@@ -390,48 +387,6 @@ export function inspectorCloudProcedures(env: Env, userId: string, currentDevice
       return err(errors.OperationFailed({ operation: 'Inspector setApproval', message: error instanceof Error ? error.message : String(error) }));
     }
   });
-  const createThread = server.implement(inspectorCreateReviewThreadContract).handler(async ({ input, errors }) => {
-    try {
-      const source = await readInspectorContext(env, userId, input.input.spaceId, input.input.projectId, input.expectedGeneration);
-      const value = await source.context.createReviewThread({ ...input.input, ...source.identity });
-      await source.authority.appendEvent({ scope: 'workspace', entity: 'review-thread', entityId: value.id, revision: value.revision, operation: 'created', payload: { spaceId: source.identity.spaceId } });
-      return ok(value);
-    } catch (error) {
-      if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));
-      if (error instanceof InspectorGenerationConflict) return err(errors.SpaceGenerationConflict({ spaceId: error.spaceId, expected: error.expected, actual: error.actual }));
-      if (error instanceof InspectorStateError) return err(errors.InspectorState({ resource: 'inspector', message: error.message }));
-      if (error instanceof InspectorConflictError) return err(errors.InspectorConflict({ resource: error.resource, expected: error.expected, actual: error.actual }));
-      return err(errors.OperationFailed({ operation: 'Inspector createThread', message: error instanceof Error ? error.message : String(error) }));
-    }
-  });
-  const replyThread = server.implement(inspectorAppendReviewMessageContract).handler(async ({ input, errors }) => {
-    try {
-      const source = await readInspectorContext(env, userId, input.input.spaceId, input.input.projectId, input.expectedGeneration);
-      const value = await source.context.appendReviewMessage({ ...input.input, ...source.identity });
-      await source.authority.appendEvent({ scope: 'workspace', entity: 'review-thread', entityId: value.id, revision: value.revision, operation: 'append', payload: { spaceId: source.identity.spaceId } });
-      return ok(value);
-    } catch (error) {
-      if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));
-      if (error instanceof InspectorGenerationConflict) return err(errors.SpaceGenerationConflict({ spaceId: error.spaceId, expected: error.expected, actual: error.actual }));
-      if (error instanceof InspectorStateError) return err(errors.InspectorState({ resource: 'inspector', message: error.message }));
-      if (error instanceof InspectorConflictError) return err(errors.InspectorConflict({ resource: error.resource, expected: error.expected, actual: error.actual }));
-      return err(errors.OperationFailed({ operation: 'Inspector replyThread', message: error instanceof Error ? error.message : String(error) }));
-    }
-  });
-  const resolveThread = server.implement(inspectorResolveReviewThreadContract).handler(async ({ input, errors }) => {
-    try {
-      const source = await readInspectorContext(env, userId, input.input.spaceId, input.input.projectId, input.expectedGeneration);
-      const value = await source.context.resolveReviewThread({ ...input.input, ...source.identity });
-      await source.authority.appendEvent({ scope: 'workspace', entity: 'review-thread', entityId: value.id, revision: value.revision, operation: 'updated', payload: { spaceId: source.identity.spaceId } });
-      return ok(value);
-    } catch (error) {
-      if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));
-      if (error instanceof InspectorGenerationConflict) return err(errors.SpaceGenerationConflict({ spaceId: error.spaceId, expected: error.expected, actual: error.actual }));
-      if (error instanceof InspectorStateError) return err(errors.InspectorState({ resource: 'inspector', message: error.message }));
-      if (error instanceof InspectorConflictError) return err(errors.InspectorConflict({ resource: error.resource, expected: error.expected, actual: error.actual }));
-      return err(errors.OperationFailed({ operation: 'Inspector resolveThread', message: error instanceof Error ? error.message : String(error) }));
-    }
-  });
   const readArtifact = server.implement(inspectorReadArtifactContract).stream(async function* ({ input, errors, signal }) {
     try {
       const source = await readInspectorContext(env, userId, input.spaceId, undefined, input.expectedGeneration);
@@ -770,7 +725,7 @@ export function inspectorCloudProcedures(env: Env, userId: string, currentDevice
       put: putGuide, analyze: analyzeGuide, submit: submitGuide, markSectionRead, setApproval, diff: guideDiff, revisions: guideRevisions, get: getGuide,
       shares: { list: listGuideShares, create: createGuideShareHandler, revoke: revokeGuideShare },
     },
-    review: { list: threads, create: createThread, reply: replyThread, resolve: resolveThread },
+    review: { list: threads },
     artifacts: {
       read: readArtifact, readPage: readArtifactPage, file: artifactFile, write: writeArtifact, list: listArtifacts, copyToProject: copyArtifacts, delete: deleteArtifacts, shares: { list: listShares, create: createShare, revoke: revokeShare },
       uploadBegin: beginUpload, uploadChunk, uploadCommit: commitUpload, uploadAbort: abortUpload,

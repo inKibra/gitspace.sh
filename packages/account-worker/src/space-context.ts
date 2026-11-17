@@ -1,12 +1,10 @@
 import {
   INSPECTOR_EVIDENCE_HISTORY_LIMIT,
   appendJournalEntryInputSchema,
-  appendReviewMessageInputSchema,
   appendRubricJudgmentInputSchema,
   attachRequirementEvidenceInputSchema,
   changeGuideRevisionSummarySchema,
   changeGuideViewSchema,
-  createReviewThreadInputSchema,
   endJournalPhaseInputSchema,
   evidenceReferenceSchema,
   goalRecordViewSchema,
@@ -20,7 +18,6 @@ import {
   putGoalInputSchema,
   putRubricInputSchema,
   putWorkflowInputSchema,
-  resolveReviewThreadInputSchema,
   reviewAnchorContextSchema,
   reviewAnchorSchema,
   reviewMessageViewSchema,
@@ -35,12 +32,10 @@ import {
   workflowNodeSchema,
   workflowViewSchema,
   type AppendJournalEntryInput,
-  type AppendReviewMessageInput,
   type AppendRubricJudgmentInput,
   type AttachRequirementEvidenceInput,
   type ChangeGuideRevisionSummary,
   type ChangeGuideView,
-  type CreateReviewThreadInput,
   type EndJournalPhaseInput,
   type EvidenceReference,
   type GoalRecordView,
@@ -54,7 +49,6 @@ import {
   type PutGoalInput,
   type PutRubricInput,
   type PutWorkflowInput,
-  type ResolveReviewThreadInput,
   type ReviewAnchorContext,
   type ReviewThreadView,
   type RubricJudgment,
@@ -156,6 +150,7 @@ interface GuideRow extends Record<string, SqlStorageValue> {
   intro: string | null;
   captures_json: string | null;
   map_json: string | null;
+  walkthrough_json: string | null;
 }
 interface ReviewerStateRow extends Record<string, SqlStorageValue> {
   reviewer_id: string;
@@ -658,9 +653,10 @@ export class SpaceContextDO extends BudgetedDurableObject {
       const revision = actual + 1;
       const timestamp = new Date().toISOString();
       this.ctx.storage.sql.exec(
-        'INSERT INTO inspector_guide_revisions (revision, head_commit, base_ref, base_commit, title, created_at, created_by, intro, captures_json, map_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        'INSERT INTO inspector_guide_revisions (revision, head_commit, base_ref, base_commit, title, created_at, created_by, intro, captures_json, map_json, walkthrough_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         revision, parsed.guide.headCommit, parsed.guide.baseRef, parsed.guide.baseCommit, parsed.guide.title, timestamp, parsed.guide.createdBy,
         parsed.guide.intro ?? null, parsed.guide.captures === undefined ? null : JSON.stringify(parsed.guide.captures), parsed.guide.map === undefined ? null : JSON.stringify(parsed.guide.map),
+        parsed.guide.walkthrough === undefined ? null : JSON.stringify(parsed.guide.walkthrough),
       );
       for (const [ordinal, section] of parsed.guide.sections.entries()) {
         this.ctx.storage.sql.exec('INSERT INTO inspector_guide_sections (revision, section_id, ordinal, value_json) VALUES (?, ?, ?, ?)', revision, section.id, ordinal, JSON.stringify(section));
@@ -708,52 +704,6 @@ export class SpaceContextDO extends BudgetedDurableObject {
     return this.readThreads(identity, context === undefined ? undefined : reviewAnchorContextSchema.parse(context));
   }
 
-  createReviewThread(input: CreateReviewThreadInput, context?: ReviewAnchorContext): ReviewThreadView {
-    const parsed = createReviewThreadInputSchema.parse(input);
-    const identity = this.requireIdentity(parsed);
-    return this.ctx.storage.transactionSync(() => {
-      const timestamp = new Date().toISOString();
-      this.ctx.storage.sql.exec(
-        'INSERT INTO inspector_review_threads (thread_id, revision, anchor_json, decision, resolved, created_at, updated_at) VALUES (?, 1, ?, ?, 0, ?, ?)',
-        parsed.id, JSON.stringify(parsed.anchor), parsed.decision, timestamp, timestamp,
-      );
-      this.ctx.storage.sql.exec('INSERT INTO inspector_review_messages (message_id, thread_id, sequence, value_json) VALUES (?, ?, 1, ?)', parsed.message.id, parsed.id, JSON.stringify(parsed.message));
-      this.bump();
-      return this.readThread(identity, parsed.id, context === undefined ? undefined : reviewAnchorContextSchema.parse(context));
-    });
-  }
-
-  appendReviewMessage(input: AppendReviewMessageInput, context?: ReviewAnchorContext): ReviewThreadView {
-    const parsed = appendReviewMessageInputSchema.parse(input);
-    const identity = this.requireIdentity(parsed);
-    return this.ctx.storage.transactionSync(() => {
-      const thread = this.threadRow(parsed.threadId);
-      if (!thread) throw new InspectorStateError(`Review thread ${parsed.threadId} does not exist`);
-      this.assertRevision(`review-thread:${parsed.threadId}`, parsed.expectedRevision, thread.revision);
-      const sequence = this.ctx.storage.sql.exec<{ sequence: number }>('SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence FROM inspector_review_messages WHERE thread_id = ?', parsed.threadId).one().sequence;
-      this.ctx.storage.sql.exec('INSERT INTO inspector_review_messages (message_id, thread_id, sequence, value_json) VALUES (?, ?, ?, ?)', parsed.message.id, parsed.threadId, sequence, JSON.stringify(parsed.message));
-      this.ctx.storage.sql.exec('UPDATE inspector_review_threads SET revision = revision + 1, updated_at = ? WHERE thread_id = ?', new Date().toISOString(), parsed.threadId);
-      this.bump();
-      return this.readThread(identity, parsed.threadId, context === undefined ? undefined : reviewAnchorContextSchema.parse(context));
-    });
-  }
-
-  resolveReviewThread(input: ResolveReviewThreadInput, context?: ReviewAnchorContext): ReviewThreadView {
-    const parsed = resolveReviewThreadInputSchema.parse(input);
-    const identity = this.requireIdentity(parsed);
-    return this.ctx.storage.transactionSync(() => {
-      const thread = this.threadRow(parsed.threadId);
-      if (!thread) throw new InspectorStateError(`Review thread ${parsed.threadId} does not exist`);
-      this.assertRevision(`review-thread:${parsed.threadId}`, parsed.expectedRevision, thread.revision);
-      this.ctx.storage.sql.exec(
-        'UPDATE inspector_review_threads SET revision = revision + 1, resolved = ?, decision = ?, updated_at = ? WHERE thread_id = ?',
-        parsed.resolved ? 1 : 0, parsed.decision, new Date().toISOString(), parsed.threadId,
-      );
-      this.bump();
-      return this.readThread(identity, parsed.threadId, context === undefined ? undefined : reviewAnchorContextSchema.parse(context));
-    });
-  }
-
   private migrate(): void {
     this.ctx.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS _inspector_schema_migrations (
@@ -779,6 +729,11 @@ export class SpaceContextDO extends BudgetedDurableObject {
       ALTER TABLE inspector_guide_revisions ADD COLUMN captures_json TEXT;
       ALTER TABLE inspector_guide_revisions ADD COLUMN map_json TEXT;
       INSERT INTO _inspector_schema_migrations (version, applied_at) VALUES (4, datetime('now'));
+    `));
+    // Guides store their walkthrough. Rows written earlier have none and play one built from their sections.
+    if (version < 5) this.ctx.storage.transactionSync(() => this.ctx.storage.sql.exec(`
+      ALTER TABLE inspector_guide_revisions ADD COLUMN walkthrough_json TEXT;
+      INSERT INTO _inspector_schema_migrations (version, applied_at) VALUES (5, datetime('now'));
     `));
   }
 
@@ -1138,6 +1093,7 @@ export class SpaceContextDO extends BudgetedDurableObject {
       ...(guide.intro === null ? {} : { intro: guide.intro }),
       ...(guide.captures_json === null ? {} : { captures: JSON.parse(guide.captures_json) }),
       ...(guide.map_json === null ? {} : { map: JSON.parse(guide.map_json) }),
+      ...(guide.walkthrough_json === null ? {} : { walkthrough: JSON.parse(guide.walkthrough_json) }),
     });
   }
 
@@ -1180,7 +1136,7 @@ export class SpaceContextDO extends BudgetedDurableObject {
 /** Every column of a journal row, in `JournalRow` order. */
 const JOURNAL_COLUMNS = 'sequence, entry_id, kind, phase_run_id, phase, title, body, outcome, decisions_json, surprises_json, evidence_json, snapshot_json, delta_json, reverted_json, created_at, created_by, citations_json, section_id, supersedes';
 /** Every column of a guide revision row, in `GuideRow` order. */
-const GUIDE_COLUMNS = 'revision, head_commit, base_ref, base_commit, title, created_at, created_by, intro, captures_json, map_json';
+const GUIDE_COLUMNS = 'revision, head_commit, base_ref, base_commit, title, created_at, created_by, intro, captures_json, map_json, walkthrough_json';
 const requirementAcceptanceSchema = goalRequirementSchema.pick({ acceptedBy: true, acceptedAt: true }).required();
 /** A requirement whose acceptance a person recorded and that is no longer accepted. */
 const REOPENED_ACCEPTANCE = JSON.stringify({ acceptedBy: null, acceptedAt: null });

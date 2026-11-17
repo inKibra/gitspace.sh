@@ -1,8 +1,8 @@
-// The chat's comments in a margin beside its column, Google Docs style: each comment is a compact pill at the height of
-// what it is about, comments anchored close together share one stacked marker, and none overlap (a pill is pushed down
-// below the one above, as close to its anchor as it fits). Hovering or clicking a commented passage, item or tool row
-// opens its comment, and hovering a comment lights what it is about. A staged comment is edited or removed in its opened
-// card; a sent one is read-only, with the agent's reply under it.
+// A document's comments in a margin beside its column (the chat's, the Goal's, a Change Guide's), Google Docs style:
+// each comment is a compact pill at the height of what it is about, comments anchored close together share one stacked
+// marker, and none overlap (a pill is pushed down below the one above, as close to its anchor as it fits). Hovering or
+// clicking a commented passage, item or tool row opens its comment, and hovering a comment lights what it is about. A
+// staged comment is edited or removed in its opened card; a sent one is read-only, with the agent's reply under it.
 //
 // The margin's space is kept from the start where it fits, so the first comment moves nothing; the column and the
 // margin are centred together. Where it does not fit (a narrow window, the Inspector open) a 28 px strip right of the
@@ -154,14 +154,14 @@ export function CommentCards({ notes }: { notes: readonly CommentNote[] }) {
   </div>;
 }
 
-/** The chat's column with its comment margin. `columnMax` is the column's widest; with the margin beside it, the two
- * are centred together. */
-export function CommentMarginLayout({ columnMax, children }: { columnMax: number; children: ReactNode }) {
+/** A document's column with its comment margin. `columnMax` is the column's widest; with the margin beside it, the two
+ * are centred together. `notes`: the comments it shows (the Goal's or a Guide revision's); the chat's when absent. */
+export function CommentMarginLayout({ columnMax, notes: shownNotes, children }: { columnMax: number; notes?: readonly CommentNote[]; children: ReactNode }) {
   const layer = useContext(CommentLayer);
   const id = useId();
   const outer = useRef<HTMLDivElement>(null);
   const row = useRef<HTMLDivElement>(null);
-  const notes = useMemo(() => layer?.notes ?? [], [layer?.notes]);
+  const notes = useMemo(() => shownNotes ?? (layer?.notes ?? []).filter((note) => note.anchor.document.kind === 'turn'), [shownNotes, layer?.notes]);
   const author = layer?.author ?? 'You';
   const [width, setWidth] = useState(0);
   const [tick, setTick] = useState(0);

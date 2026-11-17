@@ -54,10 +54,10 @@ export interface RuntimeInspectorContext {
   /** Adds `text` to the end of the chat composer's draft for you to finish and send; absent until the draft is loaded. */
   onCompose?: (text: string) => void;
   onSetRelations?: GitSpaceShellProps['onSetWorkspaceRelations'];
-  initialView?: 'environment' | 'browser';
+  initialView?: 'environment' | 'browser' | 'goal';
   resourceRequest?: ResourceRequest;
-  /** Open the Change Guide at this section (a block in the chat asked to). */
-  guideSection?: { id: string; serial: number };
+  /** Open the Change Guide at the section of this guide entity (a block or a comment in the chat asked to). */
+  guideSection?: { entity: string; serial: number };
   /** Opens the terminal panel on `machineId` and selects the named terminal, such as an interactive setup run. */
   onOpenTerminal(machineId: string, name: string): void;
 }
@@ -316,7 +316,7 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, reads, 
   useRepositoryBridgeToasts(bridged, installApp, () => props.onOpenSettings?.('github'));
   return <>
     <QuestionCardsContext.Provider value={questionCards}>
-    <CommentLayerProvider conversationId={conversationId} document={snapshot.documents['gitspace.comments']} rows={transcript.rows} latest={!transcript.hasAfter} request={sessionCommand}>
+    <CommentLayerProvider conversationId={conversationId} document={snapshot.documents['gitspace.comments']} rows={transcript.rows} latest={!transcript.hasAfter} generation={transcript.generation} request={sessionCommand}>
     <ComposerStagingProvider answers={stagedAnswers}>
     <RequirementAcceptance.Provider value={acceptRequirement}>
     <SpeechProvider projectId={identity.projectId} workspaceId={identity.workspaceId}>

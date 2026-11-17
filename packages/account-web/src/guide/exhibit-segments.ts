@@ -90,3 +90,11 @@ export function narrowExhibit(patch: string, ranges: readonly ExhibitRange[]): N
   const otherChanges = hunks.reduce((sum, hunk, hunkIndex) => sum + hunk.filter((line, index) => line.kind !== ' ' && !shown[hunkIndex]!.has(index)).length, 0);
   return { segments, otherChanges };
 }
+
+/** The text of lines `start`–`end` of one side of a file's patch (`base`, the old file; `head`, the new), as far as the
+ * patch shows them, one per line. */
+export function patchLines(patch: string, side: 'base' | 'head', start: number, end: number): string {
+  return parsePatch(patch).hunks.flat()
+    .filter((line) => side === 'base' ? line.kind !== '+' && line.oldNo >= start && line.oldNo <= end : line.kind !== '-' && line.newNo >= start && line.newNo <= end)
+    .map((line) => line.text).join('\n');
+}

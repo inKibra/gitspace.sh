@@ -3,7 +3,7 @@ import type { AskBlock, TransportBlock, TurnBlock } from '@gitspace/blocks';
 import type { SessionControlView } from '@gitspace/protocol';
 import type { AgentSessionRenderState, SessionHistoryPage, SessionHistoryPageRequest } from '@gitspace/protocol-agent';
 import type { RuntimeMessageDecision, SessionControlView as RuntimeSessionControlView } from '@gitspace/protocol-runtime/session-controls';
-import type { SentAnswer } from '@gitspace/protocol-runtime/comments';
+import type { CommentAnchor, SentAnswer } from '@gitspace/protocol-runtime/comments';
 import type { WorkspaceStatusColor, WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
 import type { RemoteBranchState, WorkspaceLifecycle } from '@gitspace/protocol/project-authority';
 import {
@@ -54,6 +54,8 @@ import { ProjectGraphsContext } from './sidebar/project-graph.js';
 import { githubRepositoryOf } from '@gitspace/protocol/github';
 import { BlockReferences, type BlockReferenceTargets } from './blocks/references.js';
 import { GuideSectionNavigation } from './chat/staging.js';
+import { anchorEntity } from './comments/CommentLayer.js';
+import { DocumentNavigation } from './comments/context.js';
 import { OutgoingMessages, useOutbox, type OutboxArrivals, type SentMessage } from './chat/outbox.js';
 import { Toasts, useToasts } from './toasts.js';
 
@@ -205,8 +207,8 @@ export interface GitSpaceShellProps {
   onOpenSettings?: (section?: 'source' | 'github') => void;
   onNavigateView?: (view: AppView) => void;
   skills?: readonly SkillView[];
-  /** `guideSection`: open the Change Guide at this section (a new `serial` opens it again). */
-  renderInspector?: (onClose: () => void, initialView: 'environment' | 'browser' | undefined, resource: ResourceRequest | undefined, openTerminal: (name: string) => void, guideSection?: { id: string; serial: number }) => ReactNode;
+  /** `guideSection`: open the Change Guide at the section of this guide entity (`section:<id>`, `exhibit:<section id>:<path>`; a new `serial` opens it again). */
+  renderInspector?: (onClose: () => void, initialView: 'environment' | 'browser' | 'goal' | undefined, resource: ResourceRequest | undefined, openTerminal: (name: string) => void, guideSection?: { entity: string; serial: number }) => ReactNode;
   renderEnvironmentStatus?: (onInspect: () => void, onRevealTerminal: (name: string) => void) => ReactNode;
   /** Signed-in user shown in the sidebar footer. */
   user?: { name: string; handle?: string | null };
@@ -668,10 +670,10 @@ function Shell({ project, projects, workspace, baseSpace, workspaces, mainAgent,
   const [inspectorOpen, setInspectorOpen] = useState(capturing);
   /** The Inspector in the conversation's place, its tab strip on top; Escape or "Back to conversation" returns. */
   const [inspectorFull, setInspectorFull] = useState(false);
-  const [inspectorSection, setInspectorSection] = useState<'environment' | 'browser' | undefined>(capturing ? 'browser' : undefined);
+  const [inspectorSection, setInspectorSection] = useState<'environment' | 'browser' | 'goal' | undefined>(capturing ? 'browser' : undefined);
   const openEnvironment = (): void => { setInspectorSection('environment'); setInspectorOpen(true); };
   const [resourceRequest, setResourceRequest] = useState<{ spaceId: string; request: ResourceRequest } | null>(null);
-  const [guideSection, setGuideSection] = useState<{ spaceId: string; id: string; serial: number } | null>(null);
+  const [guideSection, setGuideSection] = useState<{ spaceId: string; entity: string; serial: number } | null>(null);
   const [inspectorWidth, setInspectorWidth] = useState(() => {
     if (typeof window === 'undefined') return 560;
     const stored = Number(window.localStorage.getItem('gitspace:inspector-width'));
@@ -762,7 +764,22 @@ function Shell({ project, projects, workspace, baseSpace, workspaces, mainAgent,
   };
   useLayoutEffect(() => { accountSidebar?.(sidebar); });
   useLayoutEffect(() => () => { accountSidebar?.(null); }, [accountSidebar]);
-  const content = <BlockReferences.Provider value={referenceTargets}><ResourceFiles.Provider value={resolveResourceFile ?? null}><ResourceNavigation.Provider value={renderInspector ? (request) => { setResourceRequest({ spaceId: workspace.id, request }); setInspectorSection(undefined); setInspectorOpen(true); } : null}><GuideSectionNavigation.Provider value={renderInspector ? (id) => { setGuideSection((current) => ({ spaceId: workspace.id, id, serial: (current?.serial ?? 0) + 1 })); setInspectorSection(undefined); setInspectorOpen(true); } : null}>
+  // A section of the Change Guide, or the section of a Guide comment's entity: the Inspector finds the section among the
+  // guide's, since a section id may itself contain `:`.
+  const openGuideEntity = (entity: string): void => { setGuideSection((current) => ({ spaceId: workspace.id, entity, serial: (current?.serial ?? 0) + 1 })); setInspectorSection(undefined); setInspectorOpen(true); };
+  // A comment on the Goal opens the Goal tab: the Inspector follows its initial view when it changes, so it is cleared
+  // for a frame first and a second link to the Goal opens it again.
+  const openDocument = (anchor: CommentAnchor): void => {
+    if (anchor.document.kind === 'guide') {
+      const entity = anchorEntity(anchor);
+      if (entity?.startsWith('section:') || entity?.startsWith('exhibit:')) openGuideEntity(entity);
+      return;
+    }
+    setInspectorSection(undefined);
+    setInspectorOpen(true);
+    requestAnimationFrame(() => setInspectorSection('goal'));
+  };
+  const content = <BlockReferences.Provider value={referenceTargets}><ResourceFiles.Provider value={resolveResourceFile ?? null}><ResourceNavigation.Provider value={renderInspector ? (request) => { setResourceRequest({ spaceId: workspace.id, request }); setInspectorSection(undefined); setInspectorOpen(true); } : null}><GuideSectionNavigation.Provider value={renderInspector ? (id: string) => openGuideEntity(`section:${id}`) : null}><DocumentNavigation.Provider value={renderInspector ? openDocument : null}>
     <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
       <SidebarInsetTopbar className="pr-3">
         <nav aria-label="Location" className="flex min-w-0 flex-1 items-center gap-2 text-body">
@@ -797,7 +814,7 @@ function Shell({ project, projects, workspace, baseSpace, workspaces, mainAgent,
               </div>
               {inspectorOpen && renderInspector ? <InspectorResizeHandle width={inspectorWidth} onWidth={updateInspectorWidth} /> : null}
               {/* Opaque in every state: on narrow viewports the pane overlays the conversation, so a transparent loading or error state would still swallow its clicks. */}
-              {inspectorOpen && renderInspector ? <aside className="inspector-pane flex min-w-0 flex-col bg-surface-2" aria-label="Inspector"><InspectorLayout.Provider value={{ full: inspectorFull, onFull: setInspectorFull }}>{renderInspector(() => { setInspectorOpen(false); setInspectorFull(false); setInspectorSection(undefined); setResourceRequest(null); setGuideSection(null); }, inspectorSection, resourceRequest?.spaceId === workspace.id ? resourceRequest.request : undefined, (name) => { setRequestedTerminal({ spaceId: workspace.id, name }); setTerminalOpen(true); }, guideSection?.spaceId === workspace.id ? { id: guideSection.id, serial: guideSection.serial } : undefined)}</InspectorLayout.Provider></aside> : null}
+              {inspectorOpen && renderInspector ? <aside className="inspector-pane flex min-w-0 flex-col bg-surface-2" aria-label="Inspector"><InspectorLayout.Provider value={{ full: inspectorFull, onFull: setInspectorFull }}>{renderInspector(() => { setInspectorOpen(false); setInspectorFull(false); setInspectorSection(undefined); setResourceRequest(null); setGuideSection(null); }, inspectorSection, resourceRequest?.spaceId === workspace.id ? resourceRequest.request : undefined, (name) => { setRequestedTerminal({ spaceId: workspace.id, name }); setTerminalOpen(true); }, guideSection?.spaceId === workspace.id ? { entity: guideSection.entity, serial: guideSection.serial } : undefined)}</InspectorLayout.Provider></aside> : null}
             </div>
             {terminalOpen && terminals ? <><TerminalResizeHandle height={terminalHeight} onHeight={setTerminalHeight} /><section className="min-h-0 min-w-0 overflow-hidden"><WorkspaceTerminals key={terminals.spaceId} {...terminals} requestedName={requestedTerminal?.spaceId === workspace.id ? requestedTerminal.name : terminals.requestedName} onAttachMachine={renderInspector ? openEnvironment : undefined} onClose={() => setTerminalOpen(false)} /></section></> : null}
           </div>
@@ -816,6 +833,6 @@ function Shell({ project, projects, workspace, baseSpace, workspaces, mainAgent,
       setCreateError(null);
       try { await onCreateWorkspace(input); setNewWorkspaceFor(null); } catch (failure) { setCreateError(rpcErrorMessage(failure, 'Create workspace')); } finally { createPendingRef.current = false; setCreatePending(false); }
     }} /> : null}
-  </GuideSectionNavigation.Provider></ResourceNavigation.Provider></ResourceFiles.Provider></BlockReferences.Provider>;
+  </DocumentNavigation.Provider></GuideSectionNavigation.Provider></ResourceNavigation.Provider></ResourceFiles.Provider></BlockReferences.Provider>;
   return accountSidebar ? content : <SidebarProvider className="gitspace-shell" persist={false} width="19rem"><AppSidebar {...sidebar} /><SidebarInset className="overflow-hidden">{content}</SidebarInset></SidebarProvider>;
 }

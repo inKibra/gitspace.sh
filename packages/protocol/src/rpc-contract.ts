@@ -41,14 +41,12 @@ import {
 } from './automations-contract.js';
 import {
   AppendJournalEntryInputCodec,
-  AppendReviewMessageInputCodec,
   AppendRubricJudgmentInputCodec,
   AttachRequirementEvidenceInputCodec,
   AnalyzeChangeGuideInputCodec,
   ChangeGuideWorksheetCodec,
   ChangeGuideViewCodec,
   ChangeGuideRevisionSummaryCodec,
-  CreateReviewThreadInputCodec,
   EndJournalPhaseInputCodec,
   InspectorOverviewCodec,
   InspectorIdentityCodec,
@@ -64,7 +62,6 @@ import {
   RepositoryFileViewCodec,
   RepositoryStatusEntryCodec,
   RepositoryTreeEntryCodec,
-  ResolveReviewThreadInputCodec,
   ReviewThreadViewCodec,
   RubricViewCodec,
   ServiceViewCodec,
@@ -2322,27 +2319,6 @@ export const inspectorSetGuideApprovalContract = gitspaceRpc
   .errors(inspectorMutationErrors)
   .mutation();
 
-export const inspectorCreateReviewThreadContract = gitspaceRpc
-  .procedure()
-  .input(wire.object({ expectedGeneration: wire.integer({ min: 0 }), input: CreateReviewThreadInputCodec }))
-  .output(ReviewThreadViewCodec)
-  .errors(inspectorMutationErrors)
-  .mutation();
-
-export const inspectorAppendReviewMessageContract = gitspaceRpc
-  .procedure()
-  .input(wire.object({ expectedGeneration: wire.integer({ min: 0 }), input: AppendReviewMessageInputCodec }))
-  .output(ReviewThreadViewCodec)
-  .errors(inspectorMutationErrors)
-  .mutation();
-
-export const inspectorResolveReviewThreadContract = gitspaceRpc
-  .procedure()
-  .input(wire.object({ expectedGeneration: wire.integer({ min: 0 }), input: ResolveReviewThreadInputCodec }))
-  .output(ReviewThreadViewCodec)
-  .errors(inspectorMutationErrors)
-  .mutation();
-
 /** Where every space of the account lives right now; the routing table for clients that span machines. */
 export const SpacePlacementViewCodec = wire.object({
   spaceId: wire.string,
@@ -2709,9 +2685,6 @@ export const gitspaceContract = gitspaceRpc.contract({
     },
     review: {
       list: inspectorReviewThreadsContract,
-      create: inspectorCreateReviewThreadContract,
-      reply: inspectorAppendReviewMessageContract,
-      resolve: inspectorResolveReviewThreadContract,
     },
     repository: {
       tree: inspectorRepositoryTreeContract,

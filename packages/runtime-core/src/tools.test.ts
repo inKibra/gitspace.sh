@@ -109,13 +109,22 @@ test('every registered tool advertises its real object contract and executes thr
     expect((await harness.snapshot(PlanDoc, root.id, BACKGROUND_CONTEXT))?.status).toBe('proposed');
   } finally { await harness.close(BACKGROUND_CONTEXT); }
 });
-test('a review thread opened with only its body is about the whole workspace and pending', async () => {
+test('space_review only lists: opening, replying to or resolving a thread is refused without dispatching', async () => {
   const dispatched: unknown[] = [];
-  const { harness, root } = await registered([[call('space_review', { method: 'create', message: { body: 'Check the parser.' } })]], async input => { dispatched.push(input.args); return completed(input); });
+  const { harness, root } = await registered([[
+    call('space_review', { method: 'create', message: { body: 'Check the parser.' } }, 'create'),
+    call('space_review', { method: 'append', threadId: 'thread', expectedRevision: 1, message: { body: 'Done.' } }, 'append'),
+    call('space_review', { method: 'resolve', threadId: 'thread', expectedRevision: 1, resolved: true, decision: 'approved' }, 'resolve'),
+    call('space_review', { method: 'list' }, 'list'),
+  ]], async input => { dispatched.push(input.args); return completed(input); });
   try {
     await root.submit({ type: 'input', content: 'Review it.' }, BACKGROUND_CONTEXT);
     await root.waitForIdle(withAbortSignal(AbortSignal.timeout(3000), BACKGROUND_CONTEXT));
-    expect(dispatched).toEqual([expect.objectContaining({ method: 'create', anchor: { kind: 'workspace' }, decision: 'pending', message: { body: 'Check the parser.' } })]);
+    const results = (await root.context(BACKGROUND_CONTEXT)).messages.filter(message => message.role === 'toolResult');
+    expect(results.map(result => ({ id: result.toolCallId, error: result.isError })).sort((a, b) => a.id.localeCompare(b.id))).toEqual([
+      { id: 'append', error: true }, { id: 'create', error: true }, { id: 'list', error: false }, { id: 'resolve', error: true },
+    ]);
+    expect(dispatched).toEqual([expect.objectContaining({ method: 'list' })]);
   } finally { await harness.close(BACKGROUND_CONTEXT); }
 });
 test('an image the conversation\'s model cannot take never enters history, and one it can enters as its stored bytes', async () => {

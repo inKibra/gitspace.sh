@@ -5,6 +5,7 @@
 // their title and a JSON code block; blockMarkdown never throws.
 import type { z } from 'zod';
 import { gitspaceUiCatalog, isRecord, parseBlockRef, parseSvg, readState } from './gitspace-ui.js';
+import type { ChangeGuideSection, EvidenceReference, GoalRequirement, JournalEntryView } from './inspector-contract.js';
 
 const components = gitspaceUiCatalog.components;
 type Unit = z.output<typeof components.Chart.props>['unit'];
@@ -382,4 +383,65 @@ export function blockMarkdown(spec: unknown, refSpec?: RefSpec): string {
     // A value no spec holds (a cycle, a getter that throws) is written as JSON below.
   }
   return jsonBlock('Block', spec);
+}
+
+// The typed record blocks (`Requirement`, `Decision`, `Evidence`, `GuideSection`) as plain Markdown, drawn from their
+// records. Like blockMarkdown, they never throw.
+
+/** One line naming an evidence reference: its label and what it points at. */
+export function evidenceMarkdown(reference: EvidenceReference): string {
+  switch (reference.kind) {
+    case 'artifact': return `**${reference.label}**: artifact \`${reference.url}\` (\`${reference.hash}\`)`;
+    case 'git': return `**${reference.label}**: \`${reference.path}\` @ \`${reference.commitId.slice(0, 7)}\``;
+    case 'command': return `**${reference.label}**: run \`${reference.runId}\`, exit code ${reference.exitCode}`;
+    case 'review-thread': return `**${reference.label}**: review thread \`${reference.threadId}\`${reference.messageId === null ? '' : `, message \`${reference.messageId}\``}`;
+    default: return '';
+  }
+}
+
+const REQUIREMENT_STATUS: Readonly<Record<string, string>> = { accepted: 'accepted', review: 'evidence to check', missing: 'no evidence' };
+
+/** A requirement as a task-list item: checked once accepted, its status, whether it is optional, its description and
+ * its evidence. */
+export function requirementMarkdown(requirement: GoalRequirement): string {
+  const marks = [REQUIREMENT_STATUS[requirement.status] ?? requirement.status, ...(requirement.required ? [] : ['optional'])];
+  const lines = [`- [${requirement.status === 'accepted' ? 'x' : ' '}] **${requirement.title}** (${marks.join(', ')})`];
+  if (requirement.description.trim() !== '') lines.push('', `  ${indented(requirement.description.trim())}`);
+  const evidence = requirement.evidence ?? [];
+  if (evidence.length > 0) lines.push('', ...evidence.map((reference) => `  - ${evidenceMarkdown(reference)}`));
+  return lines.join('\n');
+}
+
+/** A decision entry: its title (struck through, and what replaced it, once superseded), who wrote it and when, its body,
+ * the messages it quotes and the decision it replaces. */
+export function decisionMarkdown(entry: JournalEntryView, replacedBy: string | null): string {
+  const parts = [replacedBy === null ? `### ${entry.title}` : `### ~~${entry.title}~~\n\nSuperseded by ${replacedBy}.`];
+  parts.push(`*${entry.createdBy}, ${entry.createdAt}*`);
+  if (entry.body.trim() !== '') parts.push(entry.body.trim());
+  for (const citation of entry.citations ?? []) {
+    parts.push(`${citation.quote.split('\n').map((line) => `> ${line}`).join('\n')}\n>\n> — ${citation.who}, ${citation.at}`);
+  }
+  if (entry.supersedes !== undefined) parts.push(`Supersedes ${entry.supersedes}.`);
+  return parts.join('\n\n');
+}
+
+const CALLOUT_LABELS: Readonly<Record<string, string>> = { risk: 'Risk', mechanical: 'Mechanical', decision: 'Decision' };
+
+/** A guide section, numbered as the guide reads: its title and kind, summary, explanation, why, callouts, diagram (its
+ * fence kept), exhibits with their line ranges and notes, and evidence. */
+export function guideSectionMarkdown(section: ChangeGuideSection, number: number): string {
+  const parts = [`### §${number} ${section.title}`, `*${section.kind}*`];
+  for (const text of [section.summary, section.explanation]) if (text !== undefined && text.trim() !== '') parts.push(text.trim());
+  if (section.why.trim() !== '') parts.push(`**Why:** ${section.why.trim()}`);
+  for (const callout of section.callouts ?? []) parts.push(`> **${CALLOUT_LABELS[callout.tone] ?? callout.tone}:** ${callout.text.split('\n').join('\n> ')}`);
+  if (section.diagram !== undefined && section.diagram.trim() !== '') parts.push(section.diagram.trim());
+  if (section.exhibits.length > 0) {
+    parts.push(section.exhibits.map((exhibit) => [
+      `- \`${exhibit.path}\`${exhibit.note.trim() === '' ? '' : `: ${exhibit.note.trim()}`}`,
+      ...(exhibit.ranges ?? []).map((range) => `  - lines ${range.start}–${range.end}${range.note === undefined || range.note === '' ? '' : `: ${range.note}`}`),
+    ].join('\n')).join('\n'));
+  }
+  const evidence = section.evidence ?? [];
+  if (evidence.length > 0) parts.push(['**Evidence**', ...evidence.map((reference) => `- ${evidenceMarkdown(reference)}`)].join('\n'));
+  return parts.join('\n\n');
 }

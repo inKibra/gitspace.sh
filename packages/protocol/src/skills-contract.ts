@@ -38,7 +38,7 @@ export const SkillUpdateCodec = wire.serializable((value): value is SkillUpdate 
 export const DEFAULT_GITSPACE_SKILLS: readonly Omit<SkillView, 'revision'>[] = [
   { id: 'space-goal', name: 'space-goal', description: 'Goal intent, requirements, evidence, and decisions.', source: 'gitspace', scope: 'project', enabled: true, exceptions: [], assignments: [] },
   { id: 'space-chain', name: 'space-chain', description: 'Related spaces and their position in a goal chain.', source: 'gitspace', scope: 'project', enabled: true, exceptions: [], assignments: [] },
-  { id: 'space-review', name: 'space-review', description: 'Files, durable comments, evidence, and review threads.', source: 'gitspace', scope: 'all', enabled: true, exceptions: [], assignments: [] },
+  { id: 'space-review', name: 'space-review', description: 'Files and diffs, answering the comments people send with Reply blocks, and older review threads, read-only.', source: 'gitspace', scope: 'all', enabled: true, exceptions: [], assignments: [] },
   { id: 'space-artifacts', name: 'space-artifacts', description: 'Publish, inspect, and attach durable space artifacts.', source: 'gitspace', scope: 'all', enabled: true, exceptions: [], assignments: [] },
   { id: 'phase-journal', name: 'phase-journal', description: 'Curated phase narrative, snapshots, and state deltas.', source: 'gitspace', scope: 'project', enabled: true, exceptions: [], assignments: [] },
   { id: 'review-guide-narrator', name: 'review-guide-narrator', description: 'Narrate a Change Guide grounded in the Journal and current diff.', source: 'gitspace', scope: 'workspaces', enabled: true, exceptions: [], assignments: [] },

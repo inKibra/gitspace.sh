@@ -50,7 +50,7 @@ export function LightboxComments({ children }: { children: ReactNode }) {
     if (!draft.trim() || state.saving) return;
     setState({ saving: true, error: null });
     const quote = at?.quote ?? (block.title ? `${block.kind}: ${block.title}` : block.kind);
-    layer.stage(scope.row, at ? { ...at.at, block: block.key } : { kind: 'block', id: block.key }, at ? `${at.label}${at.quote ? ` · ${at.quote}` : ''}` : quote, draft.trim()).then(() => {
+    layer.stage(scope, at ? { ...at.at, block: block.key } : { kind: 'block', id: block.key }, at ? `${at.label}${at.quote ? ` · ${at.quote}` : ''}` : quote, draft.trim()).then(() => {
       setDraft('');
       setPinned(null);
       setState({ saving: false, error: null });

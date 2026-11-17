@@ -649,6 +649,7 @@ describe('GitHub App', () => {
   });
 
   it('shares a private repository’s guide only with GitHub readers who can read the repository', async () => {
+    const tour = { root: 'tour', elements: { tour: { type: 'Sequence', props: { title: 'Search', frames: [{ content: { ref: 'section:search' }, say: 'Search arrives.' }, { content: { ref: 'exhibit:search:src/search.ts' }, say: 'Here it is.' }] }, children: [] } } };
     const key = await rsaKey('pkcs1');
     await createApp(key);
     const pantry = await project('Pantry', 'git@github.com:inKibra/Pantry.git');
@@ -710,6 +711,7 @@ describe('GitHub App', () => {
       await source.context.putChangeGuide({ ...source.identity, expectedRevision: 0, guide: {
         headCommit: head, baseRef: 'origin/staging', baseCommit: base, title: 'Pantry search', createdBy: 'narrator',
         sections: [{ id: 'search', title: 'Search', kind: 'behavior', explanation: 'Adds search.', why: '', exhibits: [{ path: 'src/search.ts', blobId: null, note: '', slowRead: false }], requirementIds: [] }],
+        walkthrough: tour,
       } });
       return { ...await createGuideShare(env, source, null), base, head, workspaceId, source };
     };
@@ -778,6 +780,9 @@ describe('GitHub App', () => {
     // Anyone with the link reads a public repository's guide.
     const opened = await share(open.id);
     expect(opened.access).toBe('public');
-    expect((await read(opened.url)).status).toBe(200);
+    const publicGuide = await read(opened.url);
+    expect(publicGuide.status).toBe(200);
+    // The guide's walkthrough travels with its share; its comments do not.
+    expect(await publicGuide.json()).toMatchObject({ title: 'Pantry search', walkthrough: tour });
   });
 });

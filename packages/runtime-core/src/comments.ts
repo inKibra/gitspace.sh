@@ -6,7 +6,7 @@ import { AssistantEntry, UserEntry, type Conversation, type Cursor, type EntryRe
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { PI_ENTRY_ORDINALS, openerAt, piMessageRowId, piSessionId, turnRowId, userRowId } from '@gitspace/blocks';
 import { blockReplies } from '@gitspace/protocol/gitspace-ui';
-import { STAGED_ANSWERS_MAX, STAGED_COMMENTS_MAX, messageComments, type CommentAnchor, type CommentLookup, type StagedComment } from '@gitspace/protocol-runtime/comments';
+import { STAGED_ANSWERS_MAX, STAGED_COMMENTS_MAX, messageComments, type CommentAnchor, type CommentLookup, type OpenDocumentKind, type StagedComment } from '@gitspace/protocol-runtime/comments';
 import { questionState } from '@gitspace/protocol-runtime';
 import { CommentLookupDoc, QuestionsDoc, StagedCommentsDoc } from './documents.js';
 import { messageAnswer, questionRefusal } from './questions.js';
@@ -40,10 +40,13 @@ export async function latestTurn(conversation: Conversation): Promise<string | n
   return null;
 }
 
-/** Stages a comment on the latest turn of the conversation its anchor names. */
+/** Stages a comment: on the latest turn of the conversation a turn anchor names, or on the Goal or a Change Guide
+ * revision, whose comments never lock. */
 export async function stageComment(harness: Harness, conversation: Conversation, anchor: CommentAnchor, note: string, deviceId: string | null): Promise<StagedComment> {
-  if (anchor.document.conversationId !== String(conversation.id)) throw new Error('The comment names another conversation');
-  if (anchor.document.turnId !== await latestTurn(conversation)) throw new Error('Comments go on the latest turn');
+  if (anchor.document.kind === 'turn') {
+    if (anchor.document.conversationId !== String(conversation.id)) throw new Error('The comment names another conversation');
+    if (anchor.document.turnId !== await latestTurn(conversation)) throw new Error('Comments go on the latest turn');
+  }
   const comment: StagedComment = { id: `cm-${crypto.randomUUID().replaceAll('-', '').slice(0, 12)}`, anchor, note, stagedAt: new Date().toISOString(), deviceId };
   await harness.commit(async tx => {
     const staged = await tx.doc(StagedCommentsDoc);
@@ -176,15 +179,16 @@ export async function rebuildCommentLookup(harness: Harness, storage: Storage): 
   await repairCommentLookup(harness, storage);
 }
 
-/** The lookup's comments on the turns `turnIds` and the replies to them, with the comments the replies in those turns
- * answer. */
-export async function commentLookup(harness: Harness, turnIds: readonly string[]): Promise<CommentLookup> {
+/** The lookup's comments on the turns `turnIds` and on every revision of the open documents `documents` (the Goal, the
+ * Change Guide), and the replies to them, with the comments the replies in those turns answer. */
+export async function commentLookup(harness: Harness, turnIds: readonly string[], documents: readonly OpenDocumentKind[] = []): Promise<CommentLookup> {
   const lookup = await harness.snapshot(CommentLookupDoc, BACKGROUND_CONTEXT);
   if (!lookup) return { comments: [], replies: [] };
   const turns = new Set(turnIds);
   const local = new Map(Object.entries(lookup.replies).filter(([row]) => turnIds.some(turn => row.startsWith(`${turn}:`))));
   const answered = new Set([...local.values()].flat());
-  const comments = Object.entries(lookup.comments).filter(([id, comment]) => turns.has(comment.anchor.document.turnId) || answered.has(id));
+  const comments = Object.entries(lookup.comments).filter(([id, { anchor: { document } }]) =>
+    (document.kind === 'turn' ? turns.has(document.turnId) : documents.includes(document.kind)) || answered.has(id));
   const ids = new Set(comments.map(([id]) => id));
   return {
     comments: comments.map(([id, comment]) => ({ id, ...comment })),

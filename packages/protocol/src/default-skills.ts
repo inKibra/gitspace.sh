@@ -32,6 +32,20 @@ The space_* tools are called from a codemode script, as \`tools.<name>(args)\`; 
 
 Read the arguments with \`await tools.describe('space_guide', 'put')\`, then \`put\` with the revision from \`get\` (0 creates); the host records who wrote it. Every Markdown field and diagram is validated; an error names the field and the path inside the block. Fix and resubmit until accepted.
 
+## Walkthrough
+
+Every guide you write carries a \`walkthrough\`: a gitspace-ui spec whose root is a Sequence of 2 to 30 frames in reading order. Each frame shows one part of the guide by ref, with one or two spoken sentences as its \`say\`:
+
+- \`{ "ref": "section:<section id>" }\`: the section's title, summary and diagram;
+- \`{ "ref": "diagram:<section id>" }\`: the section's diagram alone;
+- \`{ "ref": "exhibit:<section id>:<path>" }\`: an exhibit's lines, by its repository path;
+- \`{ "ref": "<block id>" }\`: a block element with that \`id\` in the guide's Markdown;
+- or one element of its own, such as a Markdown frame that opens or closes the tour.
+
+\`{ "root": "tour", "elements": { "tour": { "type": "Sequence", "props": { "title": "<guide title>", "frames": [{ "content": { "ref": "section:store" }, "say": "Reads now go through the cache." }, { "content": { "ref": "exhibit:store:src/store.ts" }, "say": "Here the store checks the cache first." }] }, "children": [] } } }\`
+
+Follow the sections' order: a section, then its diagram or the exhibit that carries it. A ref that names nothing in the guide is refused with its path.
+
 ## Hard rules
 
 - HEAD and \`baseCommit\` are the checkout's; the guide's diffs compare against \`baseCommit\`.
@@ -70,8 +84,8 @@ Use typed workspace tools:
 - Methods open and restore take expectedGeneration. Use the latest authority values, never invented generations.
 
 Mutating workspace tools act on the conversation's current workspace and cache attachment. An agent cannot close or archive its own workspace from a running tool; use the browser. Cloud goal, workflow, and rubric tools can target other workspaces without opening them.`);
-const SPACE_REVIEW = gitSpaceSkill('space-review', 'Review current files and Git diffs with durable typed threads.', `
-Use repository tools for files and diffs, then \`tools.space_review({ method: 'list' })\` in a codemode script for durable threads. Methods create, append, and resolve take their typed fields; \`await tools.describe('space_review', 'create')\` declares them. A message is its body: the host records its id, author and time. Anchor comments to generation plus Git object identity, and preserve stale threads rather than silently relocating them.`);
+const SPACE_REVIEW = gitSpaceSkill('space-review', 'Review current files and Git diffs, answer the comments people send, and read older review threads.', `
+Use repository tools for files and diffs. People comment on the chat, the Goal and the Change Guide; their comments arrive in their messages as "Comment on …" lines, each with its quote, note and anchor. Answer each comment with a Reply block in your message, and change the commented record when the comment asks for it. Review threads are retired: \`tools.space_review({ method: 'list' })\` in a codemode script lists the workspace's older threads, read-only; nothing opens, replies to or resolves a thread any more.`);
 const SPACE_ARTIFACTS = gitSpaceSkill('space-artifacts', 'Publish and attach durable workspace evidence artifacts.', `
 Use \`drive://base/<path>\` and \`drive://workspace/<path>\` through read, write, and edit tools. Project sessions may write base artifacts. Workspace sessions may read base artifacts and write workspace artifacts; the host rejects every other mount or access. Successful artifact tool writes publish changes for browser views. Binary files (zips, fonts, images, builds) read as metadata only; move them in a codemode script with \`tools.space_artifacts({ method: 'toMachine', url: 'drive://workspace/uploads/a.zip', path: '/tmp/a.zip' })\` and publish machine files with method \`fromMachine\` (path, url), up to 1 GiB each. Use \`tools.space_artifacts({ method: 'listScopes' })\` and method \`listPromotions\` for canonical metadata. Copying workspace files into project artifacts and creating or revoking public links are user actions in the browser, not agent APIs. Copies are independent files; do not link or roll up artifact scopes.
 

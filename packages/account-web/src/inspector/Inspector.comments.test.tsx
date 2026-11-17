@@ -59,38 +59,42 @@ beforeEach(() => {
   props = {
     overview: { projectId: 'project', spaceId: 'space', revision: 1, goal: null, workflow: null, rubric: null, journal: { entries: 0, openPhaseRunId: null, recent: [] }, review: { total: 0, unresolved: 0 }, changeGuide: { projectId: 'project', spaceId: 'space', revision: 1, headCommit: diff.headCommit, baseRef: 'main', baseCommit: 'c'.repeat(40), title: 'Guide', createdAt: date, createdBy: 'author', reviewerStates: [], sections: [{ id: 'section', title: 'Behavior', kind: 'behavior', explanation: 'Changed behavior', why: '', requirementIds: [], exhibits: [{ path: 'file.ts', blobId: null, note: '', slowRead: false }] }] } },
     initialView: 'guide', workspaces: [], onSelectWorkspace() {}, repositoryEntries: [], repositoryMode: 'current', onRepositoryModeChange() {}, repositoryFile: null, repositoryDiff: null, journalEntries: [], threads: [], services: [], subagents: [],
-    usage: { sessionId: null, report: null, status: 'idle', load() {}, refresh() {} }, agentSetup: { sessionId: null, report: null, status: 'idle', load: unavailable, refresh: unavailable, save: unavailable }, reviewerId: 'reviewer', onRequestArtifact: unavailable, onRequestRepositoryFile() {}, onRequestRepositoryDiff() {}, onLoadGuideDiff: async () => diff, onCreateThread: unavailable, onReplyThread: unavailable, onResolveThread: unavailable, onMarkGuideSectionRead: unavailable,
+    usage: { sessionId: null, report: null, status: 'idle', load() {}, refresh() {} }, agentSetup: { sessionId: null, report: null, status: 'idle', load: unavailable, refresh: unavailable, save: unavailable }, reviewerId: 'reviewer', onRequestArtifact: unavailable, onRequestRepositoryFile() {}, onRequestRepositoryDiff() {}, onLoadGuideDiff: async () => diff, onMarkGuideSectionRead: unavailable,
   };
 });
 afterEach(async () => { await act(() => root.unmount()); container.remove(); if (!animationDescriptor) Reflect.deleteProperty(Element.prototype, 'getAnimations'); vi.unstubAllGlobals(); });
 
-describe('Inspector review comments', () => {
-  it('pins guide selection to its loaded side, preserves failed drafts, and follows saved thread revisions', async () => {
-    const pending = Promise.withResolvers<ReviewThreadView>();
-    const create = vi.fn<InspectorProps['onCreateThread']>(() => pending.promise);
-    props.onCreateThread = create;
+describe('Inspector review threads, retired', () => {
+  const thread: ReviewThreadView = {
+    projectId: 'project', spaceId: 'space', id: 'thread', revision: 2, anchorState: 'current', staleReason: null, decision: 'approved', resolved: true, createdAt: date, updatedAt: date,
+    anchor: { kind: 'line', path: 'file.ts', generation: 7, baseCommit: diff.baseCommit, headCommit: diff.headCommit, blobId: diff.files[0]!.oldBlobId, side: 'base', startLine: 1, endLine: 1 },
+    messages: [{ id: 'first', authorId: 'reviewer', body: 'Keep this context', createdAt: date }, { id: 'second', authorId: 'agent', body: 'Kept.', createdAt: date }],
+  };
+
+  it('shows an older thread on its guide line read-only, and selecting lines starts no thread', async () => {
+    props = { ...props, threads: [thread] };
     await render();
+    // The thread's mark on its line shows how many messages it holds.
+    await click('2');
+    expect(container.textContent).toContain('Review thread · read-only');
+    expect(container.textContent).toContain('Keep this context');
+    expect(container.textContent).toContain('Kept.');
+    expect(container.textContent).toContain('Resolved');
+    expect(container.querySelector('textarea')).toBeNull();
+    expect([...container.querySelectorAll('button')].map((node) => node.textContent)).not.toContain('Resolve');
     await click('Select old line');
-    await draft('Keep this context');
-    await click('Start thread');
-    expect(container.querySelector<HTMLTextAreaElement>('textarea')?.disabled).toBe(true);
-    expect(create).toHaveBeenCalledTimes(1);
-    expect(create.mock.calls[0]?.[0]).toMatchObject({ anchor: { kind: 'line', path: 'file.ts', generation: 7, baseCommit: diff.baseCommit, headCommit: diff.headCommit, blobId: diff.files[0]!.oldBlobId, side: 'base', startLine: 1, endLine: 1 } });
-    await act(async () => pending.reject(new Error('Review unavailable')));
-    expect(container.querySelector('[role="alert"]')?.textContent).toContain('Review unavailable');
-    expect(container.querySelector('textarea')?.value).toBe('Keep this context');
-    const saved: ReviewThreadView = { projectId: 'project', spaceId: 'space', id: 'thread', revision: 1, anchor: create.mock.calls[0]![0].anchor, anchorState: 'current', staleReason: null, decision: 'pending', resolved: false, messages: [{ id: 'first', authorId: 'reviewer', body: 'Keep this context', createdAt: date }], createdAt: date, updatedAt: date };
-    props.onCreateThread = async () => { props = { ...props, threads: [saved] }; root.render(<Toasts><Inspector {...props} /></Toasts>); return saved; };
-    await render();
-    await click('Start thread');
-    expect(container.querySelector('textarea')?.getAttribute('aria-label')).toBe('Reply to review thread');
-    props = { ...props, threads: [{ ...saved, revision: 2, messages: [...saved.messages, { id: 'second', authorId: 'other', body: 'New reply', createdAt: date }] }], onReplyThread: vi.fn(async () => {}), onResolveThread: vi.fn(async () => {}) };
-    await render();
-    expect(container.textContent).toContain('New reply');
-    await draft('Follow up'); await click('Reply');
-    expect(props.onReplyThread).toHaveBeenCalledWith('thread', 2, 'Follow up');
-    await click('Resolve');
-    expect(props.onResolveThread).toHaveBeenCalledWith('thread', 2, true, 'pending');
+    expect(container.querySelector('textarea')).toBeNull();
+    expect(container.textContent).not.toContain('New review thread');
+  });
+
+  it('offers no thread on a line selected in Files, and still shows an older one there read-only', async () => {
+    props = { ...props, threads: [thread], initialView: 'files', repositoryMode: 'base', repositoryEntries: [{ spaceId: 'space', generation: 7, mode: 'base', path: 'file.ts', name: 'file.ts', kind: 'file', status: 'modified', oldPath: null, blobId: null, size: null }], repositoryDiff: diff };
+    await render(); await click('Open file.ts');
+    await click('Select old line');
+    expect(container.querySelector('textarea')).toBeNull();
+    await click('2');
+    expect(container.textContent).toContain('Review thread · read-only');
+    expect(container.querySelector('textarea')).toBeNull();
   });
 
   it('does not render a response for another comparison mode', async () => {

@@ -111,7 +111,7 @@ it('names what is pending instead of offering Install while an install is reques
 });
 
 it('offers both the App and a machine on an unbridged project, the machine button opening the Environment', async () => {
-  const renderInspector = vi.fn((_onClose: () => void, initialView: 'environment' | 'browser' | undefined) => <div data-inspector-view={initialView} />);
+  const renderInspector = vi.fn((_onClose: () => void, initialView: 'environment' | 'browser' | 'goal' | undefined) => <div data-inspector-view={initialView} />);
   const onInstall = vi.fn(async () => '#');
   await act(() => root.render(<GitSpaceShell {...verticalSliceFixture} onSend={async () => undefined} renderInspector={renderInspector} access={{ card: (onAttachMachine) => <RepositoryAccessCard access={needsApp} copy={noCopy} onInstall={onInstall} onOpenSettings={() => undefined} onAttachMachine={onAttachMachine} />, notice: 'The project agent starts once GitSpace can read octo-labs/portal.' }} />));
   const card = container.querySelector('[aria-label="Repository access"]');

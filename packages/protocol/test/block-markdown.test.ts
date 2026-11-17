@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test';
-import { blockMarkdown } from '../src/block-markdown.js';
+import { blockMarkdown, decisionMarkdown, evidenceMarkdown, guideSectionMarkdown, requirementMarkdown } from '../src/block-markdown.js';
+import type { EvidenceReference, JournalEntryView } from '../src/inspector-contract.js';
 import { extractBlocks, fenceSpec, gitspaceUiCatalog } from '../src/gitspace-ui.js';
 
 const fence = '```';
@@ -162,5 +163,50 @@ describe('blockMarkdown', () => {
     expect(blockMarkdown(cyclic)).toStartWith('**Block**\n\n```json\n');
     expect(blockMarkdown(one('Markdown', { content: 'a ``` fence' }))).toBe('a ``` fence');
     expect(blockMarkdown(one('Mermaid', { source: 'a ``` b' }))).toBe('````mermaid\na ``` b\n````');
+  });
+});
+
+describe('record Markdown', () => {
+  const commit = 'c0ffee1'.padEnd(40, '0');
+  const git: EvidenceReference = { kind: 'git', generation: 2, path: 'src/parse.ts', blobId: null, commitId: commit, label: 'Parser' };
+  const run: EvidenceReference = { kind: 'command', runId: 'run-7', command: 'bun test', exitCode: 0, artifactUrl: null, artifactHash: null, generation: 2, label: 'Tests' };
+  const artifact: EvidenceReference = { kind: 'artifact', url: 'drive://ws/shot.png', hash: `sha256:${'a'.repeat(64)}`, generation: 2, label: 'Screenshot', mediaType: 'image/png' };
+  const thread: EvidenceReference = { kind: 'review-thread', threadId: 'thread-1', messageId: null, label: 'Old review' };
+
+  it('names each kind of evidence in one line', () => {
+    expect(evidenceMarkdown(git)).toBe('**Parser**: `src/parse.ts` @ `c0ffee1`');
+    expect(evidenceMarkdown(run)).toBe('**Tests**: run `run-7`, exit code 0');
+    expect(evidenceMarkdown(artifact)).toBe(`**Screenshot**: artifact \`drive://ws/shot.png\` (\`sha256:${'a'.repeat(64)}\`)`);
+    expect(evidenceMarkdown(thread)).toBe('**Old review**: review thread `thread-1`');
+  });
+
+  it('writes a requirement as a task item, checked once accepted, with its status, description and evidence', () => {
+    const requirement = { id: 'parses', title: 'Parses v2', description: 'Every *sample* parses.', required: true, status: 'accepted' as const, workflowNodeId: null, criterionId: null, evidence: [run] };
+    expect(requirementMarkdown(requirement)).toBe('- [x] **Parses v2** (accepted)\n\n  Every *sample* parses.\n\n  - **Tests**: run `run-7`, exit code 0');
+    expect(requirementMarkdown({ ...requirement, status: 'review', required: false, description: '', evidence: [] })).toBe('- [ ] **Parses v2** (evidence to check, optional)');
+    expect(requirementMarkdown({ ...requirement, status: 'missing', evidence: [] })).toStartWith('- [ ] **Parses v2** (no evidence)');
+  });
+
+  it('writes a decision with who and when, its quotes and what it replaces, struck through once superseded', () => {
+    const entry: JournalEntryView = {
+      projectId: 'p', spaceId: 's', id: 'stream', sequence: 4, kind: 'decision', phaseRunId: null, phase: 'build', title: 'Stream the input', body: 'Files reach 2 GB.',
+      outcome: null, decisions: [], surprises: [], evidence: [], snapshot: null, delta: null, reverted: null, createdAt: '2026-11-17T10:00:00.000Z', createdBy: 'agent',
+      citations: [{ conversationId: 'c', messageId: 'm', who: 'Ana', at: '2026-11-17T09:00:00.000Z', quote: 'Some files are huge.' }], supersedes: 'buffer',
+    };
+    expect(decisionMarkdown(entry, null)).toBe('### Stream the input\n\n*agent, 2026-11-17T10:00:00.000Z*\n\nFiles reach 2 GB.\n\n> Some files are huge.\n>\n> — Ana, 2026-11-17T09:00:00.000Z\n\nSupersedes buffer.');
+    expect(decisionMarkdown(entry, 'Use mmap')).toStartWith('### ~~Stream the input~~\n\nSuperseded by Use mmap.');
+  });
+
+  it('writes a guide section with its parts, the diagram fence kept and each exhibit\'s lines', () => {
+    const diagram = '```mermaid\ngraph LR\n  a --> b\n```';
+    const markdown = guideSectionMarkdown({
+      id: 'parse', title: 'Parse headers', kind: 'behavior', summary: 'Reads v2.', explanation: 'Checks the version first.', why: 'v2 files carry one.',
+      callouts: [{ tone: 'risk', text: 'v1 files still load.' }], diagram, evidence: [run], requirementIds: [],
+      exhibits: [{ path: 'src/parse.ts', blobId: null, note: 'The check.', slowRead: true, ranges: [{ start: 3, end: 9, note: 'version' }] }],
+    }, 2);
+    expect(markdown).toBe([
+      '### §2 Parse headers', '*behavior*', 'Reads v2.', 'Checks the version first.', '**Why:** v2 files carry one.', '> **Risk:** v1 files still load.', diagram,
+      '- `src/parse.ts`: The check.\n  - lines 3–9: version', '**Evidence**\n- **Tests**: run `run-7`, exit code 0',
+    ].join('\n\n'));
   });
 });

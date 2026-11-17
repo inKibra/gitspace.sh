@@ -31,6 +31,17 @@ async function inside<T>(name: string, operation: (context: SpaceContextDO) => T
   return runInDurableObject(stub, (context: SpaceContextDO) => operation(context));
 }
 
+/** A review thread as one written before threads were retired: its row and its messages, at revision `messages.length`. */
+async function seedThread(name: string, threadId: string, anchor: Record<string, unknown>, messages: readonly Record<string, string>[]): Promise<void> {
+  await runInDurableObject(env.SPACE_CONTEXT.getByName(name), (context: SpaceContextDO, state) => {
+    context.listReviewThreads(identity);
+    state.storage.sql.exec("INSERT INTO inspector_review_threads (thread_id, revision, anchor_json, decision, resolved, created_at, updated_at) VALUES (?, ?, ?, 'pending', 0, ?, ?)", threadId, messages.length, JSON.stringify(anchor), at, at);
+    for (const [index, message] of messages.entries()) {
+      state.storage.sql.exec('INSERT INTO inspector_review_messages (message_id, thread_id, sequence, value_json) VALUES (?, ?, ?, ?)', message.id, threadId, index + 1, JSON.stringify(message));
+    }
+  });
+}
+
 describe('SpaceContextDO', () => {
   it('keeps goal, workflow gates, judgments, and journal deltas canonical with optimistic revisions', async () => {
     const goal = await inside('inspector-domain', (context) => context.putGoal({
@@ -89,7 +100,7 @@ describe('SpaceContextDO', () => {
     expect((await inside('inspector-domain', (context) => context.listJournal(identity))).map((entry) => entry.kind)).toEqual(['phase-start', 'phase-end']);
   });
 
-  it('bounds evidence and judgments, appends review messages, and pins guide approval to revision plus HEAD', async () => {
+  it('bounds evidence and judgments, reads older review threads, and pins guide approval to revision plus HEAD', async () => {
     let goal = await inside('inspector-review', (context) => context.putGoal({
       ...identity,
       expectedRevision: 0,
@@ -150,33 +161,43 @@ describe('SpaceContextDO', () => {
     guide = await inside('inspector-review', (context) => context.setGuideApproval({ ...identity, revision: guide.revision, headCommit: head, reviewerId: 'human-a', decision: 'approved', note: null }));
     expect(guide.reviewerStates[0]).toMatchObject({ revision: 1, headCommit: head, decision: 'approved', readSectionIds: ['portable'] });
 
-    let thread = await inside('inspector-review', (context) => context.createReviewThread({
-      ...identity,
-      id: 'thread-a',
-      anchor: { kind: 'line', path: 'src/Inspector.tsx', generation: 7, baseCommit: head, headCommit: head, blobId: head, side: 'head', startLine: 4, endLine: 4 },
-      decision: 'pending',
-      message: { id: 'message-a', authorId: 'human-a', body: 'Keep this identity stable.', createdAt: at },
-    }, { generation: 7, headCommit: head }));
-    thread = await inside('inspector-review', (context) => context.appendReviewMessage({
-      ...identity,
-      threadId: thread.id,
-      expectedRevision: thread.revision,
-      message: { id: 'message-b', authorId: 'agent-a', body: 'Pinned to the Git blob.', createdAt: at },
-    }, { generation: 8, headCommit: movedHead }));
-    expect(thread).toMatchObject({ revision: 2, anchorState: 'stale' });
-    expect(thread.messages.map((message) => message.id)).toEqual(['message-a', 'message-b']);
+    await seedThread('inspector-review', 'thread-a', { kind: 'line', path: 'src/Inspector.tsx', generation: 7, baseCommit: head, headCommit: head, blobId: head, side: 'head', startLine: 4, endLine: 4 }, [
+      { id: 'message-a', authorId: 'human-a', body: 'Keep this identity stable.', createdAt: at },
+      { id: 'message-b', authorId: 'agent-a', body: 'Pinned to the Git blob.', createdAt: at },
+    ]);
+    expect(await inside('inspector-review', (context) => context.listReviewThreads(identity, { generation: 7, headCommit: head }))).toMatchObject([{ id: 'thread-a', anchorState: 'current' }]);
+    const [thread] = await inside('inspector-review', (context) => context.listReviewThreads(identity, { generation: 8, headCommit: movedHead }));
+    expect(thread).toMatchObject({ revision: 2, anchorState: 'stale', decision: 'pending', resolved: false });
+    expect(thread?.messages.map((message) => message.id)).toEqual(['message-a', 'message-b']);
   });
 
   it('keeps a comment on a plan step anchored to that step, current whatever the HEAD', async () => {
-    await inside('inspector-plan-step', (context) => context.createReviewThread({
-      ...identity,
-      id: 'thread-step',
-      anchor: { kind: 'plan-step', stepId: 'store-tokens' },
-      decision: 'pending',
-      message: { id: 'message-step', authorId: 'human-a', body: 'Keep the old column until the backfill ends.', createdAt: at },
-    }, { generation: 7, headCommit: head }));
+    await seedThread('inspector-plan-step', 'thread-step', { kind: 'plan-step', stepId: 'store-tokens' }, [
+      { id: 'message-step', authorId: 'human-a', body: 'Keep the old column until the backfill ends.', createdAt: at },
+    ]);
     const [thread] = await inside('inspector-plan-step', (context) => context.listReviewThreads(identity, { generation: 9, headCommit: movedHead }));
     expect(thread).toMatchObject({ id: 'thread-step', anchor: { kind: 'plan-step', stepId: 'store-tokens' }, anchorState: 'current', staleReason: null });
+  });
+
+  it('stores a Change Guide\'s walkthrough with its revision and refuses one whose refs name nothing in the guide', async () => {
+    const section = { id: 'parse', title: 'Parse headers', kind: 'behavior' as const, explanation: 'Reads the version first.', why: '', diagram: '```mermaid\ngraph LR\n  read --> parse\n```', exhibits: [{ path: 'src/parse.ts', blobId: null, note: '', slowRead: false }], requirementIds: [] };
+    const draft = { headCommit: head, baseRef: 'main', baseCommit: movedHead, title: 'Parser v2', createdBy: 'narrator-a', sections: [section] };
+    const walkthrough = (...refs: string[]) => ({ root: 'tour', elements: { tour: { type: 'Sequence', props: { title: 'Parser v2', frames: refs.map((ref) => ({ content: { ref }, say: `Showing ${ref}.` })) }, children: [] } } });
+    const tour = walkthrough('section:parse', 'diagram:parse', 'exhibit:parse:src/parse.ts');
+    const first = await inside('inspector-walkthrough', (context) => context.putChangeGuide({ ...identity, expectedRevision: 0, guide: { ...draft, walkthrough: tour } }));
+    expect(first.walkthrough).toStrictEqual(tour);
+    const second = await inside('inspector-walkthrough', (context) => context.putChangeGuide({ ...identity, expectedRevision: 1, guide: draft }));
+    expect(second.revision).toBe(2);
+    expect(second).not.toHaveProperty('walkthrough');
+    expect((await inside('inspector-walkthrough', (context) => context.getChangeGuide(identity)))).not.toHaveProperty('walkthrough');
+    expect((await inside('inspector-walkthrough', (context) => context.getChangeGuide(identity, 1)))?.walkthrough).toStrictEqual(tour);
+
+    await expect(inside('inspector-walkthrough', (context) => context.putChangeGuide({ ...identity, expectedRevision: 2, guide: { ...draft, walkthrough: walkthrough('section:parse', 'section:gone') } })))
+      .rejects.toThrow(/walkthrough\/elements\/tour\/props\/frames\/1\/content\/ref: no section, diagram, exhibit or block element \\"section:gone\\"/u);
+    const card = { root: 'card', elements: { card: { type: 'Card', props: { title: 'Not a walk' }, children: [] } } };
+    await expect(inside('inspector-walkthrough', (context) => context.putChangeGuide({ ...identity, expectedRevision: 2, guide: { ...draft, walkthrough: card } })))
+      .rejects.toThrow('is not a Sequence');
+    expect((await inside('inspector-walkthrough', (context) => context.listGuideRevisions(identity))).map((summary) => summary.revision)).toEqual([2, 1]);
   });
 
   it('reads goals, guides and journal entries stored before their new fields exactly as before', async () => {

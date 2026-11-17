@@ -925,26 +925,8 @@ export const reviewedAnnotations: Record<string, ToolAnnotation> = {
     "readOnlyHint": true,
     "openWorldHint": false
   },
-  "inspector.review.create": {
-    "readOnlyHint": false,
-    "destructiveHint": false,
-    "idempotentHint": false,
-    "openWorldHint": false
-  },
   "inspector.review.list": {
     "readOnlyHint": true,
-    "openWorldHint": false
-  },
-  "inspector.review.reply": {
-    "readOnlyHint": false,
-    "destructiveHint": false,
-    "idempotentHint": false,
-    "openWorldHint": false
-  },
-  "inspector.review.resolve": {
-    "readOnlyHint": false,
-    "destructiveHint": false,
-    "idempotentHint": false,
     "openWorldHint": false
   },
   "inspector.rubric.appendJudgment": {

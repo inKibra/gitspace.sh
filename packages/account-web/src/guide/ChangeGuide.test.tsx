@@ -90,7 +90,7 @@ function button(label: string): HTMLElement {
 }
 async function surface(overrides: Partial<Parameters<typeof ChangeGuideSurface>[0]> = {}) {
   await act(async () => root.render(<Toasts><ChangeGuideSurface guide={guide} reviewerId="reviewer" goal={goal} workspaces={[]}
-    review={{ threads: [], onOpenFile() {}, onSelectThread() {}, onSelectRange() {} }} onOpenEvidence={() => undefined}
+    review={{ threads: [], onOpenFile() {}, onSelectThread() {} }} onOpenEvidence={() => undefined}
     captures={{ content: () => null, status: () => undefined, error: () => undefined, load() {}, size: () => null, browserCapture: () => ({ poster: null, recording: null }) }}
     onLoadDiff={async (path) => diffFor(path)} onMarkRead={unavailable} {...overrides} /></Toasts>));
 }

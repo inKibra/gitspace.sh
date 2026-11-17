@@ -1,12 +1,16 @@
 // The conversation's plan, from the runtime's session-control view: its steps with their status, where the agent's
-// todo list is (on a step, or on a detour of its own), and per step its code, requirements, detail and comments.
+// todo list is (on a step, or on a detour of its own), and per step its code, requirements and detail. A step is
+// anchored `step:<id>` in the Goal's document: comments on it go to the agent with the person's next message. Review
+// threads written on steps before comments replaced them show read-only.
 import { Badge, useShape } from '@gitspace/ui';
 import type { GoalRequirement, ReviewThreadView } from '@gitspace/protocol';
 import type { SessionControlView } from '@gitspace/protocol-runtime/session-controls';
 import { Check, ChevronRight, MessageSquare01 } from '@untitledui/icons';
 import { useState, type ReactElement } from 'react';
+import { CommentEntity, EntityThreads } from '../comments/CommentLayer.js';
+import { entityQuote } from '../comments/document-notes.js';
 import { GitSpaceMarkdown } from '../GitSpaceMarkdown.js';
-import { StepComments, type StepCommentHandlers } from './StepComments.js';
+import { StepThreads } from '../inspector/ReviewThreads.js';
 
 type Plan = NonNullable<SessionControlView['plan']>;
 
@@ -21,9 +25,10 @@ function todoPosition(todos: SessionControlView['todos']): { stepId: string } | 
 
 const STATUS_LABEL: Record<Plan['steps'][number]['status'], string | null> = { completed: 'Done', active: 'In progress', pending: null };
 
-export function PlanSection({ plan, todos, requirements, threads, comments }: {
+export function PlanSection({ plan, todos, requirements, threads }: {
   plan: Plan | null; todos: SessionControlView['todos']; requirements: readonly GoalRequirement[];
-  threads: readonly ReviewThreadView[]; comments: StepCommentHandlers;
+  /** Review threads written on plan steps before comments replaced them. */
+  threads: readonly ReviewThreadView[];
 }): ReactElement {
   const shape = useShape();
   const [open, setOpen] = useState<string | null>(null);
@@ -46,27 +51,30 @@ export function PlanSection({ plan, todos, requirements, threads, comments }: {
       {plan.steps.map((step, index) => {
         const expanded = open === step.id;
         const stepThreads = threads.filter(thread => thread.anchor.kind === 'plan-step' && thread.anchor.stepId === step.id);
-        const unresolved = stepThreads.filter(thread => !thread.resolved).length;
         const linked = step.requirementIds.flatMap(id => requirements.filter(requirement => requirement.id === id));
         const label = STATUS_LABEL[step.status];
+        const entity = `step:${step.id}`;
         return <li key={step.id} className="border-b border-border last:border-b-0" aria-label={`Step ${index + 1}: ${step.title}`}>
-          <button type="button" className="flex w-full items-start gap-3 px-3 py-2.5 text-left" aria-expanded={expanded} onClick={() => setOpen(expanded ? null : step.id)}>
-            <span aria-hidden className={`mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold tabular-nums ${step.status === 'completed' ? 'bg-foreground text-background' : step.status === 'active' ? 'text-foreground ring-[1.5px] ring-inset ring-[color:var(--focus-ring)]' : 'text-muted-foreground ring-1 ring-inset ring-border'}`}>
-              {step.status === 'completed' ? <Check width={12} height={12} strokeWidth={3} /> : index + 1}
-            </span>
-            <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-              <span className={`text-body ${step.status === 'completed' ? 'text-muted-foreground' : 'text-foreground'}`}>{step.title}</span>
-              {label || index === onStep ? <span className="flex flex-wrap items-center gap-1.5 text-caption text-muted-foreground">{label}{label && index === onStep ? ' · ' : null}{index === onStep ? <span className="text-foreground">todo list is here</span> : null}</span> : null}
-            </span>
-            {stepThreads.length ? <span className="flex items-center gap-1 text-caption tabular-nums text-muted-foreground" aria-label={`${unresolved} open comment${unresolved === 1 ? '' : 's'}`}><MessageSquare01 width={12} height={12} />{stepThreads.length}</span> : null}
-            <ChevronRight width={14} height={14} className={`mt-1 shrink-0 text-muted-foreground transition-transform ${expanded ? 'rotate-90' : ''}`} />
-          </button>
-          {expanded ? <div className="flex flex-col gap-3 pb-4 pl-11 pr-3">
-            {step.where.length ? <ul className="flex flex-col gap-0.5" aria-label="Where">{step.where.map((where, child) => <li key={where} className="flex gap-2 text-caption"><span className="tabular-nums text-muted-foreground">{index + 1}.{child + 1}</span><code className="font-mono text-[11px] text-muted-foreground [overflow-wrap:anywhere]">{where}</code></li>)}</ul> : null}
-            {linked.length ? <span className="flex flex-wrap items-center gap-1 text-caption text-muted-foreground">Requirements {linked.map(requirement => <Badge key={requirement.id} size="compact" color="gray">{requirement.title}</Badge>)}</span> : null}
-            {step.detail.trim() ? <GitSpaceMarkdown className="text-body">{step.detail}</GitSpaceMarkdown> : null}
-            <StepComments stepId={step.id} stepNumber={index + 1} threads={stepThreads} handlers={comments} />
-          </div> : null}
+          <CommentEntity entity={entity} label={`step ${index + 1}`} quote={entityQuote(step.title, step.detail)}>
+            <button type="button" className="flex w-full items-start gap-3 px-3 py-2.5 text-left" aria-expanded={expanded} onClick={() => setOpen(expanded ? null : step.id)}>
+              <span aria-hidden className={`mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold tabular-nums ${step.status === 'completed' ? 'bg-foreground text-background' : step.status === 'active' ? 'text-foreground ring-[1.5px] ring-inset ring-[color:var(--focus-ring)]' : 'text-muted-foreground ring-1 ring-inset ring-border'}`}>
+                {step.status === 'completed' ? <Check width={12} height={12} strokeWidth={3} /> : index + 1}
+              </span>
+              <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                <span className={`text-body ${step.status === 'completed' ? 'text-muted-foreground' : 'text-foreground'}`}>{step.title}</span>
+                {label || index === onStep ? <span className="flex flex-wrap items-center gap-1.5 text-caption text-muted-foreground">{label}{label && index === onStep ? ' · ' : null}{index === onStep ? <span className="text-foreground">todo list is here</span> : null}</span> : null}
+              </span>
+              {stepThreads.length ? <span className="flex items-center gap-1 text-caption tabular-nums text-muted-foreground" aria-label={`${stepThreads.length} earlier comment${stepThreads.length === 1 ? '' : 's'}`}><MessageSquare01 width={12} height={12} />{stepThreads.length}</span> : null}
+              <ChevronRight width={14} height={14} className={`mt-1 shrink-0 text-muted-foreground transition-transform ${expanded ? 'rotate-90' : ''}`} />
+            </button>
+            {expanded ? <div className="flex flex-col gap-3 pb-4 pl-11 pr-3">
+              {step.where.length ? <ul className="flex flex-col gap-0.5" aria-label="Where">{step.where.map((where, child) => <li key={where} className="flex gap-2 text-caption"><span className="tabular-nums text-muted-foreground">{index + 1}.{child + 1}</span><code className="font-mono text-[11px] text-muted-foreground [overflow-wrap:anywhere]">{where}</code></li>)}</ul> : null}
+              {linked.length ? <span className="flex flex-wrap items-center gap-1 text-caption text-muted-foreground">Requirements {linked.map(requirement => <Badge key={requirement.id} size="compact" color="gray">{requirement.title}</Badge>)}</span> : null}
+              {step.detail.trim() ? <GitSpaceMarkdown className="text-body">{step.detail}</GitSpaceMarkdown> : null}
+              <StepThreads threads={stepThreads} />
+            </div> : null}
+          </CommentEntity>
+          <EntityThreads entity={entity} className="px-3 pb-2 pl-11" />
         </li>;
       })}
     </ol>

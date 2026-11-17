@@ -22,23 +22,34 @@ export const STAGED_COMMENTS_MAX = 64;
 export const CommentIdSchema = z.string().regex(/^cm-[0-9a-f]{12}$/u);
 const Reference = z.string().min(1).max(512);
 
-/** The document a comment is in: a chat turn (`turnId`, the transcript's turn row id). */
+/** The document a comment is in: a chat turn (`turnId`, the transcript's turn row id), the workspace Goal at a revision,
+ * or a Change Guide revision. A turn's comments go on its latest turn only; the Goal's and the Guide's never lock. */
 export const CommentDocumentSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('turn'), conversationId: z.string().min(1), turnId: z.string().min(1) }).strict(),
+  z.object({ kind: z.literal('goal'), revision: z.number().int().nonnegative() }).strict(),
+  z.object({ kind: z.literal('guide'), revision: z.number().int().positive() }).strict(),
 ]);
+export type CommentDocument = z.infer<typeof CommentDocumentSchema>;
+/** The documents whose comments stay open across turns. */
+export const OPEN_DOCUMENT_KINDS = ['goal', 'guide'] as const;
+export type OpenDocumentKind = (typeof OPEN_DOCUMENT_KINDS)[number];
 
 /**
  * Where in its document a comment is. In a chat turn a message is `message:<row id>`, a tool call `tool-call:<row id>`,
  * and a gitspace-ui block `<message row id>#<element id>` (its root element's id), or `<message row id>#@<hash>` for a
- * block whose root has no id. `item`: a row, step, line or frame of a block (`path` as `rows/2`, `label` as people read
- * it). `text`: a text-quote selector inside `within` (a message or a block), found again by `findTextQuote`. `time`: a
- * moment of a video; `frame`: a frame of a Sequence.
+ * block whose root has no id. In the Goal and a Change Guide an entity is `requirement:<id>`, `decision:<entry id>`,
+ * `section:<id>` or `exhibit:<section id>:<path>`, and a block in one of its Markdown fields `<entity>#<element id>`.
+ * `item`: a row, step, line or frame of a block (`path` as `rows/2`, `label` as people read it). `text`: a text-quote
+ * selector inside `within` (a message, an entity or a block), found again by `findTextQuote`. `lines`: lines of an
+ * exhibit's diff on one side, at the file's blob there. `time`: a moment of a video; `frame`: a frame of a Sequence.
  */
 export const CommentTargetSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('block'), id: Reference }).strict(),
   z.object({ kind: z.literal('item'), block: Reference, path: z.string().min(1).max(200), label: z.string().min(1).max(120) }).strict(),
   z.object({ kind: z.literal('entity'), ref: Reference }).strict(),
   z.object({ kind: z.literal('text'), within: Reference.nullable(), exact: z.string().min(1).max(COMMENT_EXACT_MAX), prefix: z.string().max(COMMENT_CONTEXT), suffix: z.string().max(COMMENT_CONTEXT) }).strict(),
+  z.object({ kind: z.literal('lines'), exhibit: Reference, side: z.enum(['base', 'head']), start: z.number().int().positive(), end: z.number().int().positive(), blobId: z.string().min(1).max(128).nullable() }).strict()
+    .refine((target) => target.end >= target.start, { message: 'A line range ends at or after its start', path: ['end'] }),
   z.object({ kind: z.literal('time'), block: Reference, seconds: z.number().nonnegative() }).strict(),
   z.object({ kind: z.literal('frame'), block: Reference, index: z.number().int().nonnegative() }).strict(),
 ]);

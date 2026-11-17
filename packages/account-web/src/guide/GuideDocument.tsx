@@ -1,10 +1,15 @@
 // A Change Guide as one calm document, the same in the Inspector and on a shared link: the title and who made what;
 // the introduction and its captures; where the change is; the change map with its steps; then the walkthrough, one
-// section at a time. In the workspace it is also where a person reads, accepts requirements, comments on lines and
-// routes follow-ups; a shared guide shows the same parts read-only.
+// section at a time. Its header plays the guide's narrated walkthrough. In the workspace it is also where a person
+// reads, accepts requirements, comments on sections, exhibits and lines, and routes follow-ups; a shared guide shows the
+// same parts read-only.
 import type { ChangeGuideSection, ChangeMap, EvidenceReference, RepositoryDiffView } from '@gitspace/protocol';
 import { badgeColors } from '@gitspace/ui';
-import { useContext, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import type { GuideWalkthrough } from '@gitspace/protocol/guide-walkthrough';
+import { EntityThreads, anchorEntity } from '../comments/CommentLayer.js';
+import { DocumentComments } from '../comments/context.js';
+import { entitySection } from '../comments/document-notes.js';
 import { GitSpaceMarkdown } from '../GitSpaceMarkdown.js';
 import { artifactId, RuntimeAvailability, type ArtifactReference } from '../inspector/inspector-shared.js';
 import { GuideCapture, type GuideCaptures } from './GuideCapture.js';
@@ -14,6 +19,7 @@ import { ChangeTreemap } from './ChangeTreemap.js';
 import type { FileChange } from './iso-layout.js';
 import { EvidenceLinks, GuideSection, MEASURE, type GuideWorkspace } from './GuideSection.js';
 import { ComparisonSummary, type GuideComparison } from './GuideRevisions.js';
+import { GuideWalkthroughButton } from './GuideWalkthrough.js';
 
 /** How many of the guide's files are measured at once. */
 const MEASURING = 4;
@@ -28,6 +34,8 @@ export interface GuideContent {
   intro?: string | undefined;
   captures?: readonly EvidenceReference[] | undefined;
   map?: ChangeMap | undefined;
+  /** The narrated walkthrough the agent wrote with the revision; built from the sections without one. */
+  walkthrough?: GuideWalkthrough | undefined;
 }
 
 function PartHeading({ id, title, source, detail }: { id: string; title: string; source: ReactNode; detail?: string }) {
@@ -102,6 +110,12 @@ export function GuideDocument({ guide, kicker, actions, onLoadDiff, workspace, c
   const accepted = workspace?.goal?.requirements.filter((requirement) => requirementIds.has(requirement.id) && requirement.status === 'accepted').length ?? 0;
   const artifacts = guide.captures?.filter((reference): reference is ArtifactReference => reference.kind === 'artifact') ?? [];
   const otherCaptures = guide.captures?.filter((reference) => reference.kind !== 'artifact') ?? [];
+  // Comments on sections and exhibits this revision no longer has: outdated, shown under the header.
+  const notes = useContext(DocumentComments)?.notes;
+  const orphaned = useMemo(() => [...new Set((notes ?? []).flatMap((note) => {
+    const entity = anchorEntity(note.anchor);
+    return entity !== null && entitySection(entity, guide.sections) === undefined ? [entity] : [];
+  }))], [notes, guide.sections]);
   return <article className="flex w-full min-w-0 flex-col px-5 pb-16 pt-4">
     <header className={`flex flex-col gap-3 ${MEASURE}`}>
       <span className="text-caption text-muted-foreground">{kicker}</span>
@@ -111,7 +125,7 @@ export function GuideDocument({ guide, kicker, actions, onLoadDiff, workspace, c
         <span>· {guide.sections.length} section{guide.sections.length === 1 ? '' : 's'} · {files} file{files === 1 ? '' : 's'}</span>
         <Source by="gitspace" what="the base and head commits the guide's diffs compare" />
       </p>
-      {actions ? <div className="flex flex-wrap items-center gap-1">{actions}</div> : null}
+      <div className="flex flex-wrap items-center gap-1"><GuideWalkthroughButton guide={guide} onLoadDiff={loadDiff} />{actions}</div>
       {comparison ? <ComparisonSummary comparison={comparison} /> : null}
       {workspace ? <div className="flex flex-col gap-1.5">
         <div className="flex gap-1" aria-hidden>{guide.sections.map((section) => <span key={section.id} className="h-1 flex-1 rounded-full" style={{ background: workspace.readIds.has(section.id) ? badgeColors.green : 'var(--border)' }} />)}</div>
@@ -122,6 +136,10 @@ export function GuideDocument({ guide, kicker, actions, onLoadDiff, workspace, c
         </span>
       </div> : null}
       <SourceLegend />
+      {orphaned.length ? <div data-orphaned-threads="" className="flex flex-col gap-1">
+        <span className="text-caption text-muted-foreground">Comments on sections this revision no longer has</span>
+        {orphaned.map((entity) => <EntityThreads key={entity} entity={entity} />)}
+      </div> : null}
     </header>
 
     {guide.intro || guide.captures?.length ? <>

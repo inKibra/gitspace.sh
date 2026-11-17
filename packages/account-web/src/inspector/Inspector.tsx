@@ -1,7 +1,7 @@
 import type { ExecutionBlock } from '@gitspace/blocks';
 import type { RuntimeSideAgentBlock } from '../runtime-shell-adapter.js';
 import { Button, TabsSubtle, TabsSubtleItem, TabsSubtlePanel, Tooltip, ThinkingIndicator } from '@gitspace/ui';
-import { browserCaptureFolder, type EvidenceReference, type InspectorOverview, type JournalEntryView, type RepositoryDiffView, type RepositoryFileView, type RepositoryMode, type RepositoryTreeEntry, type ReviewAnchor, type ReviewThreadView, type SessionUsageReport, type ServiceView } from '@gitspace/protocol';
+import { browserCaptureFolder, type EvidenceReference, type InspectorOverview, type JournalEntryView, type RepositoryDiffView, type RepositoryFileView, type RepositoryMode, type RepositoryTreeEntry, type ReviewThreadView, type SessionUsageReport, type ServiceView } from '@gitspace/protocol';
 import type { GitLfsHeldBack } from '@gitspace/protocol-workspace';
 import { AlertCircle, Archive, ArrowLeft, Expand06, File02, FileCode02, Globe01, Minimize02, Tool02, XClose } from '@untitledui/icons';
 import { useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
@@ -20,7 +20,7 @@ import type { ArtifactUploadClient } from './artifact-upload.js';
 import { ResourceNavigation, type ResourceRequest } from '../ResourceNavigation.js';
 import { parseResourceUri } from '@gitspace/protocol/resource-uri';
 import { IssuesView, openIssueCount, type IssuesViewProps } from './IssuesView.js';
-import { type InspectorArtifactContent, type ArtifactReference, type ThreadSelection, diffIdentities, InspectorLayout, RuntimeAvailability, openWorkspaceFirst, repositoryModes, ic, artifactId, Kicker, Padded } from './inspector-shared.js';
+import { type InspectorArtifactContent, type ArtifactReference, diffIdentities, InspectorLayout, RuntimeAvailability, openWorkspaceFirst, repositoryModes, ic, artifactId, Kicker, Padded } from './inspector-shared.js';
 import { GoalSurface, WorkflowDocument, RubricDocument } from './GoalSurface.js';
 import type { GoalAutomations } from '../goal/useWorkspaceAutomations.js';
 import type { SessionControlView } from '@gitspace/protocol-runtime/session-controls';
@@ -32,13 +32,9 @@ import { ServicesSurface } from './ServicesSurface.js';
 import { ChangeGuideSurface } from './ChangeGuideSurface.js';
 import { JournalSurface } from './JournalSurface.js';
 import { OpenFilesLayout, OpenFilesStrip, closeInStrip, fromRepository, openInStrip, type InspectorOpenDocument, type OpenFiles } from './OpenFiles.js';
+import { entitySection } from '../comments/document-notes.js';
 
 export type InspectorPermanentView = 'overview' | 'environment' | 'browser' | 'goal' | 'agents' | 'subagents' | 'files' | 'artifacts' | 'services' | 'issues' | 'usage' | 'guide' | 'journal';
-export interface CreateInspectorThread {
-  anchor: ReviewAnchor;
-  body: string;
-  decision: ReviewThreadView['decision'];
-}
 export interface InspectorUsageState {
   sessionId: string | null;
   report: SessionUsageReport | null;
@@ -74,6 +70,7 @@ export interface InspectorProps {
   repositoryFile: RepositoryFileView | null;
   repositoryDiff: RepositoryDiffView | null;
   journalEntries: readonly JournalEntryView[];
+  /** Review threads written before comments replaced them: read-only on their old anchors. */
   threads: readonly ReviewThreadView[];
   services: readonly ServiceView[];
   runtimeServices?: ReactNode;
@@ -87,8 +84,8 @@ export interface InspectorProps {
   onRequestArtifact(reference: Extract<EvidenceReference, { kind: 'artifact' }>, signal?: AbortSignal): Promise<InspectorArtifactContent>;
   artifactReferences?: readonly Extract<EvidenceReference, { kind: 'artifact' }>[];
   resourceRequest?: ResourceRequest;
-  /** Opens the Change Guide at this section (asked from outside the Inspector, e.g. a chat block); a new serial opens it again. */
-  guideSection?: { id: string; serial: number };
+  /** Opens the Change Guide at the section of this guide entity (`section:<id>`, `exhibit:<section id>:<path>`), asked from outside the Inspector (a chat block, a comment); a new serial opens it again. */
+  guideSection?: { entity: string; serial: number };
   onRequestResource?(uri: string, signal?: AbortSignal): Promise<InspectorArtifactContent>;
   artifactActions?: ArtifactActionsHandlers;
   /** Present when the viewer may upload files into the drive this space writes. */
@@ -107,9 +104,6 @@ export interface InspectorProps {
   onRequestRepositoryDiff(path: string | null, mode: Exclude<RepositoryMode, 'current'>, baseRef?: string): void;
   /** One exhibit's diff in a Change Guide revision: between its recorded base and head commits, or since an earlier revision's head. */
   onLoadGuideDiff(path: string, target: GuideDiffTarget): Promise<RepositoryDiffView>;
-  onCreateThread(input: CreateInspectorThread): Promise<ReviewThreadView>;
-  onReplyThread(threadId: string, expectedRevision: number, body: string): Promise<void>;
-  onResolveThread(threadId: string, expectedRevision: number, resolved: boolean, decision: ReviewThreadView['decision']): Promise<void>;
   onMarkGuideSectionRead(sectionId: string, revision: number, headCommit: string): Promise<void>;
   onGenerateChangeGuide?(): Promise<void>;
   guideShares?: GuideShareHandlers;
@@ -183,7 +177,6 @@ export function Inspector(props: InspectorProps) {
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const activeThread = props.threads.find((thread) => thread.id === activeThreadId) ?? null;
   const setActiveThread = (thread: ReviewThreadView | null): void => setActiveThreadId(thread?.id ?? null);
-  const [threadSelection, setThreadSelection] = useState<ThreadSelection | null>(null);
   const [artifactContent, setArtifactContent] = useState<Record<string, InspectorArtifactContent>>({});
   const [artifactLoad, setArtifactLoad] = useState<Record<string, 'loading' | 'loaded' | 'error'>>({});
   const [artifactErrors, setArtifactErrors] = useState<Record<string, string>>({});
@@ -275,7 +268,7 @@ export function Inspector(props: InspectorProps) {
     }
   };
   useEffect(() => { if (activeArtifact) void loadArtifact(activeArtifact); }, [props.overview.spaceId, activeArtifact ? artifactId(activeArtifact) : null]);
-  const closeThread = (): void => { setActiveThread(null); setThreadSelection(null); };
+  const closeThread = (): void => setActiveThread(null);
   const selectSurface = (next: InspectorPermanentView): void => { setView(next); setGuideFocus(null); closeThread(); };
   /** Opens a document into the strip Files and Drive share; from any other tab, its own tab (Files or Drive) shows it. */
   const openDocument = (document: InspectorOpenDocument): void => {
@@ -302,7 +295,7 @@ export function Inspector(props: InspectorProps) {
       if (runtimeAvailable) openFile(reference.path, 'current');
     } else if (reference.kind === 'review-thread') {
       const thread = props.threads.find((candidate) => candidate.id === reference.threadId);
-      if (thread) { setView('guide'); setActiveThread(thread); setThreadSelection(null); }
+      if (thread) { setView('guide'); setActiveThread(thread); }
     }
   };
   const openGuideSection = (sectionId: string): void => {
@@ -310,30 +303,14 @@ export function Inspector(props: InspectorProps) {
     closeThread();
     setGuideFocus((current) => ({ id: sectionId, serial: (current?.serial ?? 0) + 1 }));
   };
-  useEffect(() => { if (props.guideSection) openGuideSection(props.guideSection.id); }, [props.guideSection?.serial]);
+  // The section of the entity asked for, found among the latest guide's sections (a section id may itself contain `:`).
+  useEffect(() => {
+    if (!props.guideSection) return;
+    const section = entitySection(props.guideSection.entity, props.overview.changeGuide?.sections ?? []);
+    if (section) openGuideSection(section.id);
+    else setView('guide');
+  }, [props.guideSection?.serial]);
   const chooseMode = (mode: RepositoryMode): void => { if (!activeDocument || activeDocument.kind !== 'file') return; setFileModes((current) => ({ ...current, [activeDocument.id]: mode })); if (mode === 'current') props.onRequestRepositoryFile(activeDocument.target, mode); else props.onRequestRepositoryDiff(activeDocument.target, mode); };
-  const createThread = async (body: string): Promise<void> => {
-    if (!threadSelection) throw new Error('Select a line before starting a review thread.');
-    const { generation, baseCommit, headCommit, blobId } = threadSelection.identity;
-    if (generation === undefined || !baseCommit || !headCommit) throw new Error('The displayed content is missing its review identity. Reload the view and select the line again.');
-    const created = await props.onCreateThread({
-      body,
-      decision: 'pending',
-      anchor: {
-        kind: 'line',
-        path: threadSelection.path,
-        generation,
-        baseCommit,
-        headCommit,
-        blobId,
-        side: threadSelection.side,
-        startLine: threadSelection.startLine,
-        endLine: threadSelection.endLine,
-      },
-    });
-    setActiveThreadId(created.id);
-    setThreadSelection(null);
-  };
   const counts: Partial<Record<InspectorPermanentView, number>> = { browser: props.browserCount || undefined, subagents: props.subagents.length, files: props.repositoryEntries.filter((entry) => entry.kind === 'file' && entry.status !== 'clean').length, artifacts: artifacts.length, services: props.runtimeServices === undefined ? props.services.length : undefined, issues: props.issues ? openIssueCount(props.issues.document) : undefined };
   for (const tab of permanentTabs) if (props.sectionErrors?.[tab.id] && !props.sectionErrors[tab.id]!.retained) delete counts[tab.id];
   useToasts(props.loading || props.error ? [] : permanentTabs.map((tab): Toast | null => {
@@ -341,14 +318,7 @@ export function Inspector(props: InspectorProps) {
     if (tab.id === 'agents' || !failure?.retained) return null;
     return { key: `inspector-refresh:${tab.id}:${failure.message}`, tone: 'warning', persistent: true, message: `${tab.label} refresh failed; showing the last accepted state. ${failure.message}`, action: { label: `Retry ${tab.label}`, onClick: failure.retry } };
   }));
-  const threadPanel = activeThread || threadSelection ? <ThreadPanel
-    thread={activeThread}
-    selection={threadSelection}
-    onClose={closeThread}
-    onCreate={createThread}
-    onReply={(body) => activeThread ? props.onReplyThread(activeThread.id, activeThread.revision, body) : Promise.resolve()}
-    onResolve={(resolved, decision) => activeThread ? props.onResolveThread(activeThread.id, activeThread.revision, resolved, decision) : Promise.resolve()}
-  /> : null;
+  const threadPanel = activeThread ? <ThreadPanel thread={activeThread} onClose={closeThread} /> : null;
   let documentBody: ReactNode = null;
   if (activeDocument?.kind === 'resource') documentBody = <ResourceDocument key={`${props.overview.spaceId}:${activeDocument.target}`} uri={activeDocument.target} mode={artifactModeById[activeDocument.id] ?? 'preview'} onRequest={props.onRequestResource} artifactReferences={artifacts} artifactContent={artifactContent} onRequestArtifact={loadArtifact} />;
   else if (activeDocument?.kind === 'artifact') {
@@ -366,7 +336,7 @@ export function Inspector(props: InspectorProps) {
     documentBody = <RepositoryBinaryFile file={displayedFile} />;
   } else if (activeDocument?.kind === 'file' && (displayedFile || displayedDiff)) {
     const currentIdentity = displayedFile ? { generation: displayedFile.generation, baseCommit: displayedFile.commitId, headCommit: displayedFile.headCommit, blobId: displayedFile.blobId } : null;
-    documentBody = <PierreViewer path={activeDocument.target} identities={currentIdentity ? { base: currentIdentity, head: currentIdentity } : diffIdentities(displayedDiff!, activeDocument.target)} patch={displayedFile ? repositoryPatch(displayedFile) : displayedDiff!.patch} threads={props.threads} onSelectThread={(thread) => { setActiveThread(thread); setThreadSelection(null); }} onSelectRange={(selection) => { setThreadSelection(selection); setActiveThread(null); }} />;
+    documentBody = <PierreViewer path={activeDocument.target} identities={currentIdentity ? { base: currentIdentity, head: currentIdentity } : diffIdentities(displayedDiff!, activeDocument.target)} patch={displayedFile ? repositoryPatch(displayedFile) : displayedDiff!.patch} threads={props.threads} onSelectThread={setActiveThread} />;
   } else if (activeDocument) {
     documentBody = <Padded><EmptyState icon={ic(FileCode02, 22)} title="Loading repository view" description="The selected file mode will render when its generation-pinned response arrives." /></Padded>;
   }
@@ -403,12 +373,6 @@ export function Inspector(props: InspectorProps) {
       threads={props.threads}
       viewerId={props.reviewerId}
       automations={props.goalAutomations}
-      comments={{
-        viewerId: props.reviewerId,
-        onComment: async (stepId, body) => { await props.onCreateThread({ anchor: { kind: 'plan-step', stepId }, body, decision: 'pending' }); },
-        onReply: (thread, body) => props.onReplyThread(thread.id, thread.revision, body),
-        onResolve: (thread, resolved) => props.onResolveThread(thread.id, thread.revision, resolved, thread.decision),
-      }}
       onSetAcceptance={props.onSetRequirementAcceptance}
       onOpenEvidence={openEvidence}
       onOpenGuideSection={openGuideSection}
@@ -468,8 +432,7 @@ export function Inspector(props: InspectorProps) {
         review={{
           threads: props.threads,
           onOpenFile: (path) => openFile(path, 'current'),
-          onSelectThread: (thread) => { setActiveThread(thread); setThreadSelection(null); },
-          onSelectRange: (selection) => { setThreadSelection(selection); setActiveThread(null); },
+          onSelectThread: setActiveThread,
         }}
         goal={props.overview.goal}
         onSetAcceptance={props.onSetRequirementAcceptance}

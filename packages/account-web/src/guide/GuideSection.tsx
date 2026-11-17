@@ -1,13 +1,20 @@
-// One walkthrough section of a Change Guide: its summary, explanation, why and callouts at a reading measure; its
-// diagram (the agent's block, else the change map around the areas its files are in); its exhibits at the full width
-// under a reader's guide that stays pinned while the section's code scrolls; its evidence; and, in the workspace, the
-// requirements it shows (accepted here as in the Goal) and its follow-ups. Marks say who made each part.
+// One walkthrough section of a Change Guide, a GuideSection block (docs/BLOCK-DOCUMENTS-DESIGN.md §5) anchored
+// `section:<id>`: its summary, explanation, why and callouts at a reading measure; its diagram (the agent's block, else
+// the change map around the areas its files are in); its exhibits, each anchored `exhibit:<section id>:<path>`, at the
+// full width under a reader's guide that stays pinned while the section's code scrolls; its evidence; and, in the
+// workspace, the requirements it shows (accepted here as in the Goal) and its follow-ups. Marks say who made each part.
+// A person comments on the section, an exhibit, a passage or an exhibit's lines; the threads show under each. Its
+// Markdown form is `guideSectionMarkdown`.
 import type { ChangeGuideSection, ChangeMap, EvidenceReference, GoalRecordView, RepositoryDiffView } from '@gitspace/protocol';
 import { Badge, Button, CheckboxGroup, CheckboxItem, Select, SelectContent, SelectItem, SelectTrigger, badgeColors, useShape } from '@gitspace/ui';
-import { ArrowUpRight, Check, ChevronDown, ChevronRight, File02, GitCommit, Link03, MessageChatSquare, MessageSquare01, Terminal } from '@untitledui/icons';
-import { useMemo, useState, type ReactNode } from 'react';
+import { Annotation, ArrowUpRight, Check, ChevronDown, ChevronRight, Link03, MessageChatSquare, MessageSquare01 } from '@untitledui/icons';
+import { useContext, useMemo, useState, type ReactNode } from 'react';
 import type { ComposerStaging } from '../chat/staging.js';
+import { CommentEntity, EntityThreads, anchorEntity } from '../comments/CommentLayer.js';
+import { DocumentComments } from '../comments/context.js';
+import { entityQuote, entitySection } from '../comments/document-notes.js';
 import { GitSpaceMarkdown } from '../GitSpaceMarkdown.js';
+import { EVIDENCE_ICON, EvidenceBlock } from '../goal/Evidence.js';
 import { ic } from '../inspector/inspector-shared.js';
 import { rpcErrorMessage } from '../rpc-error-message.js';
 import { Source } from './Authorship.js';
@@ -24,7 +31,6 @@ export const SECTION_KIND: Record<ChangeGuideSection['kind'], { label: string; c
   mechanical: { label: 'Mechanical', color: badgeColors.gray },
 };
 const CALLOUT: Record<NonNullable<ChangeGuideSection['callouts']>[number]['tone'], string> = { risk: 'Risk.', mechanical: 'Mechanical.', decision: 'Decision.' };
-const EVIDENCE_ICON: Record<EvidenceReference['kind'], typeof File02> = { artifact: File02, git: GitCommit, command: Terminal, 'review-thread': MessageSquare01 };
 /** Prose keeps a reading measure; code and pictures take the whole width. */
 export const MEASURE = 'mx-auto w-full max-w-[46rem]';
 
@@ -49,15 +55,12 @@ function PartHeading({ children, source }: { children: ReactNode; source?: React
   return <h4 className="flex items-center gap-1.5 text-caption font-semibold uppercase tracking-wide text-muted-foreground">{children}{source}</h4>;
 }
 
-/** The evidence a section or the guide cites: opened in the Inspector, or listed on a shared guide. */
+/** The evidence a section or the guide cites as Evidence blocks: opened in the Inspector, or listed on a shared guide. */
 export function EvidenceLinks({ evidence, onOpen }: { evidence: readonly EvidenceReference[]; onOpen: ((reference: EvidenceReference) => void) | null }) {
-  return <ul className="flex flex-wrap gap-1">{evidence.map((reference, index) => {
-    const text = reference.kind === 'command' ? `${reference.label} · exit ${reference.exitCode}` : reference.label;
-    return <li key={`${reference.kind}:${index}`}>
-      {onOpen ? <Button variant="tertiary" size="compact" type="button" onClick={() => onOpen(reference)}>{ic(EVIDENCE_ICON[reference.kind], 14)}{text}</Button>
-        : <span className="inline-flex items-center gap-1.5 px-1 text-caption text-muted-foreground">{ic(EVIDENCE_ICON[reference.kind], 14)}{text}</span>}
-    </li>;
-  })}</ul>;
+  return <ul className="flex flex-wrap gap-1">{evidence.map((reference, index) => <li key={`${reference.kind}:${index}`}>
+    {onOpen ? <EvidenceBlock reference={reference} onOpen={onOpen} />
+      : <span data-block-type="Evidence" className="inline-flex items-center gap-1.5 px-1 text-caption text-muted-foreground">{ic(EVIDENCE_ICON[reference.kind], 14)}{reference.kind === 'command' ? `${reference.label} · exit ${reference.exitCode}` : reference.label}</span>}
+  </li>)}</ul>;
 }
 
 function SectionRequirements({ section, goal, onSetAcceptance, readOnly }: { section: ChangeGuideSection; goal: GoalRecordView | null; onSetAcceptance: GuideWorkspace['onSetAcceptance']; readOnly: boolean }) {
@@ -172,10 +175,14 @@ export function GuideSection({ section, index, map, open, onMapNow, onToggle, on
   const ranges = section.exhibits.reduce((sum, exhibit) => sum + (exhibit.ranges?.length ?? 0), 0);
   const paths = new Set(section.exhibits.map((exhibit) => exhibit.path));
   const threads = workspace?.review.threads.filter((thread) => thread.anchor.kind === 'line' && paths.has(thread.anchor.path)).length ?? 0;
+  const entity = `section:${section.id}`;
+  const notes = useContext(DocumentComments)?.notes;
+  const comments = notes?.filter((note) => { const ref = anchorEntity(note.anchor); return ref !== null && entitySection(ref, [section]) !== undefined; }).length ?? 0;
   const kind = SECTION_KIND[section.kind];
   const change = comparison?.changes.get(section.id) ?? null;
   const since = comparison?.onLoadSinceDiff && change === 'changed' ? { revision: comparison.since, onLoad: comparison.onLoadSinceDiff } : null;
-  return <section id={`guide-section-${section.id}`} data-section={section.id} data-map-now={onMapNow || undefined} className="scroll-mt-2 pt-4">
+  return <section id={`guide-section-${section.id}`} data-section={section.id} data-block-type="GuideSection" data-map-now={onMapNow || undefined} className="scroll-mt-2 pt-4">
+    <CommentEntity entity={entity} label={`section ${number}`} quote={entityQuote(section.title, section.summary ?? section.explanation)}>
     <div className={`flex items-start gap-3 border-t border-border pt-5 ${MEASURE}`}>
       <button type="button" onClick={onToggle} aria-expanded={open} className={`flex min-w-0 flex-1 items-start gap-3 text-left ${shape.item}`} style={onMapNow ? { boxShadow: `0 0 0 2px ${badgeColors.blue}`, padding: 4 } : undefined}>
         <span className="mt-0.5 w-6 shrink-0 text-right text-title font-semibold tabular-nums" style={{ color: read ? badgeColors.green : 'var(--muted-foreground)' }}>{read ? <Check width={18} height={18} className="ml-auto mt-1" aria-label="Read" /> : number}</span>
@@ -187,6 +194,7 @@ export function GuideSection({ section, index, map, open, onMapNow, onToggle, on
             <span className="tabular-nums">· {section.exhibits.length} file{section.exhibits.length === 1 ? '' : 's'}</span>
             {ranges ? <span className="tabular-nums">· {ranges} range{ranges === 1 ? '' : 's'}</span> : null}
             {threads ? <span className="flex items-center gap-1 tabular-nums">· <MessageSquare01 width={12} height={12} />{threads} thread{threads === 1 ? '' : 's'}</span> : null}
+            {comments ? <span data-section-comments={comments} className="flex items-center gap-1 tabular-nums">· <Annotation width={12} height={12} />{comments} comment{comments === 1 ? '' : 's'}</span> : null}
             {onMapNow ? <span style={{ color: badgeColors.blue }}>· on the map now</span> : null}
           </span>
         </span>
@@ -194,6 +202,7 @@ export function GuideSection({ section, index, map, open, onMapNow, onToggle, on
       </button>
       <span className="mt-2"><Source by="agent" what="the section: its title, kind, summary, explanation, why and callouts" /></span>
     </div>
+    <EntityThreads entity={entity} className={`pt-2 ${MEASURE}`} />
     {open ? <div className="flex flex-col gap-6 pb-4 pt-5">
       <div className={`flex flex-col gap-4 ${MEASURE}`}>
         {section.summary ? <div className="text-body font-medium leading-relaxed text-foreground"><GitSpaceMarkdown>{section.summary}</GitSpaceMarkdown></div> : null}
@@ -204,10 +213,16 @@ export function GuideSection({ section, index, map, open, onMapNow, onToggle, on
       </div>
       {section.exhibits.length ? <div className="flex flex-col gap-4">
         <ReadersGuide section={section} number={number} />
-        {section.exhibits.map((exhibit) => <div key={exhibit.path} className="flex flex-col gap-2">
-          {exhibit.note && !exhibit.ranges?.length ? <div className={`flex items-start gap-1.5 text-caption text-muted-foreground ${MEASURE}`}><span className="mt-1"><Source by="agent" what="this exhibit's note" /></span><div className="min-w-0 flex-1"><GitSpaceMarkdown>{exhibit.note}</GitSpaceMarkdown></div></div> : null}
-          <ExhibitDiff exhibit={exhibit} onLoadDiff={onLoadDiff} review={workspace?.review ?? null} since={since} />
-        </div>)}
+        {section.exhibits.map((exhibit) => {
+          const exhibitEntity = `exhibit:${section.id}:${exhibit.path}`;
+          return <div key={exhibit.path} className="flex flex-col gap-2" data-block-type="Exhibit">
+            <CommentEntity entity={exhibitEntity} label={exhibit.path} quote={entityQuote(exhibit.path, exhibit.note)} className="flex flex-col gap-2">
+              {exhibit.note && !exhibit.ranges?.length ? <div className={`flex items-start gap-1.5 text-caption text-muted-foreground ${MEASURE}`}><span className="mt-1"><Source by="agent" what="this exhibit's note" /></span><div className="min-w-0 flex-1"><GitSpaceMarkdown>{exhibit.note}</GitSpaceMarkdown></div></div> : null}
+              <ExhibitDiff exhibit={exhibit} entity={exhibitEntity} onLoadDiff={onLoadDiff} review={workspace?.review ?? null} since={since} />
+            </CommentEntity>
+            <EntityThreads entity={exhibitEntity} className={MEASURE} />
+          </div>;
+        })}
       </div> : <p className={`text-caption text-muted-foreground ${MEASURE}`}>No file exhibits in this section.</p>}
       <div className={`flex flex-col gap-6 ${MEASURE}`}>
         {section.evidence?.length ? <div className="flex flex-col gap-2">
@@ -225,5 +240,6 @@ export function GuideSection({ section, index, map, open, onMapNow, onToggle, on
         {onReadNext ? <div><button type="button" disabled={read} onClick={onReadNext} className="flex items-center gap-1.5 text-caption font-medium text-foreground hover:underline disabled:text-muted-foreground disabled:no-underline">{read ? <><Check width={13} height={13} />Read</> : 'Mark read and continue →'}</button></div> : null}
       </div>
     </div> : null}
+    </CommentEntity>
   </section>;
 }

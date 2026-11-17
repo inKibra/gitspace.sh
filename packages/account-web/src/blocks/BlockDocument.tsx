@@ -28,9 +28,27 @@ export interface BlockDocumentValue {
   targets: ReadonlyMap<string, BlockTarget>;
   /** The stored chat message the blocks are in (its transcript item id); null elsewhere and while it streams. */
   messageId: string | null;
+  /** The Goal or Change Guide entity the blocks are in (`requirement:<id>`, `section:<id>`, …): their comments name it.
+   * Null in a chat message. */
+  entity?: string | null;
 }
 
 export const BlockDocument = createContext<BlockDocumentValue>({ targets: new Map(), messageId: null });
+
+/** The Goal or a Change Guide revision as the document its blocks are in: `markdown`, every Markdown field of it, whose
+ * element ids a BlockRef or a Sequence frame names. */
+export function RecordBlockDocument({ markdown, children }: { markdown: readonly string[]; children: ReactNode }) {
+  const key = markdown.join('\n\n');
+  const value = useMemo((): BlockDocumentValue => ({ targets: blockDocument(key), messageId: null, entity: null }), [key]);
+  return <BlockDocument.Provider value={value}>{children}</BlockDocument.Provider>;
+}
+
+/** The blocks of one entity's Markdown inside a RecordBlockDocument: they take comments named after the entity. */
+export function EntityBlocks({ entity, children }: { entity: string; children: ReactNode }) {
+  const parent = useContext(BlockDocument);
+  const value = useMemo((): BlockDocumentValue => ({ ...parent, entity }), [parent, entity]);
+  return <BlockDocument.Provider value={value}>{children}</BlockDocument.Provider>;
+}
 
 /** The ids of the gitspace-ui fences in `markdown`, read as one document. A fence that does not draw names nothing. */
 export function blockDocument(markdown: string): ReadonlyMap<string, BlockTarget> {
@@ -96,3 +114,12 @@ export const BlockStagedAnswer = createContext<string | null>(null);
 /** Inside a block whose workspace question closed unanswered: why, as a closed question card says it (`CLOSED_REASON`).
  * The block then takes no choice. Null elsewhere. */
 export const BlockQuestionClosed = createContext<string | null>(null);
+
+/** Draws a part of the document a Sequence frame names by a ref that is not a block id (a Change Guide walkthrough's
+ * `section:<id>`, `diagram:<id>`, `exhibit:<section id>:<path>`); null for a ref it does not know. Null outside such a
+ * document. */
+export const DocumentRefs = createContext<((ref: string) => ReactNode | null) | null>(null);
+
+/** Around a Sequence started from outside its block (the Change Guide's Play): it opens full-screen and plays at once;
+ * `onClose` runs when that view closes. */
+export const SequenceStart = createContext<{ onClose(): void } | null>(null);

@@ -72,7 +72,7 @@ interface AskQuestion { ask: BlockAsk & { id: string }; question: RuntimeQuestio
 
 function DrawnBlock({ spec, refs }: { spec: Spec; refs: readonly string[] }) {
   const surface = useBlockActions();
-  const { messageId, targets } = useContext(BlockDocument);
+  const { messageId, targets, entity } = useContext(BlockDocument);
   const cards = useContext(QuestionCardsContext);
   // A block drawn again by ref shows its content only; its asks belong to where it was written.
   const asks = useMemo((): BlockAsk[] => refs.length > 0 ? [] : Object.values(spec.elements).flatMap((element) => 'ask' in element && typeof element.ask === 'object' && element.ask !== null ? [{
@@ -118,18 +118,19 @@ function DrawnBlock({ spec, refs }: { spec: Spec; refs: readonly string[] }) {
   }, [store]);
   const rendering = useMemo((): BlockRenderingValue => ({ spec, registry, drawRef: (reference) => <RefBlock reference={reference} refs={refs} within={spec} /> }), [spec, registry, refs]);
   const title = spec.elements[spec.root]?.props.title;
-  // What comments on this block and its items name. A block drawn again by ref is a copy inside another block, whose
-  // items take no comments of their own; a question (an AskCard, or an element with a required ask) takes none: it is
-  // answered by answering it.
+  // What comments on this block and its items name: its chat message, or the Goal or Guide entity it is in. A block
+  // drawn again by ref is a copy inside another block, whose items take no comments of their own; a question (an
+  // AskCard, or an element with a required ask) takes none: it is answered by answering it.
+  const owner = messageId ?? entity ?? null;
   const comments = useMemo((): CommentBlockValue | null => {
-    if (refs.length > 0 || messageId === null) return null;
+    if (refs.length > 0 || owner === null) return null;
     const root = spec.elements[spec.root];
     return {
-      key: blockKey(messageId, root, root && 'id' in root && typeof root.id === 'string' ? root.id : null),
+      key: blockKey(owner, root, root && 'id' in root && typeof root.id === 'string' ? root.id : null),
       kind: root?.type ?? 'Block', title: typeof title === 'string' && title ? title : null,
       asks: Object.values(spec.elements).some((element) => element.type === 'AskCard' || ('ask' in element && typeof element.ask === 'object' && element.ask !== null && 'required' in element.ask && element.ask.required === true)),
     };
-  }, [spec, refs, messageId, title]);
+  }, [spec, refs, owner, title]);
   return <JSONUIProvider registry={registry} store={store} handlers={handlers} functions={blockFunctions}>
     <BlockRendering.Provider value={rendering}><BlockStagedAnswer.Provider value={stagesAnswer ? staged : null}><BlockQuestionClosed.Provider value={closed}><CommentBlock.Provider value={comments}>
       <Lightbox label={typeof title === 'string' && title ? title : 'Block'} mode="fill" className="my-2" actions={<>

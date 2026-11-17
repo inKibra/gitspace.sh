@@ -1,6 +1,6 @@
 # Block documents and comments
 
-Status: proposed, 2026-11-15. Decided with the user: one document model for chat turns, the Goal, the Change Guide
+Status: slices A–D built (D, the Goal and Change Guide: SIMPLIFICATION 287, 2026-11-17); E proposed. Decided with the user: one document model for chat turns, the Goal, the Change Guide
 and drive docs; comments are the one way a person responds to what an agent wrote; threads reuse chat comments;
 requirements stay the agent's to track (the optional acceptance button stays as it is, nothing waits on it); every
 Change Guide gets a walkthrough.

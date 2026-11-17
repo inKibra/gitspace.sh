@@ -4,6 +4,7 @@ import { cloudProjectSummarySchema, cloudWorkspaceDefinitionSchema } from './pro
 import { WorkspacePhaseSchema } from '@gitspace/protocol-workspace';
 import { RuntimeDispatchSelectionSchema } from '@gitspace/protocol-runtime';
 import { AutomationDraftSchema, AutomationSubjectRefSchema } from './automations-contract.js';
+import { guideWalkthroughSchema, walkthroughIssues } from './guide-walkthrough.js';
 
 export const INSPECTOR_EVIDENCE_HISTORY_LIMIT = 20 as const;
 
@@ -435,11 +436,12 @@ export const changeMapSchema = z.object({
 });
 export type ChangeMap = z.infer<typeof changeMapSchema>;
 
-/** A guide's opening, its captured evidence, and its map. */
+/** A guide's opening, its captured evidence, its map, and its walkthrough. */
 const changeGuideNarrativeFields = {
   intro: z.string().trim().max(16_384).optional().describe('The guide\'s opening, in Markdown.'),
   captures: z.array(evidenceReferenceSchema).max(64).optional().describe('Screenshots, videos or browser captures shown with the intro.'),
   map: changeMapSchema.optional().describe('The change as areas of the codebase and the paths between them.'),
+  walkthrough: guideWalkthroughSchema.optional().describe('The guide played as a walkthrough: a gitspace-ui spec { "root", "elements" } whose root is a Sequence of 2–30 frames in reading order, each { "content": …, "say": "one or two spoken sentences" }. A frame\'s content is { "ref": "section:<id>" } (a section\'s title, summary and diagram), { "ref": "diagram:<id>" } (its diagram alone), { "ref": "exhibit:<sectionId>:<path>" } (an exhibit\'s lines), { "ref": "<block id>" } of a block element in the guide\'s Markdown, or one element. Without one the guide plays one built from its sections.'),
 };
 
 /** What an intro capture shows. */
@@ -473,6 +475,17 @@ function refineGuideMapSections(guide: { sections: ChangeGuideSection[]; map?: C
   const sectionIds = new Set(guide.sections.map((section) => section.id));
   for (const [index, step] of guide.map.steps.entries()) {
     if (!sectionIds.has(step.sectionId)) context.addIssue({ code: 'custom', path: ['map', 'steps', index, 'sectionId'], message: `Change map step names a missing section ${step.sectionId}` });
+  }
+}
+
+/** A guide as it is written: its map steps name its sections, and its walkthrough, when it has one, passes
+ * `walkthroughIssues`. Stored views skip the walkthrough check so revisions written before it still read. */
+function refineGuideDraft(guide: { title: string; intro?: string | undefined; sections: ChangeGuideSection[]; map?: ChangeMap; walkthrough?: unknown }, context: z.RefinementCtx): void {
+  refineGuideMapSections(guide, context);
+  if (guide.walkthrough === undefined) return;
+  for (const issue of walkthroughIssues(guide.walkthrough, guide)) {
+    const pointer = issue.path.split('/').slice(1).map((part) => part.replaceAll('~1', '/').replaceAll('~0', '~'));
+    context.addIssue({ code: 'custom', path: ['walkthrough', ...pointer.map((part) => /^\d+$/u.test(part) ? Number(part) : part)], message: `walkthrough${issue.path}: ${issue.message}` });
   }
 }
 
@@ -531,6 +544,7 @@ export const sharedGuideSchema = z.object({
   sharedAt: isoDateSchema,
   intro: changeGuideNarrativeFields.intro,
   map: changeGuideNarrativeFields.map,
+  walkthrough: changeGuideNarrativeFields.walkthrough,
 }).strict();
 export type SharedGuide = z.infer<typeof sharedGuideSchema>;
 /** Why a shared guide is not shown: sign in with GitHub first, or the signed-in reader cannot read the repository. */
@@ -552,10 +566,10 @@ const changeGuideDraftShape = z.object({
   createdBy: idSchema.describe('Who wrote this revision.'),
   ...changeGuideNarrativeFields,
 }).strict();
-export const changeGuideDraftSchema = changeGuideDraftShape.superRefine(refineGuideMapSections);
+export const changeGuideDraftSchema = changeGuideDraftShape.superRefine(refineGuideDraft);
 export type ChangeGuideDraft = z.infer<typeof changeGuideDraftSchema>;
 /** A guide as an agent writes it: the host records who wrote it. */
-export const changeGuideAgentDraftSchema = changeGuideDraftShape.omit({ createdBy: true }).superRefine(refineGuideMapSections);
+export const changeGuideAgentDraftSchema = changeGuideDraftShape.omit({ createdBy: true }).superRefine(refineGuideDraft);
 
 export const changeGuideWorksheetClusterSchema = z.object({
   id: idSchema,
@@ -735,7 +749,6 @@ export type InspectorOverview = z.infer<typeof inspectorOverviewSchema>;
 const putRevisionSchema = z.number().int().nonnegative().describe('The record\'s current revision, from get; 0 to create it. A stale revision is refused.');
 const expectedRevisionSchema = revisionSchema.describe('The record\'s current revision, from get or list. A stale revision is refused.');
 const requirementIdSchema = idSchema.describe('The goal requirement.');
-const reviewDecisionSchema = z.enum(['pending', 'approved', 'changes-requested']).describe('pending, approved or changes-requested.');
 const journalPhase = z.string().trim().min(1).max(160);
 const journalRepositorySchema = z.object({ generation: generationSchema.describe('The workspace generation.'), headCommit: gitObjectIdSchema.describe('The branch HEAD.') }).strict().describe('The workspace\'s code when the entry was written.');
 export const putGoalInputSchema = inspectorIdentitySchema.extend({ expectedRevision: putRevisionSchema, goal: goalDraftSchema.describe('The whole new goal; it replaces the old one.') }).strict();
@@ -782,21 +795,13 @@ export const submitChangeGuideInputSchema = inspectorIdentitySchema.extend({
   sections: z.array(changeGuideSectionSchema).max(512).refine(orderedUnique, 'Change Guide section ids must be unique'),
   createdBy: idSchema,
   ...changeGuideNarrativeFields,
-}).strict().superRefine(refineGuideMapSections);
+}).strict().superRefine(refineGuideDraft);
 export const markGuideSectionReadInputSchema = inspectorIdentitySchema.extend({ revision: revisionSchema.describe('The guide revision read.'), headCommit: gitObjectIdSchema.describe('That revision\'s head commit.'), sectionId: idSchema.describe('The section read.'), reviewerId: idSchema.describe('Who read it.') }).strict();
 export const setGuideApprovalInputSchema = inspectorIdentitySchema.extend({
   revision: revisionSchema, headCommit: gitObjectIdSchema, reviewerId: idSchema,
   decision: z.enum(['pending', 'approved', 'changes-requested']), note: z.string().trim().max(8_192).nullable(),
 }).strict();
 export const reviewAnchorContextSchema = z.object({ generation: generationSchema.describe('The workspace generation.'), headCommit: gitObjectIdSchema.describe('The branch HEAD.') }).strict();
-export const createReviewThreadInputSchema = inspectorIdentitySchema.extend({
-  id: idSchema.describe('The thread\'s id.'), anchor: reviewAnchorSchema, decision: reviewDecisionSchema,
-  message: reviewMessageViewSchema.describe('The thread\'s first message.'),
-}).strict();
-export const appendReviewMessageInputSchema = inspectorIdentitySchema.extend({ threadId: idSchema.describe('The thread.'), expectedRevision: expectedRevisionSchema, message: reviewMessageViewSchema.describe('The reply.') }).strict();
-export const resolveReviewThreadInputSchema = inspectorIdentitySchema.extend({
-  threadId: idSchema.describe('The thread.'), expectedRevision: expectedRevisionSchema, resolved: z.boolean().describe('true resolves it; false reopens it.'), decision: reviewDecisionSchema,
-}).strict();
 export const repositoryReadRequestSchema = inspectorIdentitySchema.extend({
   expectedGeneration: generationSchema,
   mode: repositoryModeSchema,
@@ -820,9 +825,6 @@ export type SubmitChangeGuideInput = z.infer<typeof submitChangeGuideInputSchema
 export type MarkGuideSectionReadInput = z.infer<typeof markGuideSectionReadInputSchema>;
 export type SetGuideApprovalInput = z.infer<typeof setGuideApprovalInputSchema>;
 export type ReviewAnchorContext = z.infer<typeof reviewAnchorContextSchema>;
-export type CreateReviewThreadInput = z.infer<typeof createReviewThreadInputSchema>;
-export type AppendReviewMessageInput = z.infer<typeof appendReviewMessageInputSchema>;
-export type ResolveReviewThreadInput = z.infer<typeof resolveReviewThreadInputSchema>;
 export type RepositoryReadRequest = z.infer<typeof repositoryReadRequestSchema>;
 
 const asWireCodec = <T>(schema: z.ZodType<T>, id: string) => wire.serializable((value): value is T => schema.safeParse(value).success, { id, jsonSchema: schema });
@@ -859,9 +861,6 @@ export const AnalyzeChangeGuideInputCodec = asWireCodec(analyzeChangeGuideInputS
 export const SubmitChangeGuideInputCodec = asWireCodec(submitChangeGuideInputSchema, 'gitspace/submit-change-guide-input/v1');
 export const MarkGuideSectionReadInputCodec = asWireCodec(markGuideSectionReadInputSchema, 'gitspace/mark-guide-section-read-input/v1');
 export const SetGuideApprovalInputCodec = asWireCodec(setGuideApprovalInputSchema, 'gitspace/set-guide-approval-input/v1');
-export const CreateReviewThreadInputCodec = asWireCodec(createReviewThreadInputSchema, 'gitspace/create-review-thread-input/v1');
-export const AppendReviewMessageInputCodec = asWireCodec(appendReviewMessageInputSchema, 'gitspace/append-review-message-input/v1');
-export const ResolveReviewThreadInputCodec = asWireCodec(resolveReviewThreadInputSchema, 'gitspace/resolve-review-thread-input/v1');
 export const RepositoryReadRequestCodec = asWireCodec(repositoryReadRequestSchema, 'gitspace/repository-read-request/v1');
 
 const targetWorkspace = z.string().min(1).describe('The workspace.');

@@ -69,6 +69,12 @@ describe('Cloud workspace authority controls', () => {
     expect(started).toMatchObject({ kind: 'phase-start', createdBy: 'conversation:agent-a', snapshot: { headCommit } });
     const phaseRunId = z.object({ phaseRunId: z.string() }).parse(started).phaseRunId;
     expect(await call('space_journal', { method: 'endPhase', phaseRunId, outcome: 'Parser built.', decisions: [], surprises: [], revert: null })).toMatchObject({ kind: 'phase-end', phaseRunId, createdBy: 'conversation:agent-a' });
-    expect(await call('space_review', { method: 'create', anchor: { kind: 'workspace' }, decision: 'pending', message: { body: 'Check the parser.' } })).toMatchObject({ messages: [{ authorId: 'conversation:agent-a', body: 'Check the parser.' }] });
+  });
+  it('lists older review threads and refuses opening, replying to or resolving one', async () => {
+    const { call } = await fixture();
+    expect(await call('space_review', { method: 'list' })).toEqual([]);
+    for (const method of ['create', 'append', 'resolve']) {
+      await expect(call('space_review', { method, anchor: { kind: 'workspace' }, decision: 'pending', message: { body: 'Check the parser.' } })).rejects.toThrow('Unknown workspace authority operation');
+    }
   });
 });

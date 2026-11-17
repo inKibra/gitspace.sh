@@ -1,9 +1,9 @@
 import { z } from 'zod';
 import {
-  appendJournalEntryInputSchema, appendReviewMessageInputSchema, attachRequirementEvidenceInputSchema, changeGuideAgentDraftSchema,
-  createReviewThreadInputSchema, endJournalPhaseInputSchema, goalAgentDraftSchema, markGuideSectionReadInputSchema,
+  appendJournalEntryInputSchema, attachRequirementEvidenceInputSchema, changeGuideAgentDraftSchema,
+  endJournalPhaseInputSchema, goalAgentDraftSchema, markGuideSectionReadInputSchema,
   putChangeGuideInputSchema, putGoalInputSchema, putRubricInputSchema, putWorkflowInputSchema,
-  resolveReviewThreadInputSchema, reviewAnchorContextSchema, reviewMessageViewSchema, rubricAgentDraftSchema, startJournalPhaseInputSchema, workflowAgentDraftSchema,
+  reviewAnchorContextSchema, rubricAgentDraftSchema, startJournalPhaseInputSchema, workflowAgentDraftSchema,
 } from '@gitspace/protocol';
 import { RuntimeIdentitySchema, RuntimeJsonSchema } from '@gitspace/protocol-runtime';
 
@@ -43,9 +43,6 @@ export async function invokeRuntimeSpaceTool(env: Env, identity: z.infer<typeof 
     if (!headCommit) throw new Error(`Workspace ${target} has no commit yet, so a journal phase cannot record its code`);
     return { generation: placement?.generation ?? 0, headCommit };
   };
-  /** A review message as the agent writes it (its body), with the id, author and time the host knows. Ids come from the
-   * call's attempt, so a retried call writes the same ones. */
-  const message = () => ({ ...reviewMessageViewSchema.pick({ body: true }).parse(payload.message), id: `message:${input.attemptId}`, authorId: actorId, createdAt: new Date().toISOString() });
   const args = { ...payload, ...owned };
   switch (key) {
     case 'space_goal.get': return context.getGoal(owned);
@@ -63,9 +60,6 @@ export async function invokeRuntimeSpaceTool(env: Env, identity: z.infer<typeof 
     case 'space_guide.put': return publish('change-guide', await context.putChangeGuide(putChangeGuideInputSchema.parse({ ...args, guide: { ...changeGuideAgentDraftSchema.parse(payload.guide), createdBy: actorId } })));
     case 'space_guide.markRead': return publish('change-guide', await context.markGuideSectionRead(markGuideSectionReadInputSchema.parse({ ...args, reviewerId: actorId })));
     case 'space_review.list': return context.listReviewThreads(owned, reviewContext);
-    case 'space_review.create': return publish('review-thread', await context.createReviewThread(createReviewThreadInputSchema.parse({ ...args, id: `thread:${input.attemptId}`, message: message() }), reviewContext), 'created');
-    case 'space_review.append': return publish('review-thread', await context.appendReviewMessage(appendReviewMessageInputSchema.parse({ ...args, message: message() }), reviewContext), 'append');
-    case 'space_review.resolve': return publish('review-thread', await context.resolveReviewThread(resolveReviewThreadInputSchema.parse(args), reviewContext));
     default: throw new Error('Unknown workspace authority operation');
   }
 }

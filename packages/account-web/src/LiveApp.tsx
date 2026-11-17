@@ -102,7 +102,7 @@ export function LiveInspector({
   onGenerateChangeGuide?: () => Promise<void>;
   runtimeAvailable: boolean;
   onAskAgent?: (text: string) => Promise<void>;
-  initialView?: 'environment' | 'browser';
+  initialView?: 'environment' | 'browser' | 'goal';
   resourceRequest?: ResourceRequest;
   runtimeContext: RuntimeInspectorContext;
 }) {
@@ -220,9 +220,6 @@ export function LiveInspector({
       if (result.value.spaceId !== spaceId || result.value.generation !== generation || result.value.path !== path || result.value.mode !== mode) throw new Error('Repository diff response does not match the requested view.');
       setRepositoryDiff(result.value);
     }).catch((error: unknown) => { if (pending.current()) setActionError(rpcErrorMessage(error, 'inspector.repository.diff')); });
-  };
-  const refreshOverviewAndThreads = async (): Promise<void> => {
-    await Promise.all([overview.refetch(), threads.refetch()]);
   };
   const artifactReferences = artifactValue ? artifactValue.artifacts.map((artifact) => ({
     kind: 'artifact' as const, url: artifact.url, hash: artifact.hash, label: artifact.path,
@@ -381,45 +378,6 @@ export function LiveInspector({
     onClose={onClose}
     onRequestRepositoryFile={requestRepositoryFile}
     onRequestRepositoryDiff={requestRepositoryDiff}
-    onCreateThread={async ({ anchor, body, decision }) => {
-      const now = new Date().toISOString();
-      const result = await rpcClient.inspector.review.create({
-        expectedGeneration: generation,
-        input: {
-          projectId,
-          spaceId,
-          id: crypto.randomUUID(),
-          anchor,
-          decision,
-          message: { id: crypto.randomUUID(), authorId: reviewerId, body, createdAt: now },
-        },
-      });
-      if (result.status === 'error') throw result.error;
-      await refreshOverviewAndThreads();
-      return result.value;
-    }}
-    onReplyThread={async (threadId, expectedRevision, body) => {
-      const result = await rpcClient.inspector.review.reply({
-        expectedGeneration: generation,
-        input: {
-          projectId,
-          spaceId,
-          threadId,
-          expectedRevision,
-          message: { id: crypto.randomUUID(), authorId: reviewerId, body, createdAt: new Date().toISOString() },
-        },
-      });
-      if (result.status === 'error') throw result.error;
-      await refreshOverviewAndThreads();
-    }}
-    onResolveThread={async (threadId, expectedRevision, resolved, decision) => {
-      const result = await rpcClient.inspector.review.resolve({
-        expectedGeneration: generation,
-        input: { projectId, spaceId, threadId, expectedRevision, resolved, decision },
-      });
-      if (result.status === 'error') throw result.error;
-      await refreshOverviewAndThreads();
-    }}
     onGenerateChangeGuide={onGenerateChangeGuide}
     onMarkGuideSectionRead={async (sectionId, revision, headCommit) => {
       const result = await rpcClient.inspector.guide.markSectionRead({

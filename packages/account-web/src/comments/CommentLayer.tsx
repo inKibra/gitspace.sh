@@ -1,11 +1,13 @@
-// Comments on what the agent wrote in its latest turn (docs/BLOCK-DOCUMENTS-DESIGN.md §3–§4): a passage selected
-// anywhere in one of its messages (prose, or any text inside a block), a whole paragraph, heading, list item or quote
-// (from an icon beside it), an item inside a block (a table row, a step, a CallDiff line, a Sequence frame, a checklist
-// item), a whole block, or a tool call. Thinking and question blocks take none, and older turns take none: selecting
-// text there shows a hint. A comment is staged in the workspace (the runtime's staged comments, so it survives reloads
-// and shows in every tab), shows as a chip above the composer and a pill in the margin (CommentMargin.tsx), and goes
-// with the person's next message, which lists it. Sent comments come from the runtime's comment lookup, their notes from
-// the person's messages and their answers from the agent's Reply blocks.
+// Comments on what the agent wrote (docs/BLOCK-DOCUMENTS-DESIGN.md §3–§4): in its latest turn, the Goal and the Change
+// Guide. In a message: a passage selected anywhere (prose, or any text inside a block), a whole paragraph, heading, list
+// item or quote (from an icon beside it), an item inside a block (a table row, a step, a CallDiff line, a Sequence frame,
+// a checklist item), a whole block, or a tool call. Thinking and question blocks take none, and older turns take none:
+// selecting text there shows a hint. In the Goal and the Guide: an entity (a requirement, decision, plan step, section or
+// exhibit, CommentEntity), a passage or block inside one, or an exhibit's lines; these never lock. A comment is staged in
+// the workspace (the runtime's staged comments, so it survives reloads and shows in every tab), shows as a chip above the
+// composer and a pill in the margin (CommentMargin.tsx), and goes with the person's next message, which lists it. Sent
+// comments come from the runtime's comment lookup, their notes from the person's messages and their answers from the
+// agent's Reply blocks.
 //
 // The chat wraps each of the agent's messages in CommentMessage; a drawn block sets CommentBlock (and
 // data-comment-block on its element) so its items and the selections inside it know where they are.
@@ -13,15 +15,16 @@ import type { TranscriptRow } from '@gitspace/blocks';
 import { blockReplies } from '@gitspace/protocol/gitspace-ui';
 import {
   COMMENT_EXACT_MAX, COMMENT_QUOTE_MAX, CommentsDocumentSchema, commentExcerpt, findTextQuote, messageComments, textQuoteAt,
-  type CommentAnchor, type CommentLookup, type CommentTarget, type SentComment,
+  type CommentAnchor, type CommentDocument, type CommentLookup, type CommentTarget, type OpenDocumentKind, type SentComment,
 } from '@gitspace/protocol-runtime/comments';
 import type { RuntimeSessionCommand, RuntimeSessionResult } from '@gitspace/protocol-runtime/session-controls';
-import { Button, useShape } from '@gitspace/ui';
-import { Annotation, ArrowUpRight } from '@untitledui/icons';
+import { Badge, Button, useShape } from '@gitspace/ui';
+import { Annotation, ArrowUpRight, ChevronRight, Trash01 } from '@untitledui/icons';
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { GitSpaceMarkdown } from '../GitSpaceMarkdown.js';
-import { CommentLayer, type CommentLayerValue, type CommentNote } from './context.js';
+import { EntityBlocks } from '../blocks/BlockDocument.js';
+import { CommentLayer, DocumentComments, DocumentNavigation, type CommentLayerValue, type CommentNote, type CommentScopeValue, type DocumentNote } from './context.js';
 
 /**
  * The rows that take new comments: walking back from the newest loaded row to the person's last message, the agent's
@@ -41,16 +44,36 @@ export function openRows(rows: readonly TranscriptRow[], latest: boolean): Set<s
 const NO_LOOKUP: CommentLookup = { comments: [], replies: [] };
 /** Turns one lookup asks about: the newest loaded ones. */
 const LOOKUP_TURNS = 256;
+/** The documents whose comments the layer always reads, whichever turns are loaded. */
+const OPEN_DOCUMENTS: OpenDocumentKind[] = ['goal', 'guide'];
+/** Pages of a row's text read for a comment on the Goal or the Guide whose message is not loaded. */
+const ROW_PAGES = 8;
+
+/** The whole text of a transcript row, read page by page; empty when the runtime returns none. */
+async function rowText(request: (command: RuntimeSessionCommand) => Promise<RuntimeSessionResult>, generation: string, rowId: string): Promise<string> {
+  let text = '';
+  let offset: number | null = 0;
+  for (let page = 0; offset !== null && page < ROW_PAGES; page++) {
+    const content: RuntimeSessionResult['transcriptContent'] = (await request({ type: 'transcriptContent', request: { generation, rowId, offset } })).transcriptContent;
+    if (!content) break;
+    text += content.text;
+    offset = content.nextOffset;
+  }
+  return text;
+}
 
 /** The comment layer of one open workspace's main conversation: its staged comments (the snapshot's
- * `gitspace.comments`), the sent ones on the loaded turns (the runtime's lookup, asked again when its revision moves),
- * and the loaded rows that take new ones. */
-export function CommentLayerProvider({ conversationId, document, rows, latest, request, author = 'You', children }: {
+ * `gitspace.comments`), the sent ones on the loaded turns and on the Goal and the Change Guide (the runtime's lookup,
+ * asked again when its revision moves), and the loaded rows that take new ones. A Goal or Guide comment's note and
+ * replies are read from the transcript when their messages are not loaded. */
+export function CommentLayerProvider({ conversationId, document, rows, latest, generation = null, request, author = 'You', children }: {
   conversationId: string | undefined;
   document: unknown;
   rows: readonly TranscriptRow[];
   /** The newest rows are loaded. */
   latest: boolean;
+  /** The transcript's generation, which reads rows that are not loaded. */
+  generation?: string | null;
   request(command: RuntimeSessionCommand): Promise<RuntimeSessionResult>;
   author?: string;
   children: ReactNode;
@@ -64,35 +87,59 @@ export function CommentLayerProvider({ conversationId, document, rows, latest, r
   const ask = useRef({ request, turnIds });
   ask.current = { request, turnIds };
   useEffect(() => {
-    if (conversationId === undefined || ask.current.turnIds.length === 0) return;
+    if (conversationId === undefined) return;
     let live = true;
     // A failed read keeps the comments already shown; the next revision or loaded turn asks again.
-    ask.current.request({ type: 'commentLookup', turnIds: ask.current.turnIds }).then((result) => { if (live && result.commentLookup) setLookup(result.commentLookup); }, () => {});
+    ask.current.request({ type: 'commentLookup', turnIds: ask.current.turnIds, documents: OPEN_DOCUMENTS }).then((result) => { if (live && result.commentLookup) setLookup(result.commentLookup); }, () => {});
     return () => { live = false; };
   }, [conversationId, turnKey, revision]);
   const byRow = useMemo(() => new Map(rows.map((row) => [row.id, row])), [rows]);
+  // The rows a Goal or Guide comment needs that are not loaded: the person's message carrying it and the replies to it.
+  const [read, setRead] = useState<ReadonlyMap<string, string>>(new Map());
+  const reading = useRef(new Set<string>());
+  const unloaded = useMemo(() => {
+    const documentComments = lookup.comments.filter((comment) => comment.anchor.document.kind !== 'turn');
+    const ids = new Set(documentComments.map((comment) => comment.id));
+    return [...new Set([...documentComments.map((comment) => comment.message), ...lookup.replies.filter((reply) => ids.has(reply.comment)).map((reply) => reply.row)])]
+      .filter((row) => !byRow.has(row)).sort();
+  }, [lookup, byRow]);
+  const unloadedKey = unloaded.join('\n');
+  useEffect(() => {
+    if (generation === null) return;
+    for (const row of unloaded) {
+      if (reading.current.has(row)) continue;
+      reading.current.add(row);
+      rowText(ask.current.request, generation, row).then((text) => setRead((current) => new Map(current).set(row, text)), () => { reading.current.delete(row); });
+    }
+  }, [unloadedKey, generation]);
   const notes = useMemo((): CommentNote[] => {
     if (conversationId === undefined) return [];
+    const textOf = (row: string): string | null => {
+      const item = byRow.get(row)?.item;
+      return item?.type === 'message' ? item.text : read.get(row) ?? null;
+    };
     const sent = lookup.comments.filter((comment) => comment.conversationId === conversationId).map((comment): CommentNote => {
-      const message = byRow.get(comment.message)?.item;
-      const carried = message?.type === 'message' ? messageComments(message.text).find((each) => each.id === comment.id) : undefined;
+      const message = textOf(comment.message);
+      const carried = message === null ? undefined : messageComments(message).find((each) => each.id === comment.id);
       const replies = lookup.replies.filter((reply) => reply.comment === comment.id).map((reply) => {
-        const item = byRow.get(reply.row)?.item;
-        return { row: reply.row, text: item?.type === 'message' ? blockReplies(item.text).find((each) => each.comment === comment.id)?.text ?? null : null };
+        const text = textOf(reply.row);
+        return { row: reply.row, text: text === null ? null : blockReplies(text).find((each) => each.comment === comment.id)?.text ?? null };
       });
       return { id: comment.id, anchor: comment.anchor, note: carried?.note ?? null, state: 'sent', replies };
     });
     const sentIds = new Set(sent.map((note) => note.id));
-    const waiting = (staged ?? []).filter((comment) => comment.anchor.document.conversationId === conversationId && !sentIds.has(comment.id))
+    const waiting = (staged ?? []).filter(({ id, anchor: { document } }) => (document.kind !== 'turn' || document.conversationId === conversationId) && !sentIds.has(id))
       .map((comment): CommentNote => ({ id: comment.id, anchor: comment.anchor, note: comment.note, state: 'staged', replies: [] }));
     return [...sent, ...waiting];
-  }, [conversationId, lookup, byRow, staged]);
+  }, [conversationId, lookup, byRow, read, staged]);
   const open = useMemo(() => openRows(rows, latest), [rows, latest]);
   const turnOf = useCallback((row: string) => byRow.get(row)?.turnId, [byRow]);
-  const stage = useCallback(async (row: string, target: CommentTarget, quote: string, note: string) => {
-    const turnId = byRow.get(row)?.turnId;
-    if (conversationId === undefined || turnId === undefined) throw new Error('Comments go on the latest turn');
-    await request({ type: 'stageComment', anchor: { document: { kind: 'turn', conversationId, turnId }, target, quote: commentExcerpt(quote, COMMENT_QUOTE_MAX) }, note });
+  const stage = useCallback(async (scope: Pick<CommentScopeValue, 'row' | 'document'>, target: CommentTarget, quote: string, note: string) => {
+    const turnId = byRow.get(scope.row)?.turnId;
+    let where: CommentDocument | null = scope.document;
+    if (where === null && conversationId !== undefined && turnId !== undefined) where = { kind: 'turn', conversationId, turnId };
+    if (where === null) throw new Error('Comments go on the latest turn');
+    await request({ type: 'stageComment', anchor: { document: where, target, quote: commentExcerpt(quote, COMMENT_QUOTE_MAX) }, note });
   }, [byRow, conversationId, request]);
   const edit = useCallback(async (id: string, note: string) => { await request({ type: 'editComment', id, note }); }, [request]);
   const remove = useCallback(async (id: string) => { await request({ type: 'unstageComment', id }); }, [request]);
@@ -101,8 +148,7 @@ export function CommentLayerProvider({ conversationId, document, rows, latest, r
   return <CommentLayer.Provider value={value}>{children}</CommentLayer.Provider>;
 }
 
-/** The message (or tool call) a part of the chat belongs to, and whether it takes new comments. */
-interface CommentScopeValue { row: string; editable: boolean }
+/** The message, tool call or Goal or Guide entity a part of the page belongs to, and whether it takes new comments. */
 export const CommentScope = createContext<CommentScopeValue | null>(null);
 
 /** Set by a drawn block for its items and the selections inside it: the block's key in the turn (`blockKey`), what it is
@@ -119,15 +165,27 @@ export function blockKey(messageRow: string, root: unknown, id: string | null): 
   return `${messageRow}#@${hash.toString(16)}`;
 }
 
+/** What people call a Goal or Guide entity by the prefix of its ref. */
+const ENTITY_LABEL: Record<string, string> = { 'tool-call': 'Tool call', requirement: 'Requirement', decision: 'Decision', step: 'Plan step', section: 'Guide section', exhibit: 'Exhibit' };
+
 /** What people call a comment's place. */
 export function anchorLabel(anchor: CommentAnchor): string {
   const { target } = anchor;
   if (target.kind === 'item') return target.label;
-  if (target.kind === 'entity') return 'Tool call';
+  if (target.kind === 'entity') return ENTITY_LABEL[target.ref.split(':')[0] ?? ''] ?? 'Entity';
   if (target.kind === 'block') return 'Block';
+  if (target.kind === 'lines') return target.start === target.end ? `Line ${target.start}` : `Lines ${target.start}–${target.end}`;
   if (target.kind === 'time') return `At ${Math.floor(target.seconds / 60)}:${String(Math.floor(target.seconds % 60)).padStart(2, '0')}`;
   if (target.kind === 'frame') return `Frame ${target.index + 1}`;
   return 'Passage';
+}
+
+/** The Goal or Guide entity a comment is in (`requirement:<id>`, `exhibit:<section>:<path>`, …): its entity, the exhibit
+ * of its lines, or the entity a block or passage is in (a block key `<entity>#<element id>`). */
+export function anchorEntity(anchor: CommentAnchor): string | null {
+  const { target } = anchor;
+  const ref = target.kind === 'entity' ? target.ref : target.kind === 'lines' ? target.exhibit : target.kind === 'text' ? target.within : target.kind === 'block' ? target.id : target.block;
+  return ref === null ? null : ref.split('#')[0] ?? null;
 }
 
 /** Text the comment layer draws: never part of a quote. */
@@ -204,16 +262,18 @@ function textTarget(flat: FlatText, start: number, end: number, within: string):
   return { target: { kind: 'text', within, ...quote }, quote: quote.exact };
 }
 
-/** The element a comment's target names inside `root`: the message, the block, its item or the tool call. */
+/** The element a comment's target names inside `root`: the message, the block, its item, the tool call, or the Goal or
+ * Guide entity (an exhibit for its lines). */
 function targetElement(root: ParentNode, target: CommentTarget): Element | null {
   const named = (attribute: string, value: string) => root.querySelector(`[${attribute}="${CSS.escape(value)}"]`);
   if (target.kind === 'entity') {
     const row = target.ref.startsWith('tool-call:') ? target.ref.slice('tool-call:'.length) : null;
-    return row === null ? null : named('data-call', row) ?? root.querySelector(`[data-comment-calls~="${CSS.escape(row)}"]`);
+    return row === null ? named('data-comment-target', target.ref) : named('data-call', row) ?? root.querySelector(`[data-comment-calls~="${CSS.escape(row)}"]`);
   }
+  if (target.kind === 'lines') return named('data-comment-target', target.exhibit);
   if (target.kind === 'text') {
     if (target.within?.startsWith('message:')) return named('data-comment-target', target.within.slice('message:'.length));
-    return target.within === null ? null : named('data-comment-block', target.within);
+    return target.within === null ? null : named('data-comment-block', target.within) ?? named('data-comment-target', target.within);
   }
   const block = named('data-comment-block', target.kind === 'block' ? target.id : target.block);
   if (target.kind === 'item') return block?.querySelector(`[data-comment-item="${CSS.escape(target.path)}"]`) ?? block;
@@ -241,10 +301,29 @@ export function locateAnchor(root: ParentNode, anchor: CommentAnchor): { element
   return { element: whole ?? element, range: whole ? null : range, whole };
 }
 
-/** Scrolls the chat to what a comment is about, when it is drawn. */
+/** Scrolls the page to what a comment is about, when it is drawn. */
 export function showAnchor(anchor: CommentAnchor): void {
   const found = locateAnchor(document, anchor);
   (found?.whole ?? found?.range?.startContainer.parentElement ?? found?.element)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+/** Frames to wait for the Inspector to draw a Goal or Guide anchor after opening it. */
+const NAVIGATION_FRAMES = 90;
+
+/** Shows what a comment is about: in the chat, scrolls to it; on the Goal or the Guide, opens it in the Inspector first
+ * and scrolls once it is drawn. */
+export function useShowAnchor(): (anchor: CommentAnchor) => void {
+  const navigate = useContext(DocumentNavigation);
+  return useCallback((anchor: CommentAnchor) => {
+    if (anchor.document.kind === 'turn' || !navigate) { showAnchor(anchor); return; }
+    navigate(anchor);
+    let frames = 0;
+    const scroll = (): void => {
+      if (locateAnchor(document, anchor)) showAnchor(anchor);
+      else if (frames++ < NAVIGATION_FRAMES) requestAnimationFrame(scroll);
+    };
+    requestAnimationFrame(scroll);
+  }, [navigate]);
 }
 
 /** The comments here: a block's (`block`), an item's of it (`path`), or a tool call's (`call`). */
@@ -253,7 +332,9 @@ export function useCommentsAt(place: { block: string; path?: string } | { call: 
   return useMemo(() => (layer?.notes ?? []).filter(({ anchor: { target } }) => {
     if ('call' in place) return target.kind === 'entity' && target.ref === `tool-call:${place.call}`;
     if (place.path !== undefined) return target.kind === 'item' && target.block === place.block && target.path === place.path;
-    return target.kind === 'block' ? target.id === place.block : target.kind === 'text' ? target.within === place.block : target.kind !== 'entity' && target.block === place.block;
+    if (target.kind === 'block') return target.id === place.block;
+    if (target.kind === 'text') return target.within === place.block;
+    return (target.kind === 'item' || target.kind === 'time' || target.kind === 'frame') && target.block === place.block;
   }), [layer?.notes, 'call' in place ? place.call : place.block, 'path' in place ? place.path : undefined]);
 }
 
@@ -335,7 +416,7 @@ function CommentTrigger({ label, quote, targetFor, around, className = '', child
       <Annotation width={13} height={13} />{children}
     </button>
     {open ? <NoteEditor quote={open.quote} label={open.label} at={open.at} onCancel={() => setOpen(null)}
-      onSave={async (note) => { await layer.stage(scope.row, open.target, open.quote ?? open.label, note); setOpen(null); }} /> : null}
+      onSave={async (note) => { await layer.stage(scope, open.target, open.quote ?? open.label, note); setOpen(null); }} /> : null}
   </>;
 }
 
@@ -357,11 +438,18 @@ function gutterOf(element: Element): HTMLElement | null {
   return element.closest('[data-comment-column]')?.querySelector<HTMLElement>(':scope > [data-comment-gutter]') ?? null;
 }
 
-/** The element's first line of text, else its box. */
+/** The element's first line of text (its first drawn text node's first line, not the box of a child that holds more
+ * than one line), else its box. */
 function firstLine(element: Element): DOMRect {
+  const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
   const range = document.createRange();
-  range.selectNodeContents(element);
-  return [...range.getClientRects()].find((rect) => rect.width > 0 && rect.height > 0) ?? element.getBoundingClientRect();
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    if (!node.textContent?.trim() || node.parentElement?.closest(COMMENT_UI)) continue;
+    range.selectNodeContents(node);
+    const line = [...range.getClientRects()].find((rect) => rect.width > 0 && rect.height > 0);
+    if (line) return line;
+  }
+  return element.getBoundingClientRect();
 }
 
 /** The pointer cannot hover (touch): every icon shows, dimmed. */
@@ -465,7 +553,7 @@ export function CallComment({ id, tool, target }: { id: string; tool: string; ta
   const layer = useContext(CommentLayer);
   const notes = useCommentsAt({ call: id });
   const editable = layer?.open.has(id) ?? false;
-  const scope = useMemo(() => ({ row: id, editable }), [id, editable]);
+  const scope = useMemo(() => ({ row: id, editable, document: null }), [id, editable]);
   if (!layer || (!editable && notes.length === 0)) return null;
   return <CommentScope.Provider value={scope}><span data-comment-ui="" className="absolute right-16 top-0 flex h-7 items-center gap-0.5">
     <CommentCount notes={notes} />
@@ -482,8 +570,9 @@ export function useCallCommentCount(calls: readonly string[]): number {
 
 interface ProseHandle { element: Element; label: string; quote: string; left: number; top: number }
 
+/** The prose of a commentable part (`target`, a message or an entity), not that of an entity drawn inside it. */
 function proseElements(target: Element): Element[] {
-  return [...target.querySelectorAll(PROSE)].filter((element) => !element.closest(NOT_PROSE) && !(element.tagName === 'P' && element.parentElement?.tagName === 'LI'));
+  return [...target.querySelectorAll(PROSE)].filter((element) => !element.closest(NOT_PROSE) && element.closest('[data-comment-target]') === target && !(element.tagName === 'P' && element.parentElement?.tagName === 'LI'));
 }
 
 function proseLabel(element: Element): string {
@@ -499,9 +588,9 @@ function proseHandle(gutter: Element, element: Element): ProseHandle {
   return { element, label, quote: commentExcerpt(element.textContent ?? '', COMMENT_QUOTE_MAX), ...gutterSlot(gutter.getBoundingClientRect(), firstLine(element)) };
 }
 
-/** The comment icons of a message's prose, in the column's gutter: the hovered element's (kept while the pointer
- * crosses to it); with no hover (touch), every element's, dimmed, as item icons are. */
-function ProseHandles({ container, row }: { container: HTMLDivElement; row: string }) {
+/** The comment icons of a message's or an entity's prose, in the column's gutter: the hovered element's (kept while the
+ * pointer crosses to it); with no hover (touch), every element's, dimmed, as item icons are. */
+function ProseHandles({ container, scope }: { container: HTMLDivElement; scope: CommentScopeValue }) {
   const layer = useContext(CommentLayer);
   const touch = useTouch();
   const gutter = gutterOf(container);
@@ -521,7 +610,7 @@ function ProseHandles({ container, row }: { container: HTMLDivElement; row: stri
       const start = event.target.closest(PROSE);
       const prose = start?.tagName === 'P' && start.parentElement?.tagName === 'LI' ? start.parentElement : start;
       if (prose && prose === current.current) { window.clearTimeout(linger.current); return; }
-      if (!prose || !container.contains(prose) || prose.closest(NOT_PROSE)) { clearSoon(); return; }
+      if (!prose || !container.contains(prose) || prose.closest(NOT_PROSE) || prose.closest('[data-comment-target]') !== container) { clearSoon(); return; }
       window.clearTimeout(linger.current);
       current.current = prose;
       setHovered(proseHandle(gutter, prose));
@@ -552,9 +641,10 @@ function ProseHandles({ container, row }: { container: HTMLDivElement; row: stri
       onSave={async (note) => {
         const flat = flatText(container);
         const { element } = editing.handle;
-        const chosen = textTarget(flat, flatOffset(flat, element, 0), flatOffset(flat, element, element.childNodes.length), `message:${row}`);
+        // A message's passage is within the message; an entity's within the entity.
+        const chosen = textTarget(flat, flatOffset(flat, element, 0), flatOffset(flat, element, element.childNodes.length), scope.document ? scope.row : `message:${scope.row}`);
         if (!chosen) throw new Error('This has no text to comment on');
-        await layer.stage(row, chosen.target, chosen.quote, note);
+        await layer.stage(scope, chosen.target, chosen.quote, note);
         setEditing(null);
       }} /> : null}
   </>;
@@ -564,10 +654,11 @@ function ProseHandles({ container, row }: { container: HTMLDivElement; row: stri
 interface Selected { rect: DOMRect; target: CommentTarget; quote: string; label: string }
 
 /**
- * A commentable part of a message (the message, or a block in its lightbox): selecting text in it shows a Comment button
- * once the pointer is up, so dragging is never interrupted. A selection inside one block is anchored to that block,
- * else to the message. Question blocks take no comments. Where the message takes no new comments (an older turn), a
- * selection shows a hint instead. The button is drawn without moving any text.
+ * A commentable part of a message (the message, or a block in its lightbox) or of a Goal or Guide entity: selecting text
+ * in it shows a Comment button once the pointer is up, so dragging is never interrupted. A selection inside one block is
+ * anchored to that block, else to the message or entity; one inside an entity drawn within this part is that entity's.
+ * Question blocks take no comments. Where the message takes no new comments (an older turn), a selection shows a hint
+ * instead. The button is drawn without moving any text.
  */
 export function SelectionComments({ className = '', children }: { className?: string; children: ReactNode }) {
   const layer = useContext(CommentLayer);
@@ -590,6 +681,8 @@ export function SelectionComments({ className = '', children }: { className?: st
       const start = range.startContainer instanceof Element ? range.startContainer : range.startContainer.parentElement;
       const end = range.endContainer instanceof Element ? range.endContainer : range.endContainer.parentElement;
       if (!start || !end || !element.contains(start) || !element.contains(end)) { setSelection(null); setHint(null); return; }
+      const owner = element.closest('[data-comment-target]');
+      if (owner && (start.closest('[data-comment-target]') !== owner || end.closest('[data-comment-target]') !== owner)) { setSelection(null); setHint(null); return; }
       // While the pointer is down, the person is still selecting: show nothing yet.
       if (pointerDown) return;
       if ([start, end].some((edge) => edge.closest('[data-comment-ui], [data-comment-editor], [data-comment-ask]'))) { setSelection(null); setHint(null); return; }
@@ -600,7 +693,7 @@ export function SelectionComments({ className = '', children }: { className?: st
       const within = block ?? element.closest('[data-comment-target]') ?? element;
       const flat = flatText(within);
       const key = block?.getAttribute('data-comment-block');
-      const chosen = textTarget(flat, flatOffset(flat, range.startContainer, range.startOffset), flatOffset(flat, range.endContainer, range.endOffset), key ?? `message:${here.row}`);
+      const chosen = textTarget(flat, flatOffset(flat, range.startContainer, range.startOffset), flatOffset(flat, range.endContainer, range.endOffset), key ?? (here.document ? here.row : `message:${here.row}`));
       setHint(null);
       setSelection(chosen ? { rect, ...chosen, label: block ? `${block.getAttribute('data-comment-kind') ?? 'Block'} · selection` : 'Selection' } : null);
     };
@@ -640,7 +733,7 @@ export function SelectionComments({ className = '', children }: { className?: st
     </span> : null}
     {editing ? <NoteEditor quote={editing.selected.quote} label={editing.selected.label} at={editing.at} onCancel={() => setEditing(null)}
       onSave={async (note) => {
-        await layer.stage(scope.row, editing.selected.target, editing.selected.quote, note);
+        await layer.stage(scope, editing.selected.target, editing.selected.quote, note);
         setEditing(null);
         window.getSelection()?.removeAllRanges();
       }} /> : null}
@@ -653,21 +746,22 @@ export function CommentMessage({ row, children }: { row: string; children: React
   const layer = useContext(CommentLayer);
   const [element, setElement] = useState<HTMLDivElement | null>(null);
   const editable = layer?.open.has(row) ?? false;
-  const scope = useMemo(() => ({ row, editable }), [row, editable]);
+  const scope = useMemo(() => ({ row, editable, document: null }), [row, editable]);
   if (!layer) return <>{children}</>;
   return <CommentScope.Provider value={scope}><div ref={setElement} data-comment-target={row} className="relative min-w-0">
     <SelectionComments>{children}</SelectionComments>
-    {editable && element ? <ProseHandles container={element} row={row} /> : null}
+    {editable && element ? <ProseHandles container={element} scope={scope} /> : null}
   </div></CommentScope.Provider>;
 }
 
 /** The comments a sent message carried: each quote and note, linking back to what it is about. */
 export function SentComments({ comments }: { comments: readonly SentComment[] }) {
   const shape = useShape();
+  const show = useShowAnchor();
   if (comments.length === 0) return null;
   return <ul aria-label="Comments in this message" className="mt-1 flex flex-col gap-1.5">
     {comments.map(({ id, anchor, note }) => <li key={id} data-sent-comment={id} className={`${shape.container} flex min-w-0 flex-col gap-1 bg-background/60 px-2.5 py-1.5 text-left`}>
-      <button type="button" className="flex min-w-0 items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground" onClick={() => showAnchor(anchor)}>
+      <button type="button" className="flex min-w-0 items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground" onClick={() => show(anchor)}>
         <Annotation width={12} height={12} className="shrink-0" />
         <span className="min-w-0 truncate">{anchorLabel(anchor)}</span>
         <ArrowUpRight width={11} height={11} className="shrink-0" />
@@ -682,15 +776,102 @@ export function SentComments({ comments }: { comments: readonly SentComment[] })
 export function ReplyView({ comment, quote, text }: { comment: string; quote: string | null; text: string }) {
   const shape = useShape();
   const layer = useContext(CommentLayer);
+  const show = useShowAnchor();
   const answered = layer?.notes.find((note) => note.id === comment);
   const quoted = quote ?? answered?.anchor.quote ?? null;
   return <div data-comment-reply={comment} className={`${shape.container} flex min-w-0 flex-col gap-1.5 border border-border border-l-2 bg-surface-1 px-3 py-2`} style={{ borderLeftColor: 'var(--muted-foreground)' }}>
-    <button type="button" disabled={!answered} className="flex min-w-0 items-center gap-1 text-left text-caption text-muted-foreground enabled:hover:text-foreground" onClick={() => { if (answered) showAnchor(answered.anchor); }}>
+    <button type="button" disabled={!answered} className="flex min-w-0 items-center gap-1 text-left text-caption text-muted-foreground enabled:hover:text-foreground" onClick={() => { if (answered) show(answered.anchor); }}>
       <Annotation width={13} height={13} className="shrink-0" />
       <span className="min-w-0 truncate">Reply to your comment{answered?.note ? `: “${commentExcerpt(answered.note, 80)}”` : ''}</span>
       {answered ? <ArrowUpRight width={11} height={11} className="shrink-0" /> : null}
     </button>
     {quoted ? <blockquote className="border-l-2 border-border pl-2 text-caption italic text-muted-foreground [overflow-wrap:anywhere]">{commentExcerpt(quoted, 140)}</blockquote> : null}
     <div className="text-body"><GitSpaceMarkdown>{text}</GitSpaceMarkdown></div>
+  </div>;
+}
+
+/**
+ * An entity of the Goal or a Change Guide revision (`requirement:<id>`, `decision:<entry id>`, `step:<id>`,
+ * `section:<id>`, `exhibit:<section id>:<path>`) as a commentable part of its document (DocumentComments): its comment
+ * icon (in the column's gutter level with its first line while hovered), a selection or a paragraph's icon inside it,
+ * and the blocks of its Markdown. It never locks; where its document takes no comments (an older Guide revision), it
+ * is only marked so its comments find it.
+ */
+export function CommentEntity({ entity, label, quote, className = '', children }: { entity: string; label: string; quote: string; className?: string; children: ReactNode }) {
+  const layer = useContext(CommentLayer);
+  const where = useContext(DocumentComments)?.document ?? null;
+  const [element, setElement] = useState<HTMLDivElement | null>(null);
+  const scope = useMemo((): CommentScopeValue | null => where ? { row: entity, editable: true, document: where } : null, [entity, where]);
+  if (!layer || !scope) return <div data-comment-target={entity} className={`min-w-0 ${className}`}><EntityBlocks entity={entity}>{children}</EntityBlocks></div>;
+  // The layout classes go on the box that holds the entity's own content, not on the box that also holds its icons.
+  return <CommentScope.Provider value={scope}><div ref={setElement} data-comment-target={entity} data-comment-entity={entity} className="relative min-w-0">
+    <SelectionComments className={className}><EntityBlocks entity={entity}>{children}</EntityBlocks></SelectionComments>
+    <GutterTrigger anchor="[data-comment-entity]" label={label} quote={quote} inlineClassName="absolute -left-5 top-0.5 opacity-60 hover:opacity-100 focus-visible:opacity-100"
+      targetFor={() => ({ kind: 'entity', ref: entity })} />
+    {element ? <ProseHandles container={element} scope={scope} /> : null}
+  </div></CommentScope.Provider>;
+}
+
+/** The note editor for a target the caller found (an exhibit's selected lines), beside `around`, staging in the scope
+ * it is drawn in; closes once staged or cancelled. */
+export function TargetCommentEditor({ target, quote, label, around, onClose }: { target: CommentTarget; quote: string; label: string; around: Element; onClose(): void }) {
+  const layer = useContext(CommentLayer);
+  const scope = useContext(CommentScope);
+  const at = useMemo(() => editorAt(around), [around]);
+  if (!layer || !scope?.editable) return null;
+  return <NoteEditor quote={quote} label={label} at={at} onCancel={onClose} onSave={async (note) => { await layer.stage(scope, target, quote, note); onClose(); }} />;
+}
+
+/** A Goal or Guide comment with its replies, under what it is on: its place, its quote (as written, for an outdated
+ * one), the person's note and the agent's Reply blocks. Folded, one line. */
+function DocumentThread({ note, folded, onUnfold }: { note: DocumentNote; folded: boolean; onUnfold(): void }) {
+  const shape = useShape();
+  const layer = useContext(CommentLayer);
+  const documentComments = useContext(DocumentComments);
+  const onShowRevision = documentComments?.onShowRevision ?? null;
+  const [error, setError] = useState<string | null>(null);
+  const said = note.note ?? 'Sent with your message.';
+  if (folded) return <button type="button" data-document-thread={note.id} data-thread-folded="" onClick={onUnfold}
+    className="flex w-full min-w-0 items-center gap-1.5 rounded px-1 py-0.5 text-left text-caption text-muted-foreground hover:bg-surface-2 hover:text-foreground">
+    <ChevronRight width={12} height={12} className="shrink-0" /><Annotation width={12} height={12} className="shrink-0" />
+    <span className="shrink-0">{anchorLabel(note.anchor)}</span>
+    <span className="min-w-0 flex-1 truncate">· {commentExcerpt(said, 80)}</span>
+    {note.outdated ? <span className="shrink-0">outdated</span> : null}
+    {note.replies.length ? <span className="shrink-0 tabular-nums">· {note.replies.length} repl{note.replies.length === 1 ? 'y' : 'ies'}</span> : null}
+  </button>;
+  return <article data-document-thread={note.id} data-thread-state={note.state} data-thread-outdated={note.outdated || undefined} aria-label={`Comment: ${commentExcerpt(said, 60)}`}
+    className={`${shape.container} flex min-w-0 flex-col gap-1.5 border border-border border-l-2 bg-surface-1 px-2.5 py-2`}
+    style={{ borderLeftColor: note.state === 'staged' ? 'var(--color-amber-500, #f59e0b)' : 'var(--border)' }}>
+    <span className="flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
+      <Annotation width={12} height={12} className="shrink-0" />
+      <span>{anchorLabel(note.anchor)}</span>
+      {note.outdated ? <Badge size="compact" variant="dot" color="amber">Outdated</Badge> : null}
+      {note.outdated && onShowRevision ? <button type="button" className="underline-offset-2 hover:text-foreground hover:underline" onClick={() => onShowRevision(note.revision)}>as written on r{note.revision}</button> : null}
+      <span className="flex-1" />
+      <Badge size="compact" variant="dot" color={note.state === 'staged' ? 'amber' : 'gray'}>{note.state === 'staged' ? 'in your next message' : 'sent'}</Badge>
+      {note.state === 'staged' && layer ? <button type="button" aria-label="Remove comment" className="rounded p-0.5 hover:bg-surface-2 hover:text-foreground"
+        onClick={() => { setError(null); layer.remove(note.id).catch((failure: unknown) => setError(failure instanceof Error ? failure.message : String(failure))); }}><Trash01 width={12} height={12} /></button> : null}
+    </span>
+    {note.anchor.quote ? <blockquote className="border-l-2 border-border pl-2 text-caption italic text-muted-foreground [overflow-wrap:anywhere]">{commentExcerpt(note.anchor.quote, 200)}</blockquote> : null}
+    <p className="whitespace-pre-wrap text-caption text-foreground [overflow-wrap:anywhere]">{said}</p>
+    {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}
+    {note.replies.map((reply) => <div key={reply.row} data-thread-reply="" className="flex flex-col gap-0.5 border-t border-border pt-1.5 text-caption">
+      <span className="text-[11px] font-medium text-foreground">Agent</span>
+      {reply.text === null ? <span className="text-muted-foreground">Replied in the chat.</span> : <GitSpaceMarkdown>{reply.text}</GitSpaceMarkdown>}
+    </div>)}
+  </article>;
+}
+
+/** The comment threads on a Goal or Guide entity (and on passages, blocks and lines inside it), in order: the newest
+ * open, older ones folded to one line until opened. No resolve: a thread stays until what it is on changes (then it
+ * shows outdated) or its messages leave the transcript. */
+export function EntityThreads({ entity, className = '' }: { entity: string; className?: string }) {
+  const notes = useContext(DocumentComments)?.notes;
+  const [unfolded, setUnfolded] = useState<ReadonlySet<string>>(new Set());
+  const threads = useMemo(() => (notes ?? []).filter((note) => anchorEntity(note.anchor) === entity), [notes, entity]);
+  if (threads.length === 0) return null;
+  return <div data-entity-threads={entity} data-comment-ui="" className={`flex min-w-0 flex-col gap-1 ${className}`}>
+    {threads.map((note, index) => <DocumentThread key={note.id} note={note} folded={index < threads.length - 1 && note.state === 'sent' && !unfolded.has(note.id)}
+      onUnfold={() => setUnfolded((current) => new Set(current).add(note.id))} />)}
   </div>;
 }

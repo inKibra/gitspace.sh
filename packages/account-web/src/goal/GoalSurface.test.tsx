@@ -46,7 +46,6 @@ beforeEach(() => {
   props = {
     overview: { projectId: 'project', spaceId: 'space', revision: 1, goal: { projectId: 'project', spaceId: 'space', id: 'goal', revision: 3, title: 'Jobs survive a restart', summary: 'Queued jobs are lost when the worker restarts.', phase: 'code', requirements: [], createdAt: at, updatedAt: at, updatedBy: 'agent' }, workflow: null, rubric: null, journal: { entries: 0, openPhaseRunId: null, recent: [] }, changeGuide: null, review: { total: 0, unresolved: 0 } },
     journalEntries: [], threads: [], viewerId: 'reviewer',
-    comments: { viewerId: 'reviewer', onComment: unexpected, onReply: unexpected, onResolve: unexpected },
     onOpenEvidence() {}, onOpenGuideSection() {}, onOpenJournal() {}, onOpenProduct() {},
   };
 });
@@ -78,23 +77,6 @@ describe('Goal tab', () => {
     await render();
     expect(container.textContent).toContain('Awaiting your approval');
     expect(container.textContent).toContain('Needs you: approve the proposed plan');
-  });
-
-  it('comments on a plan step through the step’s handler', async () => {
-    const onComment = vi.fn(async () => undefined);
-    props.controls = control([], plan);
-    props.comments = { ...props.comments, onComment };
-    await render();
-    await act(async () => step(2).querySelector('button')!.click());
-    expect(step(2).textContent).toContain('Writes go through one transaction.');
-    await act(async () => button('Comment on this step').click());
-    const textarea = step(2).querySelector('textarea')!;
-    await act(async () => {
-      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(textarea, 'Keep the old queue until the backfill ends.');
-      textarea.dispatchEvent(new Event('input', { bubbles: true }));
-    });
-    await act(async () => button('Comment').click());
-    expect(onComment).toHaveBeenCalledWith('writer', 'Keep the old queue until the backfill ends.');
   });
 
   it('accepts a requirement with evidence to check, shows who accepted one and when, and reopens it', async () => {

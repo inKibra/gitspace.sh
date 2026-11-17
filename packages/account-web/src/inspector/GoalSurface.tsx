@@ -1,15 +1,22 @@
 // The Goal tab, in the order it explains the work: where the workspace is (phase, pull request, what needs you); the
 // goal (the problem, why it matters, what done means); the plan; the requirements and their evidence; the decisions;
 // and how the workspace runs (its automations by phase). The workflow and rubric records open from the last part.
+// The Goal is a block document (docs/BLOCK-DOCUMENTS-DESIGN.md §5): its plan steps, requirements and decisions are
+// typed blocks a person comments on, in the margin, at any time; a comment goes to the agent with their next message.
 import { Background, Controls, MarkerType, Position, ReactFlow, type Edge, type Node } from '@xyflow/react';
 import { Badge, Button, Card, CardAction, CardContent, CardDescription, CardFooter, CardGroup, CardHeader, CardTitle, ScrollArea, useShape } from '@gitspace/ui';
 import type { EvidenceReference, InspectorOverview, JournalEntryView, ReviewThreadView, RubricCriterion, RubricView, WorkflowNode, WorkflowView } from '@gitspace/protocol';
 import type { SessionControlView } from '@gitspace/protocol-runtime/session-controls';
 import { ArrowUpRight, Play, Scales02, Terminal, User01, Users01 } from '@untitledui/icons';
 import { useContext, useEffect, useMemo, useState, type ReactElement, type ReactNode } from 'react';
+import { STAGED_CHOICE_DATA } from '@gitspace/protocol-runtime/session-controls';
 import { AutomationPhaseGrid } from '../automations/AutomationPhaseGrid.js';
 import { MODE_LABEL } from '../automations/automation-formatters.js';
 import { BlockActionsProvider } from '../blocks/BlockActions.js';
+import { RecordBlockDocument } from '../blocks/BlockDocument.js';
+import { CommentMarginLayout } from '../comments/CommentMargin.js';
+import { CommentLayer, DocumentComments, type DocumentCommentsValue } from '../comments/context.js';
+import { entityQuote, goalNotes, useFoundAgain } from '../comments/document-notes.js';
 import { useComposerStaging, workspaceBlockActions } from '../chat/staging.js';
 import { GitSpaceMarkdown } from '../GitSpaceMarkdown.js';
 import { EmptyState, type AgentScopeView } from '../GitSpaceShell.js';
@@ -17,7 +24,6 @@ import { DecisionsSection } from '../goal/DecisionsSection.js';
 import { EvidenceList } from '../goal/Evidence.js';
 import { PlanSection } from '../goal/PlanSection.js';
 import { RequirementsSection } from '../goal/RequirementsSection.js';
-import type { StepCommentHandlers } from '../goal/StepComments.js';
 import type { GoalAutomations } from '../goal/useWorkspaceAutomations.js';
 import { automationsUrl, navigateProductUrl } from '../routes.js';
 import { PrChips } from '../sidebar/parts.js';
@@ -53,11 +59,11 @@ export interface GoalSurfaceProps {
   /** The conversation's session controls: its plan and todo list. */
   controls?: SessionControlView;
   journalEntries: readonly JournalEntryView[];
+  /** Review threads written before comments replaced them: shown read-only on their plan steps. */
   threads: readonly ReviewThreadView[];
   /** This browser's device id, which records name as their author. */
   viewerId: string;
   automations?: GoalAutomations;
-  comments: StepCommentHandlers;
   onSetAcceptance?(requirementId: string, accepted: boolean): Promise<void>;
   onOpenEvidence(reference: EvidenceReference): void;
   onOpenGuideSection(sectionId: string): void;
@@ -65,7 +71,7 @@ export interface GoalSurfaceProps {
   onOpenProduct(kind: 'workflow' | 'rubric'): void;
 }
 
-export function GoalSurface({ overview, scope, controls, journalEntries, threads, viewerId, automations, comments, onSetAcceptance, onOpenEvidence, onOpenGuideSection, onOpenJournal, onOpenProduct }: GoalSurfaceProps): ReactElement {
+export function GoalSurface({ overview, scope, controls, journalEntries, threads, viewerId, automations, onSetAcceptance, onOpenEvidence, onOpenGuideSection, onOpenJournal, onOpenProduct }: GoalSurfaceProps): ReactElement {
   const shape = useShape();
   const goal = overview.goal;
   const workspace = scope?.kind === 'workspace' ? scope : null;
@@ -84,15 +90,27 @@ export function GoalSurface({ overview, scope, controls, journalEntries, threads
     ...plan?.status === 'proposed' ? ['approve the proposed plan'] : [],
     ...controls?.pendingAsk ? ['answer the agent’s question'] : [],
     ...toAccept ? [`accept ${toAccept} requirement${toAccept === 1 ? '' : 's'} with evidence to check`] : [],
-    ...overview.review.unresolved ? [`${overview.review.unresolved} open review thread${overview.review.unresolved === 1 ? '' : 's'}`] : [],
   ];
   const entries = journalEntries.length ? journalEntries : overview.journal.recent;
   const done = [
     ...plan?.steps.length ? [`${stepsDone} of ${plan.steps.length} plan steps`] : [],
     ...required.length ? [`${accepted} of ${required.length} required requirements accepted`] : [],
   ];
+  // The Goal's comments: each entity shown now and what a comment on it quotes, so a comment written on an earlier
+  // revision shows outdated once its entity changed.
+  const layer = useContext(CommentLayer);
+  const revision = goal?.revision ?? 0;
+  const quotes = useMemo(() => new Map([
+    ...requirements.map((requirement): [string, string] => [`requirement:${requirement.id}`, entityQuote(requirement.title, requirement.description)]),
+    ...entries.filter((entry) => entry.kind === 'decision').map((entry): [string, string] => [`decision:${entry.id}`, entityQuote(entry.title, entry.body.replace(STAGED_CHOICE_DATA, '$1'))]),
+    ...(plan?.steps ?? []).map((step): [string, string] => [`step:${step.id}`, entityQuote(step.title, step.detail)]),
+  ]), [requirements, entries, plan]);
+  const [root, setRoot] = useState<HTMLDivElement | null>(null);
+  const notes = useFoundAgain(root, useMemo(() => goalNotes(layer?.notes ?? [], revision, quotes), [layer?.notes, revision, quotes]));
+  const documentComments = useMemo((): DocumentCommentsValue => ({ document: { kind: 'goal', revision }, notes, onShowRevision: null }), [revision, notes]);
+  const markdown = useMemo(() => [goal?.summary ?? '', ...requirements.map((requirement) => requirement.description), ...entries.map((entry) => entry.body), ...(plan?.steps ?? []).map((step) => step.detail)], [goal?.summary, requirements, entries, plan]);
 
-  return <BlockActionsProvider actions={blockActions}><ScrollArea className="min-h-0 flex-1" viewportClassName="h-full"><div className="flex flex-col gap-6 p-4">
+  return <BlockActionsProvider actions={blockActions}><DocumentComments.Provider value={documentComments}><RecordBlockDocument markdown={markdown}><ScrollArea className="min-h-0 flex-1" viewportClassName="h-full"><div ref={setRoot}><CommentMarginLayout columnMax={768} notes={notes}><div className="flex flex-col gap-6 p-4">
     <section className={`${shape.container} flex flex-col gap-2 bg-surface-1 p-4 shadow-surface-1`} aria-label="Where we are">
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-caption font-semibold tabular-nums text-muted-foreground">1</span>
@@ -113,7 +131,7 @@ export function GoalSurface({ overview, scope, controls, journalEntries, threads
     </Part>
 
     <Part number={3} title="The plan" detail="The agent’s steps. Steps mark themselves done as the agent finishes them; you approve the plan in the conversation and comment on any step.">
-      <PlanSection plan={plan} todos={controls?.todos ?? []} requirements={requirements} threads={threads} comments={comments} />
+      <PlanSection plan={plan} todos={controls?.todos ?? []} requirements={requirements} threads={threads} />
     </Part>
 
     <Part number={4} title="Requirements and evidence" detail="Each points at the evidence that shows it and the guide section that explains it.">
@@ -136,7 +154,7 @@ export function GoalSurface({ overview, scope, controls, journalEntries, threads
         {overview.rubric ? <Button variant="secondary" size="compact" type="button" onClick={() => onOpenProduct('rubric')}>{ic(Scales02, 14)}{overview.rubric.title}</Button> : null}
       </div> : null}
     </Part>
-  </div></ScrollArea></BlockActionsProvider>;
+  </div></CommentMarginLayout></div></ScrollArea></RecordBlockDocument></DocumentComments.Provider></BlockActionsProvider>;
 }
 
 function workflowNodeLabel(node: WorkflowNode): ReactNode {

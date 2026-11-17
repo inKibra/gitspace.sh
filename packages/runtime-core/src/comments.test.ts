@@ -137,3 +137,30 @@ test('a send carries its staged comments as data, the agent\'s Reply links to it
     expect(f.reports).toEqual([]);
   } finally { await f.harness.close(context); }
 });
+
+test('a comment on a Goal requirement or a Guide exhibit\'s lines stages on any turn, goes with a send, stays open after it, and the lookup finds it and its Reply by document', async () => {
+  const f = await open();
+  try {
+    const goal: CommentAnchor = { document: { kind: 'goal', revision: 3 }, target: { kind: 'entity', ref: 'requirement:parses' }, quote: 'Parses every sample' };
+    const lines: CommentAnchor = { document: { kind: 'guide', revision: 2 }, target: { kind: 'lines', exhibit: 'exhibit:parser:src/parse.ts', side: 'head', start: 12, end: 14, blobId: 'a'.repeat(40) }, quote: 'const line = read();' };
+    await f.send('Start.');
+    await f.controls.execute(f.conversationId, { type: 'stageComment', anchor: goal, note: 'Which samples?' });
+    await f.controls.execute(f.conversationId, { type: 'stageComment', anchor: lines, note: 'Why read here?' });
+    const staged = await f.staged();
+    expect(staged.map((comment) => comment.anchor)).toEqual([goal, lines]);
+    const turn = await f.send('Two comments.', staged.map((comment) => comment.id));
+    expect(messageComments(lastText(f.requests.at(-1) ?? [])).map((comment) => comment.anchor)).toEqual([goal, lines]);
+    // Sent, the Goal still takes comments: its blocks never lock.
+    await f.controls.execute(f.conversationId, { type: 'stageComment', anchor: goal, note: 'And the empty file?' });
+    expect((await f.staged()).map((comment) => comment.note)).toEqual(['And the empty file?']);
+    await f.settled();
+    const replyRow = piMessageRowId(f.conversationId, Number(turn.split(':turn:')[1]) / PI_ENTRY_ORDINALS, await f.newestReply(), 0, 0);
+    const [first, second] = staged;
+    if (!first || !second) throw new Error('Nothing staged');
+    // A lookup of no loaded turns finds them by their documents.
+    expect(await commentLookup(f.harness, [], ['goal'])).toEqual({ comments: [{ id: first.id, conversationId: f.conversationId, message: userRowId(turn), anchor: goal }], replies: [{ row: replyRow, comment: first.id }] });
+    expect((await commentLookup(f.harness, [], ['goal', 'guide'])).comments.map((comment) => comment.anchor)).toEqual([goal, lines]);
+    expect(await commentLookup(f.harness, [])).toEqual({ comments: [], replies: [] });
+    expect(f.reports).toEqual([]);
+  } finally { await f.harness.close(context); }
+});

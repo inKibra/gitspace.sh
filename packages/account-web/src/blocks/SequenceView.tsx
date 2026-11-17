@@ -10,7 +10,7 @@ import { ChevronLeft, ChevronRight, Maximize01, PauseCircle, Play, PlayCircle, V
 import { useContext, useEffect, useId, useMemo, useState, type KeyboardEvent } from 'react';
 import type { z } from 'zod';
 import { SpeechContext } from '../speech.js';
-import { BlockRendering, SequenceFrame, conforms } from './BlockDocument.js';
+import { BlockRendering, DocumentRefs, SequenceFrame, SequenceStart, conforms } from './BlockDocument.js';
 import { BlockErrorCard } from './BlockFrames.js';
 import { ItemComment, commentItem } from '../comments/CommentLayer.js';
 import { LightboxComments, LightboxPlaceReport } from '../comments/LightboxComments.js';
@@ -31,10 +31,15 @@ function clock(ms: number): string {
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 }
 
-/** One frame's content: an element drawn with the block's registry and state, or a block of the document by ref. */
+/** One frame's content: an element drawn with the block's registry and state, a block of the document by ref, or a part
+ * of the document its DocumentRefs draws (a Change Guide's section, diagram or exhibit). */
 function FrameContent({ content }: { content: Frame['content'] }) {
   const rendering = useContext(BlockRendering);
-  const issues = useMemo(() => rendering ? validateFrameContent(content, rendering.spec.elements, rendering.spec.state ?? {}) : [], [content, rendering]);
+  const documentRefs = useContext(DocumentRefs);
+  const part = typeof content.ref === 'string' ? documentRefs?.(content.ref) ?? null : null;
+  const ownRef = part !== null;
+  const issues = useMemo(() => rendering && !ownRef ? validateFrameContent(content, rendering.spec.elements, rendering.spec.state ?? {}) : [], [content, rendering, ownRef]);
+  if (part !== null) return <>{part}</>;
   if (!rendering) return null;
   if (issues.length > 0) return <BlockErrorCard issues={issues} source={JSON.stringify(content, null, 2)} sourceLabel="JSON" />;
   if (typeof content.ref === 'string') return rendering.drawRef(content.ref);
@@ -43,10 +48,11 @@ function FrameContent({ content }: { content: Frame['content'] }) {
 }
 
 export function SequenceView(props: SequenceProps) {
-  const [expanded, setExpanded] = useState<{ index: number; playing: boolean } | null>(null);
+  const start = useContext(SequenceStart);
+  const [expanded, setExpanded] = useState<{ index: number; playing: boolean } | null>(start ? { index: 0, playing: true } : null);
   return <>
-    <SequencePlayer {...props} large={false} startAt={0} autoPlay={false} onExpand={(index, playing) => setExpanded({ index, playing })} />
-    <Dialog open={expanded !== null} onOpenChange={(open) => { if (!open) setExpanded(null); }}>
+    {start ? null : <SequencePlayer {...props} large={false} startAt={0} autoPlay={false} onExpand={(index, playing) => setExpanded({ index, playing })} />}
+    <Dialog open={expanded !== null} onOpenChange={(open) => { if (!open) { setExpanded(null); start?.onClose(); } }}>
       <DialogContent size="lg" className="flex h-[calc(100dvh-2rem)] !max-w-[calc(100vw-2rem)] flex-col gap-2 overflow-hidden p-4">
         <DialogTitle className="pr-10">{props.title}</DialogTitle>
         <LightboxComments><div className="min-h-0 flex-1 overflow-auto">{expanded ? <SequencePlayer {...props} large startAt={expanded.index} autoPlay={expanded.playing} /> : null}</div></LightboxComments>
