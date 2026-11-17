@@ -372,11 +372,12 @@ describe('The drawing brief', () => {
   });
 
   it('asks for a required AskCard on decisions, names the example reply, prefers specific blocks and Copy as Markdown', () => {
-    expect(UI_BLOCK_BRIEF).toContain('AskCard ask=required only when they\'ll decide ("let me pick") or you\'re blocked on their pick: compare, recommend one, end with it');
-    expect(UI_BLOCK_BRIEF).toContain('Asked for yours? Recommend and continue.');
+    expect(UI_BLOCK_BRIEF).toContain('AskCard ask=required when they say they\'ll decide ("I\'ll make the call", "let me pick"), even if they also ask your pick, or you\'re blocked on their choice: compare, recommend one, end with it');
+    expect(UI_BLOCK_BRIEF).toContain('Asked only for your pick? Recommend and continue.');
     const decision = UI_REPLY_EXAMPLES.find((example) => example.title === 'Options compared, then the person decides');
     expect(UI_BLOCK_BRIEF).toContain(`example reply "${decision?.title ?? 'missing'}"`);
-    expect(UI_BLOCK_BRIEF).toContain('Prefer the specific block to a Table: before/after numbers → MetricDelta, schema changes → SchemaDiff, events in time → Timeline, options → Tradeoffs.');
+    expect(UI_BLOCK_BRIEF).toContain('- options: Tradeoffs; a schema change: SchemaDiff; events: Timeline');
+    expect(UI_BLOCK_BRIEF).toContain('Prefer these specific blocks to a Table.');
     expect(UI_BLOCK_BRIEF).toContain('Draw even when the person will paste the result elsewhere: every block has Copy as Markdown.');
     const skill = uiBlockPrompt();
     for (const mention of ['Every block has Copy as Markdown', 'short names Markdown fences use (ts, js, py, sh, yml, md…)', 'A Tradeoffs `note` is one short line under the comparison']) expect(skill).toContain(mention);

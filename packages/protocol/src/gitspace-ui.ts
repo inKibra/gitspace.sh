@@ -2001,8 +2001,8 @@ export const UI_BLOCK_BRIEF = [
 - options: Tradeoffs; a schema change: SchemaDiff; events: Timeline; a walkthrough: Sequence
 - a diagram: Mermaid (a few boxes) or Svg (theme colours only: currentColor, var(--border)…)
 - answering comments: Reply
-Prefer the specific block to a Table: before/after numbers → MetricDelta, schema changes → SchemaDiff, events in time → Timeline, options → Tradeoffs.
-AskCard ask=required only when they'll decide ("let me pick") or you're blocked on their pick: compare, recommend one, end with it (example reply "Options compared, then the person decides"). Asked for yours? Recommend and continue.
+Prefer these specific blocks to a Table.
+AskCard ask=required when they say they'll decide ("I'll make the call", "let me pick"), even if they also ask your pick, or you're blocked on their choice: compare, recommend one, end with it (example reply "Options compared, then the person decides"). Asked only for your pick? Recommend and continue.
 Show real data with builders: \`tools.blocks({ op })\`, op diff, excerpt, changeSet, commandRun or testReport, returns a ready fence; paste it, add notes.`,
   `Short form: a fence naming one component holds just its props, as one JSON object:
 ${FENCE}gitspace-ui CallDiff id=cache-path

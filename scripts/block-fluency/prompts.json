@@ -80,7 +80,8 @@
     "title": "Catch up on a change before standup",
     "kind": "scenario",
     "expected": [
-      "Sequence"
+      "Sequence",
+      "CallDiff"
     ],
     "requiresAsk": false,
     "text": "I'm reviewing this on my phone before standup and only have a few minutes. Get me up to speed on what this change does and what I should check.\n\n```diff\n--- a/src/cache.ts\n+++ b/src/cache.ts\n@@ -1,3 +1,17 @@\n-export async function getProfile(id: string) {\n-  return db.profiles.find(id);\n-}\n+const cache = new Map<string, { value: Profile; expires: number }>();\n+const TTL_MS = 60_000;\n+\n+export async function getProfile(id: string) {\n+  const hit = cache.get(id);\n+  if (hit && hit.expires > Date.now()) return hit.value;\n+  const value = await db.profiles.find(id);\n+  cache.set(id, { value, expires: Date.now() + TTL_MS });\n+  return value;\n+}\n+\n+export function invalidateProfile(id: string) {\n+  cache.delete(id);\n+}\n--- a/src/routes/profile.ts\n+++ b/src/routes/profile.ts\n@@ -8,5 +8,6 @@\n export async function updateProfile(req: Request) {\n   const body = await req.json();\n   await db.profiles.update(req.params.id, body);\n+  invalidateProfile(req.params.id);\n   return Response.json({ ok: true });\n }\n```"

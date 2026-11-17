@@ -52,6 +52,8 @@ const { values, positionals } = parseArgs({
     concurrency: { type: 'string', default: '2' },
     thinking: { type: 'string', default: 'medium' },
     'timeout-minutes': { type: 'string', default: '15' },
+    repeat: { type: 'string', default: '1' },
+    rescore: { type: 'string' },
     check: { type: 'boolean', default: false },
   },
   allowPositionals: true,
@@ -67,23 +69,6 @@ if (values.check) {
   console.log(`${allPrompts.length} prompts, none suggests a visual form`);
   process.exit(0);
 }
-const chosen = values.prompts?.split(',').map(id => id.trim());
-const prompts = chosen ? allPrompts.filter(prompt => chosen.includes(prompt.id)) : allPrompts;
-if (prompts.length === 0) throw new Error('No prompts selected');
-const accountUrl = process.env.GITSPACE_ACCOUNT_URL?.replace(/\/+$/u, '');
-const token = process.env.GITSPACE_MCP_TOKEN?.trim();
-if (!accountUrl || !token) throw new Error('Set GITSPACE_ACCOUNT_URL and GITSPACE_MCP_TOKEN');
-if (!values.project) throw new Error('Pass --project <projectId>: the eval project its workspaces are created in');
-const projectId = values.project;
-const stamp = new Date().toISOString().replace(/[:.]/gu, '-');
-const outDir = resolve(positionals[0] ?? join(homedir(), 'work', 'block-fluency-results', stamp));
-const turnTimeoutMs = Number(values['timeout-minutes']) * 60_000;
-const concurrency = Math.max(1, Number(values.concurrency));
-const models = values.models.split(',').map((spec) => {
-  const [provider, ...rest] = spec.trim().split('/');
-  if (!provider || rest.length === 0) throw new Error(`A model is <provider>/<id>, not "${spec}"`);
-  return { provider, model: rest.join('/') };
-});
 
 // ---------------------------------------------------------------------------------------------------------------- MCP
 
@@ -197,37 +182,40 @@ async function transcript(workspaceId: string): Promise<TranscriptRow[]> {
 
 // ------------------------------------------------------------------------------------------------------------ Scoring
 
-interface BlockScore {
-  kind: UiBlockKind;
+const blockScoreSchema = z.object({
+  kind: z.enum(['gitspace-ui', 'svg', 'mermaid']),
   /** gitspace-ui only: a component named in the fence's info string (short) or a whole spec (full). */
-  form: 'short' | 'full' | null;
-  components: string[];
-  requiredAsk: boolean;
+  form: z.enum(['short', 'full']).nullable(),
+  components: z.array(z.string()),
+  requiredAsk: z.boolean(),
   /** The validator's issues with the block as first written. */
-  issuesAsWritten: string[];
+  issuesAsWritten: z.array(z.string()),
   /** A fix step corrected it (the transcript row lists it under `corrected`). */
-  fixed: boolean;
+  fixed: z.boolean(),
   /** The block as first written; null for a corrected block whose original was not seen before its correction. */
-  written: string | null;
+  written: z.string().nullable(),
   /** The block as the transcript shows it, with any correction applied. */
-  shown: string;
-}
+  shown: z.string(),
+});
+type BlockScore = z.infer<typeof blockScoreSchema>;
 
-interface ReplyScore {
-  messages: number;
-  replyChars: number;
-  blocks: BlockScore[];
-  components: string[];
-  expectedHit: boolean;
-  shortForm: number;
-  fullForm: number;
-  invalidAsWritten: number;
-  fixed: number;
-  stillInvalid: number;
-  requiredAsk: boolean;
+/** A turn's replies as scored. Fit and over-asking are judged at report time against the current prompts.json, so a
+ * changed expectation re-scores stored results (`--rescore`). */
+const replyScoreSchema = z.object({
+  messages: z.number(),
+  replyChars: z.number(),
+  blocks: z.array(blockScoreSchema),
+  components: z.array(z.string()),
+  shortForm: z.number(),
+  fullForm: z.number(),
+  invalidAsWritten: z.number(),
+  fixed: z.number(),
+  stillInvalid: z.number(),
+  requiredAsk: z.boolean(),
   /** Characters of prose before the first block; null when the reply has no block. */
-  proseBeforeFirstBlock: number | null;
-}
+  proseBeforeFirstBlock: z.number().nullable(),
+});
+type ReplyScore = z.infer<typeof replyScoreSchema>;
 
 const elementsSchema = z.object({ elements: z.record(z.string(), z.object({ type: z.string().optional(), ask: z.object({ required: z.boolean().optional() }).nullable().optional() }).loose()) });
 const KIND_COMPONENT: Record<UiBlockKind, string> = { 'gitspace-ui': '', mermaid: 'Mermaid', svg: 'Svg' };
@@ -260,7 +248,7 @@ function validatedBlocks(text: string): { block: UiBlock; issues: string[] }[] {
 
 /** Scores the turn's assistant replies. Each message row is one Markdown document, as the runtime validates it. A row
  * with corrections is scored against its original text (`originals`, by row id) when the run saw it before the fix. */
-function scoreReplies(replies: readonly TranscriptRow[], originals: ReadonlyMap<string, string>, prompt: EvalPrompt): ReplyScore {
+function scoreReplies(replies: readonly TranscriptRow[], originals: ReadonlyMap<string, string>): ReplyScore {
   const blocks: BlockScore[] = [];
   let prose: number | null = null;
   let proseSoFar = 0;
@@ -290,7 +278,6 @@ function scoreReplies(replies: readonly TranscriptRow[], originals: ReadonlyMap<
     replyChars: replies.reduce((sum, row) => sum + (row.item.text ?? '').length, 0),
     blocks,
     components,
-    expectedHit: components.some(component => prompt.expected.includes(component)),
     shortForm: blocks.filter(block => block.form === 'short').length,
     fullForm: blocks.filter(block => block.form === 'full').length,
     invalidAsWritten: invalid.length,
@@ -303,33 +290,37 @@ function scoreReplies(replies: readonly TranscriptRow[], originals: ReadonlyMap<
 
 // ---------------------------------------------------------------------------------------------------------------- Run
 
-interface RunResult {
-  prompt: string;
-  kind: EvalPrompt['kind'];
-  provider: string;
-  model: string;
-  status: 'done' | 'failed' | 'timeout' | 'error';
-  error: string | null;
-  workspaceId: string | null;
-  phase: string | null;
-  control: { provider: string | null; model: string | null; thinking: string | null } | null;
-  conversationStatus: string | null;
-  durationMs: number | null;
-  usage: z.infer<typeof totalsSchema> | null;
-  tools: string[];
-  askTool: boolean;
-  interruptions: string[];
-  openQuestions: number;
-  score: ReplyScore | null;
-  archived: string | null;
-}
+const runResultSchema = z.object({
+  prompt: z.string(),
+  /** Which repetition of the (prompt, model) pair, from 1 (`--repeat`). */
+  attempt: z.number().int().positive().default(1),
+  kind: z.enum(['scenario', 'control']),
+  provider: z.string(),
+  model: z.string(),
+  status: z.enum(['done', 'failed', 'timeout', 'error']),
+  error: z.string().nullable(),
+  workspaceId: z.string().nullable(),
+  phase: z.string().nullable(),
+  control: z.object({ provider: z.string().nullable(), model: z.string().nullable(), thinking: z.string().nullable() }).nullable(),
+  conversationStatus: z.string().nullable(),
+  durationMs: z.number().nullable(),
+  usage: totalsSchema.nullable(),
+  tools: z.array(z.string()),
+  askTool: z.boolean(),
+  interruptions: z.array(z.string()),
+  openQuestions: z.number(),
+  score: replyScoreSchema.nullable(),
+  archived: z.string().nullable(),
+});
+type RunResult = z.infer<typeof runResultSchema>;
 
-async function run(prompt: EvalPrompt, target: { provider: string; model: string }, baseBranch: string): Promise<RunResult> {
+async function run(prompt: EvalPrompt, target: { provider: string; model: string }, attempt: number, baseBranch: string): Promise<RunResult> {
   const label = `${target.provider}-${target.model}`.replace(/[^A-Za-z0-9-]/gu, '-');
-  const result: RunResult = { prompt: prompt.id, kind: prompt.kind, provider: target.provider, model: target.model, status: 'error', error: null, workspaceId: null, phase: null, control: null, conversationStatus: null, durationMs: null, usage: null, tools: [], askTool: false, interruptions: [], openQuestions: 0, score: null, archived: null };
-  const log = (message: string): void => console.log(`[${prompt.id} × ${label}] ${message}`);
+  const name = repeat > 1 ? `${prompt.id}__${label}__${attempt}` : `${prompt.id}__${label}`;
+  const result: RunResult = { prompt: prompt.id, attempt, kind: prompt.kind, provider: target.provider, model: target.model, status: 'error', error: null, workspaceId: null, phase: null, control: null, conversationStatus: null, durationMs: null, usage: null, tools: [], askTool: false, interruptions: [], openQuestions: 0, score: null, archived: null };
+  const log = (message: string): void => console.log(`[${name}] ${message}`);
   try {
-    const created = await call('gitspace_workspace_create', { projectId, name: `bf ${prompt.id} ${label}`.slice(0, 80), branch: `bf/${stamp}/${prompt.id}/${label}`, sourceKind: 'base', sourceRef: baseBranch }, createdSchema);
+    const created = await call('gitspace_workspace_create', { projectId, name: `bf ${prompt.id} ${label} ${attempt}`.slice(0, 80), branch: `bf/${stamp}/${prompt.id}/${label}/${attempt}`, sourceKind: 'base', sourceRef: baseBranch }, createdSchema);
     const workspaceId = created.workspace.id;
     result.workspaceId = workspaceId;
     const operation = await followOperation(created.operation.id, 180_000);
@@ -341,7 +332,7 @@ async function run(prompt: EvalPrompt, target: { provider: string; model: string
     if (control.provider !== target.provider || control.model !== target.model) throw new Error(`session model is ${control.provider}/${control.model}, not ${target.provider}/${target.model}`);
 
     const started = Date.now();
-    const submitted = await call('gitspace_runtime_submit', { projectId, workspaceId, requestId: `bf-${stamp}-${prompt.id}-${label}`, text: prompt.text }, submitSchema);
+    const submitted = await call('gitspace_runtime_submit', { projectId, workspaceId, requestId: `bf-${stamp}-${prompt.id}-${label}-${attempt}`, text: prompt.text }, submitSchema);
     if (!submitted.accepted) throw new Error('submission not accepted');
     // The turn is over once the conversation leaves running (a block fix step runs inside the same busy period) and
     // stays out of it for a second read. Every version of each assistant text part is kept: a fix step's correction
@@ -400,12 +391,12 @@ async function run(prompt: EvalPrompt, target: { provider: string; model: string
       const original = history?.at(-2);
       if (original !== undefined && extractBlocks(original).filter(block => block.closed).length === extractBlocks(row.item.text ?? '').length) originals.set(row.id, original);
     }
-    result.score = scoreReplies(replies, originals, prompt);
+    result.score = scoreReplies(replies, originals);
     if (result.status !== 'timeout') result.status = replies.length > 0 ? 'done' : 'failed';
     if (result.status === 'failed' && !result.error) result.error = result.interruptions.join('; ') || `no reply (conversation ${result.conversationStatus})`;
     await mkdir(join(outDir, 'runs'), { recursive: true });
-    await writeFile(join(outDir, 'runs', `${prompt.id}__${label}.md`), replies.map(row => row.item.text ?? '').join('\n\n<!-- next message -->\n\n'));
-    if (originals.size > 0) await writeFile(join(outDir, 'runs', `${prompt.id}__${label}.original.md`), replies.map(row => originals.get(row.id) ?? row.item.text ?? '').join('\n\n<!-- next message -->\n\n'));
+    await writeFile(join(outDir, 'runs', `${name}.md`), replies.map(row => row.item.text ?? '').join('\n\n<!-- next message -->\n\n'));
+    if (originals.size > 0) await writeFile(join(outDir, 'runs', `${name}.original.md`), replies.map(row => originals.get(row.id) ?? row.item.text ?? '').join('\n\n<!-- next message -->\n\n'));
   } catch (error) {
     result.error = error instanceof Error ? error.message : String(error);
     log(`error: ${result.error}`);
@@ -415,17 +406,33 @@ async function run(prompt: EvalPrompt, target: { provider: string; model: string
       result.archived = archived instanceof Error ? `failed: ${archived.message}` : archived.id;
     }
     await mkdir(join(outDir, 'runs'), { recursive: true });
-    await writeFile(join(outDir, 'runs', `${prompt.id}__${label}.json`), `${JSON.stringify(result, null, 2)}\n`);
+    await writeFile(join(outDir, 'runs', `${name}.json`), `${JSON.stringify(result, null, 2)}\n`);
   }
   return result;
 }
 
 // ------------------------------------------------------------------------------------------------------------ Report
 
-const percent = (part: number, whole: number): string => whole === 0 ? '–' : `${Math.round((part / whole) * 100)}%`;
+function percent(part: number, whole: number): string {
+  return whole === 0 ? '–' : `${Math.round((part / whole) * 100)}%`;
+}
+
+/** What one run scored against the current prompts.json: whether a scenario's reply has a component its `expected`
+ * set names, whether a scenario that wants a required ask got one, and whether one that doesn't want it got one. */
+function judged(result: RunResult) {
+  const prompt = allPrompts.find(each => each.id === result.prompt);
+  const scenario = result.kind === 'scenario' && result.score !== null;
+  return {
+    fit: scenario && (result.score?.components.some(component => prompt?.expected.includes(component)) ?? false),
+    wantsAsk: scenario && prompt?.requiresAsk === true,
+    asked: result.score?.requiredAsk ?? false,
+    overAsked: scenario && prompt?.requiresAsk === false && (result.score?.requiredAsk ?? false),
+  };
+}
 
 /** Per model: drew unprompted (scenario replies with a block), fit (scenario replies with an expected component),
- * over-drew (control replies with a block), and how many blocks were invalid as written and fixed. */
+ * over-drew (control replies with a block), required asks where a scenario wants one and over-asks (a required ask on
+ * a scenario that doesn't), and how many blocks were invalid as written and fixed. */
 function totals(results: readonly RunResult[]) {
   const scored = results.filter(result => result.score !== null && result.status === 'done');
   const scenarios = scored.filter(result => result.kind === 'scenario');
@@ -435,8 +442,12 @@ function totals(results: readonly RunResult[]) {
   const invalid = scored.reduce((sum, result) => sum + (result.score?.invalidAsWritten ?? 0), 0);
   const fixed = scored.reduce((sum, result) => sum + (result.score?.fixed ?? 0), 0);
   const drew = scenarios.filter(result => (result.score?.blocks.length ?? 0) > 0).length;
-  const fit = scenarios.filter(result => result.score?.expectedHit).length;
+  const fit = scenarios.filter(result => judged(result).fit).length;
   const overDrew = controls.filter(result => (result.score?.blocks.length ?? 0) > 0).length;
+  const wantAsk = scenarios.filter(result => judged(result).wantsAsk);
+  const askFree = scenarios.filter(result => !judged(result).wantsAsk);
+  const asked = wantAsk.filter(result => judged(result).asked).length;
+  const overAsked = askFree.filter(result => judged(result).overAsked).length;
   const durations = scored.flatMap(result => result.durationMs === null ? [] : [result.durationMs]);
   return {
     runs: results.length,
@@ -446,9 +457,15 @@ function totals(results: readonly RunResult[]) {
     drew,
     fit,
     overDrew,
+    wantAsk: wantAsk.length,
+    asked,
+    askFree: askFree.length,
+    overAsked,
     drewRate: scenarios.length ? drew / scenarios.length : null,
     fitRate: scenarios.length ? fit / scenarios.length : null,
     overDrewRate: controls.length ? overDrew / controls.length : null,
+    askedRate: wantAsk.length ? asked / wantAsk.length : null,
+    overAskedRate: askFree.length ? overAsked / askFree.length : null,
     blocksPerScenarioReply: scenarios.length ? scenarioBlocks / scenarios.length : null,
     invalidBeforeFixRate: blocks ? invalid / blocks : null,
     fixedRate: invalid ? fixed / invalid : null,
@@ -461,33 +478,47 @@ function totals(results: readonly RunResult[]) {
   };
 }
 
-function markdown(results: readonly RunResult[]): string {
+/** The results grouped by `provider/model`, in the order the models first appear. */
+function byModel(results: readonly RunResult[]): [string, RunResult[]][] {
+  const groups = new Map<string, RunResult[]>();
+  for (const result of results) {
+    const key = `${result.provider}/${result.model}`;
+    groups.set(key, [...groups.get(key) ?? [], result]);
+  }
+  return [...groups];
+}
+
+interface ReportMeta { stamp: string; accountUrl: string; projectId: string; thinking: string }
+
+function markdown(results: readonly RunResult[], meta: ReportMeta, rescoredAt?: string): string {
   const lines = [
-    `# Block fluency results, ${stamp}`,
+    `# Block fluency results, ${meta.stamp}`,
     '',
-    `Account ${accountUrl}, project ${projectId}, thinking ${values.thinking}.`,
+    `Account ${meta.accountUrl}, project ${meta.projectId}, thinking ${meta.thinking}.${rescoredAt ? ` Re-scored ${rescoredAt} against the current prompts.json.` : ''}`,
     '',
-    '| Prompt | Kind | Model | Status | Blocks | Components | Drew | Fit | Invalid as written | Fixed | Short/full | Required ask | Prose before 1st block | Reply chars | Duration | Requests | Tokens |',
-    '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|',
+    '| Prompt | # | Kind | Model | Status | Blocks | Components | Drew | Fit | Required ask | Over-ask | Invalid as written | Fixed | Short/full | Prose before 1st block | Reply chars | Duration | Requests | Tokens |',
+    '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|',
   ];
   for (const result of results) {
     const score = result.score;
-    const expected = prompts.find(prompt => prompt.id === result.prompt);
+    const verdict = judged(result);
     const drew = score ? (score.blocks.length > 0 ? (result.kind === 'control' ? 'over-drew' : 'yes') : 'no') : '–';
-    const fit = score && result.kind === 'scenario' ? (score.expectedHit ? 'yes' : 'no') : '–';
-    lines.push(`| ${result.prompt} | ${result.kind} | ${result.model} | ${result.status}${result.error ? `: ${result.error.slice(0, 80).replaceAll('|', '\\|').replaceAll('\n', ' ')}` : ''} | ${score?.blocks.length ?? '–'} | ${score?.components.join(', ') || '–'} | ${drew} | ${fit} | ${score?.invalidAsWritten ?? '–'} | ${score?.fixed ?? '–'} | ${score ? `${score.shortForm}/${score.fullForm}` : '–'} | ${expected?.requiresAsk ? (score?.requiredAsk ? 'yes' : 'no') : (score?.requiredAsk ? 'yes (unasked)' : '–')} | ${score?.proseBeforeFirstBlock ?? '–'} | ${score?.replyChars ?? '–'} | ${result.durationMs === null ? '–' : `${Math.round(result.durationMs / 1000)} s`} | ${result.usage?.requests ?? '–'} | ${result.usage?.totalTokens ?? '–'} |`);
+    const fit = score && result.kind === 'scenario' ? (verdict.fit ? 'yes' : 'no') : '–';
+    const required = verdict.wantsAsk ? (verdict.asked ? 'yes' : 'no') : '–';
+    const overAsk = score && result.kind === 'scenario' && !verdict.wantsAsk ? (verdict.overAsked ? 'yes' : 'no') : '–';
+    lines.push(`| ${result.prompt} | ${result.attempt} | ${result.kind} | ${result.model} | ${result.status}${result.error ? `: ${result.error.slice(0, 80).replaceAll('|', '\\|').replaceAll('\n', ' ')}` : ''} | ${score?.blocks.length ?? '–'} | ${score?.components.join(', ') || '–'} | ${drew} | ${fit} | ${required} | ${overAsk} | ${score?.invalidAsWritten ?? '–'} | ${score?.fixed ?? '–'} | ${score ? `${score.shortForm}/${score.fullForm}` : '–'} | ${score?.proseBeforeFirstBlock ?? '–'} | ${score?.replyChars ?? '–'} | ${result.durationMs === null ? '–' : `${Math.round(result.durationMs / 1000)} s`} | ${result.usage?.requests ?? '–'} | ${result.usage?.totalTokens ?? '–'} |`);
   }
-  lines.push('', '| Model | Runs | Replied | Drew unprompted | Fit | Over-drew | Blocks per scenario reply | Invalid before fix | Fixed | Mean duration | Tokens | Cost (USD) |', '|---|---|---|---|---|---|---|---|---|---|---|---|');
-  for (const target of models) {
-    const sum = totals(results.filter(result => result.provider === target.provider && result.model === target.model));
-    lines.push(`| ${target.provider}/${target.model} | ${sum.runs} | ${sum.replied} | ${percent(sum.drew, sum.scenarios)} (${sum.drew}/${sum.scenarios}) | ${percent(sum.fit, sum.scenarios)} (${sum.fit}/${sum.scenarios}) | ${percent(sum.overDrew, sum.controls)} (${sum.overDrew}/${sum.controls}) | ${sum.blocksPerScenarioReply === null ? '–' : sum.blocksPerScenarioReply.toFixed(2)} | ${percent(sum.invalid, sum.blocks)} (${sum.invalid}/${sum.blocks}) | ${percent(sum.fixed, sum.invalid)} (${sum.fixed}/${sum.invalid}) | ${sum.meanDurationMs === null ? '–' : `${Math.round(sum.meanDurationMs / 1000)} s`} | ${sum.totalTokens} | ${sum.costUsd.toFixed(2)} |`);
+  lines.push('', '| Model | Runs | Replied | Drew unprompted | Fit | Over-drew | Required ask when wanted | Over-ask | Blocks per scenario reply | Invalid before fix | Fixed | Mean duration | Tokens | Cost (USD) |', '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|');
+  for (const [model, group] of byModel(results)) {
+    const sum = totals(group);
+    lines.push(`| ${model} | ${sum.runs} | ${sum.replied} | ${percent(sum.drew, sum.scenarios)} (${sum.drew}/${sum.scenarios}) | ${percent(sum.fit, sum.scenarios)} (${sum.fit}/${sum.scenarios}) | ${percent(sum.overDrew, sum.controls)} (${sum.overDrew}/${sum.controls}) | ${percent(sum.asked, sum.wantAsk)} (${sum.asked}/${sum.wantAsk}) | ${percent(sum.overAsked, sum.askFree)} (${sum.overAsked}/${sum.askFree}) | ${sum.blocksPerScenarioReply === null ? '–' : sum.blocksPerScenarioReply.toFixed(2)} | ${percent(sum.invalid, sum.blocks)} (${sum.invalid}/${sum.blocks}) | ${percent(sum.fixed, sum.invalid)} (${sum.fixed}/${sum.invalid}) | ${sum.meanDurationMs === null ? '–' : `${Math.round(sum.meanDurationMs / 1000)} s`} | ${sum.totalTokens} | ${sum.costUsd.toFixed(2)} |`);
   }
   const broken = results.flatMap(result => (result.score?.blocks ?? []).filter(block => block.issuesAsWritten.length > 0).map(block => ({ result, block })));
   if (broken.length > 0) {
     lines.push('', '## Invalid blocks as written', '');
     for (const { result, block } of broken) {
       const quoted = block.written === null ? ['As written: not seen before its correction. Corrected:', '', '````', block.shown, '````'] : ['As written:', '', '````', block.written, '````', ...(block.fixed ? ['', 'Corrected:', '', '````', block.shown, '````'] : [])];
-      lines.push(`### ${result.prompt} × ${result.model} (${block.fixed ? 'fixed by its fix step' : 'not fixed'})`, '', ...block.issuesAsWritten.map(issue => `- ${issue}`), '', ...quoted, '');
+      lines.push(`### ${result.prompt} #${result.attempt} × ${result.model} (${block.fixed ? 'fixed by its fix step' : 'not fixed'})`, '', ...block.issuesAsWritten.map(issue => `- ${issue}`), '', ...quoted, '');
     }
   }
   return `${lines.join('\n')}\n`;
@@ -495,22 +526,58 @@ function markdown(results: readonly RunResult[]): string {
 
 // --------------------------------------------------------------------------------------------------------------- Main
 
+// --rescore <dir>: score a finished run's stored results against the current prompts.json (expected sets and asks),
+// without the account; writes results.rescored.{json,md} beside its results.json.
+if (values.rescore) {
+  const dir = resolve(values.rescore);
+  const stored = z.object({ stamp: z.string(), accountUrl: z.string(), projectId: z.string(), thinking: z.string(), results: z.array(runResultSchema) })
+    .parse(JSON.parse(await readFile(join(dir, 'results.json'), 'utf8')));
+  const rescoredAt = new Date().toISOString();
+  const summary = Object.fromEntries(byModel(stored.results).map(([model, group]) => [model, totals(group)]));
+  await writeFile(join(dir, 'results.rescored.json'), `${JSON.stringify({ ...stored, rescoredAt, prompts: allPrompts, totals: summary }, null, 2)}\n`);
+  const report = markdown(stored.results, stored, rescoredAt);
+  await writeFile(join(dir, 'results.rescored.md'), report);
+  console.log(report);
+  process.exit(0);
+}
+
+const chosen = values.prompts?.split(',').map(id => id.trim());
+const prompts = chosen ? allPrompts.filter(prompt => chosen.includes(prompt.id)) : allPrompts;
+if (prompts.length === 0) throw new Error('No prompts selected');
+const accountUrl = process.env.GITSPACE_ACCOUNT_URL?.replace(/\/+$/u, '');
+const token = process.env.GITSPACE_MCP_TOKEN?.trim();
+if (!accountUrl || !token) throw new Error('Set GITSPACE_ACCOUNT_URL and GITSPACE_MCP_TOKEN');
+if (!values.project) throw new Error('Pass --project <projectId>: the eval project its workspaces are created in');
+const projectId = values.project;
+const stamp = new Date().toISOString().replace(/[:.]/gu, '-');
+const outDir = resolve(positionals[0] ?? join(homedir(), 'work', 'block-fluency-results', stamp));
+const turnTimeoutMs = Number(values['timeout-minutes']) * 60_000;
+const concurrency = Math.max(1, Number(values.concurrency));
+const repeat = Math.max(1, Number(values.repeat));
+const models = values.models.split(',').map((spec) => {
+  const [provider, ...rest] = spec.trim().split('/');
+  if (!provider || rest.length === 0) throw new Error(`A model is <provider>/<id>, not "${spec}"`);
+  return { provider, model: rest.join('/') };
+});
+const meta: ReportMeta = { stamp, accountUrl, projectId, thinking: values.thinking };
+
 const project = (await call('gitspace_project_list', { lifecycle: 'active' }, projectsSchema)).find(each => each.id === projectId);
 if (!project) throw new Error(`No active project ${projectId}`);
 const baseBranch = project.baseBranch ?? 'main';
 await mkdir(outDir, { recursive: true });
 console.log(`Writing to ${outDir}`);
-const jobs = prompts.flatMap(prompt => models.map(target => ({ prompt, target })));
+// Attempts outermost, so every (prompt, model) pair runs once before any runs twice.
+const jobs = Array.from({ length: repeat }, (_, index) => index + 1).flatMap(attempt => prompts.flatMap(prompt => models.map(target => ({ prompt, target, attempt }))));
 const results: RunResult[] = new Array(jobs.length);
 let next = 0;
 await Promise.all(Array.from({ length: Math.min(concurrency, jobs.length) }, async () => {
   while (next < jobs.length) {
     const index = next++;
-    results[index] = await run(jobs[index].prompt, jobs[index].target, baseBranch);
-    await writeFile(join(outDir, 'results.json'), `${JSON.stringify({ stamp, accountUrl, projectId, thinking: values.thinking, prompts, results: results.filter(Boolean) }, null, 2)}\n`);
+    results[index] = await run(jobs[index].prompt, jobs[index].target, jobs[index].attempt, baseBranch);
+    await writeFile(join(outDir, 'results.json'), `${JSON.stringify({ ...meta, prompts, results: results.filter(Boolean) }, null, 2)}\n`);
   }
 }));
-const summary = Object.fromEntries(models.map(target => [`${target.provider}/${target.model}`, totals(results.filter(result => result.provider === target.provider && result.model === target.model))]));
-await writeFile(join(outDir, 'results.json'), `${JSON.stringify({ stamp, accountUrl, projectId, thinking: values.thinking, prompts, results, totals: summary }, null, 2)}\n`);
-await writeFile(join(outDir, 'results.md'), markdown(results));
-console.log(markdown(results));
+const summary = Object.fromEntries(byModel(results).map(([model, group]) => [model, totals(group)]));
+await writeFile(join(outDir, 'results.json'), `${JSON.stringify({ ...meta, prompts, results, totals: summary }, null, 2)}\n`);
+await writeFile(join(outDir, 'results.md'), markdown(results, meta));
+console.log(markdown(results, meta));
