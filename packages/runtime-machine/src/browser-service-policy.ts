@@ -19,18 +19,25 @@ function networkURL(value: string) {
 export class BrowserServicePolicy {
   private frames = new Map<string, z.infer<typeof Frame>>();
   private requests = new Map<string, ServiceRequest>();
-  private navigation: { url: string; frameId: string } | undefined;
+  private navigation: { url: string; frameId: string; observed(): void } | undefined;
   constructor(private readonly workspaceHostname: (hostname: string) => boolean | Promise<boolean>) {}
   initialize(raw: unknown) {
     const tree = z.object({ frameTree: FrameTree }).parse(raw).frameTree;
     const visit = (node: z.infer<typeof FrameTree>): void => { this.frames.set(node.frame.id, node.frame); node.childFrames?.forEach(visit); };
     visit(tree);
   }
-  beginNavigation(url: string) {
-    const root = [...this.frames.values()].find(frame => !frame.parentId);
-    this.navigation = root ? { url: networkURL(url) ?? url, frameId: root.id } : undefined;
+  /** Announces a navigation a trusted client (a single step, a script) starts on `frameId`, the root frame when it names
+   * none: to `url`, or with no `url` a reload of the frame's current URL. That frame's next document request, initiated
+   * by nobody, to that URL is explicit. `observed` settles once a document request of the frame is seen; `end`
+   * withdraws the announcement unless a later one replaced it. A frame this policy does not know is not announced. */
+  beginNavigation(url: string | undefined, frameId?: string): { observed: Promise<void>; end(): void } {
+    const frame = frameId === undefined ? [...this.frames.values()].find(frame => !frame.parentId) : this.frames.get(frameId);
+    if (!frame) return { observed: Promise.resolve(), end: () => {} };
+    const observed = Promise.withResolvers<void>(), target = url ?? frame.url;
+    const navigation = { url: networkURL(target) ?? target, frameId: frame.id, observed: () => observed.resolve() };
+    this.navigation = navigation;
+    return { observed: observed.promise, end: () => { if (this.navigation === navigation) this.navigation = undefined; } };
   }
-  endNavigation() { this.navigation = undefined; }
   observe(raw: unknown, sessionId: string) {
     const event = Event.safeParse(raw);
     if (!event.success || event.data.sessionId !== sessionId) return;
@@ -54,8 +61,9 @@ export class BrowserServicePolicy {
       const request = parsed.data, frame = request.frameId ? this.frames.get(request.frameId) : undefined;
       const previous = this.requests.get(request.requestId);
       const redirected = request.redirectResponse !== undefined;
-      const explicit = !redirected && request.type === 'Document' && request.initiator.type === 'other' && request.frameId === this.navigation?.frameId && networkURL(request.request.url) === this.navigation?.url;
-      if (request.frameId === this.navigation?.frameId && request.type === 'Document') this.navigation = undefined;
+      const navigation = this.navigation;
+      const explicit = !redirected && !!navigation && request.type === 'Document' && request.initiator.type === 'other' && request.frameId === navigation.frameId && networkURL(request.request.url) === navigation.url;
+      if (navigation && request.frameId === navigation.frameId && request.type === 'Document') { navigation.observed(); this.navigation = undefined; }
       // Root links/forms still require the browser's cross-site veto in allows:
       // the destination root alone cannot identify a child targeting _top.
       // Child navigation needs parser attribution to its parent.

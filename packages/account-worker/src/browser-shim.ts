@@ -18,6 +18,9 @@ export interface CdpShimOptions {
   siteCookies?: boolean;
   /** Runs before a client's navigation (`Page.navigate`, `Target.createTarget`) reaches the browser. */
   navigating?: (url: string) => Promise<void>;
+  /** Carries a client's navigation of a page to the browser: `send` sends it. `targetId` is the page the command's
+   * session works on; a `Page.navigate` has its `url` and `frameId`, a `Page.reload` neither. */
+  navigation?: (navigation: { targetId: string; url: string | undefined; frameId: string | undefined }, send: () => Promise<unknown>) => Promise<unknown>;
 }
 
 const WHOLE_BROWSER = 'reaches the whole browser', COOKIES = 'reads or sets cookies';
@@ -196,7 +199,10 @@ export class CdpShimClient {
     if ((method === 'Page.navigate' || method === 'Target.createTarget') && typeof params.url === 'string') await this.options.navigating?.(params.url);
     if (session) {
       if (!this.sessions.has(session)) throw new Error(`Session ${session} does not belong to this client`);
-      const result = await this.upstream.send(method, params, session);
+      const forward = () => this.upstream.send(method, params, session);
+      const url = method === 'Page.navigate' && typeof params.url === 'string' ? params.url : undefined;
+      const navigation = page !== undefined && (url !== undefined || method === 'Page.reload') ? { targetId: page, url, frameId: url !== undefined && typeof params.frameId === 'string' ? params.frameId : undefined } : undefined;
+      const result = navigation && this.options.navigation ? await this.options.navigation(navigation, forward) : await forward();
       if (this.options.cursor) this.drawCursor(method, params, session);
       // A site's cookies as a power step reads them: without the service session cookie.
       if (siteCookie && method === 'Network.getCookies') { const read = z.object({ cookies: z.array(z.object({ name: z.string() }).loose()) }).parse(result); return { cookies: read.cookies.filter(cookie => cookie.name !== SERVICE_COOKIE) }; }

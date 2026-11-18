@@ -35,6 +35,24 @@ export type AccountBrowserTransport = {
  * `admit` gives the browser its own session for one of the workspace's hostnames, after which the request goes to the
  * network like any page's, so responses stream and WebSockets open. */
 export type AccountBrowserServices = { urlPattern: string; hostname(hostname: string): boolean; workspace: BrowserWorkspaceServiceHostname; admit(hostname: string): Promise<void> };
+/** How long a reload's announcement waits for its document request after Chrome answers `Page.reload`. */
+const RELOAD_ANNOUNCED_MS = 10_000;
+/** Sends a navigation of a tab announced to its service policy, so its own document request is the explicit one:
+ * `Page.navigate` to `url` on `frameId` (the root frame when omitted), or with no `url` `Page.reload`. Chrome may answer
+ * `Page.reload` before the reload's document request starts, so a reload's announcement holds until that request is
+ * seen, at most `RELOAD_ANNOUNCED_MS`. A tab with no policy just sends. */
+async function announced<T>(policy: BrowserServicePolicy | undefined, url: string | undefined, frameId: string | undefined, send: () => Promise<T>): Promise<T> {
+  if (!policy) return send();
+  const navigation = policy.beginNavigation(url, frameId);
+  try {
+    const result = await send();
+    if (url === undefined) {
+      const expired = Promise.withResolvers<void>(), timer = setTimeout(expired.resolve, RELOAD_ANNOUNCED_MS);
+      try { await Promise.race([navigation.observed, expired.promise]); } finally { clearTimeout(timer); }
+    }
+    return result;
+  } finally { navigation.end(); }
+}
 export class AccountBrowserRuntime {
   private tabs = new Map<string, Tab>();
   private groups = new Map<string, RuntimeAccountBrowserGrant>();
@@ -88,6 +106,12 @@ export class AccountBrowserRuntime {
     if (!tab) return;
     tab.document++;
     tab.refs.clear();
+  }
+  /** A script's navigation of a cloud tab a single step opened, announced to that tab's service policy as a single
+   * step's is: `Page.navigate` to `url` on `frameId`, or `Page.reload` with no `url`. Any other page's navigation, a
+   * page the script made itself included, is just sent. */
+  announceNavigation<T>(navigation: { targetId: string; url: string | undefined; frameId: string | undefined }, send: () => Promise<T>): Promise<T> {
+    return announced(this.tabs.get(navigation.targetId)?.servicePolicy, navigation.url, navigation.frameId, send);
   }
   private async perform(authorization: RuntimeAccountBrowserAuthorization, signal: AbortSignal): Promise<RuntimeToolResult> {
     const { body } = authorization, { command, scope } = body;
@@ -197,7 +221,7 @@ export class AccountBrowserRuntime {
       this.tabs.set(targetId, opened); tab = opened;
       await channel.send('Page.enable', {}, sessionId); await channel.send('DOM.enable', {}, sessionId);
       if (grant.source === 'headless') await this.interceptServices(opened);
-      if (args.action === 'open' && args.url && grant.source === 'headless') { opened.servicePolicy?.beginNavigation(args.url); try { await channel.send('Page.navigate', { url: args.url }, sessionId); } finally { opened.servicePolicy?.endNavigation(); } }
+      if (args.action === 'open' && args.url && grant.source === 'headless') await announced(opened.servicePolicy, args.url, undefined, () => channel.send('Page.navigate', { url: args.url }, sessionId));
       if (args.action === 'open') return json({ groupId: grant.groupId, targetId, source: grant.source, expiresAt: grant.expiresAt });
     } else if (grant.source === 'relay' && this.options.relay) await this.options.relay.open(authorization, signal);
     if (!tab || tab.stale) throw new Error('Browser target stale or unavailable');
@@ -214,9 +238,8 @@ export class AccountBrowserRuntime {
     try {
       const content = await performBrowserAction({ tab: active, args, frame, signal, send: async (method, params) => {
         signal.throwIfAborted(); if (active.stale || Date.parse(active.grant.expiresAt) <= Date.now()) throw new Error('Browser disconnected or expired');
-        if (method === 'Page.navigate' && typeof params?.url === 'string') active.servicePolicy?.beginNavigation(params.url);
-        try { return await active.channel.send(method, params, active.sessionId); }
-        finally { if (method === 'Page.navigate') active.servicePolicy?.endNavigation(); }
+        const send = () => active.channel.send(method, params, active.sessionId);
+        return method === 'Page.navigate' && typeof params?.url === 'string' ? announced(active.servicePolicy, params.url, undefined, send) : send();
       }, close: () => this.closeTab(active), allows: url => grant.source === 'headless' || url === 'about:blank' || grant.origins.some(origin => browserOriginMatches(origin, new URL(url).hostname)), artifact: text => this.outputs.put(JSON.stringify([scope.projectId, scope.workspaceId]), text, scope.placement.accountId), selectAllModifier: 2 });
       return result(content);
     } catch (error) {

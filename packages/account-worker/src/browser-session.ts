@@ -464,7 +464,8 @@ export class BrowserSessionDO extends BudgetedDurableObject {
     const sockets = this.scripts.get(run) ?? new Set<WebSocket>();
     // The script's first command to a tab you hold stops it: that command and every later one is refused.
     const hold = { holds: (targetId: string) => this.held.has(targetId), refuse: () => { this.stopped.add(run); return SCRIPT_TAKEN; } };
-    const { socket, response } = serveCdpSocket(shim, { cursor: { label: decodeURIComponent(label ?? '').slice(0, 64) || 'Agent' }, hold, policy: () => this.stopped.has(run) ? SCRIPT_TAKEN : null }, () => {
+    // A script's navigation of a tab a single step opened is announced to that tab's service guard, as the step's is.
+    const { socket, response } = serveCdpSocket(shim, { cursor: { label: decodeURIComponent(label ?? '').slice(0, 64) || 'Agent' }, hold, navigation: (navigated, send) => this.runtime ? this.runtime.announceNavigation(navigated, send) : send(), policy: () => this.stopped.has(run) ? SCRIPT_TAKEN : null }, () => {
       sockets.delete(socket);
       if (!sockets.size && this.scripts.get(run) === sockets) this.scripts.delete(run);
       void this.used();

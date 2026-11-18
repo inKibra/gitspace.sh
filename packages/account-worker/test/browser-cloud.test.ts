@@ -106,6 +106,85 @@ test('a script going to localhost on the cloud browser is refused with the works
   expect(sent).not.toContain('Target.createTarget');
 });
 
+/** A cloud tab a single step opened on the workspace service, and a script client of the same browser whose
+ * navigations go through the runtime as a browser session's scripts do. Each document request the fake browser
+ * starts is `document-<n>`, in order; `answer` is what the guard sent for one: `Fetch.continueRequest` or
+ * `Fetch.failRequest`. Chrome answers `Page.reload` here before the reload's document request starts. */
+async function scriptOnSteppedTab() {
+  await leaseService(hostname, 'workspace');
+  const store = new Map<string, unknown>();
+  const storage = { async get(key: string) { return store.get(key); }, async put(key: string, value: unknown) { store.set(key, value); }, async delete(key: string) { return store.delete(key); } };
+  const answers = new Map<string, PromiseWithResolvers<string>>();
+  const answer = (requestId: string) => { const known = answers.get(requestId) ?? Promise.withResolvers<string>(); answers.set(requestId, known); return known.promise; };
+  const pair = new WebSocketPair(); pair[1].accept();
+  const emit = (method: string, params: Record<string, unknown>) => pair[1].send(JSON.stringify({ method, sessionId: 'cloud-session', params }));
+  let current = 'about:blank', attaches = 0, documents = 0;
+  const document = (url: string) => {
+    const id = `document-${++documents}`;
+    emit('Network.requestWillBeSent', { requestId: `${id}-network`, frameId: 'cloud-target', type: 'Document', documentURL: url, initiator: { type: 'other' }, request: { url } });
+    emit('Fetch.requestPaused', { requestId: id, networkId: `${id}-network`, frameId: 'cloud-target', resourceType: 'Document', request: { url, method: 'GET', headers: {} } });
+  };
+  pair[1].addEventListener('message', event => {
+    const command = RequestFrame.parse(JSON.parse(String(event.data)));
+    const reply = (result: unknown) => pair[1].send(JSON.stringify({ id: command.id, result }));
+    if (command.method === 'Fetch.continueRequest' || command.method === 'Fetch.failRequest') { const requestId = String(command.params.requestId); void answer(requestId); answers.get(requestId)?.resolve(command.method); }
+    if (command.method === 'Page.reload') { reply({}); document(current); return; }
+    if (command.method === 'Page.navigate') {
+      current = String(command.params.url);
+      document(current);
+      emit('Page.frameNavigated', { frame: { id: 'cloud-target', url: current } });
+    }
+    reply(command.method === 'Target.createTarget' ? { targetId: 'cloud-target' }
+      : command.method === 'Target.attachToTarget' ? { sessionId: attaches++ === 0 ? 'cloud-session' : 'script-session' }
+      : command.method === 'Target.getTargets' ? { targetInfos: [{ targetId: 'cloud-target', type: 'page', url: current, title: '', attached: true }] }
+      : command.method === 'Page.getFrameTree' ? { frameTree: { frame: { id: 'cloud-target', url: current } } }
+      : command.method === 'Page.navigate' ? { frameId: 'cloud-target' } : {});
+  });
+  const binding = { async fetch(input: RequestInfo | URL, init?: RequestInit) {
+    if (new Request(input, init).method === 'POST') return Response.json({ sessionId: 'binding-session' });
+    return new Response(null, { status: 101, webSocket: pair[0] });
+  } };
+  const upstream = await launchCloudBrowser(binding, AbortSignal.timeout(5000));
+  const cookies = new CloudServiceCookies(env, upstream, workspace, async () => []);
+  const runtime = new AccountBrowserRuntime({ storage, cloud: async () => upstream, services: { urlPattern: hostedServiceUrlPattern(env), hostname: name => isHostedServiceHostname(env, name), workspace: (name, grant) => isWorkspaceServiceHostname(env, workspace, name, grant), admit: name => cookies.admit(name) } });
+  const expiresAt = new Date(Date.now() + 60_000).toISOString();
+  const placement = { kind: 'cloud', accountId: 'account' };
+  const authority = { body: { accountId: 'account', projectId: 'project', workspaceId: 'workspace', publicKey: 'AA==', issuedAt: new Date().toISOString(), expiresAt }, signature: 'AA==' };
+  const authorization = RuntimeAccountBrowserAuthorizationSchema.parse({ body: { scope: { projectId: 'project', workspaceId: 'workspace', placement, conversationId: 'conversation', conversationKind: 'subagent', taskId: 'task', requestId: 'request', attemptId: 'attempt' }, issuedAt: new Date().toISOString(), expiresAt, dispatch: { version: 1, tool: 'browser', deadlineAt: expiresAt, replay: 'unsafe' }, command: { type: 'execute', args: { action: 'open', source: 'headless', url: `https://${hostname}/tt` }, grant: { body: { projectId: 'project', workspaceId: 'workspace', placement, groupId: crypto.randomUUID(), groupName: 'Workspace', source: 'headless', stepsOnly: [], origins: [], expiresAt }, signature: 'AA==', authority } } }, signature: 'AA==', authority });
+  expect((await runtime.execute(authorization, AbortSignal.timeout(5000))).status).toBe('completed');
+  expect(await answer('document-1')).toBe('Fetch.continueRequest');
+  const shim = await CdpBrowserShim.open(upstream, { navigating: url => cookies.navigating(url) });
+  const script = shim.client(() => {}, { navigation: (navigation, send) => runtime.announceNavigation(navigation, send) });
+  const { sessionId } = z.object({ sessionId: z.string() }).parse(await script.send('Target.attachToTarget', { targetId: 'cloud-target', flatten: true }));
+  return { script, sessionId, answer, document, close: () => pair[1].close() };
+}
+
+test('a script’s goto of a workspace service on a tab a single step opened is continued', async () => {
+  const tab = await scriptOnSteppedTab();
+  try {
+    await tab.script.send('Page.navigate', { url: `https://${hostname}/tt`, frameId: 'cloud-target' }, tab.sessionId);
+    expect(await tab.answer('document-2')).toBe('Fetch.continueRequest');
+  } finally { tab.close(); }
+});
+
+test('a script’s reload of a workspace service tab a single step opened is continued, though Chrome answers before the request starts', async () => {
+  const tab = await scriptOnSteppedTab();
+  try {
+    await tab.script.send('Page.reload', {}, tab.sessionId);
+    expect(await tab.answer('document-2')).toBe('Fetch.continueRequest');
+  } finally { tab.close(); }
+});
+
+test('after a script’s goto, a document request to the workspace service that nobody announced and no page started is denied', async () => {
+  const tab = await scriptOnSteppedTab();
+  try {
+    await tab.script.send('Page.navigate', { url: `https://${hostname}/tt`, frameId: 'cloud-target' }, tab.sessionId);
+    expect(await tab.answer('document-2')).toBe('Fetch.continueRequest');
+    tab.document(`https://${hostname}/tt`);
+    expect(await tab.answer('document-3')).toBe('Fetch.failRequest');
+  } finally { tab.close(); }
+});
+
 afterEach(() => { vi.restoreAllMocks(); });
 
 test('an expired cloud tab and its browser close before the next operation', async () => {

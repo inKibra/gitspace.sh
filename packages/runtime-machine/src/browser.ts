@@ -464,7 +464,7 @@ export class MachineBrowser {
           if (!tab) throw new Error('Headless target outside group');
           targetId = tab.targetId;
           await channel.send('Target.activateTarget', { targetId });
-          if (args.url) { tab.servicePolicy?.beginNavigation(args.url); try { await channel.send('Page.navigate', { url: args.url }, tab.sessionId); } finally { tab.servicePolicy?.endNavigation(); } }
+          if (args.url) { const navigation = tab.servicePolicy?.beginNavigation(args.url); try { await channel.send('Page.navigate', { url: args.url }, tab.sessionId); } finally { navigation?.end(); } }
           return [{ type: 'text', text: JSON.stringify({ groupId: grant.groupId, targetId, source: grant.source }) }];
         }
         // Each tab gets its own window, where it is the front tab: headless Chrome does not draw a tab behind another,
@@ -499,7 +499,7 @@ export class MachineBrowser {
         opened.servicePolicy = new BrowserServicePolicy(hostname => services.workspaceServiceHostname(hostname, grant));
         opened.closeServices = await attachBrowserServiceForward(channel, opened.sessionId, services, () => { opened.stale = true; opened.reason = 'Hosted service authorization failed'; }, opened.servicePolicy);
       }
-      if (args.action === 'open' && args.url && grant.source === 'headless') { opened.servicePolicy?.beginNavigation(args.url); try { await channel.send('Page.navigate', { url: args.url }, opened.sessionId); } finally { opened.servicePolicy?.endNavigation(); } }
+      if (args.action === 'open' && args.url && grant.source === 'headless') { const navigation = opened.servicePolicy?.beginNavigation(args.url); try { await channel.send('Page.navigate', { url: args.url }, opened.sessionId); } finally { navigation?.end(); } }
       if (args.action === 'open') return [{ type: 'text', text: JSON.stringify({ groupId: grant.groupId, targetId, source: grant.source, expiresAt: grant.expiresAt }) }];
     } else if (grant.source === 'relay' && tab) {
       await this.options.relay!.open(signed, args, signal);
@@ -510,9 +510,9 @@ export class MachineBrowser {
     const active = tab;
     const send = async (method: string, params: Record<string, unknown> = {}) => {
       signal.throwIfAborted(); if (active.stale) throw new Error('Browser tab stale');
-      if (method === 'Page.navigate' && typeof params.url === 'string') active.servicePolicy?.beginNavigation(params.url);
+      const navigation = method === 'Page.navigate' && typeof params.url === 'string' ? active.servicePolicy?.beginNavigation(params.url) : undefined;
       try { return await active.channel.send(method, params, active.sessionId); }
-      finally { if (method === 'Page.navigate') active.servicePolicy?.endNavigation(); }
+      finally { navigation?.end(); }
     };
     const effect = ['act', 'navigate', 'evaluate'].includes(args.action);
     const fenceId = `fence-${grant.groupId}`, fencePath = join(this.options.directory, 'fences', fenceId);
