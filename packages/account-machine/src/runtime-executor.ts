@@ -693,8 +693,10 @@ export async function createMachineExecutor(options: {
         },
         hydrateLfs: async (path: string) => {
           if (source.origin) {
+            // The settings are idempotent, so each preparation runs them under its own attempt.
+            const run = crypto.randomUUID();
             for (const [name, value] of [['remote.origin.url', source.origin], ['remote.origin.fetch', '+refs/heads/*:refs/remotes/origin/*']]) {
-              const result = await runSupervisorCommand({ application: 'git', args: ['config', name, value], cwd: path, env, signal, deadlineAt, attemptId: `origin-${attachment.attachmentId}-${name}`, sequence: 0 });
+              const result = await runSupervisorCommand({ application: 'git', args: ['config', name, value], cwd: path, env, signal, deadlineAt, attemptId: `origin-${attachment.attachmentId}-${run}-${name}`, sequence: 0 });
               if (result.exitCode !== 0) throw new Error(result.output);
             }
           }

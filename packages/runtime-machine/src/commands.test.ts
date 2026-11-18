@@ -82,3 +82,25 @@ test('a command sent again after a machine restart waits for the process the sup
   expect(result).toEqual({ exitCode: 0, output: 'done\n' });
   expect(await readFile(marker, 'utf8')).toBe('run\n');
 }, 30_000);
+
+test('a command run again under an attempt whose process already ended and was read runs again and returns its own output', async () => {
+  const marker = join(base, 'repeated.log');
+  const run = () => runSupervisorCommand({ application: '/bin/bash', args: ['-c', `echo run >> ${marker}; wc -l < ${marker}`], cwd: rootPath, attemptId: 'repeated', sequence: 0, deadlineAt: new Date(Date.now() + 60_000).toISOString(), signal: new AbortController().signal });
+  expect(await run()).toEqual({ exitCode: 0, output: '1\n' });
+  expect(await run()).toEqual({ exitCode: 0, output: '2\n' });
+  expect(await readFile(marker, 'utf8')).toBe('run\nrun\n');
+}, 30_000);
+
+test('a command sent again after its kept process ended unread returns that output and runs once', async () => {
+  const attemptId = 'ended-unread';
+  const marker = join(base, 'ended-unread.log');
+  const command = `echo run >> ${marker}; echo done`;
+  const name = `exec-${createHash('sha256').update(`${attemptId}:0`).digest('hex').slice(0, 40)}`;
+  const path = join(client.runtimeDir, 'outputs', `${name}.log`);
+  await client.request({ op: 'start', owner: attemptId, spec: { name, application: '/bin/bash', args: ['-c', command], cwd: rootPath, inheritEnv: true, env: {}, pty: false, restart: 'no', persist: true, detached: false, keepOutput: { path, maxBytes: COMMAND_OUTPUT_MAX_BYTES } } });
+  const waited = await client.request({ op: 'wait', name, for: 'exit', timeoutMs: 10_000 });
+  expect(waited.op === 'wait' && waited.daemon.state).toBe('exited');
+  const result = await runSupervisorCommand({ application: '/bin/bash', args: ['-c', command], cwd: rootPath, attemptId, sequence: 0, deadlineAt: new Date(Date.now() + 60_000).toISOString(), signal: new AbortController().signal });
+  expect(result).toEqual({ exitCode: 0, output: 'done\n' });
+  expect(await readFile(marker, 'utf8')).toBe('run\n');
+}, 30_000);

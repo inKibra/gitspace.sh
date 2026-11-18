@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, rm } from 'node:fs/promises';
+import { access, mkdir, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { daemonClientForProject } from '@gitspace/supervisor';
 import type { DaemonBrokerClient, DaemonResponse, DaemonSnapshot } from '@gitspace/supervisor';
@@ -44,7 +44,9 @@ async function keptOutput(client: DaemonBrokerClient, name: string, path: string
 /** Runs one command under the supervisor; cancellation or the deadline stops its process tree. The process is named by
  * attempt and sequence, so background job control (`bash` `{ op, attemptId }`) can find it, and so a dispatch sent again
  * after a machine restart waits for the process the supervisor kept instead of starting the command twice. Its whole
- * output, to `COMMAND_OUTPUT_MAX_BYTES`, goes to a file in the supervisor's directory, read once it ends and then removed. */
+ * output, to `COMMAND_OUTPUT_MAX_BYTES`, goes to a file in the supervisor's directory, read once it ends and then removed.
+ * A kept process that ended and whose file is gone was already read and returned, so the command runs again: the
+ * broker's `start` replaces an ended process of the same name. */
 export const runSupervisorCommand: RunExecutorCommand = async command => {
   const client = await daemonClientForProject(command.project ?? command.cwd);
   const name = `exec-${createHash('sha256').update(`${command.attemptId}:${command.sequence}`).digest('hex').slice(0, 40)}`;
@@ -57,7 +59,9 @@ export const runSupervisorCommand: RunExecutorCommand = async command => {
   await mkdir(outputs, { recursive: true, mode: 0o700 });
   try {
     const kept = await client.request({ op: 'describe', name }).catch(() => null);
-    if (kept?.op !== 'describe' || kept.daemon.owner !== command.attemptId) {
+    const ended = kept?.op === 'describe' && (kept.daemon.state === 'exited' || kept.daemon.state === 'failed');
+    const alreadyRead = ended && kept.daemon.keptOutput !== undefined && await access(path).then(() => false, () => true);
+    if (kept?.op !== 'describe' || kept.daemon.owner !== command.attemptId || alreadyRead) {
       await client.request({ op: 'start', owner: command.attemptId, spec: { name, application: command.application, args: command.args, cwd: command.cwd, inheritEnv: false, env: { ...inheritedCommandEnvironment(), ...command.env }, pty: false, restart: 'no', persist: true, detached: false, keepOutput: { path, maxBytes: COMMAND_OUTPUT_MAX_BYTES } } });
     }
     let abortStop: Promise<DaemonResponse> | undefined;
