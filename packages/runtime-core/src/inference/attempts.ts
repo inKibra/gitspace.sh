@@ -158,21 +158,21 @@ export function withBedrockToolStreaming(model: Model<Api>, payload: unknown): u
 /** Runs attempts in this isolate: pi-ai builds and sends each model request, `searchWithModel` each web search, with
  * Claude Code's shape for a subscription. */
 export function createAttemptRunner(runner: AttemptRunnerOptions = {}): AttemptRunner {
-  const shapes = new Map<string, Promise<ClaudeCodeTransport>>();
+  // Finished shapes only: a promise made by one request never settles in another once its request ends.
+  const shapes = new Map<string, ClaudeCodeTransport>();
   return async function* run(attempt, signal) {
     signal?.throwIfAborted();
     const providers = runner.providers ? runner.providers(attempt.settings) : profileProviders(attempt.settings);
     const provider = providers.find(candidate => candidate.id === attempt.model.provider);
     if (!provider) throw new Error(`Provider ${attempt.model.provider} is not admitted by the inference profile`);
     const key = `${attempt.claude.profileId}\n${attempt.claude.sessionId}`;
-    let shaping = shapes.get(key);
-    if (!shaping) {
+    let shape = shapes.get(key);
+    if (!shape) {
+      shape = await claudeCode(attempt.claude, runner.imageTransport);
       // One shape per requesting view; a view lives as long as an admission, so a few are held at a time.
       if (shapes.size >= 64) shapes.delete(shapes.keys().next().value!);
-      shaping = claudeCode(attempt.claude, runner.imageTransport);
-      shapes.set(key, shaping);
+      shapes.set(key, shape);
     }
-    const shape = await shaping;
     const reports: Array<AttemptResponse | AttemptRequest> = [];
     let observed = false;
     const messages = attempt.method === 'webSearch' ? 1 : attempt.context.messages.length;

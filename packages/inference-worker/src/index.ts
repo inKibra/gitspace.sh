@@ -20,10 +20,12 @@ export interface InferenceWorkerEnv {
 
 setBedrockProviderModule(bedrockProviderModule);
 const upstream = globalThis.fetch.bind(globalThis);
-/** The WASM XXH64, instantiated on first use: about 7.5 GB/s, where a BigInt version hashed 64 MB/s. */
-let hasher: Promise<XXHashAPI> | undefined;
+/** The WASM XXH64, instantiated on first use: about 7.5 GB/s, where a BigInt version hashed 64 MB/s. Module state holds
+ * finished values only: a promise made by one request never settles in another once its request ends, so a request
+ * stopped while one was pending broke every later request this isolate served. */
+let hasher: XXHashAPI | undefined;
 let runner: AttemptRunner | undefined;
-let standInFetch: Promise<ClaudeCodeTransport> | undefined;
+let standInFetch: ClaudeCodeTransport | undefined;
 
 /** Images this isolate already read, by reference (a reference names its bytes' hash and size), least recently used
  * first. One loaded worker serves one workspace, so a retried attempt and the next turn send the same images again. */
@@ -74,7 +76,7 @@ function transport(env: InferenceWorkerEnv): ImageRequestTransport {
   const read = cachedImages(env);
   return async request => {
     try {
-      const wasm = await (hasher ??= xxhash());
+      const wasm = hasher ??= await xxhash();
       const { length, body } = await expandedRequest(request, read, seed => wasm.create64(seed));
       const headers = new Headers(request.headers);
       headers.set('content-length', String(length));
@@ -105,7 +107,7 @@ function interceptStandIns(env: InferenceWorkerEnv): void {
     const headers = new Headers(init?.headers ?? request.headers);
     headers.delete('content-length');
     // No Claude identity applies to these requests; the transport only writes their images in.
-    const shaped = await (standInFetch ??= claudeCode({ profileId: 'sdk', sessionId: crypto.randomUUID() }, transport(env)));
+    const shaped = standInFetch ??= await claudeCode({ profileId: 'sdk', sessionId: crypto.randomUUID() }, transport(env));
     return shaped.fetch(request.url, { method: request.method, headers, body: restored, ...(init?.signal ? { signal: init.signal } : {}) });
   };
 }
