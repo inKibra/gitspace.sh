@@ -22,7 +22,7 @@ export class BrowserRelayFixture extends DurableObject<FixtureEnv> {
     if (url.pathname === '/project-update') { const body = z.object({ projectId: z.string(), expectedRevision: z.number().int().nonnegative(), preferences: RuntimeProjectBrowserPreferencesSchema }).parse(await request.json()); return Response.json(await this.browser.setProjectSettings(body.projectId, body.expectedRevision, body.preferences)); }
     if (url.pathname === '/unpair') return Response.json(await this.browser.unpair(z.object({ pairingId: z.string().uuid() }).parse(await request.json()).pairingId));
     if (url.pathname === '/confirm') { const body = z.object({ pairingId: z.string().uuid(), fingerprint: z.string() }).parse(await request.json()); return Response.json(await this.browser.confirm(body.pairingId, body.fingerprint)); }
-    if (url.pathname === '/extension.zip') return new Response(Uint8Array.from(browserRelayArchive(url.origin)).buffer);
+    if (url.pathname === '/extension.zip') return new Response(Uint8Array.from(await browserRelayArchive(url.origin)).buffer);
     if (url.pathname === '/execute') {
       try { return Response.json(await this.browser.execute(RuntimeAccountBrowserAuthorizationSchema.parse(await request.json()))); }
       catch (error) { return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 403 }); }

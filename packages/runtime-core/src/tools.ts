@@ -208,8 +208,10 @@ const BROWSERLESS_ACTIONS: Readonly<Record<string, true>> = { chromes: true, com
 
 /** Every tool a script may call, as `tools.describe` declares it: the model's own tools are not among them. */
 export const scriptToolSources: readonly ToolDeclarationSource[] = Object.entries(contracts).filter(([name]) => !MODEL_ONLY_TOOLS.includes(name)).map(([name, item]) => ({ ...item, ...SCRIPT_DOCS[name], name: modelToolNames[name] ?? name }));
-/** What the codemode tool's description adds: the tools only scripts reach, with their first sentences. */
-const CODE_ONLY_CATALOG = `Tools only scripts call (tools.<name>(args); await tools.describe(name) returns one's TypeScript declaration and usage, tools.describe(name, op) one operation's, tools.describe() every tool a script can call):\n${toolCatalog(scriptToolSources.filter(source => CODE_ONLY_TOOLS.includes(source.name)))}`;
+/** What the codemode tool's description adds: the tools only scripts reach, with their first sentences. Built by the
+ * first `createRuntimeTools`, not at module load: it renders each listed tool's JSON Schema, about 20 ms of the account
+ * worker's startup. */
+let codeOnlyCatalog: string | undefined;
 
 /**
  * Providers require an object root, so a union of operations is published as one object: each field once, required when
@@ -271,9 +273,10 @@ export function createRuntimeTools(services: ToolServices, operations: JobServic
     try { return await run(); }
     finally { release.resolve(); if (mutations.get(conversationId) === tail) mutations.delete(conversationId); }
   }
+  const catalog = codeOnlyCatalog ??= `Tools only scripts call (tools.<name>(args); await tools.describe(name) returns one's TypeScript declaration and usage, tools.describe(name, op) one operation's, tools.describe() every tool a script can call):\n${toolCatalog(scriptToolSources.filter(source => CODE_ONLY_TOOLS.includes(source.name)))}`;
   const tools: ToolRegistration[] = Object.entries(contracts).map(([name, contract]) => defineTool({
     // `name` stays the dispatch identity (signed browser envelopes, approvals, policies); only models see the alias.
-    name: modelToolNames[name] ?? name, description: name === 'codemode' ? `${contract.description}\n\n${CODE_ONLY_CATALOG}` : contract.description, ...(MODEL_ONLY_TOOLS.includes(name) ? { callers: ['model'] as const } : {}),
+    name: modelToolNames[name] ?? name, description: name === 'codemode' ? `${contract.description}\n\n${catalog}` : contract.description, ...(MODEL_ONLY_TOOLS.includes(name) ? { callers: ['model'] as const } : {}),
     // JSON Schema is derived from the parser owner, without pretending it has a static TypeBox type.
     parameters: runtimeToolParameters(contract.schema),
     // Preserve the owner parser's rejection semantics instead of generic model-argument coercion.

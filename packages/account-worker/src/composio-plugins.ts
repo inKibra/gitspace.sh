@@ -1,4 +1,4 @@
-import { Composio, ConnectedAccountStatuses, SessionPreset } from '@composio/core';
+import type { Composio } from '@composio/core';
 import {
   composioToolAllowed,
   type ComposioMcpMaterialization,
@@ -32,7 +32,11 @@ function requireApiKey(env: Env, accountApiKey?: string | null): string {
   return value;
 }
 
-function sdk(env: Env, accountApiKey?: string | null): Composio {
+/** `@composio/core` and the OpenAI SDK it brings load on first use, not with the worker: evaluating them took about
+ * 12 ms of its startup, and Cloudflare rejects a Worker whose startup takes over 1 s of CPU. So the module is imported
+ * here, dynamically, and its enums are written as their values (`ConnectedAccountStatuses.ACTIVE` is `'ACTIVE'`). */
+async function sdk(env: Env, accountApiKey?: string | null): Promise<Composio> {
+  const { Composio } = await import('@composio/core');
   return new Composio({ apiKey: requireApiKey(env, accountApiKey), allowTracking: false });
 }
 
@@ -48,7 +52,7 @@ export class ComposioPluginGateway implements ComposioPluginProvider {
 
   async catalog(): Promise<ComposioPluginCatalog> {
     if (!this.accountApiKey?.trim() && !this.env.COMPOSIO_API_KEY?.trim()) return { configured: false, toolkits: [] };
-    const toolkits = await sdk(this.env, this.accountApiKey).toolkits.get({ managedBy: 'composio', sortBy: 'usage', limit: 100 });
+    const toolkits = await (await sdk(this.env, this.accountApiKey)).toolkits.get({ managedBy: 'composio', sortBy: 'usage', limit: 100 });
     return {
       configured: true,
       toolkits: toolkits.map((toolkit) => ({
@@ -62,7 +66,7 @@ export class ComposioPluginGateway implements ComposioPluginProvider {
   }
 
   async authorize(principalId: string, toolkit: string, callbackUrl: string): Promise<ComposioAuthorizationStart> {
-    const composio = sdk(this.env, this.accountApiKey);
+    const composio = await sdk(this.env, this.accountApiKey);
     const session = await composio.sessions.create(principalId, {
       toolkits: [toolkit],
       manageConnections: false,
@@ -74,13 +78,13 @@ export class ComposioPluginGateway implements ComposioPluginProvider {
   }
 
   async status(connectedAccountId: string): Promise<ComposioAccountStatus> {
-    const account = await sdk(this.env, this.accountApiKey).connectedAccounts.get(connectedAccountId);
-    if (account.status === ConnectedAccountStatuses.ACTIVE && !account.isDisabled) {
+    const account = await (await sdk(this.env, this.accountApiKey)).connectedAccounts.get(connectedAccountId);
+    if (account.status === 'ACTIVE' && !account.isDisabled) {
       return { status: 'ready', message: null };
     }
-    if (account.status === ConnectedAccountStatuses.FAILED
-      || account.status === ConnectedAccountStatuses.EXPIRED
-      || account.status === ConnectedAccountStatuses.REVOKED
+    if (account.status === 'FAILED'
+      || account.status === 'EXPIRED'
+      || account.status === 'REVOKED'
       || account.isDisabled) {
       return { status: 'failed', message: account.statusReason ?? `Composio account is ${account.status.toLowerCase()}` };
     }
@@ -88,7 +92,7 @@ export class ComposioPluginGateway implements ComposioPluginProvider {
   }
 
   async tools(toolkit: string): Promise<ComposioPluginTool[]> {
-    const tools = await sdk(this.env, this.accountApiKey).tools.getRawComposioTools({ toolkits: [toolkit], important: false, limit: 1_000 });
+    const tools = await (await sdk(this.env, this.accountApiKey)).tools.getRawComposioTools({ toolkits: [toolkit], important: false, limit: 1_000 });
     return tools.map((tool) => ({
       slug: tool.slug,
       name: tool.name,
@@ -102,8 +106,8 @@ export class ComposioPluginGateway implements ComposioPluginProvider {
   async materialize(principalId: string, transport: McpComposioTransport): Promise<ComposioMcpMaterialization> {
     const enabled = (await this.tools(transport.toolkit)).filter((tool) => composioToolAllowed(transport.toolPolicy, tool)).map((tool) => tool.slug);
     if (enabled.length === 0) throw new Error('This Composio plugin has no allowed tools');
-    const session = await sdk(this.env, this.accountApiKey).sessions.create(principalId, {
-      sessionPreset: SessionPreset.DIRECT_TOOLS,
+    const session = await (await sdk(this.env, this.accountApiKey)).sessions.create(principalId, {
+      sessionPreset: 'direct_tools',
       toolkits: [transport.toolkit],
       tools: { [transport.toolkit]: { enable: enabled } },
       connectedAccounts: { [transport.toolkit]: transport.connectedAccountId },
@@ -120,6 +124,6 @@ export class ComposioPluginGateway implements ComposioPluginProvider {
   }
 
   async disconnect(connectedAccountId: string): Promise<void> {
-    await sdk(this.env, this.accountApiKey).connectedAccounts.delete(connectedAccountId);
+    await (await sdk(this.env, this.accountApiKey)).connectedAccounts.delete(connectedAccountId);
   }
 }

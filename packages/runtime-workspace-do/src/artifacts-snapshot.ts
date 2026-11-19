@@ -1,5 +1,3 @@
-import git from 'isomorphic-git';
-import { Volume, createFsFromVolume } from 'memfs';
 import { Result, TaggedError } from 'better-result';
 import { RuntimeGitCheckpointSchema } from '@gitspace/protocol-runtime/workspace-controls';
 import { z } from 'zod';
@@ -459,9 +457,17 @@ export async function transferCommit(input: { source: { remote: string; auth: Gi
   }
 }
 
+/** isomorphic-git over a new in-memory memfs volume. Both load on first use, not with the worker: evaluating them took
+ * about 15 ms of its startup, and Cloudflare rejects a Worker whose startup takes over 1 s of CPU, so they are imported
+ * here, dynamically. */
+async function memoryGit() {
+  const [{ default: git }, { Volume, createFsFromVolume }] = await Promise.all([import('isomorphic-git'), import('memfs')]);
+  return { git, fs: createFsFromVolume(new Volume()) };
+}
+
 /** Deterministic root objects make interrupted initialization safely replayable. */
 export async function initializeArtifactsRepository(repo: Pick<ArtifactsRepo, 'info' | 'createToken' | 'revokeToken'>, input: { branch: string; workspaceId?: string }, request: ArtifactsFetch = fetch) {
-  const fs = createFsFromVolume(new Volume());
+  const { git, fs } = await memoryGit();
   const dir = '/initial';
   await git.init({ fs, dir, defaultBranch: input.branch });
   const tree = await git.writeTree({ fs, dir, tree: [] });
@@ -518,7 +524,7 @@ export async function writeArtifactsSnapshot(repo: Pick<ArtifactsRepo, 'readComm
     const parent = await readCommit(previous.worktreeCommit);
     input.mark?.('readParent');
     if (!parent || parent.treeHash !== previous.worktreeTree) throw new Error('Previous snapshot is missing or inconsistent');
-    const fs = createFsFromVolume(new Volume());
+    const { git, fs } = await memoryGit();
     const dir = '/snapshot';
     await git.init({ fs, dir });
     const oids = new Set<string>();

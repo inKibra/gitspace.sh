@@ -48,7 +48,9 @@ import { workspaceLifecycleCloudProcedures } from './account-workspace-rpc.js';
 
 const MAX_REQUEST_BYTES = 512 * 1024;
 const MAX_BATCH_ITEMS = 32;
-const CONTRACT_VERSION = contractDigest(gitspaceContract);
+/** The contract's digest, computed by the first RPC request: hashing every procedure's schemas took about 5 ms of the
+ * worker's startup at module load. */
+let contractVersion: string | undefined;
 const itemSchema = z.object({ path: z.string().min(1), input: z.unknown() });
 const envelopeSchema = z.union([
   itemSchema.extend({ v: z.literal(1) }).transform((item) => [item]),
@@ -543,7 +545,7 @@ export async function handleAccountCloudRpc(request: Request, env: Env, userId: 
     return reject(403, 'RPC_FORBIDDEN', 'Deciding as the person requires the operator.decide permission');
   }
   const handler = createFetchHandler({
-    router: accountRouter(env, userId, authorized.value.device.deviceId, env.ACCOUNT_URL), endpoint: url.pathname, maxBatchItems: MAX_BATCH_ITEMS, maxRequestBytes: MAX_REQUEST_BYTES, contractVersion: CONTRACT_VERSION, createContext: () => ({}),
+    router: accountRouter(env, userId, authorized.value.device.deviceId, env.ACCOUNT_URL), endpoint: url.pathname, maxBatchItems: MAX_BATCH_ITEMS, maxRequestBytes: MAX_REQUEST_BYTES, contractVersion: contractVersion ??= contractDigest(gitspaceContract), createContext: () => ({}),
     // Incident IDs shown to users must lead somewhere: log the cause server-side, never in the response.
     onInternalError: ({ incidentId, phase, cause, procedurePath }) => {
       console.error(JSON.stringify({ event: 'rpc_internal_error', incidentId, phase, procedurePath, message: cause instanceof Error ? cause.message : String(cause), stack: cause instanceof Error ? cause.stack : undefined }));

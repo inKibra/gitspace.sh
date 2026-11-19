@@ -187,7 +187,9 @@ Use \`codemode({ code: '...' })\`. A fresh cloud Worker isolate exposes this con
 - \`mcp.call({ name, args })\`
 
 Search before guessing names. Describe unfamiliar tools before calling them. Compose loops, filtering, joins, pagination, and bounded aggregation in one codemode execution so intermediate results stay out of model context. An empty grant set produces an empty catalog. Provider and MCP credentials are never exposed. There is no \`space\` object: older conversations used \`space.create(...)\` and similar in a removed eval tool; call \`tools.space_workspace\`, \`tools.space_goal\` and the other space_* tools instead.`);
-const GITSPACE_UI = gitSpaceSkill('gitspace-ui', UI_SKILL_DESCRIPTION, uiBlockPrompt());
+/** The `gitspace-ui` skill, built on first read: `uiBlockPrompt` renders every block component's JSON Schema, about
+ * 8 ms of the account worker's startup when built at module load. */
+let gitspaceUiSkill: string | undefined;
 
 export const DEFAULT_SKILLS: Readonly<Record<string, string>> = {
   'space-goal': SPACE_GOAL,
@@ -199,6 +201,6 @@ export const DEFAULT_SKILLS: Readonly<Record<string, string>> = {
   'workspace-services': WORKSPACE_SERVICES,
   'workspace-lifecycle': WORKSPACE_LIFECYCLE,
   'integration-code-mode': INTEGRATION_CODE_MODE,
-  'gitspace-ui': GITSPACE_UI,
+  get 'gitspace-ui'() { return gitspaceUiSkill ??= gitSpaceSkill('gitspace-ui', UI_SKILL_DESCRIPTION, uiBlockPrompt()); },
 };
 

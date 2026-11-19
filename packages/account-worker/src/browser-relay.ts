@@ -10,7 +10,6 @@ import type { BrowserChannel } from './browser-cdp.js';
 import { CdpBrowserShim, serveCdpSocket } from './browser-shim.js';
 import { RelayBrowser } from './relay-browser.js';
 import { extensionFiles, SCRIPT_TAKEN_REFUSAL } from '@gitspace/browser-extension';
-import { zipSync, strToU8 } from 'fflate';
 import { captureName, readCapture, writeCapture, type CaptureDrive } from './browser-capture.js';
 import { BROWSER_DOWNLOAD, BrowserUploads, browserRequestSigner, type BrowserDownloadUpload, type BrowserRequestFailure, type BrowserSignedRequest, type BrowserUploadDrive, type BrowserUploadStep } from './browser-upload.js';
 import type { WorkspaceDrive } from './workspace-drive.js';
@@ -24,7 +23,10 @@ import { BROWSER_EVERYTHING_MS, BROWSER_POWERS_UPDATE, BrowserEverythingRequestS
 // Adding a tab to a workspace from your Chrome's popup (`browser-workspaces.ts`).
 import { BROWSER_WORKSPACE_CHOICES, RuntimeBrowserWorkspaceChromeRequestSchema, type RuntimeBrowserWorkspaceChoice } from '@gitspace/protocol-runtime';
 
-export function browserRelayArchive(endpoint: string): Uint8Array {
+/** The extension's zip. fflate loads on first download, not with the worker: its module builds Huffman tables, about
+ * 5 ms of the worker's startup, and Cloudflare rejects a Worker whose startup takes over 1 s of CPU. */
+export async function browserRelayArchive(endpoint: string): Promise<Uint8Array> {
+  const { zipSync, strToU8 } = await import('fflate');
   return zipSync(Object.fromEntries(Object.entries(extensionFiles(endpoint)).map(([name, content]) => [name, strToU8(content)])));
 }
 /** `name` is the Chrome's one name; pairings stored before names moved to the pairing have none (see `names`). `note`
