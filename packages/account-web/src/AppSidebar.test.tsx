@@ -132,6 +132,20 @@ describe('AppSidebar selected status', () => {
     expect(html).not.toContain('Cloudflare 1234');
   });
 
+  it('keeps a long project name on one line, cut with an ellipsis before the counts, its whole name in the title', () => {
+    const status = { ...verticalSliceFixture.baseSpace.status, primaryColor: 'blue' as const };
+    const name = 'Bakery Wholesale Ordering / Supplier Portal';
+    const html = renderToStaticMarkup(<SidebarProvider persist={false}><AppSidebar
+      {...base}
+      projects={[{ id: 'long', name, baseSummary: { holder: { kind: 'cloud' }, closedAt: null, status, freshness: 'fresh' }, workspaces: [] }]}
+      deployment={null}
+    /></SidebarProvider>);
+    const [, classes, text] = /<span data-project-name="" class="([^"]*)">([^<]*)<\/span>/u.exec(html) ?? [];
+    expect(text).toBe(name);
+    expect(classes?.split(' ')).toEqual(expect.arrayContaining(['truncate', 'min-w-0']));
+    expect(html).toContain(`title="${name} · project agent · `);
+  });
+
   it('shows each workspace\'s last-message preview on its second line, the selected one\'s too, truncated in place', () => {
     const status = { ...verticalSliceFixture.baseSpace.status, primaryColor: 'blue' as const };
     const row = { projectId: 'active', branch: 'main', closedAt: null };

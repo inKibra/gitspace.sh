@@ -1356,6 +1356,20 @@ describe('workspace environment edits and stack status with no machines', () => 
     const main = history.commit([root], projectRepository, baseRepository, parentRepository, childRepository);
     const built = history.commit([main], parentRepository, childRepository);
     vi.spyOn(ArtifactsCodeStore.prototype, 'resolveRef').mockImplementation(async (repository, ref) => repository === projectRepository && ref === 'refs/heads/main' ? main : null);
+
+    // A parent just created from main, with no commits of its own, is contained in main without having merged anything:
+    // the workspace stacked on it is up to date, not "merged — restack".
+    const [freshId, onFreshId] = [`space-${crypto.randomUUID()}`, `space-${crypto.randomUUID()}`];
+    for (const [id, name] of [[freshId, 'Stack head'], [onFreshId, 'Stack member']]) {
+      await authority.putWorkspace({ id, projectId, kind: 'worktree', name, branch: name.toLowerCase().replace(' ', '-'), phase: 'code', sourceKind: 'base', sourceRef: 'main', sourceCommit: main, lifecycle: 'active', goalId: null, expectedRevision: 0 });
+      await env.USER_PROJECTS.getByName(fixture.userId).putWorkspaceLocation(id, projectId);
+    }
+    expect(await client.workspace.setRelations({ workspaceId: onFreshId, dependsOn: [], relatedTo: [], stackedOn: freshId })).toMatchObject({ status: 'ok' });
+    // Its checkout is saved at the commit it started from.
+    history.copy(`workspace-${freshId}`, root, main);
+    await seedCheckpoint(env.SPACE_AUTHORITY.getByName(`${fixture.userId}:${freshId}`), checkpointAt(freshId, 'stack-head', main));
+    expect(await position(onFreshId)).toMatchObject({ parentId: freshId, parentAhead: 0, parentMerged: 'not-merged', instruction: null });
+    expect(await runInDurableObject(env.SPACE_AUTHORITY.getByName(`${fixture.userId}:${onFreshId}`), (_instance, state) => readCloudWorkspaceBase(env, state.storage, fixture.userId, projectId, onFreshId, main))).toMatchObject({ parent: { id: freshId, merged: false } });
     const parent = env.SPACE_AUTHORITY.getByName(`${fixture.userId}:${parentId}`);
     const child = env.SPACE_AUTHORITY.getByName(`${fixture.userId}:${childId}`);
     await seedCheckpoint(parent, checkpointAt(parentId, 'review', history.commit([built], parentRepository)));

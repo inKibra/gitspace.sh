@@ -64,7 +64,7 @@ machine is asked. The same reading answers `workspace.stackStatus`.
 | --- | --- |
 | N behind | `parentAhead`: commits the parent has that the member lacks |
 | base rewritten | `baseRewritten`: the parent's history no longer holds the commit the member was built on, and the member's still does |
-| merged — restack onto *base* | `parentMerged: 'merged'`: the base branch holds the parent's tip |
+| merged — restack onto *base* | `parentMerged: 'merged'`: the parent has commits of its own (its tip is past the commit it started from) and the base branch holds its tip. A parent with no commits of its own is contained in the base it came from without having merged |
 
 "Built on" (`builtOn` in the stored comparison) starts as the merge base when a member is first compared on a parent and
 moves to each later merge base while the parent's history still holds the earlier one. When the parent's history drops
@@ -93,7 +93,8 @@ Restack is a hint: it changes what "behind" is measured against and never touche
 - Group by State and Phase draw each stack whole under its head's group; a heading counts only the workspaces whose
   own state or phase matches it, so it agrees with the filter tabs. Filters keep a stack whole while any member
   matches, the rest faded.
-- The project row is the project agent's entry: its sparkle icon with its status dot.
+- The project row is the project agent's entry: the base's status dot (its colours and pulse), a semibold name on one
+  line that truncates (the whole name in its title) and a faint hairline under it.
 - Stack on…, Remove from stack, Restack, Waits on… and Related to… pick in the list itself: a mode bar takes the nav
   slot, rows show refusals with reasons and rings, a stack applies on click (or a drop) with a landing preview, and
   waits-on and related are a draft that Done applies. Each change shows an Undo toast.

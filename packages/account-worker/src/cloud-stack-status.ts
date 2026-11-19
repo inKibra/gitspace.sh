@@ -171,12 +171,11 @@ async function readCommittedTip(env: Env, userId: string, projectId: string, wor
 
 /** Compares a stacked workspace (`child`) with its parent and the parent with the base, from the stored comparison
  * `previous` (whose `builtOn` the rewrite check starts from). */
-async function compareStack(code: HistoryReader, child: Tip, parentTip: Tip, base: Tip | null, parent: { id: string; branch: string }, baseBranch: string, previous: StackComparison | null): Promise<StackComparison> {
+async function compareStack(code: HistoryReader, child: Tip, parentTip: Tip, base: Tip | null, parent: Pick<CloudWorkspaceDefinition, 'id' | 'branch' | 'sourceCommit'>, baseBranch: string, previous: StackComparison | null): Promise<StackComparison> {
   const stack = await compareCloudHistory(code, parentTip, child);
   if (!stack.complete) throw new Error('Stack comparison is unavailable because cloud history is shallow or incomplete');
-  // A parent working on the base branch itself trivially reaches it; that is not a merge.
   let merged: StackStatus['parentMerged'] = 'not-merged';
-  if (parent.branch !== baseBranch) {
+  if (parentMerges(parent, parentTip.head, baseBranch)) {
     if (!base) merged = 'unknown';
     else {
       const comparison = await compareCloudHistory(code, parentTip, base);
@@ -201,13 +200,22 @@ async function compareStack(code: HistoryReader, child: Tip, parentTip: Tip, bas
 }
 
 /**
+ * Whether a parent at `head` can have merged into the base: it has commits of its own, its head being past the commit it
+ * started from. A parent with none (just created, or never committed) is contained in the base it was created from
+ * without having merged anything; a parent working on the base branch itself trivially reaches it.
+ */
+function parentMerges(parent: Pick<CloudWorkspaceDefinition, 'branch' | 'sourceCommit'>, head: string, baseBranch: string): boolean {
+  return parent.branch !== baseBranch && head !== parent.sourceCommit;
+}
+
+/**
  * One stacked workspace's position against its `stackedOn` parent from heads already read: the stored comparison while
  * the commits and branches it compared are unchanged, else a new one, stored for next time. Without a child or parent
  * head (a checkout only on a machine) nothing is compared and the base is not read. `readBase` reads the base tip: the
  * base workspace's checkpoint, or the project's imported base branch before that workspace has one.
  */
 async function stackPosition(authority: DurableObjectStub<ProjectAuthorityDO>, code: HistoryReader, input: {
-  workspaceId: string; child: Tip | null; parent: Pick<CloudWorkspaceDefinition, 'id' | 'name' | 'branch'>; parentTip: Tip | null; readBase(): Promise<Tip | null>; baseBranch: string;
+  workspaceId: string; child: Tip | null; parent: Pick<CloudWorkspaceDefinition, 'id' | 'name' | 'branch' | 'sourceCommit'>; parentTip: Tip | null; readBase(): Promise<Tip | null>; baseBranch: string;
   stored: { source: string; resultJson: string } | undefined;
 }): Promise<StackStatus> {
   const { child, parent, parentTip, baseBranch } = input;
@@ -220,7 +228,7 @@ async function stackPosition(authority: DurableObjectStub<ProjectAuthorityDO>, c
   const parsed = input.stored ? StackComparisonSchema.safeParse(JSON.parse(input.stored.resultJson)) : null;
   const previous = parsed?.success ? parsed.data : null;
   // The comparison depends only on these commits and branches, so it is computed once per change of any of them.
-  const source = JSON.stringify([child.head, parentTip.head, base?.head ?? null, parent.id, parent.branch, baseBranch]);
+  const source = JSON.stringify([child.head, parentTip.head, base?.head ?? null, parent.id, parent.branch, parent.sourceCommit, baseBranch]);
   if (previous && input.stored?.source === source) return status(previous);
   const comparison = await compareStack(code, child, parentTip, base, parent, baseBranch, previous);
   await authority.putStackComparison(input.workspaceId, source, JSON.stringify(comparison));
@@ -317,7 +325,7 @@ export async function readCloudWorkspaceBase(env: Env, storage: DurableObjectSto
   const target = parent ? (saved?.headCommit ? { head: saved.headCommit, repositories: [artifactsWorkspaceRepository(parent.id)] } : null) : base;
   const position = parent ? { id: parent.id, name: parent.name, branch: parent.branch } : null;
   if (!target) return { baseBranch, parent: position && { ...position, merged: false }, head: null, subject: null, behind: null, overlapping: null };
-  const source = JSON.stringify([head, target.head, parent?.branch ?? null, parent ? base?.head ?? null : null, baseBranch]);
+  const source = JSON.stringify([head, target.head, parent?.branch ?? null, parent?.sourceCommit ?? null, parent ? base?.head ?? null : null, baseBranch]);
   const stored: unknown = await storage.get('base.reading');
   let reading = stored === undefined ? null : BaseReadingSchema.parse(stored);
   if (reading?.source !== source) {
@@ -325,8 +333,7 @@ export async function readCloudWorkspaceBase(env: Env, storage: DurableObjectSto
     const [repository] = target.repositories;
     if (repository === undefined) throw new Error('The base has no repository');
     const commit = await code.readCommit(repository, target.head);
-    // A parent working on the base branch itself trivially reaches it; that is not a merge.
-    const merged = parent && parent.branch !== baseBranch && base ? (await compareCloudHistory(code, target, base)).bases.includes(target.head) : false;
+    const merged = parent && parentMerges(parent, target.head, baseBranch) && base ? (await compareCloudHistory(code, target, base)).bases.includes(target.head) : false;
     let behind: number | null = null;
     let overlapping: number | null = null;
     if (head !== null) {

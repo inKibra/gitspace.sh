@@ -31,7 +31,7 @@ import {
   DropdownSeparator,
   type IconComponent,
 } from '@gitspace/ui';
-import { Activity, Archive, ArrowDown, ArrowUp, BookOpen01, Check, ChevronRight, Columns03, DotsHorizontal, Edit03, FolderClosed, FolderPlus, GitBranch01, Hourglass03, Key01, Link03, Lock01, Plus, PuzzlePiece01, RefreshCcw01, Rocket02, Settings01, Square, Stars01, Stars02, Trash01, Zap } from '@untitledui/icons';
+import { Activity, Archive, ArrowDown, ArrowUp, BookOpen01, Check, ChevronRight, Columns03, DotsHorizontal, Edit03, FolderClosed, FolderPlus, GitBranch01, Hourglass03, Key01, Link03, Lock01, Plus, PuzzlePiece01, RefreshCcw01, Rocket02, Settings01, Square, Stars01, Trash01, Zap } from '@untitledui/icons';
 import { AnimatePresence, motion } from 'framer-motion';
 import { createContext, Fragment, useContext, useEffect, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from 'react';
 import { glyph } from './glyph.js';
@@ -112,16 +112,12 @@ const UnstackGlyph = glyph(ArrowUp);
 const WaitsGlyph = glyph(Hourglass03);
 const RelatedGlyph = glyph(Link03);
 
-/** The project row's status slot: the project agent's sparkle, with the base's status dot on its corner. Icon slots take
- * component types, so keep this type stable while context updates the accepted status. */
-function AgentGlyph({ className, size, strokeWidth }: IconComponentProps) {
+/** Icon slots take component types, so keep this type stable while context updates the accepted status. */
+function SpaceStatusGlyph({ className, size, strokeWidth }: IconComponentProps) {
   const summary = useContext(SpaceSummaryContext);
   const freshness = summary?.freshness ?? (summary?.status ? 'fresh' : 'unknown');
-  return <span className={`relative inline-flex items-center justify-center ${className ?? ''}`} style={{ width: size, height: size, color: summary?.closedAt ? undefined : ACCENT }} data-freshness={freshness}>
-    {summary?.closedAt ? <ArchiveGlyph size={size} strokeWidth={strokeWidth} /> : <>
-      <Stars02 width={size} height={size} strokeWidth={1.5} />
-      <span className="absolute -bottom-[3px] -right-[3px] inline-flex rounded-full bg-background p-px">{summary ? <WorkspaceStatusDot space={summary} /> : <StatusDot color="dim" />}</span>
-    </>}
+  return <span className={`inline-flex items-center justify-center ${className ?? ''}`} style={{ width: size, height: size }} data-freshness={freshness}>
+    {summary?.closedAt ? <ArchiveGlyph size={size} strokeWidth={strokeWidth} /> : summary ? <WorkspaceStatusDot space={summary} /> : <StatusDot color="dim" />}
   </span>;
 }
 
@@ -618,12 +614,13 @@ function ProjectRows({ project, archived: projectArchived, collapsed, onCollapse
   const ghost = spot && source ? <Ghost key={`ghost-${picker.hover}`} source={source} parent={byId.get(picker.hover ?? '')} carried={stackBelow(items, source.id).length} stacked={spot.stacked} /> : null;
   return <SidebarMenuItem>
     <SpaceSummaryContext.Provider value={baseSummary}>
-      <SidebarMenuButton className={projectArchived ? 'opacity-60' : baseReleased ? 'text-muted-foreground' : undefined} icon={AgentGlyph} isActive={baseSelected && !picker.mode} aria-description={project.error ?? undefined}
+      <SidebarMenuButton className={projectArchived ? 'opacity-60' : baseReleased ? 'text-muted-foreground' : undefined} icon={SpaceStatusGlyph} isActive={baseSelected && !picker.mode} aria-description={project.error ?? undefined}
         title={stacking ? 'Move to the top level' : [baseSummary ? `${project.name} · project agent · ${summaryLabel(baseSummary)}${baseReleased ? ' · released' : ''}` : project.lifecycle === 'cloud-only' ? 'Saved in your account · no checkout' : `${project.name} · Status unknown`, project.error].filter(Boolean).join(' · ')}
         onClick={() => { if (!picker.mode) onSelectProject?.(project.id); else if (stacking) picker.pick('top'); }}
         onMouseEnter={() => { if (stacking) picker.setHover('top'); }} onMouseLeave={() => { if (stacking) picker.setHover(null); }}
         onDragOver={(event) => { if (stacking) event.preventDefault(); }} onDrop={(event) => { if (!stacking || !picker.dragging) return; event.preventDefault(); picker.pick('top'); picker.setDragging(null); }}>
-        <span className="font-semibold">{project.name}</span>
+        {/* One line: a long name gives way with an ellipsis (the whole name is the row's title), never the counts. */}
+        <span data-project-name="" className="min-w-0 truncate font-semibold">{project.name}</span>
         {stacking ? <span className="ml-1.5 text-[11px] font-normal" style={{ color: ACCENT }}>top level</span> : <StateCounts items={items} />}
         {project.operations?.length ? <ProjectOperationsGlyph operations={project.operations} /> : null}{project.remote?.behind ? <BehindOriginGlyph branch={base?.branch ?? null} /> : null}{baseReleased ? <span className="ml-1 truncate text-caption text-muted-foreground/70">· released</span> : null}
       </SidebarMenuButton>
