@@ -50,7 +50,7 @@ describe('runtime to existing shell adapter', () => {
   function listed(id: string, status: InputOf<typeof SpaceViewCodec>['workspaces'][number]['status'] = idle): InputOf<typeof SpaceViewCodec>['workspaces'][number] {
     return {
       id, projectId: project.id, projectName: project.name, name: id, branch: id, rootPath: '', phase: 'code', closedAt: null, status,
-      relations: { dependsOn: [], relatedTo: [], stackedOn: null }, stack: { blockedBy: [], blocking: [], findings: [] },
+      relations: { dependsOn: [], relatedTo: [], stackedOn: null }, stack: { waitsOn: [], blocks: [], findings: [], position: null },
     };
   }
 
@@ -58,16 +58,16 @@ describe('runtime to existing shell adapter', () => {
     const parent = { ...workspace, id: 'parent', name: 'Parent' };
     const saved = {
       ...listed(workspace.id),
-      relations: { dependsOn: ['parent'], relatedTo: ['related'], stackedOn: 'parent' },
-      stack: { blockedBy: ['parent'], blocking: ['child'], findings: [{ code: 'dependency-open' as const, message: 'Blocked by Parent (code)', workspaceId: 'parent' }] },
+      relations: { dependsOn: ['related'], relatedTo: [], stackedOn: 'parent' },
+      stack: { waitsOn: ['related'], blocks: ['child'], findings: [{ code: 'ahead-of-parent' as const, message: 'Ahead of its parent: in Code while Parent, which it is stacked on, is in Plan', workspaceId: 'parent' }], position: { parentId: 'parent', parentBranch: 'parent', baseBranch: 'main', mergeBase: null, parentAhead: 3, parentMerged: 'not-merged' as const, baseRewritten: false, instruction: null } },
     };
     const scope = runtimeScope(fixture(), { ...inspection, workspaces: [workspace, parent] }, { baseSpace: listedBase, workspaces: [saved] });
     expect(scope.workspaces.find(item => item.id === workspace.id)?.relations).toEqual(saved.relations);
     expect(scope.workspaces.find(item => item.id === workspace.id)?.stack).toEqual(saved.stack);
-    const changed = { ...saved, relations: { dependsOn: [], relatedTo: ['parent'], stackedOn: null }, stack: { blockedBy: [], blocking: [], findings: [] } };
+    const changed = { ...saved, relations: { dependsOn: [], relatedTo: ['parent'], stackedOn: null }, stack: { waitsOn: [], blocks: [], findings: [], position: null } };
     const refreshed = runtimeScope(fixture(), inspection, { baseSpace: listedBase, workspaces: [changed] });
     expect(refreshed.workspaces[0]?.relations).toEqual(changed.relations);
-    expect(refreshed.workspaces[0]?.stack.blockedBy).toEqual([]);
+    expect(refreshed.workspaces[0]?.stack).toEqual(changed.stack);
   });
 
   it('paints only the open workspace with its live status; the project and siblings keep their listed status', () => {

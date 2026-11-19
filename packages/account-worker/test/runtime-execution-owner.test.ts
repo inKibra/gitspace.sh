@@ -365,6 +365,28 @@ test('agent workspace creation and phase changes run in the cloud with no machin
   expect((await authority.listWorkspaces()).find(workspace => workspace.id === 'owner-workspace')).toMatchObject({ phase: 'review' });
 });
 
+test('the agent\'s space_phase keeps the phase rule: it never moves past the workspace it is stacked on', async () => {
+  const projectId = 'phase-rule-owner';
+  await env.CREDENTIALS.getByName(env.ACCOUNT_ID).bootstrap({ userId: env.ACCOUNT_ID, rootPublicKey: env.AUTH_PUBLIC_KEY, vaultKey: credentialProtocolBase64.encode(new Uint8Array(32).fill(19)) });
+  const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`);
+  const project = await authority.bootstrap({ id: projectId, name: 'Phase rule owner', repositoryReference: null, baseBranch: 'main', createdBy: 'test' });
+  await env.USER_PROJECTS.getByName(env.ACCOUNT_ID).put(await authority.setProjectLifecycle(project.revision, 'active'));
+  for (const [id, name] of [['phase-parent', 'Billing export'], ['phase-member', 'Billing UI']]) {
+    await authority.putWorkspace({ id, projectId, kind: 'worktree', name, branch: id, phase: 'code', sourceKind: 'base', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
+  }
+  expect(await authority.setWorkspaceRelations('phase-member', { dependsOn: [], relatedTo: [], stackedOn: 'phase-parent' })).toMatchObject({ status: 'ok' });
+  await runInDurableObject(env.SPACE_AUTHORITY.getByName(`phase-rule:${crypto.randomUUID()}`), async (_instance, ctx) => {
+    const { runtime, invoke, text } = await ownerFixture(ctx, RuntimeIdentitySchema.parse({ projectId, workspaceId: 'phase-member' }));
+    try {
+      const refused = await invoke('space_phase', { phase: 'review' });
+      expect(refused.status).toBe('failed');
+      expect(text(refused)).toContain("Billing UI can't move to Review: it is stacked on Billing export, which is in Code. Move Billing export forward first, or unstack Billing UI.");
+      expect((await runtime.harness.snapshot(WorkspaceDoc, BACKGROUND_CONTEXT))?.phase).not.toBe('review');
+    } finally { await runtime.snapshot(); await runtime.harness.close(BACKGROUND_CONTEXT); }
+  });
+  expect((await authority.getWorkspace('phase-member'))?.phase).toBe('code');
+});
+
 test('agents write and edit their own workspace artifacts through drive:// in the cloud', async () => {
   const projectId = 'artifact-project';
   const workspaceId = 'artifact-workspace';

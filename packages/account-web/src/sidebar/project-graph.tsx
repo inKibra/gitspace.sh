@@ -2,10 +2,9 @@ import type { StackStatus } from '@gitspace/protocol';
 import type { PullRequestState } from '@gitspace/protocol/automations-contract';
 import { accountLiveKey } from '@gitspace/protocol/live-notice';
 import { useResultQuery } from 'result-rpc/react';
-import { createContext, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { createContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useLiveChanges } from '../live-notices.js';
 import { rpcClient } from '../rpc-client.js';
-import { rpcErrorMessage } from '../rpc-error-message.js';
 import { useEventRefresh, useProjectChanges } from '../SynchronizationProvider.js';
 import { useRetainedQueryValue } from '../useRetainedRead.js';
 
@@ -22,11 +21,23 @@ export interface LinkedPullRequest {
   checks: PullRequestState['checks'] | null;
 }
 
+/** A workspace's relations as the sidebar reads them from the project view: what it is stacked on (merge order and
+ * branch content), what it waits on and is related to (planning labels), its branch's position against its parent
+ * (null when unstacked or unread), and, when it is already in a later phase than its parent (only possible from before
+ * the phase rule), what the project view says of that. */
+export interface GraphRelations {
+  dependsOn: readonly string[];
+  relatedTo: readonly string[];
+  stackedOn: string | null;
+  position: StackStatus | null;
+  aheadOfParent: string | null;
+}
+
 /** What the sidebar and the workspace header know of a project beyond its directory: each workspace's relations and the
  * pull requests linked to it, open and draft ones first, then merged and closed ones, each group newest link first. */
 export interface ProjectGraph {
   baseBranch: string;
-  relations: Readonly<Record<string, { dependsOn: readonly string[]; stackedOn: string | null }>>;
+  relations: Readonly<Record<string, GraphRelations>>;
   pullRequests: Readonly<Record<string, readonly LinkedPullRequest[]>>;
 }
 
@@ -53,7 +64,10 @@ function ProjectGraphReader({ projectId, onRead }: { projectId: string; onRead(p
     }
     return {
       baseBranch: viewValue.project.baseBranch,
-      relations: Object.fromEntries(viewValue.workspaces.map(workspace => [workspace.id, { dependsOn: workspace.relations.dependsOn, stackedOn: workspace.relations.stackedOn }])),
+      relations: Object.fromEntries(viewValue.workspaces.map((workspace): [string, GraphRelations] => [workspace.id, {
+        dependsOn: workspace.relations.dependsOn, relatedTo: workspace.relations.relatedTo, stackedOn: workspace.relations.stackedOn,
+        position: workspace.stack.position, aheadOfParent: workspace.stack.findings.find(finding => finding.code === 'ahead-of-parent')?.message ?? null,
+      }])),
       pullRequests,
     };
   }, [viewValue, links]);
@@ -66,33 +80,4 @@ export function useProjectGraphs(projectIds: readonly string[]): { graphs: Reado
   const [graphs, setGraphs] = useState<Readonly<Record<string, ProjectGraph>>>({});
   const readers = projectIds.map(projectId => <ProjectGraphReader key={projectId} projectId={projectId} onRead={(id, graph) => setGraphs(current => ({ ...current, [id]: graph }))} />);
   return { graphs, readers };
-}
-
-/** The git position of each listed stacked workspace against its parent: read when the list changes and again on each
- * `refresh` count (coalesced: one read at a time). The last positions stay while a read runs; a failed read keeps its
- * message until the next one succeeds. */
-export function useStackStatuses(workspaceIds: readonly string[], refresh: number | null): { statuses: ReadonlyMap<string, StackStatus>; error: string | null; retry(): void } {
-  const key = workspaceIds.join('\n');
-  const [statuses, setStatuses] = useState<ReadonlyMap<string, StackStatus>>(new Map());
-  const [error, setError] = useState<string | null>(null);
-  const latest = useRef(key);
-  latest.current = key;
-  const read = useCallback(async () => {
-    if (!key) return;
-    try {
-      const positions = await Promise.all(key.split('\n').map(async (workspaceId): Promise<[string, StackStatus]> => {
-        const result = await rpcClient.workspace.stackStatus({ workspaceId });
-        if (result.status === 'error') throw result.error;
-        return [workspaceId, result.value];
-      }));
-      if (latest.current !== key) return;
-      setStatuses(new Map(positions));
-      setError(null);
-    } catch (failure) {
-      if (latest.current === key) setError(rpcErrorMessage(failure, 'workspace.stackStatus'));
-    }
-  }, [key]);
-  useEffect(() => { void read(); }, [read]);
-  useEventRefresh(refresh, read);
-  return { statuses, error, retry: () => void read() };
 }

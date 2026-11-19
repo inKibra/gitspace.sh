@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import type { CloudWorkspaceDefinition } from '@gitspace/protocol/project-authority';
 import { verticalSliceFixture } from './App.js';
 import { AppSidebar, type AppSidebarProps, type SidebarDeploymentProps, type SidebarProject } from './AppSidebar.js';
+import type { GraphRelations } from './sidebar/project-graph.js';
 
 const base: AppSidebarProps = {
   view: 'agent',
@@ -126,7 +127,7 @@ describe('AppSidebar selected status', () => {
     expect(html).toContain('title="main · Waiting"');
     expect(html).toContain('title="idle · Cloud workspace"');
     expect(html).toContain('title="legacy · Waiting"');
-    expect(html).toContain('title="Base · Waiting"');
+    expect(html).toContain('title="Active project · project agent · Waiting"');
     expect(html).not.toContain('Status unavailable');
     expect(html).not.toContain('Cloudflare 1234');
   });
@@ -166,18 +167,22 @@ describe('AppSidebar selected status', () => {
   });
 });
 
+const position = (parentId: string, parentAhead: number, extra: Partial<NonNullable<GraphRelations['position']>> = {}): GraphRelations['position'] =>
+  ({ parentId, parentBranch: `feature/${parentId}`, baseBranch: 'develop', mergeBase: null, parentAhead, parentMerged: 'not-merged', baseRewritten: false, instruction: null, ...extra });
+const stackedOn = (parent: string | null, extra: Partial<GraphRelations> = {}): GraphRelations => ({ dependsOn: [], relatedTo: [], stackedOn: parent, position: null, aheadOfParent: null, ...extra });
+
 /** A bakery's stacks: bakery-api on bakery-core (and bakery-web on bakery-api), a fork bakery-admin on bakery-core;
- * bakery-payments depends on bakery-stock. Listed out of stacking order, as the directory lists them. */
+ * bakery-payments waits on bakery-stock. Listed out of stacking order, as the directory lists them. */
 const stackedProject: SidebarProject = {
   id: 'stacks', name: 'Stacks',
   workspaces: ['bakery-web', 'bakery-payments', 'bakery-api', 'bakery-core', 'bakery-admin', 'bakery-stock'].map((id) => ({ id, projectId: 'stacks', name: id, branch: `feature/${id}`, closedAt: null, phase: id === 'bakery-payments' ? 'review' : 'code' })),
   graph: {
     baseBranch: 'develop',
     relations: {
-      'bakery-api': { dependsOn: ['bakery-core'], stackedOn: 'bakery-core' },
-      'bakery-web': { dependsOn: ['bakery-api'], stackedOn: 'bakery-api' },
-      'bakery-admin': { dependsOn: ['bakery-core'], stackedOn: 'bakery-core' },
-      'bakery-payments': { dependsOn: ['bakery-stock'], stackedOn: null },
+      'bakery-api': stackedOn('bakery-core', { position: position('bakery-core', 2) }),
+      'bakery-web': stackedOn('bakery-api', { position: position('bakery-api', 0) }),
+      'bakery-admin': stackedOn('bakery-core'),
+      'bakery-payments': stackedOn(null, { dependsOn: ['bakery-stock'] }),
     },
     pullRequests: { 'bakery-payments': [
       { number: 42, title: 'Card payments at checkout', url: null, state: 'open', checks: 'failing' },
@@ -186,44 +191,87 @@ const stackedProject: SidebarProject = {
   },
 };
 
+const renderStacks = (project: SidebarProject, selected: AppSidebarProps['selected'] = null) => renderToStaticMarkup(<SidebarProvider persist={false}><AppSidebar {...base} selected={selected} deployment={null} projects={[project]} /></SidebarProvider>);
+/** One row's markup: from its item to the end of its item. */
+const rowOf = (html: string, id: string) => {
+  const start = html.indexOf(`data-workspace="${id}"`);
+  return html.slice(start, html.indexOf('</li>', start));
+};
+
 describe('AppSidebar stacks', () => {
   it('nests each stack under the workspace it builds on, depth-first through a fork, never deeper than one level', () => {
-    const html = renderToStaticMarkup(<SidebarProvider persist={false}><AppSidebar {...base} selected={null} deployment={null} projects={[stackedProject]} /></SidebarProvider>);
+    const html = renderStacks(stackedProject);
     // Each row in sidebar order with its left inset.
     expect([...html.matchAll(/data-workspace="([^"]+)"[^>]*><button[^>]*?style="padding-left:(\d+)px"/gu)].map((match) => [match[1], Number(match[2])]))
       .toEqual([['bakery-payments', 14], ['bakery-core', 14], ['bakery-api', 30], ['bakery-web', 30], ['bakery-admin', 30], ['bakery-stock', 14]]);
-    expect(html).toContain('title="Stacked on bakery-core: it merges after it"');
-    expect(html).toContain('title="Stacked on bakery-api: it merges after it"');
-    expect(html).toContain('blocked by bakery-stock');
-    expect(html).toContain('blocking bakery-payments');
+    expect(html).toContain('title="Stacked on bakery-core: it merges after it');
+    expect(html).toContain('title="Stacked on bakery-api: it merges after it');
     // Its open pull request with failing checks first, the merged one counted after it.
     expect(html).toMatch(/data-pr-state="open"[^>]*>#42<svg[^>]*aria-label="checks fail"/u);
     expect(html).toContain('+1');
     expect(html).not.toContain('#40');
   });
 
-  it('says blocked by and blocking only while the dependency has not shipped', () => {
-    const shipped: SidebarProject = { ...stackedProject, workspaces: stackedProject.workspaces.map((workspace) => workspace.id === 'bakery-stock' ? { ...workspace, phase: 'ship' } : workspace) };
-    const html = renderToStaticMarkup(<SidebarProvider persist={false}><AppSidebar {...base} selected={null} deployment={null} projects={[shipped]} /></SidebarProvider>);
-    expect(html).not.toContain('blocked by');
-    expect(html).not.toContain('blocking');
+  it('tags the head of a stack that has members, and puts "on <parent>" on the name line with the full text in its title', () => {
+    const html = renderStacks(stackedProject);
+    expect(rowOf(html, 'bakery-core')).toContain('>head</span>');
+    for (const id of ['bakery-api', 'bakery-web', 'bakery-payments', 'bakery-stock']) expect(rowOf(html, id)).not.toContain('>head</span>');
+    const api = rowOf(html, 'bakery-api');
+    // After the name and before the phase pips that open the second line; it gives way before the name does.
+    expect(api.indexOf('>bakery-api</span>')).toBeLessThan(api.indexOf('>on bakery-core</span>'));
+    expect(api.indexOf('>on bakery-core</span>')).toBeLessThan(api.indexOf('aria-label="Phase: Code"'));
+    expect(api).toMatch(/shrink-\[1000\][^>]*title="Stacked on bakery-core: it merges after it\. 2 commits behind bakery-core\. to take it in: git rebase feature\/bakery-core"/u);
+    // How far behind sits on the second line; the row's title says it all.
+    expect(api.indexOf('aria-label="Phase: Code"')).toBeLessThan(api.indexOf('title="2 commits behind bakery-core">2 behind</span>'));
+    expect(api).toContain('title="feature/bakery-api · Status unknown · on bakery-core · 2 behind"');
+    // Up to date: no marker.
+    expect(rowOf(html, 'bakery-web')).not.toContain(' behind</span>');
   });
 
-  it('shows each workspace once, in the same order with one open, its stacked row carrying its git position against its parent', () => {
+  it('marks a merged parent before a rewritten base before commits behind, and a legacy member ahead of its parent as a warning', () => {
+    const ahead = 'Ahead of its parent: in Review while bakery-core, which it is stacked on, is in Code';
+    const html = renderStacks({ ...stackedProject, graph: { baseBranch: 'develop', pullRequests: {}, relations: {
+      'bakery-api': stackedOn('bakery-core', { position: position('bakery-core', 4, { parentMerged: 'merged', baseRewritten: true }) }),
+      'bakery-web': stackedOn('bakery-api', { position: position('bakery-api', 3, { baseRewritten: true }) }),
+      'bakery-admin': stackedOn('bakery-core', { position: position('bakery-core', 0), aheadOfParent: ahead }),
+    } } });
+    const api = rowOf(html, 'bakery-api');
+    expect(api).toContain('>merged — restack onto develop</span>');
+    expect(api).not.toContain('base rewritten');
+    expect(api).not.toContain('4 behind');
+    const web = rowOf(html, 'bakery-web');
+    expect(web).toContain('>base rewritten</span>');
+    expect(web).not.toContain('3 behind');
+    const admin = rowOf(html, 'bakery-admin');
+    expect(admin).toMatch(new RegExp(`title="${ahead}"[^>]*>ahead of its parent</span>`, 'u'));
+  });
+
+  it('says "waits on" and "blocks" as planning labels whatever the phase, never "blocked"', () => {
+    const shipped: SidebarProject = { ...stackedProject, workspaces: stackedProject.workspaces.map((workspace) => workspace.id === 'bakery-stock' ? { ...workspace, phase: 'ship' } : workspace) };
+    for (const html of [renderStacks(stackedProject), renderStacks(shipped)]) {
+      expect(rowOf(html, 'bakery-payments')).toContain('waits on bakery-stock');
+      expect(rowOf(html, 'bakery-stock')).toContain('blocks bakery-payments');
+      expect(html).not.toMatch(/blocked by|blocking/u);
+    }
+  });
+
+  it('lists a member of an archived merged parent at the top level, still on its parent and asking to restack', () => {
+    const archivedParent = { id: 'bakery-old', projectId: 'stacks', name: 'bakery-old', branch: 'feature/bakery-old', closedAt: new Date('2026-11-01T00:00:00.000Z'), phase: 'ship' as const };
+    const html = renderStacks({ ...stackedProject, workspaces: [...stackedProject.workspaces, archivedParent], graph: { baseBranch: 'develop', pullRequests: {}, relations: {
+      'bakery-api': stackedOn('bakery-old', { position: position('bakery-old', 0, { parentMerged: 'merged' }) }),
+    } } });
+    expect(html).toMatch(/data-workspace="bakery-api"[^>]*><button[^>]*?style="padding-left:14px"/u);
+    const api = rowOf(html, 'bakery-api');
+    expect(api).toContain('>on bakery-old</span>');
+    expect(api).toContain('>merged — restack onto develop</span>');
+  });
+
+  it('shows each workspace once, in the same order with one open', () => {
     const rows = (html: string) => [...html.matchAll(/data-workspace="([^"]+)"/gu)].map((match) => match[1]);
-    const closed = renderToStaticMarkup(<SidebarProvider persist={false}><AppSidebar {...base} selected={null} deployment={null} projects={[stackedProject]} /></SidebarProvider>);
-    const html = renderToStaticMarkup(<SidebarProvider persist={false}><AppSidebar {...base} deployment={null} projects={[stackedProject]} selected={{ projectId: 'stacks', workspaceId: 'bakery-api' }}
-      stackStatuses={new Map([
-        ['bakery-api', { parentId: 'bakery-core', parentBranch: 'feature/bakery-core', baseBranch: 'develop', mergeBase: null, parentAhead: 2, parentMerged: 'not-merged', instruction: null }],
-        ['bakery-web', { parentId: 'bakery-api', parentBranch: 'feature/bakery-api', baseBranch: 'develop', mergeBase: null, parentAhead: 0, parentMerged: 'not-merged', instruction: null }],
-      ])} /></SidebarProvider>);
+    const closed = renderStacks(stackedProject);
+    const html = renderStacks(stackedProject, { projectId: 'stacks', workspaceId: 'bakery-api' });
     expect(rows(html)).toEqual(rows(closed));
     expect(new Set(rows(html)).size).toBe(rows(html).length);
-    expect(html).toContain('title="Stacked on bakery-core: it merges after it. 2 commits behind bakery-core. to take it in: git rebase feature/bakery-core"');
-    expect(html).toContain('on bakery-core · 2 behind');
-    // Up to date: the caption stays short, the position only on hover.
-    expect(html).toContain('title="Stacked on bakery-api: it merges after it. up to date with bakery-api"');
-    expect(html).not.toContain('on bakery-api · ');
   });
 });
 

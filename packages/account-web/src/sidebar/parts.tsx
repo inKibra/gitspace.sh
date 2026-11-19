@@ -6,9 +6,12 @@ import { PHASE_LABEL, PHASES, STATUS_COLOR, StatusDot, type WorkspaceView } from
 import type { LinkedPullRequest } from './project-graph.js';
 import type { StackPosition } from './StackChain.js';
 
-/** What the focused workspace waits on (violet) and what waits on it (teal); neither is a status colour. */
+/** What the focused workspace sits on or waits on (violet) and what sits on it or waits on it (teal); neither is a
+ * status colour. */
 export const UPSTREAM_TONE = '#a855f7';
 export const DOWNSTREAM_TONE = '#14b8a6';
+/** The picker's and the head tag's accent, the focus ring's blue. */
+export const ACCENT = '#6B97FF';
 
 /** A quiet tinted pill with the status dot and its written label. */
 export function StatusBadge({ color, label }: { color: WorkspaceStatusColor; label: string }) {
@@ -66,26 +69,36 @@ export function PhaseTag({ phase }: { phase: WorkspaceView['phase'] | null }) {
   </span>;
 }
 
-function names(values: readonly string[], limit: number): string {
-  const shown = values.slice(0, limit).join(', ');
-  return values.length > limit ? `${shown} +${values.length - limit}` : shown;
-}
-
-/** "↑ blocked by X, Y" and "↓ blocking Z", one or both, only while they hold; a stack parent is told by the nesting and
- * its caption instead. */
-export function DependencyText({ blockedBy, blocking }: { blockedBy: readonly string[]; blocking: readonly string[] }) {
-  if (!blockedBy.length && !blocking.length) return null;
+/** "↑ waits on X" and "↓ blocks Y", one or both: planning labels, so neither says it blocks anything from moving. */
+export function LabelText({ waits, blocks }: { waits: readonly string[]; blocks: readonly string[] }) {
+  if (!waits.length && !blocks.length) return null;
   return <span className="flex min-w-0 items-center gap-1.5 truncate">
-    {blockedBy.length ? <span className="inline-flex min-w-0 items-center gap-0.5 truncate" style={{ color: `color-mix(in oklab, ${UPSTREAM_TONE} 75%, var(--muted-foreground))` }}><ArrowNarrowUp width={11} height={11} strokeWidth={2} className="shrink-0" /><span className="truncate">blocked by {names(blockedBy, blockedBy.length > 1 && blocking.length ? 1 : 2)}</span></span> : null}
-    {blocking.length ? <span className="inline-flex min-w-0 shrink-0 items-center gap-0.5" style={{ color: `color-mix(in oklab, ${DOWNSTREAM_TONE} 75%, var(--muted-foreground))` }}><ArrowNarrowDown width={11} height={11} strokeWidth={2} className="shrink-0" />blocking {blockedBy.length ? blocking.length : names(blocking, 1)}</span> : null}
+    {waits.length ? <span className="inline-flex min-w-0 items-center gap-0.5 truncate" style={{ color: `color-mix(in oklab, ${UPSTREAM_TONE} 75%, var(--muted-foreground))` }}><ArrowNarrowUp width={11} height={11} strokeWidth={2} className="shrink-0" /><span className="truncate">waits on {waits.join(', ')}</span></span> : null}
+    {blocks.length ? <span className="inline-flex min-w-0 items-center gap-0.5 truncate" style={{ color: `color-mix(in oklab, ${DOWNSTREAM_TONE} 75%, var(--muted-foreground))` }}><ArrowNarrowDown width={11} height={11} strokeWidth={2} className="shrink-0" /><span className="truncate">blocks {waits.length ? blocks.length : blocks[0]}{!waits.length && blocks.length > 1 ? ` +${blocks.length - 1}` : ''}</span></span> : null}
   </span>;
 }
 
-/** "↳ on bakery-core · 2 behind": the workspace a stacked row builds on and merges after, with its git position
- * against it when that is read and not up to date; the full position and the command that takes it in on hover. */
+/** "↳ on bakery-core" beside a stacked row's name: the workspace it builds on and merges after. It gives way before
+ * the name does (it shrinks a thousand times faster); its title has the full text, the position and the command that
+ * takes it in. */
 export function StackCaption({ parent, position }: { parent: string; position: StackPosition | null }) {
   const title = [`Stacked on ${parent}: it merges after it`, position?.text, position?.command ? `to take it in: ${position.command}` : null].filter(Boolean).join('. ');
-  return <span className="inline-flex min-w-0 shrink items-center gap-0.5" title={title}><CornerDownRight width={11} height={11} strokeWidth={1.75} className="shrink-0" /><span className="truncate">on {parent}{position?.short ? ` · ${position.short}` : ''}</span></span>;
+  return <span className="inline-flex min-w-0 shrink-[1000] items-center gap-0.5 overflow-hidden text-[11.5px] text-muted-foreground" title={title}><CornerDownRight width={11} height={11} strokeWidth={1.75} className="shrink-0" /><span className="truncate">on {parent}</span></span>;
+}
+
+/** How a stacked branch stands against its parent, on the row's second line: "3 behind", "base rewritten", "merged —
+ * restack onto main"; then, in the warning tone, "ahead of its parent" for a member already in a later phase than its
+ * parent (only possible from before the phase rule). Nothing when up to date and in step. */
+export function StackMarker({ position, ahead }: { position: StackPosition | null; ahead: string | null }) {
+  return <>
+    {position?.short ? <span className="shrink-0" title={position.text}>{position.short}</span> : null}
+    {ahead ? <span className="shrink-0" title={ahead} style={{ color: `color-mix(in oklab, ${STATUS_COLOR.orange} 80%, var(--muted-foreground))` }}>ahead of its parent</span> : null}
+  </>;
+}
+
+/** The subtle mark on a stack's head: the root its members sit under, which merges first. */
+export function HeadTag() {
+  return <span title="Head: leads its stack and merges first" className="ml-1 shrink-0 rounded-[5px] px-1 text-[10px] font-medium leading-[14px]" style={{ color: ACCENT, background: `color-mix(in oklab, ${ACCENT} 12%, transparent)` }}>head</span>;
 }
 
 /** A group heading inside a project: its label, its count and a rule. */

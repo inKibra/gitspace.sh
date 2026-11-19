@@ -872,13 +872,13 @@ export const RuntimeWorkspaceCreateArgumentsSchema = RuntimeDispatchSelectionSch
   name: z.string().trim().min(1).max(160).describe('The workspace\'s name.'), branch: z.string().min(1).max(512).describe('Its branch, new or existing.'),
   phase: WorkspacePhaseSchema.default('plan').describe('Its first phase: plan (the default), code, review or ship.'),
   sourceKind: z.enum(['base', 'branch', 'workspace', 'pull-request']).describe('What it starts from: the project base, a branch, another workspace or a pull request.'), sourceRef: z.string().describe('Which one: the branch name, workspace id or pull request number; the base branch for base.'),
-  dependsOn: z.array(z.string().min(1)).optional().describe('Workspaces it depends on.'),
+  dependsOn: z.array(z.string().min(1)).optional().describe('Workspaces it waits on: planning labels that never block anything.'),
   goal: goalAgentDraftSchema.optional().describe('Its first goal.'), workflow: workflowAgentDraftSchema.optional().describe('Its first workflow.'), rubric: rubricAgentDraftSchema.optional().describe('Its first rubric.'),
 }).strict();
 export const RuntimeWorkspaceMutationArgumentsSchema = z.discriminatedUnion('method', [
   RuntimeWorkspaceCreateArgumentsSchema,
   RuntimeDispatchSelectionSchema.extend({ method: z.enum(['open', 'restore']).describe('open: the workspace\'s definition, refused while it is archived; restore: bring back an archived workspace.'), workspaceId: otherWorkspace, expectedGeneration: z.number().int().nonnegative().describe('The workspace\'s current generation, from get; a stale one is refused.') }).strict(),
-  RuntimeDispatchSelectionSchema.extend({ method: z.literal('setRelations').describe('Replace the workspace\'s relations.'), workspaceId: otherWorkspace, expectedRevision: z.number().int().nonnegative().describe('The workspace\'s current revision, from get; a stale one is refused.'), dependsOn: z.array(z.string()).describe('Workspaces it depends on.'), relatedTo: z.array(z.string()).describe('Workspaces related to it.'), stackedOn: z.string().nullable().describe('The workspace it is stacked on; null for none.') }).strict(),
+  RuntimeDispatchSelectionSchema.extend({ method: z.literal('setRelations').describe('Replace the workspace\'s relations.'), workspaceId: otherWorkspace, expectedRevision: z.number().int().nonnegative().describe('The workspace\'s current revision, from get; a stale one is refused.'), dependsOn: z.array(z.string()).describe('Workspaces it waits on: planning labels that never block anything.'), relatedTo: z.array(z.string()).describe('Workspaces related to it: planning labels.'), stackedOn: z.string().nullable().describe('The workspace it is stacked on (merge order and branch content), never one it is further along than; null for none.') }).strict(),
 ]);
 /** The project agent sends another workspace's main agent an instruction, as its first message or a later one: `steer`
  * (the default) brings it into a running turn at its next tool boundary, `queue` runs it after that turn ends. The turn

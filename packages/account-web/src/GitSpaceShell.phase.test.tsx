@@ -3,7 +3,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { verticalSliceFixture } from './App.js';
-import { GitSpaceShell } from './GitSpaceShell.js';
+import { GitSpaceShell, type GitSpaceShellProps, type WorkspaceView } from './GitSpaceShell.js';
 
 let root: Root;
 let container: HTMLDivElement;
@@ -25,22 +25,42 @@ afterEach(async () => {
   if (!animationDescriptor) Reflect.deleteProperty(Element.prototype, 'getAnimations');
 });
 
-it('keeps the phase and shows the server’s refusal when a phase would pass what the workspace depends on', async () => {
-  const refusal = 'Phase review is ahead of relay-hardening (code); a workspace cannot pass the phase of what it depends on';
-  const onSetWorkspacePhase = vi.fn(async () => { throw new Error(refusal); });
-  await act(() => root.render(<GitSpaceShell {...verticalSliceFixture} onSetWorkspacePhase={onSetWorkspacePhase} />));
+// agent-blame (Code) is stacked on relay-hardening (Review), and follow-up (Code) is stacked on agent-blame.
+const [open, parent] = verticalSliceFixture.workspaces as [WorkspaceView, WorkspaceView];
+const scope: WorkspaceView = { ...open, relations: { dependsOn: [], relatedTo: [], stackedOn: parent.id } };
+const member: WorkspaceView = { ...open, id: 'workspace-d', name: 'follow-up', branch: 'follow-up', relations: { dependsOn: [], relatedTo: [], stackedOn: open.id } };
+const props: GitSpaceShellProps = { ...verticalSliceFixture, workspace: scope, workspaces: [scope, parent, member] };
+const phase = (label: string) => document.querySelector<HTMLElement>(`[role="menuitemradio"][aria-label="${label}"]`);
+const toast = () => document.querySelector<HTMLElement>('[data-stack-toast]');
+
+it('lists every phase and says why one is refused before it is chosen; a move reports with Undo', async () => {
+  const onSetWorkspacePhase = vi.fn<NonNullable<GitSpaceShellProps['onSetWorkspacePhase']>>(async () => undefined);
+  await act(() => root.render(<GitSpaceShell {...props} onSetWorkspacePhase={onSetWorkspacePhase} />));
   const trigger = container.querySelector<HTMLElement>('[aria-label="Workspace phase"]');
   expect(trigger?.textContent).toContain('Code');
   await act(() => trigger!.click());
-  const review = [...document.body.querySelectorAll<HTMLElement>('[role="option"]')].find((option) => option.textContent === 'Review');
-  expect(review).toBeDefined();
-  await act(async () => { review!.click(); });
-  expect(onSetWorkspacePhase).toHaveBeenCalledWith(verticalSliceFixture.workspace.id, 'review');
-  const refusalToast = () => container.querySelector('section[aria-label="Notifications"] [role="alert"]');
-  expect(refusalToast()?.textContent).toContain(refusal);
-  expect(container.querySelector('.workspace-workbench')?.parentElement?.textContent).not.toContain(refusal);
-  expect(container.querySelector('[aria-label="Workspace phase"]')?.textContent).toContain('Code');
+  expect(document.body.textContent).toContain('Phase · never ahead of its parent');
+  expect(phase('Code')?.getAttribute('aria-checked')).toBe('true');
+  expect(phase('Ship')?.getAttribute('aria-disabled')).toBe('true');
+  expect(document.body.textContent).toContain('Stacked on relay-hardening, which is in Review; move it forward first, or unstack this');
+  expect(phase('Plan')?.getAttribute('aria-disabled')).toBe('true');
+  expect(document.body.textContent).toContain('follow-up is in Code and stacked on this; move it back first, or unstack it');
+  await act(() => phase('Ship')!.click());
+  expect(onSetWorkspacePhase).not.toHaveBeenCalled();
+  await act(async () => phase('Review')!.click());
+  expect(onSetWorkspacePhase).toHaveBeenCalledWith(open.id, 'review', 'code');
+  expect(toast()?.textContent).toContain('agent-blame moved to Review');
+  await act(async () => Array.from(toast()!.querySelectorAll('button')).find((button) => button.textContent === 'Undo')!.click());
+  expect(onSetWorkspacePhase).toHaveBeenLastCalledWith(open.id, 'code', 'review');
+});
 
-  await act(() => refusalToast()!.querySelector<HTMLButtonElement>('button[aria-label="Dismiss"]')!.click());
-  expect(refusalToast()).toBeNull();
+it('keeps the phase and shows the server’s refusal when the server still refuses a move', async () => {
+  const refusal = 'agent-blame is in Review now, not Code; nothing was changed';
+  const onSetWorkspacePhase = vi.fn(async () => { throw new Error(refusal); });
+  await act(() => root.render(<GitSpaceShell {...props} onSetWorkspacePhase={onSetWorkspacePhase} />));
+  await act(() => container.querySelector<HTMLElement>('[aria-label="Workspace phase"]')!.click());
+  await act(async () => phase('Review')!.click());
+  expect(toast()?.getAttribute('role')).toBe('alert');
+  expect(toast()?.textContent).toContain(refusal);
+  expect(container.querySelector('[aria-label="Workspace phase"]')?.textContent).toContain('Code');
 });

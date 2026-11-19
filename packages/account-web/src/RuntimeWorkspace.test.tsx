@@ -37,10 +37,10 @@ const inspection: InspectorView = {
   artifacts: [], creation: null,
 };
 const snapshot = RuntimeSnapshotSchema.parse({ version: 1, projectId: project.id, workspaceId: workspace.id, cursor: 0, conversations: [], tasks: [], attachments: [], questions: [], documents: {} });
-const relationView = (relations: SpaceView['workspaces'][number]['relations'], blockedBy: string[]): SpaceView => ({
+const relationView = (relations: SpaceView['workspaces'][number]['relations'], waitsOn: string[]): SpaceView => ({
   project: { id: project.id, name: project.name, baseBranch: 'main', connected: true },
   baseSpace: { id: project.id, projectId: project.id, kind: 'base', name: project.name, branch: 'main', closedAt: null, status: emptyWorkspaceStatus },
-  workspaces: [{ id: workspace.id, projectId: project.id, projectName: project.name, name: workspace.name, branch: 'work', rootPath: '/work', phase: 'code', closedAt: null, status: emptyWorkspaceStatus, relations, stack: { blockedBy, blocking: [], findings: [] } }],
+  workspaces: [{ id: workspace.id, projectId: project.id, projectName: project.name, name: workspace.name, branch: 'work', rootPath: '/work', phase: 'code', closedAt: null, status: emptyWorkspaceStatus, relations, stack: { waitsOn, blocks: [], findings: [], position: null } }],
   statusError: null, operations: [],
 });
 const transcript: TranscriptHistory = { rows: [], generation: null, navigation: null, loading: false, initialLoading: false, error: null, saved: false, hasBefore: false, hasAfter: false, total: 0, refresh: vi.fn(), loadOlder: vi.fn(), loadNewer: vi.fn(), jumpToLatest: vi.fn(), jumpToRow: vi.fn(), setViewport: vi.fn(), content: vi.fn(), executionPage: vi.fn() };
@@ -64,7 +64,7 @@ beforeEach(() => {
   snapshot.conversations = [];
   snapshot.attachments = [];
   inspectEnvironment.mockReset();
-  mocks.saved = relationView({ dependsOn: ['parent'], relatedTo: [], stackedOn: 'parent' }, ['parent']);
+  mocks.saved = relationView({ dependsOn: ['parent'], relatedTo: [], stackedOn: null }, ['parent']);
   container = document.createElement('div'); document.body.append(container); root = createRoot(container);
 });
 afterEach(async () => { await act(() => root.unmount()); container.remove(); vi.unstubAllGlobals(); });
@@ -82,7 +82,7 @@ it('edits the real saved relation graph and refreshes it after accepted writes',
   expect(mocks.refresh).toHaveBeenCalled();
   expect(refreshInspection).toHaveBeenCalled();
   expect((mocks.shell as GitSpaceShellProps).workspaces[0]?.relations).toEqual(relations);
-  expect((mocks.shell as GitSpaceShellProps).workspaces[0]?.stack.blockedBy).toEqual([]);
+  expect((mocks.shell as GitSpaceShellProps).workspaces[0]?.stack.waitsOn).toEqual([]);
 });
 it('propagates rejected edits to the existing relation writer and refreshes canonical state', async () => {
   await act(render);

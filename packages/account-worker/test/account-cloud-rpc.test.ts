@@ -959,21 +959,52 @@ describe('cloud projects and workspace relations with no machines', () => {
     } });
   });
 
-  it('saves workspace relations in the cloud and derives the stack they block', async () => {
+  it('saves relations in the cloud: stacking adds no waits-on, labels never weigh phases, and the phase rule refuses with its reason', async () => {
     const fixture = await account(['rpc.read', 'rpc.write']);
     const { projectId, spaceId: parentId, authority } = await inspectorWorkspace(fixture.userId);
-    const childId = `space-${crypto.randomUUID()}`;
-    await authority.putWorkspace({ id: childId, projectId, kind: 'worktree', name: 'Child', branch: 'child', phase: 'plan', sourceKind: 'base', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
-    await env.USER_PROJECTS.getByName(fixture.userId).putWorkspaceLocation(childId, projectId);
+    const [childId, docsId] = [`space-${crypto.randomUUID()}`, `space-${crypto.randomUUID()}`];
+    for (const [id, name, phase] of [[childId, 'Child', 'plan'], [docsId, 'Docs', 'ship']] as const) {
+      await authority.putWorkspace({ id, projectId, kind: 'worktree', name, branch: name.toLowerCase(), phase, sourceKind: 'base', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
+      await env.USER_PROJECTS.getByName(fixture.userId).putWorkspaceLocation(id, projectId);
+    }
     const client = inspectorClient(fixture);
-    expect(await client.workspace.setRelations({ workspaceId: childId, dependsOn: [], relatedTo: [], stackedOn: parentId })).toMatchObject({ status: 'ok', value: {
-      id: childId, phase: 'plan', relations: { dependsOn: [parentId], relatedTo: [], stackedOn: parentId }, stack: { blockedBy: [parentId], blocking: [] },
+    const view = async () => {
+      const read = await client.space.view({ projectId, workspaceId: null });
+      if (read.status === 'error') throw read.error;
+      return new Map(read.value.workspaces.map((workspace) => [workspace.id, workspace]));
+    };
+    const stacked = { dependsOn: [], relatedTo: [], stackedOn: parentId };
+    expect(await client.workspace.setRelations({ workspaceId: childId, ...stacked })).toMatchObject({ status: 'ok', value: {
+      id: childId, phase: 'plan', relations: stacked, stack: { waitsOn: [], blocks: [], findings: [] },
     } });
-    const view = await client.space.view({ projectId, workspaceId: parentId });
-    if (view.status === 'error') throw view.error;
-    expect(view.value.workspaces.find((workspace) => workspace.id === parentId)?.stack.blocking).toEqual([childId]);
-    expect(await client.workspace.setRelations({ workspaceId: parentId, dependsOn: [childId], relatedTo: [], stackedOn: null })).toMatchObject({ status: 'error', error: { data: { code: 'WORKSPACE_DEPENDENCY_CYCLE' } } });
+    expect((await view()).get(parentId)?.stack).toMatchObject({ waitsOn: [], blocks: [], findings: [] });
+
+    // Waits-on is a planning label: Docs, in Ship, may wait on Child, in Plan.
+    expect(await client.workspace.setRelations({ workspaceId: docsId, dependsOn: [childId], relatedTo: [], stackedOn: null })).toMatchObject({ status: 'ok', value: { stack: { waitsOn: [childId], blocks: [] } } });
+    expect((await view()).get(childId)?.stack).toMatchObject({ waitsOn: [], blocks: [docsId] });
+
+    // Stacking keeps the phase rule and never closes a loop; a waits-on cycle is refused too.
+    expect(await client.workspace.setRelations({ workspaceId: docsId, dependsOn: [childId], relatedTo: [], stackedOn: childId })).toMatchObject({ status: 'error', error: { data: {
+      code: 'WORKSPACE_PHASE_RULE', message: "Docs can't stack on Child: Docs is in Ship and Child only in Plan. Move Child forward first, or move Docs back.",
+    } } });
+    expect(await client.workspace.setRelations({ workspaceId: parentId, dependsOn: [], relatedTo: [], stackedOn: childId })).toMatchObject({ status: 'error', error: { data: { code: 'WORKSPACE_STACK_CYCLE', message: "Review can't stack on Child: Child is stacked on Review" } } });
+    expect(await client.workspace.setRelations({ workspaceId: childId, dependsOn: [docsId], relatedTo: [], stackedOn: parentId })).toMatchObject({ status: 'error', error: { data: { code: 'WORKSPACE_DEPENDENCY_CYCLE' } } });
     expect(await client.workspace.setRelations({ workspaceId: childId, dependsOn: ['missing'], relatedTo: [], stackedOn: null })).toMatchObject({ status: 'error', error: { data: { code: 'WORKSPACE_NOT_FOUND' } } });
+
+    // A write over relations that changed since it was read (an Undo after another change) is refused.
+    expect(await client.workspace.setRelations({ workspaceId: childId, dependsOn: [], relatedTo: [], stackedOn: null, expected: { dependsOn: [], relatedTo: [], stackedOn: null } })).toMatchObject({ status: 'error', error: { data: { code: 'WORKSPACE_REVISION_INVALID', message: "Child's relations changed since; nothing was changed" } } });
+    expect(await client.workspace.setRelations({ workspaceId: childId, dependsOn: [], relatedTo: [], stackedOn: null, expected: stacked })).toMatchObject({ status: 'ok', value: { relations: { stackedOn: null } } });
+
+    // A stack that breaks the rule (only possible from before it) stays, reported and never forced; a row stored when
+    // stacking also added a waits-on reads back without it.
+    await runInDurableObject(authority, (_instance, state) => {
+      state.storage.sql.exec('UPDATE workspace_relations SET relations_json=? WHERE workspace_id=?', JSON.stringify({ dependsOn: [parentId], relatedTo: [], stackedOn: parentId }), childId);
+    });
+    await authority.commitWorkspacePhase(childId, 'ship');
+    const legacy = (await view()).get(childId);
+    expect(legacy?.relations).toEqual(stacked);
+    expect(legacy?.stack.findings).toEqual([{ code: 'ahead-of-parent', message: 'Ahead of its parent: in Ship while Review, which it is stacked on, is in Review', workspaceId: parentId }]);
+    expect(await client.workspace.setRelations({ workspaceId: childId, dependsOn: [], relatedTo: [docsId], stackedOn: parentId })).toMatchObject({ status: 'ok', value: { relations: { relatedTo: [docsId], stackedOn: parentId } } });
     expect(await client.space.view({ projectId, workspaceId: 'missing' })).toMatchObject({ status: 'error', error: { data: { workspaceId: 'missing' } } });
   });
 
@@ -1289,7 +1320,7 @@ describe('workspace environment edits and stack status with no machines', () => 
     const child = env.SPACE_AUTHORITY.getByName(`${fixture.userId}:${childId}`);
     await seedCheckpoint(env.SPACE_AUTHORITY.getByName(`${fixture.userId}:${parentId}`), checkpointAt(parentId, 'review', parentHead));
     await seedCheckpoint(child, checkpointAt(childId, 'child', childHead));
-    expect(await stack(childId)).toEqual({ parentId, parentBranch: 'review', baseBranch: 'main', mergeBase: fork, parentAhead: 2, parentMerged: 'not-merged', instruction: "You merge after Review. Its branch has 2 commits yours doesn't. If you want to build on them: `git rebase review`. Optional." });
+    expect(await stack(childId)).toEqual({ parentId, parentBranch: 'review', baseBranch: 'main', mergeBase: fork, parentAhead: 2, parentMerged: 'not-merged', baseRewritten: false, instruction: "You merge after Review. Its branch has 2 commits yours doesn't. If you want to build on them: `git rebase review`. Optional." });
 
     // Merging the parent into the child reaches its commits only through a second parent.
     history.copy(childRepository, second, parentHead);
@@ -1299,10 +1330,59 @@ describe('workspace environment edits and stack status with no machines', () => 
     // The base workspace's checkpoint, not the imported branch, says whether the parent landed.
     history.copy(baseRepository, fork, second, parentHead);
     await seedCheckpoint(env.SPACE_AUTHORITY.getByName(`${fixture.userId}:${projectId}`), checkpointAt(projectId, 'main', history.commit([main, parentHead], baseRepository)));
-    expect(await stack(childId)).toMatchObject({ parentAhead: 0, parentMerged: 'merged', instruction: 'Review merged into main. If you want your branch to hold only your own commits: `git rebase --onto main review`. Optional.' });
+    expect(await stack(childId)).toMatchObject({ parentAhead: 0, parentMerged: 'merged', instruction: 'Review merged into main: restacking onto main (unstacking this workspace) measures it against main. If you want your branch to hold only your own commits: `git rebase --onto main review`. Optional.' });
 
-    expect(await stack(parentId)).toEqual({ parentId: null, parentBranch: null, baseBranch: 'main', mergeBase: null, parentAhead: 0, parentMerged: 'unknown', instruction: null });
+    expect(await stack(parentId)).toEqual({ parentId: null, parentBranch: null, baseBranch: 'main', mergeBase: null, parentAhead: 0, parentMerged: 'unknown', baseRewritten: false, instruction: null });
     expect(await client.workspace.stackStatus({ workspaceId: 'missing' })).toMatchObject({ status: 'error', error: { _tag: rpcErrors.workspaceNotFound.tag, data: { workspaceId: 'missing' } } });
+  });
+
+  it('publishes each stacked workspace\'s state in the project view (behind, base rewritten, merged), and Restack after a merge unstacks it', async () => {
+    const fixture = await account(['rpc.read', 'rpc.write']);
+    const { projectId, spaceId: parentId, authority } = await inspectorWorkspace(fixture.userId);
+    const childId = `space-${crypto.randomUUID()}`;
+    await authority.putWorkspace({ id: childId, projectId, kind: 'worktree', name: 'Child', branch: 'child', phase: 'code', sourceKind: 'base', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
+    await env.USER_PROJECTS.getByName(fixture.userId).putWorkspaceLocation(childId, projectId);
+    const client = inspectorClient(fixture);
+    const stacked = { dependsOn: [], relatedTo: [], stackedOn: parentId };
+    expect(await client.workspace.setRelations({ workspaceId: childId, ...stacked })).toMatchObject({ status: 'ok' });
+    const position = async (workspaceId: string) => {
+      const read = await client.space.view({ projectId, workspaceId: null });
+      if (read.status === 'error') throw read.error;
+      return read.value.workspaces.find((workspace) => workspace.id === workspaceId)?.stack.position;
+    };
+    const [projectRepository, baseRepository, parentRepository, childRepository] = [`project-${projectId}`, `workspace-${projectId}`, `workspace-${parentId}`, `workspace-${childId}`];
+    const history = artifactsHistory();
+    const root = history.commit([], projectRepository, baseRepository, parentRepository, childRepository);
+    const main = history.commit([root], projectRepository, baseRepository, parentRepository, childRepository);
+    const built = history.commit([main], parentRepository, childRepository);
+    vi.spyOn(ArtifactsCodeStore.prototype, 'resolveRef').mockImplementation(async (repository, ref) => repository === projectRepository && ref === 'refs/heads/main' ? main : null);
+    const parent = env.SPACE_AUTHORITY.getByName(`${fixture.userId}:${parentId}`);
+    const child = env.SPACE_AUTHORITY.getByName(`${fixture.userId}:${childId}`);
+    await seedCheckpoint(parent, checkpointAt(parentId, 'review', history.commit([built], parentRepository)));
+    await seedCheckpoint(child, checkpointAt(childId, 'child', history.commit([built], childRepository)));
+    expect(await position(childId)).toEqual({ parentId, parentBranch: 'review', baseBranch: 'main', mergeBase: built, parentAhead: 1, parentMerged: 'not-merged', baseRewritten: false, instruction: "You merge after Review. Its branch has 1 commit yours doesn't. If you want to build on them: `git rebase review`. Optional." });
+    expect(await position(parentId)).toBeNull();
+
+    // The parent rewrites the commit the child was built on: its history no longer holds it, the child's still does.
+    const rewritten = history.commit([main], parentRepository);
+    await seedCheckpoint(parent, checkpointAt(parentId, 'review', rewritten));
+    const rewrite = { mergeBase: main, parentAhead: 1, parentMerged: 'not-merged', baseRewritten: true, instruction: `Review rewrote the commits your branch was built on. If you want your branch on its new history: \`git rebase --onto review ${built}\`. Optional.` };
+    expect(await position(childId)).toMatchObject(rewrite);
+    expect(await client.workspace.stackStatus({ workspaceId: childId })).toMatchObject({ status: 'ok', value: rewrite });
+
+    // The child rebases onto the new history: it is built on the parent's new commit.
+    history.copy(childRepository, rewritten);
+    await seedCheckpoint(child, checkpointAt(childId, 'child', history.commit([rewritten], childRepository)));
+    expect(await position(childId)).toMatchObject({ mergeBase: rewritten, parentAhead: 0, baseRewritten: false, instruction: null });
+
+    // The base merges the parent; Restack unstacks the child, and its Base line measures against the base branch.
+    history.copy(baseRepository, rewritten);
+    const merge = history.commit([main, rewritten], baseRepository);
+    await seedCheckpoint(env.SPACE_AUTHORITY.getByName(`${fixture.userId}:${projectId}`), checkpointAt(projectId, 'main', merge));
+    expect(await position(childId)).toMatchObject({ parentMerged: 'merged', baseRewritten: false });
+    expect(await client.workspace.setRelations({ workspaceId: childId, dependsOn: [], relatedTo: [], stackedOn: null, expected: stacked })).toMatchObject({ status: 'ok', value: { relations: { stackedOn: null }, stack: { position: null } } });
+    expect(await position(childId)).toBeNull();
+    expect(await runInDurableObject(child, (_instance, state) => readCloudWorkspaceBase(env, state.storage, fixture.userId, projectId, childId, null))).toMatchObject({ baseBranch: 'main', parent: null, head: merge });
   });
 
   it('reads what a workspace builds on from the cloud: the project base when unstacked, its stack parent when stacked, and whether that parent merged', async () => {

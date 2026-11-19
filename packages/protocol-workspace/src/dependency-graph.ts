@@ -1,7 +1,6 @@
 /**
- * `dependsOn` reachability shared by every writer and picker: a workspace may
- * not depend on anything that already depends on it, or the phase ceiling
- * would lock both in place.
+ * `dependsOn` (waits on) reachability shared by every writer and picker: a workspace may not wait on anything that
+ * already waits on it.
  */
 
 /** Ordered ids from `from` to `to` along `dependsOn` edges (both endpoints included), or null when `to` is not reachable. */

@@ -1,25 +1,19 @@
 /** A workspace as the sidebar's stack tree and the Relations tab's chain and graph read it: `stackedOn` is the branch it
- * builds on and merges after (always also one of `dependsOn`). */
+ * builds on and merges after; `dependsOn` what it waits on, a planning label that never includes `stackedOn`. */
 export interface GraphWorkspace { id: string; dependsOn: readonly string[]; stackedOn: string | null }
 
-/** What the focused workspace waits on (transitively) and what waits on it. */
+/** What the focused workspace sits on or waits on (transitively), and what sits on it or waits on it. */
 export interface Lit { focus: string; upstream: ReadonlySet<string>; downstream: ReadonlySet<string> }
 export type Relation = 'none' | 'focus' | 'upstream' | 'downstream' | 'unrelated';
 
-/** What a workspace waits on directly: its dependencies, its stack parent among them. */
+/** What a workspace sits on or waits on directly: its stack parent and its waits-on. */
 export function directUpstream(item: GraphWorkspace): readonly string[] {
   return item.stackedOn && !item.dependsOn.includes(item.stackedOn) ? [...item.dependsOn, item.stackedOn] : item.dependsOn;
 }
 
-/** A workspace's dependencies other than its stack parent (the nesting tells that one): what a row can say it is
- * blocked by, and the mini graph's solid edges. */
-export function waitsOn(item: GraphWorkspace): readonly string[] {
-  return item.dependsOn.filter(id => id !== item.stackedOn);
-}
-
-/** The workspaces with `id` among those dependencies: what its row can say it is blocking. */
+/** The workspaces waiting on `id`: what its row says it blocks (a planning label: it holds nothing back). */
 export function blocks(items: readonly GraphWorkspace[], id: string): readonly string[] {
-  return items.filter(item => waitsOn(item).includes(id)).map(item => item.id);
+  return items.filter(item => item.dependsOn.includes(id)).map(item => item.id);
 }
 
 function closure(start: string, next: (id: string) => readonly string[]): Set<string> {
@@ -145,7 +139,7 @@ export function laneLayout(items: readonly GraphWorkspace[], members: ReadonlySe
     for (const [id, row] of placed) nodes.push({ id, column: depth(id), row: row + offset });
     offset += Math.max(...placed.values()) + 1;
   }
-  const edges = connected.flatMap((item): LaneEdge[] => waitsOn(item).filter(from => members.has(from)).map((from): LaneEdge => ({ from, to: item.id, kind: 'depends' }))
+  const edges = connected.flatMap((item): LaneEdge[] => item.dependsOn.filter(from => members.has(from)).map((from): LaneEdge => ({ from, to: item.id, kind: 'depends' }))
     .concat(item.stackedOn && members.has(item.stackedOn) ? [{ from: item.stackedOn, to: item.id, kind: 'stacked' }] : []));
   return { nodes, edges, columns: nodes.length ? Math.max(...nodes.map(node => node.column)) + 1 : 0 };
 }

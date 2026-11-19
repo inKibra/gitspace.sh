@@ -33,7 +33,7 @@ import { DEVICE_AUTHORITY_UNAVAILABLE, deviceAuthority, withDeviceAuthority } fr
 import type { CredentialVaultDO } from './application.js';
 import type { SpaceAuthorityDO } from './space-authority.js';
 import type { FleetCatalogDO } from './fleet-catalog.js';
-import { WorkspaceDomainError, WorkspaceRelationsSchema, WorkspaceReportSchema, resolveWorkspaceRelations, type PhaseCarrier, type WorkspaceFailure, type GitLfsSnapshot, type GitLfsObject, type GitLfsConfirmedObject, type WorkspacePhase, type WorkspaceRelations, type WorkspaceRelationsInput, type WorkspaceReport } from '@gitspace/protocol-workspace';
+import { WorkspaceDomainError, WorkspaceRelationsSchema, WorkspaceReportSchema, emptyRelations, normalizeRelations, resolveWorkspaceRelations, type PhaseCarrier, type WorkspaceFailure, type GitLfsSnapshot, type GitLfsObject, type GitLfsConfirmedObject, type WorkspacePhase, type WorkspaceRelations, type WorkspaceRelationsInput, type WorkspaceReport } from '@gitspace/protocol-workspace';
 import { GitLfsRetention, type RetainedLfsSnapshot } from './git-lfs-retention.js';
 import { confirmCloudOrigin } from './git-lfs-origin.js';
 import { gitLfsObjectKey } from './git-lfs-store.js';
@@ -1477,30 +1477,45 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
     return row ? workspaceDefinition(row) : null;
   }
 
-  /** The canonical relation graph of this project's workspaces, keyed by workspace id. */
-  /** A stacked workspace's last history comparison, as JSON, while the commits it compared (`source`) are unchanged. */
-  stackComparison(workspaceId: string, source: string): string | null {
-    return this.ctx.storage.sql.exec<{ result_json: string }>('SELECT result_json FROM stack_comparisons WHERE workspace_id=? AND source=?', workspaceId, source).toArray()[0]?.result_json ?? null;
+  /** Each stacked workspace's last history comparison, as JSON, with the commits and branches it compared (`source`):
+   * reused while they are unchanged, and the earlier reading the next comparison starts from. */
+  stackComparisons(): Record<string, { source: string; resultJson: string }> {
+    return Object.fromEntries(this.ctx.storage.sql.exec<{ workspace_id: string; source: string; result_json: string }>('SELECT workspace_id,source,result_json FROM stack_comparisons').toArray()
+      .map(row => [row.workspace_id, { source: row.source, resultJson: row.result_json }]));
   }
 
   putStackComparison(workspaceId: string, source: string, resultJson: string): void {
     this.ctx.storage.sql.exec('INSERT INTO stack_comparisons(workspace_id,source,result_json) VALUES(?,?,?) ON CONFLICT(workspace_id) DO UPDATE SET source=excluded.source,result_json=excluded.result_json', workspaceId, source, resultJson);
   }
 
+  /** The canonical relation graph of this project's workspaces, keyed by workspace id. Rows stored when stacking also
+   * added a waits-on read back without it. */
   listWorkspaceRelations(): Record<string, WorkspaceRelations> {
     return Object.fromEntries(this.ctx.storage.sql.exec<{ workspace_id: string; relations_json: string }>('SELECT workspace_id,relations_json FROM workspace_relations').toArray()
-      .map(row => [row.workspace_id, WorkspaceRelationsSchema.parse(JSON.parse(row.relations_json))]));
+      .map(row => [row.workspace_id, normalizeRelations(row.workspace_id, WorkspaceRelationsSchema.parse(JSON.parse(row.relations_json)))]));
   }
 
   /** Replaces a workspace's relations after validating them against the project's workspaces (no unknown targets, no
-   * cycles). A domain refusal is returned, not thrown, so its typed failure survives the Durable Object boundary. */
-  setWorkspaceRelations(workspaceId: string, input: WorkspaceRelationsInput): { status: 'ok'; value: WorkspaceRelations } | { status: 'error'; failure: WorkspaceFailure } {
+   * stack loop or waits-on cycle, the workspace no further along than a new stack parent). `expected`, when given, is
+   * what the writer last read: relations that changed since are refused. A domain refusal is returned, not thrown, so
+   * its typed failure survives the Durable Object boundary. */
+  setWorkspaceRelations(workspaceId: string, input: WorkspaceRelationsInput, expected?: WorkspaceRelationsInput): { status: 'ok'; value: WorkspaceRelations } | { status: 'error'; failure: WorkspaceFailure } {
     try {
       const value = this.commit('workspace', workspaceId, () => {
         const project = this.requireProject();
         if (project.lifecycle === 'archived' || project.lifecycle === 'deleting') throw new Error(`Cannot change workspace relations of a ${project.lifecycle} project`);
         const workspaces = this.listWorkspaces().filter(workspace => workspace.kind === 'worktree' && workspace.lifecycle !== 'deleting');
-        const relations = resolveWorkspaceRelations(workspaceId, input, workspaces, new Map(Object.entries(this.listWorkspaceRelations())));
+        const existing = this.listWorkspaceRelations();
+        if (expected) {
+          const current = existing[workspaceId] ?? emptyRelations();
+          const wanted = normalizeRelations(workspaceId, expected);
+          if (JSON.stringify([current.stackedOn, [...current.dependsOn].sort(), [...current.relatedTo].sort()]) !== JSON.stringify([wanted.stackedOn, [...wanted.dependsOn].sort(), [...wanted.relatedTo].sort()])) {
+            const name = workspaces.find(workspace => workspace.id === workspaceId)?.name ?? workspaceId;
+            throw new WorkspaceDomainError({ domain: 'workspace', code: 'WORKSPACE_REVISION_INVALID', message: `${name}'s relations changed since; nothing was changed`, context: { workspaceId } });
+          }
+        }
+        const carriers = workspaces.map(workspace => ({ id: workspace.id, name: workspace.name, phase: workspace.phase ?? 'plan' }));
+        const relations = resolveWorkspaceRelations(workspaceId, input, carriers, new Map(Object.entries(existing)));
         this.ctx.storage.sql.exec('INSERT INTO workspace_relations(workspace_id,relations_json) VALUES(?,?) ON CONFLICT(workspace_id) DO UPDATE SET relations_json=excluded.relations_json', workspaceId, JSON.stringify(relations));
         return relations;
       });
@@ -1641,15 +1656,19 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
     return { project, workspace: workspaceId === project.id ? this.ensureBaseWorkspace({ userId: this.env.ACCOUNT_ID, projectId: project.id }) : this.getWorkspace(workspaceId) };
   }
 
-  /** The phases a workspace's dependencies cap it at, read from its relation row and those definitions only. */
-  workspaceDependencies(workspaceId: string): PhaseCarrier[] {
-    const row = this.ctx.storage.sql.exec<{ relations_json: string }>('SELECT relations_json FROM workspace_relations WHERE workspace_id=?', workspaceId).toArray()[0];
-    const dependsOn = row ? WorkspaceRelationsSchema.parse(JSON.parse(row.relations_json)).dependsOn : [];
-    // A dependency without a phase (one written before phases existed) is at the first phase.
-    return dependsOn.flatMap(id => {
-      const dependency = this.getWorkspace(id);
-      return dependency ? [{ id: dependency.id, name: dependency.name, phase: dependency.phase ?? 'plan' }] : [];
-    });
+  /** What the phase rule weighs a workspace's phase against: the open workspace it is stacked on and the open ones
+   * stacked on it, read from relation rows and definitions only. Archived and deleting workspaces weigh nothing; one
+   * without a phase (written before phases existed) is at the first phase. */
+  workspaceStackPhases(workspaceId: string): { workspace: { id: string; name: string }; parent: PhaseCarrier | null; members: PhaseCarrier[] } {
+    const open = new Map(this.listWorkspaces().filter(workspace => workspace.kind === 'worktree' && workspace.lifecycle !== 'deleting' && workspace.lifecycle !== 'archived')
+      .map(workspace => [workspace.id, { id: workspace.id, name: workspace.name, phase: workspace.phase ?? 'plan' }]));
+    const relations = this.listWorkspaceRelations();
+    const parentId = relations[workspaceId]?.stackedOn ?? null;
+    return {
+      workspace: { id: workspaceId, name: this.getWorkspace(workspaceId)?.name ?? workspaceId },
+      parent: (parentId === null ? undefined : open.get(parentId)) ?? null,
+      members: Object.entries(relations).flatMap(([id, relation]) => relation.stackedOn === workspaceId ? open.get(id) ?? [] : []),
+    };
   }
 
   /** Records a lifecycle the workspace object has already applied to itself. Repeating a recorded lifecycle returns it. Archive ends the workspace's URLs. */

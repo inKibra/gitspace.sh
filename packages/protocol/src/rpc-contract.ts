@@ -222,16 +222,37 @@ export const SessionActivityCodec = wire.serializable((value): value is SessionA
 
 export const WorkspaceRelationsCodec = wire.serializable((value): value is WorkspaceRelations => WorkspaceRelationsSchema.safeParse(value).success, { id: 'gitspace/workspace-relations/v1', jsonSchema: WorkspaceRelationsSchema });
 export const WorkspacePhaseCodec = wire.serializable((value): value is WorkspacePhase => WorkspacePhaseSchema.safeParse(value).success, { id: 'gitspace/workspace-phase/v1', jsonSchema: WorkspacePhaseSchema });
-const workspaceRelationsRequestSchema = WorkspaceRelationsSchema.extend({ workspaceId: z.string() });
+/** `expected`, when given, is what the writer last read: a write over relations that changed since is refused (Undo
+ * takes back only its own change). */
+const workspaceRelationsRequestSchema = WorkspaceRelationsSchema.extend({ workspaceId: z.string(), expected: WorkspaceRelationsSchema.optional() });
 export const StackFindingCodec = wire.object({
   code: wire.string,
   message: wire.string,
   workspaceId: wire.nullable(wire.string),
 });
+/** Git position of a stacked workspace relative to its `stackedOn` parent, computed from the workspaces' cloud history. */
+export const StackStatusCodec = wire.object({
+  parentId: wire.nullable(wire.string),
+  parentBranch: wire.nullable(wire.string),
+  baseBranch: wire.string,
+  mergeBase: wire.nullable(wire.string),
+  parentAhead: wire.number,
+  parentMerged: wire.enum(['merged', 'not-merged', 'unknown']),
+  /** The parent's history no longer holds the commits this branch was built on (it was rewritten). */
+  baseRewritten: wire.boolean,
+  /** Information for the workspace's agent: what the parent has that this branch lacks and the optional command; null
+   * while this branch holds everything its parent has. */
+  instruction: wire.nullable(wire.string),
+});
+export type StackStatus = InputOf<typeof StackStatusCodec>;
+/** A workspace's relations as the project view reads them: its open waits-on and the open workspaces waiting on it
+ * (planning labels, which never block anything), what is wrong with its relations, and, when stacked, its branch's
+ * position against its parent (null when stacked on nothing or when cloud history can't tell). */
 export const WorkspaceStackCodec = wire.object({
-  blockedBy: wire.array(wire.string),
-  blocking: wire.array(wire.string),
+  waitsOn: wire.array(wire.string),
+  blocks: wire.array(wire.string),
   findings: wire.array(StackFindingCodec),
+  position: wire.nullable(StackStatusCodec),
 });
 export const WorkspaceViewCodec = wire.object({
   id: wire.string,
@@ -1645,19 +1666,6 @@ export const renameWorkspaceContract = gitspaceRpc
   .output(WorkspaceViewCodec)
   .errors({ WorkspaceNotFound: rpcErrors.workspaceNotFound, OperationFailed: rpcErrors.operationFailed })
   .mutation();
-/** Git position of a stacked workspace relative to its `stackedOn` parent, computed from the workspaces' cloud history. */
-export const StackStatusCodec = wire.object({
-  parentId: wire.nullable(wire.string),
-  parentBranch: wire.nullable(wire.string),
-  baseBranch: wire.string,
-  mergeBase: wire.nullable(wire.string),
-  parentAhead: wire.number,
-  parentMerged: wire.enum(['merged', 'not-merged', 'unknown']),
-  /** Information for the workspace's agent: what the parent has that this branch lacks and the optional command; null
-   * while this branch holds everything its parent has. */
-  instruction: wire.nullable(wire.string),
-});
-export type StackStatus = InputOf<typeof StackStatusCodec>;
 export const stackStatusContract = gitspaceRpc
   .procedure()
   .input(wire.object({ workspaceId: wire.string }))

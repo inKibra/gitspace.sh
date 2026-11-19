@@ -3,7 +3,7 @@ import type { CloudProjectOperation, CloudProjectSummary, CloudWorkspaceDefiniti
 import { cloudResourceId, GITSPACE_SOURCE_PROJECT_ROLE, normalizeRemoteRepositoryUrl } from '@gitspace/protocol';
 import type { RuntimeWorkspaceMutationArgumentsSchema } from '@gitspace/protocol/inspector-contract';
 import type { RuntimeGitCheckpoint, RuntimeSnapshot } from '@gitspace/protocol-runtime';
-import { assertWorkspacePhase, WorkspacePhaseSchema, type WorkspacePhase } from '@gitspace/protocol-workspace';
+import { stackOnRefusal, WorkspacePhaseSchema, type WorkspacePhase } from '@gitspace/protocol-workspace';
 import { ArtifactsCodeStore, GitDiscoveryError, artifactsProjectRepository, artifactsWorkspaceRepository, isSupportedBranchName } from '@gitspace/runtime-workspace-do';
 import { ensureProjectCodeRepository } from './account-runtime-host.js';
 import { forwardPosition, type ForwardPosition } from './cloud-stack-status.js';
@@ -42,7 +42,7 @@ export interface CloudWorkspaceRequest {
   phase?: WorkspacePhase;
   sourceKind: CloudWorkspaceDefinition['sourceKind'];
   sourceRef: string;
-  /** Extra dependencies; a `workspace` source is always also a dependency and becomes `stackedOn`. */
+  /** Workspaces it waits on (planning labels); a `workspace` source becomes `stackedOn`. */
   dependsOn?: readonly string[];
 }
 
@@ -54,11 +54,6 @@ interface ResolvedSource {
   repository: string;
   /** A source workspace's whole checkpoint, uncommitted edits included; the new workspace starts from it. */
   checkpoint: RuntimeGitCheckpoint | null;
-}
-
-/** A dependency without a phase (one written before phases existed) is at the first phase. */
-function phaseCarriers(dependencies: readonly CloudWorkspaceDefinition[]) {
-  return dependencies.map(dependency => ({ id: dependency.id, name: dependency.name, phase: dependency.phase ?? 'plan' }));
 }
 
 const failureMessage = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -332,21 +327,22 @@ export async function createCloudWorkspace(env: Env, userId: string, input: Clou
   const worktrees = (await authority.listWorkspaces()).filter(workspace => workspace.kind === 'worktree' && workspace.lifecycle !== 'deleting');
   const sourceWorkspace = findSourceWorkspace(worktrees, input);
   const sourceRef = sourceWorkspace ? sourceWorkspace.id : checkedSourceRef(project, input);
-  const dependencies = [...new Set([...(sourceWorkspace ? [sourceWorkspace.id] : []), ...(input.dependsOn ?? [])])].map(id => {
-    const dependency = worktrees.find(workspace => workspace.id === id);
-    if (!dependency) throw new Error(`Dependency workspace ${id} does not exist in project ${project.id}`);
-    return dependency;
-  });
-  assertWorkspacePhase(phase, phaseCarriers(dependencies));
+  const dependsOn = [...new Set(input.dependsOn ?? [])].filter(id => id !== sourceWorkspace?.id);
+  for (const id of dependsOn) {
+    if (!worktrees.some(workspace => workspace.id === id)) throw new Error(`Dependency workspace ${id} does not exist in project ${project.id}`);
+  }
   const workspaceId = input.id ?? cloudResourceId(name);
+  // A workspace source becomes the stack parent: the new workspace is no further along than it.
+  const refusal = sourceWorkspace ? stackOnRefusal({ id: workspaceId, name, phase }, { id: sourceWorkspace.id, name: sourceWorkspace.name, phase: sourceWorkspace.phase ?? 'plan' }) : null;
+  if (refusal) throw new Error(refusal);
   const definition = await authority.putWorkspace({
     id: workspaceId, projectId: project.id, kind: 'worktree', name, branch: input.branch, phase,
     sourceKind: input.sourceKind, sourceRef, sourceCommit: null,
     lifecycle: 'provisioning', goalId: null, expectedRevision: 0,
   });
   await env.USER_PROJECTS.getByName(userId).putWorkspaceLocation(workspaceId, project.id);
-  if (dependencies.length > 0) {
-    const related = await authority.setWorkspaceRelations(workspaceId, { dependsOn: dependencies.map(dependency => dependency.id), relatedTo: [], stackedOn: sourceWorkspace?.id ?? null });
+  if (dependsOn.length > 0 || sourceWorkspace) {
+    const related = await authority.setWorkspaceRelations(workspaceId, { dependsOn, relatedTo: [], stackedOn: sourceWorkspace?.id ?? null });
     if (related.status === 'error') throw new Error(related.failure.message);
   }
   const operation = await queueOperation(authority, { projectId: project.id, workspaceId, kind: 'workspace.create', steps: WORKSPACE_CREATE_STEPS, summary: `${name} from ${sourceWorkspace ? sourceWorkspace.name : `${input.sourceKind} ${sourceRef}`}` });
@@ -699,10 +695,10 @@ export async function dismissCloudOperation(env: Env, userId: string, projectId:
   await authority.dismissOperation(operationId);
 }
 
-/** Moves a workspace's phase within the ceiling its dependencies set: the workspace object applies it, then its
- * project records it. */
-export async function setCloudWorkspacePhase(env: Env, userId: string, identity: RuntimeIdentity, phase: WorkspacePhase): Promise<CloudWorkspaceDefinition> {
-  return env.SPACE_AUTHORITY.getByName(`${userId}:${identity.workspaceId}`).setWorkspacePhase(identity, phase);
+/** Moves a workspace's phase within the phase rule: the workspace object applies it, then its project records it.
+ * `expected` is the phase the mover last read; a phase that changed since is refused. */
+export async function setCloudWorkspacePhase(env: Env, userId: string, identity: RuntimeIdentity, phase: WorkspacePhase, expected?: WorkspacePhase): Promise<CloudWorkspaceDefinition> {
+  return env.SPACE_AUTHORITY.getByName(`${userId}:${identity.workspaceId}`).setWorkspacePhase(identity, phase, expected);
 }
 
 /** How long a caller that needs a change done before it goes on (an agent's tool call, an automation) waits for it. */
@@ -775,8 +771,6 @@ export async function changeAgentWorkspace(env: Env, identity: RuntimeIdentity, 
       return definition;
     case 'setRelations': {
       if (definition.revision !== request.expectedRevision) throw new Error(`Workspace revision conflict: expected ${request.expectedRevision}, actual ${definition.revision}`);
-      const dependsOn = new Set([...request.dependsOn, ...(request.stackedOn ? [request.stackedOn] : [])]);
-      assertWorkspacePhase(definition.phase ?? 'plan', phaseCarriers(workspaces.filter(workspace => dependsOn.has(workspace.id))));
       const related = await authority.setWorkspaceRelations(definition.id, { dependsOn: request.dependsOn, relatedTo: request.relatedTo, stackedOn: request.stackedOn });
       if (related.status === 'error') throw new Error(related.failure.message);
       return { ...definition, relations: related.value };

@@ -4,13 +4,14 @@ import { createDeviceBinding, createSignedRpcFetch, credentialProtocolBase64, si
 import { gitspaceContract } from '@gitspace/protocol/rpc-contract';
 import { createRoutedTransport } from '@gitspace/protocol/routed-transport';
 import { RuntimeAttachmentSchema, RuntimeIdentitySchema } from '@gitspace/protocol-runtime';
-import { ArtifactsCodeStore, GitDiscoveryError } from '@gitspace/runtime-workspace-do';
+import { ArtifactsCodeStore, GitDiscoveryError, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
 import { createBrowserClient } from 'result-rpc/client';
 import { HttpResponse, http } from 'msw';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Result } from 'better-result';
 import { tenantRootPrivateKey } from './setup.js';
 import { createAccountWorkspaceRuntime } from '../src/account-runtime-host.js';
+import { changeAgentWorkspace } from '../src/cloud-workspace-lifecycle.js';
 import { readCloudSpaceView } from '../src/cloud-project.js';
 import { SpaceAuthorityDO } from '../src/space-authority.js';
 import { GitHubAppDO } from '../src/github-app.js';
@@ -156,11 +157,12 @@ describe('cloud workspace lifecycle with no machines', () => {
       await reopened.harness.close(BACKGROUND_CONTEXT);
     });
 
-    // A workspace source is a dependency: its phase is the ceiling, and its repository holds the commit the child starts from.
+    // A workspace source becomes the stack parent, never a waits-on: the new workspace is no further along than it, and
+    // its repository holds the commit the child starts from.
     const ahead = await client.workspace.create({ projectId: project.id, name: 'Too far', branch: 'too-far', phase: 'code', sourceKind: 'workspace', sourceRef: workspaceId });
-    expect(ahead).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('cannot pass the phase') } } });
+    expect(ahead).toMatchObject({ status: 'error', error: { data: { message: "Too far can't stack on Cloud feature: Too far is in Code and Cloud feature only in Plan. Move Cloud feature forward first, or move Too far back." } } });
     const stacked = await ready(client.workspace.create({ projectId: project.id, name: 'Stacked', branch: 'stacked', phase: 'plan', sourceKind: 'workspace', sourceRef: 'Cloud feature' }));
-    expect(stacked.workspace).toMatchObject({ phase: 'plan', relations: { dependsOn: [workspaceId], stackedOn: workspaceId } });
+    expect(stacked.workspace).toMatchObject({ phase: 'plan', relations: { dependsOn: [], stackedOn: workspaceId } });
     expect(stacked.operation.state).toBe('succeeded');
     expect(artifacts.forks).toContainEqual({ workspaceId: stacked.workspace.id, source: `workspace-${workspaceId}` });
     expect(artifacts.setBranch).toHaveBeenCalledWith(`workspace-${stacked.workspace.id}`, 'stacked', commit('1'));
@@ -843,6 +845,52 @@ describe('cloud workspace lifecycle with no machines', () => {
       await reopened.harness.close(BACKGROUND_CONTEXT);
     });
   });
+
+  it('keeps every phase move and stack within the phase rule: the person\'s control, plan approval and the project agent\'s relations', async () => {
+    const { userId, client, project, authority, ready } = await cloudProject('Phase rule');
+    const parent = (await ready(client.workspace.create({ projectId: project.id, name: 'Billing export', branch: 'billing-export', phase: 'code', sourceKind: 'base', sourceRef: '' }))).workspace.id;
+    const member = (await ready(client.workspace.create({ projectId: project.id, name: 'Billing UI', branch: 'billing-ui', phase: 'code', sourceKind: 'workspace', sourceRef: parent }))).workspace.id;
+    const draft = (await ready(client.workspace.create({ projectId: project.id, name: 'Gift cards', branch: 'gift-cards', phase: 'plan', sourceKind: 'base', sourceRef: '' }))).workspace.id;
+    const planned = (await ready(client.workspace.create({ projectId: project.id, name: 'Gift codes', branch: 'gift-codes', phase: 'plan', sourceKind: 'workspace', sourceRef: draft }))).workspace.id;
+    const phaseOf = async (id: string) => (await authority.getWorkspace(id))?.phase;
+    const inRuntime = (workspaceId: string, body: (runtime: WorkspaceRuntime) => Promise<void>) => runInDurableObject(env.SPACE_AUTHORITY.getByName(`${userId}:${workspaceId}`), async (_instance, state) => {
+      const runtime = await createAccountWorkspaceRuntime(state, env, RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId }), async () => {}, noAttach);
+      try { await body(runtime); } finally { await runtime.wake(); await runtime.harness.close(BACKGROUND_CONTEXT); }
+    });
+
+    // The person's phase control: a member never passes the workspace it is stacked on, and that one never falls behind it.
+    await inRuntime(member, async runtime => {
+      await expect(runtime.session(undefined, { type: 'setWorkspacePhase', phase: 'review' }, true)).rejects.toThrow("Billing UI can't move to Review: it is stacked on Billing export, which is in Code. Move Billing export forward first, or unstack Billing UI.");
+    });
+    await inRuntime(parent, async runtime => {
+      await expect(runtime.session(undefined, { type: 'setWorkspacePhase', phase: 'plan' }, true)).rejects.toThrow("Billing export can't move to Plan: Billing UI is in Code and stacked on it. Move Billing UI back first, or unstack it.");
+      // A move from a phase that is no longer current (an Undo after someone else moved it) changes nothing.
+      await expect(runtime.session(undefined, { type: 'setWorkspacePhase', phase: 'review', expectedPhase: 'plan' }, true)).rejects.toThrow('Billing export is in Code now, not Plan; nothing was changed');
+      await runtime.session(undefined, { type: 'setWorkspacePhase', phase: 'review', expectedPhase: 'code' }, true);
+    });
+    await inRuntime(member, async runtime => { await runtime.session(undefined, { type: 'setWorkspacePhase', phase: 'review' }, true); });
+    expect([await phaseOf(parent), await phaseOf(member)]).toEqual(['review', 'review']);
+
+    // Approving a plan moves it to Code, refused while the workspace it is stacked on is still in Plan.
+    await inRuntime(planned, async runtime => {
+      const root = await runtime.harness.root(BACKGROUND_CONTEXT);
+      await runtime.harness.commit(async tx => {
+        const plan = await tx.doc(PlanDoc, root.id);
+        plan.status = 'proposed'; plan.questionId = 'gift-plan';
+        (await tx.doc(QuestionsDoc)).items.push({ id: 'gift-plan', conversationId: String(root.id), kind: 'approval', prompt: 'Approve this plan?', choices: [], answer: null });
+      }, BACKGROUND_CONTEXT);
+      await runtime.snapshot();
+      await expect(runtime.answer({ ...RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId: planned }), questionId: 'gift-plan', answer: { approved: true, note: 'Print the codes on the receipt.' } }, { deviceId: 'browser', canApprove: true, person: true }))
+        .rejects.toThrow("Gift codes can't move to Code: it is stacked on Gift cards, which is in Plan. Move Gift cards forward first, or unstack Gift codes.");
+    });
+    expect(await phaseOf(planned)).toBe('plan');
+
+    // The project agent's relation tool: stacking a workspace on one it is further along than is refused.
+    const revision = (await authority.getWorkspace(member))?.revision ?? 0;
+    await expect(changeAgentWorkspace(env, RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId: project.id }), { method: 'setRelations', workspaceId: member, expectedRevision: revision, dependsOn: [], relatedTo: [], stackedOn: draft }, 'project-agent'))
+      .rejects.toThrow("Billing UI can't stack on Gift cards: Billing UI is in Review and Gift cards only in Plan. Move Gift cards forward first, or move Billing UI back.");
+    expect((await authority.listWorkspaceRelations())[member]).toEqual({ dependsOn: [], relatedTo: [], stackedOn: parent });
+  }, 30_000);
 
   it('archives, restores, rebases and deletes a project in the cloud; the GitSpace project refuses archive and delete', async () => {
     const { userId, client, project, artifacts, authority, index, run, ready } = await cloudProject('Project lifecycle');

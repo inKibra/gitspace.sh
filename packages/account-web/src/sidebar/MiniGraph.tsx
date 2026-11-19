@@ -25,8 +25,9 @@ const MINI_PAD = 14;
 const MINI_GAP = 8;
 const MINI_CHIP_MAX = 150;
 
-/** The open workspace's dependency neighbourhood, layered top to bottom by depth: what it waits on above, what waits on
- * it below. Solid edges are dependencies, dashed ones stack parents. Renders nothing without relations. */
+/** The open workspace's relation neighbourhood, layered top to bottom by depth: what it sits on or waits on above, what
+ * sits on it or waits on it below. Solid edges are waits-on (planning labels), dashed ones stack parents. Renders nothing
+ * without relations. */
 export function MiniGraph({ items, open, hovered, onHover, onOpen }: MiniGraphProps) {
   const lane = laneLayout(items, neighbourhood(items, open));
   if (!lane.nodes.length) return null;

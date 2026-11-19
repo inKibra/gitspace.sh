@@ -360,7 +360,7 @@ export function createSessionControls(services: SessionControlServices) {
       case 'cycleRole': { const catalog = await services.catalog(); if (!catalog.roles.length) throw new Error('No configured inference roles'); const state = await harness.snapshot(SessionControlsDoc, target.id, ctx); const index = catalog.roles.findIndex(role => role.id === state?.role); const next = index < 0 ? command.direction === 'forward' ? 0 : catalog.roles.length - 1 : (index + (command.direction === 'forward' ? 1 : catalog.roles.length - 1)) % catalog.roles.length; const role = catalog.roles[next]!; await services.configureModel(target.id, { provider: role.provider, modelId: role.model }); await target.configure({ thinkingLevel: modelRoleThinkingSchema.parse(role.thinking) }, ctx); await mutate(draft => selectRole(draft, role.id)); break; }
       case 'setFast': await mutate(draft => { draft.fastMode = command.enabled; }); break;
       case 'setWorkspacePhase':
-        await services.setWorkspacePhase?.(command.phase);
+        await services.setWorkspacePhase?.(command.phase, command.expectedPhase);
         await harness.commit(async tx => { const workspace = await tx.doc(WorkspaceDoc); workspace.phase = command.phase; }, ctx);
         break;
       case 'setGoal': await target.commit(async tx => {

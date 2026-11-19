@@ -35,8 +35,9 @@ export type RuntimeHarnessOptions = {
   storage: Storage;
   /** Canonical phase, reapplied when opening a cloud runtime, including an existing persisted document. */
   workspacePhase?: WorkspacePhase;
-  /** Persist phase policy before a session transition or an approved plan becomes effective. */
-  setWorkspacePhase?(phase: WorkspacePhase): Promise<void>;
+  /** Persist phase policy before a session transition or an approved plan becomes effective. `expected`, when given, is
+   * the phase the mover last read; the move is refused if it changed. */
+  setWorkspacePhase?(phase: WorkspacePhase, expected?: WorkspacePhase): Promise<void>;
   models: Models;
   /** Absent until explicit inference admission; history does not require a configured provider. */
   model?: ModelRef;

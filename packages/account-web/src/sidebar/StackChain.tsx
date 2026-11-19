@@ -2,17 +2,21 @@ import type { StackStatus } from '@gitspace/protocol';
 import { StatusDot, WorkspaceStatusDot, type SpaceStatusView } from '../GitSpaceShell.js';
 import { stackOf, type GraphWorkspace } from './graph.js';
 
-/** A workspace of a stack as the chain shows it; `status` absent while it is unknown. */
-export interface ChainWorkspace extends GraphWorkspace { name: string; branch: string; status?: SpaceStatusView }
+/** A workspace of a stack as the chain shows it; `status` absent while it is unknown. `position` is its branch against
+ * the workspace it is stacked on, as the project view publishes it; null when unstacked or unread. */
+export interface ChainWorkspace extends GraphWorkspace { name: string; branch: string; status?: SpaceStatusView; position: StackStatus | null }
 
 /** A stacked workspace's git position against its parent, as information: what the parent has that it lacks, the
  * same in a few words for its sidebar row (null when up to date), and the optional command that takes it in. */
 export interface StackPosition { text: string; short: string | null; command: string | null }
 
-/** The position of a stacked workspace against `parent`; null while it is unread. */
-export function stackPosition(status: StackStatus | undefined, parent: ChainWorkspace): StackPosition | null {
+/** The position of a stacked workspace against `parent`; null while it is unread. A merged parent outranks a rewritten
+ * one, which outranks commits behind. Restack is a hint: it changes what "behind" is measured against and never touches
+ * the branch. */
+export function stackPosition(status: StackStatus | null, parent: Pick<ChainWorkspace, 'id' | 'name' | 'branch'>): StackPosition | null {
   if (!status || status.parentId !== parent.id) return null;
-  if (status.parentMerged === 'merged') return { text: `${parent.name} merged into ${status.baseBranch}`, short: `merged into ${status.baseBranch}`, command: `git rebase --onto ${status.baseBranch} ${parent.branch}` };
+  if (status.parentMerged === 'merged') return { text: `${parent.name} merged into ${status.baseBranch}; Restack measures this against ${status.baseBranch}`, short: `merged — restack onto ${status.baseBranch}`, command: `git rebase --onto ${status.baseBranch} ${parent.branch}` };
+  if (status.baseRewritten) return { text: `${parent.name} rewrote the commits this was stacked on`, short: 'base rewritten', command: null };
   if (status.parentAhead > 0) return { text: `${status.parentAhead} ${status.parentAhead === 1 ? 'commit' : 'commits'} behind ${parent.name}`, short: `${status.parentAhead} behind`, command: `git rebase ${parent.branch}` };
   return { text: `up to date with ${parent.name}`, short: null, command: null };
 }
@@ -22,14 +26,14 @@ export function stackPosition(status: StackStatus | undefined, parent: ChainWork
  * the one it is stacked on, with its git position against that parent. Renders nothing when the workspace is in no
  * stack.
  */
-export function StackChain({ items, id, baseBranch, statuses, compact, onOpen }: { items: readonly ChainWorkspace[]; id: string; baseBranch: string; statuses: ReadonlyMap<string, StackStatus>; compact: boolean; onOpen(id: string): void }) {
+export function StackChain({ items, id, baseBranch, compact, onOpen }: { items: readonly ChainWorkspace[]; id: string; baseBranch: string; compact: boolean; onOpen(id: string): void }) {
   const members = stackOf(items, id);
   if (members.length < 2) return null;
   const size = compact ? 'text-[10.5px]' : 'text-caption';
   return <ol aria-label="Stack" data-stack-chain={id} className="flex min-w-0 flex-col">
     {members.map((member, index) => {
       const parent = members.find(other => other.id === member.stackedOn);
-      const position = parent ? stackPosition(statuses.get(member.id), parent) : null;
+      const position = parent ? stackPosition(member.position, parent) : null;
       const current = member.id === id;
       return <li key={member.id} data-stack-link={member.id} className={`flex min-w-0 gap-2 rounded-md px-1.5 py-1 ${current ? 'bg-active' : ''}`}>
         <span className="w-3 shrink-0 pt-px text-right text-[10.5px] tabular-nums text-muted-foreground">{index + 1}</span>

@@ -4,6 +4,7 @@ import type { SpaceView } from '@gitspace/protocol/rpc-contract';
 import { emptyRelations, emptyStack, emptyWorkspaceStatus, validateStack, type WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
 import { gitAuthorizationHeaders } from '@gitspace/runtime-workspace-do';
 import { originAccess } from './origin-access.js';
+import { readCloudStackPositions } from './cloud-stack-status.js';
 
 /** A public remote names its default branch within this window, or the import asks for the branch. */
 const DEFAULT_BRANCH_PROBE_MS = 15_000;
@@ -121,9 +122,11 @@ export function projectOperationView(operation: CloudProjectOperation) {
 }
 
 /**
- * The project's workspaces, relations, stack and statuses, from two stored sources: the project object and the account's
- * status rows (each workspace pushes its own on change). No workspace object is read, so opening a project wakes none,
- * and one workspace's failure cannot fail the view. Statuses that cannot be read are reported in `statusError`.
+ * The project's workspaces, relations, stack and statuses, from the project object and the account's status rows (each
+ * workspace pushes its own on change), plus each stacked workspace's position against its parent: read from stored
+ * checkpoints and cloud history (`readCloudStackPositions`; no runtime opens and no machine is asked), so only stacked
+ * workspaces, their parents and the base are read. One workspace's failure cannot fail the view: statuses that cannot
+ * be read are reported in `statusError`, and a position that cannot be read is null.
  */
 export async function readCloudSpaceView(env: Env, userId: string, projectId: string): Promise<SpaceView> {
   const authority = env.PROJECT_AUTHORITY.getByName(`${userId}:${projectId}`);
@@ -143,11 +146,12 @@ export async function readCloudSpaceView(env: Env, userId: string, projectId: st
   const stacks = validateStack(worktrees.map(definition => ({
     id: definition.id, name: definition.name, phase: definition.phase ?? 'plan', closedAt: definition.archivedAt, relations: relations[definition.id] ?? emptyRelations(),
   })));
+  const positions = await readCloudStackPositions(env, userId, project, worktrees, relations);
   return {
     project: { id: project.id, name: project.name, baseBranch: project.baseBranch, connected: true },
     workspaces: worktrees.map(definition => ({
       ...listed(definition), id: definition.id, projectId, projectName: project.name, name: definition.name, branch: definition.branch, rootPath: '',
-      phase: definition.phase ?? 'plan', relations: relations[definition.id] ?? emptyRelations(), stack: stacks.get(definition.id) ?? emptyStack(),
+      phase: definition.phase ?? 'plan', relations: relations[definition.id] ?? emptyRelations(), stack: { ...stacks.get(definition.id) ?? emptyStack(), position: positions.get(definition.id) ?? null },
     })),
     baseSpace: { ...listed(base), id: base.id, projectId, kind: 'base', name: base.name, branch: base.branch },
     statusError: statusRead.error,

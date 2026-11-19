@@ -40,7 +40,7 @@ import { AUTOMATION_REQUEST_PREFIX } from './project-automations.js';
 import { workspaceTurnReportSchema, type WorkspaceTurnReport } from '@gitspace/blocks';
 import { z } from 'zod';
 import type { CloudProjectSummary, CloudWorkspaceDefinition, ProjectLifecycle, WorkspaceLifecycle } from '@gitspace/protocol';
-import { assertWorkspacePhase, type GitLfsConfirmedObject, type WorkspacePhase, type WorkspaceReport, type WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
+import { assertPhaseMove, PHASE_LABEL, type GitLfsConfirmedObject, type WorkspacePhase, type WorkspaceReport, type WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
 import { RetainedLfsSnapshotSchema } from './git-lfs-retention.js';
 import { LifecycleRunRequestSchema, LifecycleRunSchema, environmentFailure, type EnvironmentFailure, type LifecycleActor, type LifecycleMutation, type LifecycleRun, type LifecycleRunLog, type LifecycleState } from '@gitspace/protocol-environment';
 import { forwardPosition } from './cloud-stack-status.js';
@@ -834,13 +834,19 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     await this.erase({ ...current, projectLifecycle: 'deleting' });
   }
 
-  /** Moves this workspace's phase within the ceiling its dependencies set; the project records it after. */
-  async setWorkspacePhase(raw: unknown, phase: WorkspacePhase): Promise<CloudWorkspaceDefinition> {
+  /** Moves this workspace's phase within the phase rule (never ahead of the workspace it is stacked on, never behind one
+   * stacked on it); the project records it after. `expected`, when given, is the phase the mover last read: a phase
+   * that changed since is refused. Repeating the current phase is never refused. */
+  async setWorkspacePhase(raw: unknown, phase: WorkspacePhase, expected?: WorkspacePhase): Promise<CloudWorkspaceDefinition> {
     const identity = RuntimeIdentitySchema.parse(raw);
     const current = authorizeWorkspaceRuntime(await this.metadata(identity), identity, false);
     if (current.projectLifecycle === 'archived') throw new Error('Cannot write workspace for archived project');
     const project = this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${identity.projectId}`);
-    assertWorkspacePhase(phase, await project.workspaceDependencies(identity.workspaceId));
+    if (current.phase !== phase) {
+      const stack = await project.workspaceStackPhases(identity.workspaceId);
+      if (expected !== undefined && current.phase !== expected) throw new Error(`${stack.workspace.name} is in ${PHASE_LABEL[current.phase ?? 'plan']} now, not ${PHASE_LABEL[expected]}; nothing was changed`);
+      assertPhaseMove(stack.workspace, phase, stack.parent, stack.members);
+    }
     const applied = writeWorkspaceMetadata(this.ctx.storage, { ...current, phase });
     const result = await project.commitWorkspacePhase(identity.workspaceId, phase);
     const recorded = structuredClone(result);

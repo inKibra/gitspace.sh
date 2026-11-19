@@ -7,6 +7,9 @@ import { createDeviceBinding, deviceProtocolBase64, RPC_DEVICE_HEADER, signDevic
 import { mcpAccessResultSchema, type McpAccessOperation } from '@gitspace/protocol/mcp-access';
 import worker from '../src/index.js';
 import { CredentialVaultDO } from '../src/application.js';
+import { DEFAULT_SKILLS } from '@gitspace/protocol/default-skills';
+import { PHASE_RULE } from '@gitspace/protocol-workspace';
+import { scriptToolSources } from '@gitspace/runtime-core';
 import { tenantRootPrivateKey } from './setup.js';
 
 async function fixture(capabilities: DeviceCapability[], rights: Partial<DeviceInvite> = {}, enable = true) {
@@ -107,6 +110,20 @@ describe('tenant MCP authority boundary', () => {
       expect(denied).toBe(true);
       const state = await value.client.callTool({ name: 'gitspace_configuration_values_get', arguments: {} });
       expect(JSON.stringify(state)).not.toContain('forbidden');
+    } finally { await value.client.close(); }
+  });
+
+  it('states the phase rule in the space-chain skill, the space_workspace and space_phase tools, and the MCP stack tools', async () => {
+    const value = await fixture(['rpc.read', 'rpc.write']);
+    await value.client.connect(value.transport);
+    try {
+      const tools = (await value.client.listTools()).tools;
+      const texts = [
+        DEFAULT_SKILLS['space-chain'],
+        ...['space_workspace', 'space_phase'].map(name => scriptToolSources.find(source => source.name === name)?.description),
+        ...['gitspace_workspace_set_relations', 'gitspace_workspace_create'].map(name => tools.find(tool => tool.name === name)?.description),
+      ];
+      for (const text of texts) expect(text).toContain(PHASE_RULE);
     } finally { await value.client.close(); }
   });
 

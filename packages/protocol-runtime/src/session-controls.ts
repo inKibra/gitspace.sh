@@ -122,7 +122,9 @@ export const RuntimeSessionCommandSchema = z.union([
   z.object({ type: z.literal('stageAnswer'), questionId: z.string().min(1).max(512), answer: RuntimeJsonSchema }),
   z.object({ type: z.literal('unstageAnswer'), questionId: z.string().min(1).max(512) }),
   z.object({ type: z.literal('commentLookup'), turnIds: z.array(z.string().min(1)).max(256), documents: z.array(z.enum(OPEN_DOCUMENT_KINDS)).max(OPEN_DOCUMENT_KINDS.length).optional(), drivePaths: z.array(z.string().min(1).max(4096)).max(16).optional() }),
-  z.object({ type: z.literal('setWorkspacePhase'), phase: z.enum(['plan', 'code', 'review', 'ship']) }),
+  /** `expectedPhase`, when given, is the phase the person last read: a move over a phase that changed since is refused
+   * (Undo takes back only its own move). */
+  z.object({ type: z.literal('setWorkspacePhase'), phase: z.enum(['plan', 'code', 'review', 'ship']), expectedPhase: z.enum(['plan', 'code', 'review', 'ship']).optional() }),
   z.object({ type: z.literal('cycleRole'), direction: z.enum(['forward', 'backward']) }),
   z.object({ type: z.literal('setModel'), provider: z.string(), model: z.string() }),
   z.object({ type: z.literal('setThinking'), thinking: z.string().nullable() }),

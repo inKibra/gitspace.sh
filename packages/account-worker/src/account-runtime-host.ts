@@ -158,7 +158,7 @@ export async function createAccountWorkspaceRuntime(
   runtime = await createWorkspaceRuntime({
     ...inference,
     workspacePhase,
-    async setWorkspacePhase(phase) { await setCloudWorkspacePhase(env, env.ACCOUNT_ID, identity, phase); },
+    async setWorkspacePhase(phase, expected) { await setCloudWorkspacePhase(env, env.ACCOUNT_ID, identity, phase, expected); },
     /** A plan's approval or rejection becomes a `decision` entry of the workspace journal, recorded by the person's device. */
     async recordDecision(decision) {
       const owned = { projectId: identity.projectId, spaceId: identity.workspaceId };

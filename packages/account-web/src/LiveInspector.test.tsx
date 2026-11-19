@@ -21,7 +21,6 @@ vi.mock('./rpc-client.js', () => ({
   homeRpcUrl: '/rpc',
   rpcClient: {
     inspector: { overview: 'overview', artifacts: { list: 'artifacts' }, journal: { list: 'journal' }, review: { list: 'threads' } },
-    workspace: { stackStatus: 'stack' },
     automations: { list: 'automations', exceptions: { list: 'automation-exceptions' } },
     environment: { get: 'environment' },
     runtime: { snapshot: 'snapshot', session: runtimeSession },
@@ -60,7 +59,7 @@ const environment: WorkspaceEnvironmentView = {
 const scope = (possessedBy: string, generation: number): WorkspaceView => ({
   kind: 'workspace', id: 'workspace', projectId: 'project', projectName: 'Project', name: 'Work', branch: 'work', phase: 'code',
   generation, possessedBy, holder: { kind: 'cloud' }, status: emptyWorkspaceStatus, closedAt: null,
-  relations: { dependsOn: [], relatedTo: [], stackedOn: null }, stack: { blockedBy: [], blocking: [], findings: [] },
+  relations: { dependsOn: [], relatedTo: [], stackedOn: null }, stack: { waitsOn: [], blocks: [], findings: [], position: null },
 });
 let root: Root;
 let container: HTMLDivElement;

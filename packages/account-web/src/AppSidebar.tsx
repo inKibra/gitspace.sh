@@ -1,4 +1,4 @@
-import type { DeploymentStatusView, StackStatus } from '@gitspace/protocol';
+import type { DeploymentStatusView } from '@gitspace/protocol';
 import type { CloudProjectOperation, CloudWorkspaceDefinition, RemoteBranchState } from '@gitspace/protocol/project-authority';
 import type { WorkspaceStatusColor } from '@gitspace/protocol-workspace';
 import type { IconComponentProps } from '@gitspace/ui';
@@ -27,19 +27,24 @@ import {
   SidebarUserFooter,
   ThinkingIndicator,
   Tooltip,
+  DropdownLabel,
+  DropdownSeparator,
   type IconComponent,
 } from '@gitspace/ui';
-import { Activity, Archive, ArrowDown, BookOpen01, ChevronRight, Columns03, DotsHorizontal, Edit03, FolderClosed, FolderPlus, Key01, Plus, PuzzlePiece01, RefreshCcw01, Rocket02, Settings01, Square, Stars01, Trash01, Zap } from '@untitledui/icons';
+import { Activity, Archive, ArrowDown, ArrowUp, BookOpen01, Check, ChevronRight, Columns03, DotsHorizontal, Edit03, FolderClosed, FolderPlus, GitBranch01, Hourglass03, Key01, Link03, Lock01, Plus, PuzzlePiece01, RefreshCcw01, Rocket02, Settings01, Square, Stars01, Stars02, Trash01, Zap } from '@untitledui/icons';
+import { AnimatePresence, motion } from 'framer-motion';
 import { createContext, Fragment, useContext, useEffect, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from 'react';
 import { glyph } from './glyph.js';
 import { converging, latestLaunchProgress, launchPhaseLabel, machineConvergence, RELEASE_TARGETS, runningLabel, workspaceRelease, type LaunchTrack } from './release.js';
 import { PRODUCT_ROUTE_LABELS, type AppView, type ProductRoute } from './routes.js';
 import { operationActive } from './OperationProgress.js';
 import { PHASE_LABEL, PHASES, STATUS_COLOR, StatusDot, workspaceStatusColor, workspaceStatusLabel, WorkspaceStatusDot, type AgentScopeView, type ProjectAgentView, type ProjectLifecycleView, type WorkspaceCreationState, type WorkspaceView } from './GitSpaceShell.js';
-import { blocks, lit, relation, stackTree, waitsOn, type Lit, type Relation } from './sidebar/graph.js';
-import { DependencyText, DOWNSTREAM_TONE, GroupHeading, PhaseTag, PrChips, StackCaption, UPSTREAM_TONE } from './sidebar/parts.js';
+import { blocks, lit, relation, stackBelow, stackTree, type Lit, type Relation } from './sidebar/graph.js';
+import { ACCENT, DOWNSTREAM_TONE, GroupHeading, HeadTag, LabelText, PhaseTag, PrChips, StackCaption, StackMarker, UPSTREAM_TONE } from './sidebar/parts.js';
 import type { ProjectGraph } from './sidebar/project-graph.js';
 import { stackPosition, type ChainWorkspace } from './sidebar/StackChain.js';
+import { phaseRefusal, pickRefusal, type PickKind } from './sidebar/stack-rules.js';
+import { StackToasts, useStackToast } from './sidebar/stack-toast.js';
 
 const NAV: Array<{ view: Exclude<AppView, 'agent'>; icon: IconComponent }> = [
   { view: 'kanban', icon: glyph(Columns03) },
@@ -102,13 +107,21 @@ const SettingsGlyph = glyph(Settings01);
 const ProjectGlyph = glyph(FolderClosed);
 const NewWorkspaceGlyph = glyph(Plus);
 const AutomationsGlyph = glyph(Zap);
+const StackGlyph = glyph(GitBranch01);
+const UnstackGlyph = glyph(ArrowUp);
+const WaitsGlyph = glyph(Hourglass03);
+const RelatedGlyph = glyph(Link03);
 
-/** Icon slots take component types, so keep this type stable while context updates the accepted status. */
-function SpaceStatusGlyph({ className, size, strokeWidth }: IconComponentProps) {
+/** The project row's status slot: the project agent's sparkle, with the base's status dot on its corner. Icon slots take
+ * component types, so keep this type stable while context updates the accepted status. */
+function AgentGlyph({ className, size, strokeWidth }: IconComponentProps) {
   const summary = useContext(SpaceSummaryContext);
   const freshness = summary?.freshness ?? (summary?.status ? 'fresh' : 'unknown');
-  return <span className={`inline-flex items-center justify-center ${className ?? ''}`} style={{ width: size, height: size }} data-freshness={freshness}>
-    {summary?.closedAt ? <ArchiveGlyph size={size} strokeWidth={strokeWidth} /> : summary ? <WorkspaceStatusDot space={summary} /> : <StatusDot color="dim" />}
+  return <span className={`relative inline-flex items-center justify-center ${className ?? ''}`} style={{ width: size, height: size, color: summary?.closedAt ? undefined : ACCENT }} data-freshness={freshness}>
+    {summary?.closedAt ? <ArchiveGlyph size={size} strokeWidth={strokeWidth} /> : <>
+      <Stars02 width={size} height={size} strokeWidth={1.5} />
+      <span className="absolute -bottom-[3px] -right-[3px] inline-flex rounded-full bg-background p-px">{summary ? <WorkspaceStatusDot space={summary} /> : <StatusDot color="dim" />}</span>
+    </>}
   </span>;
 }
 
@@ -180,8 +193,34 @@ export interface AppSidebarProps {
   user?: { name: string; handle?: string | null };
   /** Null or absent when this install has no deployment status (not a GitSpace tenant). */
   deployment?: SidebarDeploymentProps | null;
-  /** The git position of each stacked workspace in the selected workspace's stack, which its row's caption shows. */
-  stackStatuses?: ReadonlyMap<string, StackStatus>;
+  /** Writes a workspace's relations over `expected`, what the list last read (the server refuses, by throwing, when they
+   * changed since), and resolves to the relations it applied. Absent: the list offers no stack, waits-on or related
+   * changes. */
+  onSetRelations?(workspaceId: string, relations: WorkspaceView['relations'], expected: WorkspaceView['relations']): Promise<WorkspaceView['relations']>;
+  /** Moves any workspace's phase from `expectedPhase`, what the list last read (refused, by throwing, when it changed
+   * since; null when unread). Absent: rows offer no phase section. */
+  onSetPhase?(projectId: string, workspaceId: string, phase: WorkspaceView['phase'], expectedPhase: WorkspaceView['phase'] | null): Promise<void>;
+}
+
+/** A row menu's stack and relation action. */
+interface StackAction { key: string; label: string; icon: IconComponent; act(): void }
+/** A row menu's Phase section: the phase it is in, why each other one is refused (null when it isn't), and the move. */
+export interface PhaseSection { current: WorkspaceView['phase'] | null; refusal(phase: WorkspaceView['phase']): string | null; onSet(phase: WorkspaceView['phase']): void }
+
+/** Why a menu item or a picked row is refused, under it. */
+function Refusal({ why }: { why: string }) {
+  return <span className="flex items-start gap-1 px-2 pb-1.5 text-[11px] leading-snug text-muted-foreground"><Lock01 width={11} height={11} className="mt-[2px] shrink-0" />{why}</span>;
+}
+
+/** The four phases as menu items from `from`; one the phase rule refuses is disabled, with why under it. */
+export function PhaseMenuItems({ phase, from }: { phase: PhaseSection; from: number }) {
+  return <>{PHASES.map((option, index) => {
+    const why = phase.refusal(option);
+    return <Fragment key={option}>
+      <MenuItem index={from + index} label={PHASE_LABEL[option]} checked={option === phase.current} disabled={why !== null} onSelect={() => { if (option !== phase.current) phase.onSet(option); }} />
+      {why ? <Refusal why={why} /> : null}
+    </Fragment>;
+  })}</>;
 }
 
 /** Whether any account target selects this workspace's newest release. */
@@ -191,7 +230,7 @@ function launchedFrom(deployment: SidebarDeploymentProps | null | undefined, wor
   return release !== null && RELEASE_TARGETS.some((target) => deployment.status.desired[target] === release.sha);
 }
 
-function SpaceMenu({ space, kind, summary, deployment, onReleaseMachines, releasePendingSpaceId, onArchive, onRestore, onDelete, onRename, onInspect, onNewWorkspace, onOpenProjectSettings, onOpenAutomations, triggerClassName }: { space: Pick<AgentScopeView, 'id' | 'name'>; kind: AgentScopeView['kind']; summary?: SidebarSpaceSummary; onRename?: () => void; onInspect?: () => void; onNewWorkspace?: () => void; onOpenProjectSettings?: () => void; onOpenAutomations?: () => void; triggerClassName?: string } & Pick<AppSidebarProps, 'deployment' | 'onReleaseMachines' | 'releasePendingSpaceId' | 'onArchive' | 'onRestore' | 'onDelete'>) {
+function SpaceMenu({ space, kind, summary, deployment, onReleaseMachines, releasePendingSpaceId, onArchive, onRestore, onDelete, onRename, onInspect, onNewWorkspace, onOpenProjectSettings, onOpenAutomations, phase, stack = [], triggerClassName }: { space: Pick<AgentScopeView, 'id' | 'name'>; kind: AgentScopeView['kind']; summary?: SidebarSpaceSummary; onRename?: () => void; onInspect?: () => void; onNewWorkspace?: () => void; onOpenProjectSettings?: () => void; onOpenAutomations?: () => void; phase?: PhaseSection; stack?: readonly StackAction[]; triggerClassName?: string } & Pick<AppSidebarProps, 'deployment' | 'onReleaseMachines' | 'releasePendingSpaceId' | 'onArchive' | 'onRestore' | 'onDelete'>) {
   const archived = !!summary?.closedAt;
   const held = !archived && summary?.holder.kind === 'held';
   const launchable = (held || (!archived && summary?.holder.kind === 'cloud')) && deployment?.isGitSpaceProject === true;
@@ -200,24 +239,34 @@ function SpaceMenu({ space, kind, summary, deployment, onReleaseMachines, releas
   const canArchive = kind === 'workspace' && !archived && !summary?.creation && !!onArchive;
   const canDelete = kind === 'workspace' && !!onDelete;
   const canRename = kind === 'workspace' && !summary?.creation && !!onRename;
-  if (!onInspect && !onNewWorkspace && !onOpenProjectSettings && !onOpenAutomations && !canRelease && !canRestore && !canArchive && !canDelete && !canRename && !launchable) return null;
+  const phased = kind === 'workspace' && !archived && phase !== undefined;
+  const stacking = kind === 'workspace' && !archived && stack.length > 0;
+  const tail = canRelease || canRestore || canArchive || canDelete || launchable || (kind === 'project' && !!deployment?.isGitSpaceProject);
+  if (!onInspect && !onNewWorkspace && !onOpenProjectSettings && !onOpenAutomations && !canRelease && !canRestore && !canArchive && !canDelete && !canRename && !launchable && !phased && !stacking) return null;
   const launching = deployment?.launch?.status === 'running';
   let index = 0;
+  const head = (onInspect ? 1 : 0) + (onNewWorkspace ? 1 : 0) + (onOpenProjectSettings ? 1 : 0) + (onOpenAutomations ? 1 : 0) + (canRename ? 1 : 0);
+  const phases = phased ? PHASES.length : 0;
+  let next = head + phases + (stacking ? stack.length : 0);
+  const checked = phased && phase.current ? head + PHASES.indexOf(phase.current) : undefined;
   return <DropdownMenu>
     <DropdownTrigger render={<SidebarMenuAction className={triggerClassName} aria-label={`Space actions for ${space.name}`}><DotsHorizontal width={16} height={16} strokeWidth={1.5} /></SidebarMenuAction>} />
-    <DropdownContent className="min-w-[240px] w-[240px]" align="start" sideOffset={4}>
+    <DropdownContent className="min-w-[240px] w-[240px]" align="start" sideOffset={4} checkedIndex={checked}>
       {onInspect ? <MenuItem index={index++} icon={ProjectGlyph} label="Open project" onSelect={onInspect} /> : null}
       {onNewWorkspace ? <MenuItem index={index++} icon={NewWorkspaceGlyph} label="New workspace" onSelect={onNewWorkspace} /> : null}
       {onOpenProjectSettings ? <MenuItem index={index++} icon={SettingsGlyph} label="Project settings" onSelect={onOpenProjectSettings} /> : null}
       {onOpenAutomations ? <MenuItem index={index++} icon={AutomationsGlyph} label="Automations" onSelect={onOpenAutomations} /> : null}
       {canRename ? <MenuItem index={index++} icon={RenameGlyph} label="Rename workspace" onSelect={() => onRename?.()} /> : null}
-      {canRelease ? <MenuItem index={index++} icon={CloseGlyph} label={releasePendingSpaceId === space.id ? 'Releasing machine caches…' : 'Release machine caches'} disabled={releasePendingSpaceId !== null && releasePendingSpaceId !== undefined} onSelect={() => void onReleaseMachines?.(space.id)} /> : null}
-      {canRestore ? <MenuItem index={index++} icon={ReopenGlyph} label="Restore workspace" onSelect={() => void onRestore?.(space.id)} /> : null}
-      {canArchive ? <MenuItem index={index++} icon={ArchiveGlyph} label="Archive workspace" onSelect={() => void onArchive?.(space.id)} /> : null}
-      {canDelete ? <MenuItem index={index++} icon={DeleteGlyph} label="Delete workspace" onSelect={() => void onDelete?.(space.id)} /> : null}
-      {launchable && deployment ? <MenuItem index={index++} icon={LaunchGlyph} label="Launch GitSpace from here" disabled={launching} onSelect={() => void deployment.onLaunch(space.id)} /> : null}
-      {kind === 'project' && deployment?.isGitSpaceProject ? <MenuItem index={index++} icon={LaunchGlyph} label={`Launch ${deployment.branch}`} disabled={launching} onSelect={() => void deployment.onLaunchBranch()} /> : null}
-      {launchable && deployment && launchedFrom(deployment, space.id) ? <MenuItem index={index++} icon={ReopenGlyph} label="Back to default" disabled={launching} onSelect={() => void deployment.onBackToDefault()} /> : null}
+      {phased ? <>{head ? <DropdownSeparator /> : null}<DropdownLabel>Phase</DropdownLabel><PhaseMenuItems phase={phase} from={head} /></> : null}
+      {stacking ? <>{head + phases ? <DropdownSeparator /> : null}{stack.map((action, offset) => <MenuItem key={action.key} index={head + phases + offset} icon={action.icon} label={action.label} onSelect={action.act} />)}</> : null}
+      {(phased || stacking) && tail ? <DropdownSeparator /> : null}
+      {canRelease ? <MenuItem index={next++} icon={CloseGlyph} label={releasePendingSpaceId === space.id ? 'Releasing machine caches…' : 'Release machine caches'} disabled={releasePendingSpaceId !== null && releasePendingSpaceId !== undefined} onSelect={() => void onReleaseMachines?.(space.id)} /> : null}
+      {canRestore ? <MenuItem index={next++} icon={ReopenGlyph} label="Restore workspace" onSelect={() => void onRestore?.(space.id)} /> : null}
+      {canArchive ? <MenuItem index={next++} icon={ArchiveGlyph} label="Archive workspace" onSelect={() => void onArchive?.(space.id)} /> : null}
+      {canDelete ? <MenuItem index={next++} icon={DeleteGlyph} label="Delete workspace" onSelect={() => void onDelete?.(space.id)} /> : null}
+      {launchable && deployment ? <MenuItem index={next++} icon={LaunchGlyph} label="Launch GitSpace from here" disabled={launching} onSelect={() => void deployment.onLaunch(space.id)} /> : null}
+      {kind === 'project' && deployment?.isGitSpaceProject ? <MenuItem index={next++} icon={LaunchGlyph} label={`Launch ${deployment.branch}`} disabled={launching} onSelect={() => void deployment.onLaunchBranch()} /> : null}
+      {launchable && deployment && launchedFrom(deployment, space.id) ? <MenuItem index={next++} icon={ReopenGlyph} label="Back to default" disabled={launching} onSelect={() => void deployment.onBackToDefault()} /> : null}
     </DropdownContent>
   </DropdownMenu>;
 }
@@ -290,21 +339,28 @@ const STATE_COLOR: Record<RowState, WorkspaceStatusColor> = { 'needs-you': 'oran
 const STATE_ORDER: readonly RowState[] = ['needs-you', 'failed', 'running', 'waiting', 'idle'];
 const FILTERS: readonly { id: SidebarFilter; label: string }[] = [{ id: 'all', label: 'All' }, { id: 'needs-you', label: 'Needs you' }, { id: 'running', label: 'Running' }, { id: 'review', label: 'Review' }, { id: 'ship', label: 'Ship' }];
 const GROUP_BYS: readonly { id: SidebarGroupBy; label: string }[] = [{ id: 'none', label: 'None' }, { id: 'state', label: 'State' }, { id: 'phase', label: 'Phase' }];
-/** Left inset of a first-level row, a row in a stack and a grouped row; the x of each tree guide line. */
-const INSET = { first: 14, stacked: 30, grouped: 8 };
+/** Left inset of a first-level row and of a row in a stack; the x of each tree guide line. */
+const INSET = { first: 14, stacked: 30 };
 const FIRST_GUIDES: readonly number[] = [7];
 const STACK_GUIDES: readonly number[] = [7, 21];
+const ROW = 'relative flex w-full min-w-0 select-none flex-col gap-0.5 rounded-[10px] py-[5px] text-left outline-none transition-[opacity,background-color] duration-150 focus-visible:ring-2 focus-visible:ring-[#6B97FF]/50';
 
-/** An open workspace as its row and the stack chain read it. */
-interface RowItem extends ChainWorkspace { workspace: SidebarWorkspace; summary: SidebarSpaceSummary | undefined; state: RowState; phase: WorkspaceView['phase'] | null }
+/** An open workspace as its row, the stack chain and the phase rule read it: its relations, its branch's position against
+ * its parent and whether it is ahead of that parent, as the project view last published them (`known` once read). */
+interface RowItem extends ChainWorkspace { workspace: SidebarWorkspace; summary: SidebarSpaceSummary | undefined; state: RowState; phase: WorkspaceView['phase'] | null; relatedTo: readonly string[]; aheadOfParent: string | null; known: boolean }
 
 function rowItem(workspace: SidebarWorkspace, graph: ProjectGraph | undefined): RowItem {
   const summary = sidebarWorkspaceSummary(workspace);
   const relations = graph?.relations[workspace.id];
   return {
-    id: workspace.id, name: workspace.name, branch: workspace.branch, dependsOn: relations?.dependsOn ?? [], stackedOn: relations?.stackedOn ?? null,
+    id: workspace.id, name: workspace.name, branch: workspace.branch, dependsOn: relations?.dependsOn ?? [], relatedTo: relations?.relatedTo ?? [], stackedOn: relations?.stackedOn ?? null,
+    position: relations?.position ?? null, aheadOfParent: relations?.aheadOfParent ?? null, known: relations !== undefined,
     status: summary, workspace, summary, state: STATE_OF[summary ? workspaceStatusColor(summary) : 'dim'], phase: workspace.definition?.phase ?? workspace.phase ?? null,
   };
+}
+
+function relationsOf(item: RowItem): WorkspaceView['relations'] {
+  return { dependsOn: item.dependsOn, relatedTo: item.relatedTo, stackedOn: item.stackedOn };
 }
 
 function matches(item: RowItem, filter: SidebarFilter): boolean {
@@ -312,6 +368,70 @@ function matches(item: RowItem, filter: SidebarFilter): boolean {
   if (filter === 'needs-you' || filter === 'running') return item.state === filter;
   return item.phase === filter;
 }
+
+/** What a project lists: a group heading, or a row (faded when it is only there to keep its stack whole). `key` names
+ * the entry a landing preview follows. */
+type Entry = { kind: 'heading'; key: string; label: string; tone: string | undefined; count: number } | { kind: 'row'; key: string; item: RowItem; stacked: boolean; dimmed: boolean };
+
+/**
+ * A project's rows under a filter and a grouping. Every grouping draws stacks whole, as the tree draws them: a stack shows
+ * while any of it matches, the rest faded. State and Phase put each stack under its head's group; a heading counts the
+ * project's workspaces whose own state or phase is the heading's and that pass the filter, wherever their stack is drawn,
+ * so it agrees with the filter tabs.
+ */
+function listEntries(items: readonly RowItem[], filter: SidebarFilter, groupBy: SidebarGroupBy): Entry[] {
+  const runs: { item: RowItem; stacked: boolean }[][] = [];
+  for (const entry of stackTree(items)) {
+    if (!entry.stacked || !runs.length) runs.push([entry]);
+    else runs.at(-1)?.push(entry);
+  }
+  const shown = runs.filter((run) => run.some(({ item }) => matches(item, filter)));
+  const rows = (run: readonly { item: RowItem; stacked: boolean }[]) => run.map(({ item, stacked }): Entry => ({ kind: 'row', key: item.id, item, stacked, dimmed: !matches(item, filter) }));
+  if (groupBy === 'none') return shown.flatMap(rows);
+  const groups: { key: string; label: string; tone: string | undefined; holds(item: RowItem): boolean }[] = groupBy === 'state'
+    ? STATE_ORDER.map((state) => ({ key: state, label: STATE_LABEL[state], tone: STATUS_COLOR[STATE_COLOR[state]], holds: (item: RowItem) => item.state === state }))
+    : [...[...PHASES].reverse().map((phase) => ({ key: phase, label: PHASE_LABEL[phase], tone: undefined, holds: (item: RowItem) => item.phase === phase })), { key: 'unknown', label: 'Phase unknown', tone: undefined, holds: (item: RowItem) => item.phase === null }];
+  return groups.flatMap((group): Entry[] => {
+    const held = shown.filter((run) => run[0] && group.holds(run[0].item));
+    if (!held.length) return [];
+    const count = items.filter((item) => group.holds(item) && matches(item, filter)).length;
+    return [{ kind: 'heading', key: `heading-${group.key}`, label: group.label, tone: group.tone, count }, ...held.flatMap(rows)];
+  });
+}
+
+/** Where stacking `source` onto `onto` (or `top`, the top level) would put it: after which entry and at which level,
+ * read from the list the change would draw under the same filter and grouping; null when it is already there. */
+function landing(items: readonly RowItem[], source: RowItem, onto: string, filter: SidebarFilter, groupBy: SidebarGroupBy): { after: string | null; stacked: boolean } | null {
+  if ((source.stackedOn ?? 'top') === onto) return null;
+  const preview = listEntries(items.map((item) => item.id === source.id ? { ...item, stackedOn: onto === 'top' ? null : onto } : item), filter, groupBy);
+  const index = preview.findIndex((entry) => entry.key === source.id);
+  const at = preview[index];
+  return at?.kind === 'row' ? { after: preview[index - 1]?.key ?? null, stacked: at.stacked } : null;
+}
+
+/** The list choosing for one workspace: what it stacks on (applied on a pick), or its waits-on or related set (`draft`,
+ * applied by Done). */
+type Mode = { kind: PickKind; projectId: string; id: string; draft: readonly string[] };
+/** A row while choosing: the source, a choice (its ring filled once chosen), or refused, with why. */
+type Target = { role: 'source' } | { role: 'choice'; chosen: boolean } | { role: 'refused'; why: string };
+
+/** The list's picker, shared by every project's rows. `hover` is the choice under the pointer (a workspace, or `top`
+ * for the project row while stacking). */
+interface Picker {
+  mode: Mode | null;
+  hover: string | null;
+  setHover(id: string | null): void;
+  dragging: string | null;
+  setDragging(id: string | null): void;
+  start(item: RowItem, kind: PickKind): void;
+  /** A click (or a drop) on a row, or `top` on the project row. A stack applies; a waits-on or related toggles the draft. */
+  pick(id: string): void;
+  leave(): void;
+}
+/** Writes a workspace's relations, reports the change with Undo or the refusal. */
+type EditRelations = (item: RowItem, after: WorkspaceView['relations'], text: string) => void;
+/** Moves a workspace's phase, reports the move with Undo or the refusal. */
+type MovePhase = (item: RowItem, phase: WorkspaceView['phase']) => void;
 
 /** The name being edited in place: Enter or leaving the field keeps it, Escape keeps the old one. */
 function RenameInline({ name, onDone }: { name: string; onDone(name: string | null): void }) {
@@ -323,16 +443,33 @@ function RenameInline({ name, onDone }: { name: string; onDone(name: string | nu
     className="h-6 min-w-0 flex-1 rounded-[6px] border border-[#6B97FF] bg-transparent px-1 text-body outline-none" />;
 }
 
-/** A workspace row: the status dot and name, then its stack parent, phase, pull request and what blocks it or what it
- * blocks. A focused workspace lights what it depends on (violet edge) and what depends on it (teal edge); unrelated rows
- * recede. Its actions sit centred on the row's two lines. While `renaming`, the name is a field and the row selects
- * nothing; double-clicking the name starts it. */
-function WorkspaceRow({ item, kin, selected, inset, guides, meta, flags, dimmed, actions, renaming, onStartRename, onHover, onSelect }: { item: RowItem; kin: Relation; selected: boolean; inset: number; guides: readonly number[]; meta: ReactNode; flags: ReactNode; dimmed: boolean; actions: ReactNode; renaming?: { onDone(name: string | null): void }; onStartRename?(): void; onHover(id: string | null): void; onSelect(): void }) {
+/** A choice's mark at the row's right edge while choosing: a ring to pick, filled once chosen. */
+function Ring({ chosen }: { chosen: boolean }) {
+  return <span aria-hidden className="absolute right-2 top-1/2 flex size-4 -translate-y-1/2 items-center justify-center rounded-full text-white transition-colors" style={{ border: `1.5px solid ${chosen ? ACCENT : 'color-mix(in oklab, var(--foreground) 28%, transparent)'}`, background: chosen ? ACCENT : 'transparent' }}>
+    {chosen ? <Check width={11} height={11} strokeWidth={3} /> : null}
+  </span>;
+}
+
+/**
+ * A workspace row: the status dot and name (a stacked row's "↳ on X" after it, a stack's head tagged), then the phase
+ * pips, pull request, how its branch stands against its parent, the planning labels and its agent's last message. A
+ * focused workspace lights what it sits on or waits on (violet edge) and what sits on it or waits on it (teal edge);
+ * unrelated rows recede. Its actions sit centred on the row's two lines. While `renaming`, the name is a field and the
+ * row selects nothing; double-clicking the name starts it. While choosing (`target`), only its second line and right
+ * edge change: the source says what the change would make of it, a refused row says why, a choice shows its ring.
+ */
+function WorkspaceRow({ item, kin, selected, inset, guides, caption, meta, override, flags, dimmed, title, target, actions, renaming, onStartRename, onHover, onClick, drag }: {
+  item: RowItem; kin: Relation; selected: boolean; inset: number; guides: readonly number[]; caption: ReactNode; meta: ReactNode; override: ReactNode; flags: ReactNode; dimmed: boolean; title: string;
+  target: Target | null; actions: ReactNode; renaming?: { onDone(name: string | null): void }; onStartRename?(): void; onHover(id: string | null): void; onClick(): void;
+  drag?: { draggable: boolean; start(): void; drop(): void; end(): void };
+}) {
   const { summary } = item;
   const tone = kin === 'upstream' ? UPSTREAM_TONE : kin === 'downstream' ? DOWNSTREAM_TONE : null;
   const released = summary?.holder.kind === 'released';
   const freshness = summary?.freshness ?? (summary?.status ? 'fresh' : 'unknown');
-  const className = `relative flex w-full min-w-0 select-none flex-col gap-0.5 rounded-[10px] py-[5px] pr-2 text-left outline-none transition-[opacity,background-color] duration-150 group-hover/menu-sub-item:pr-8 focus-visible:ring-2 focus-visible:ring-[#6B97FF]/50 ${selected ? 'bg-active' : 'hover:bg-hover'} ${kin === 'unrelated' || dimmed ? 'opacity-40' : ''}`;
+  const source = target?.role === 'source';
+  const className = `${ROW} ${target ? 'pr-8' : 'pr-2 group-hover/menu-sub-item:pr-8'} ${target ? target.role === 'refused' ? 'opacity-45' : 'cursor-pointer hover:bg-hover' : `${selected ? 'bg-active' : 'hover:bg-hover'} ${kin === 'unrelated' || dimmed ? 'opacity-40' : ''}`}`;
+  const style = { paddingLeft: inset, ...(source ? { background: `color-mix(in oklab, ${ACCENT} 12%, transparent)`, boxShadow: `inset 0 0 0 1px color-mix(in oklab, ${ACCENT} 45%, transparent)` } : {}) };
   const body = <>
     {guides.map(x => <span key={x} aria-hidden className="pointer-events-none absolute inset-y-0 w-px bg-border" style={{ left: x }} />)}
     {tone ? <>
@@ -342,19 +479,40 @@ function WorkspaceRow({ item, kin, selected, inset, guides, meta, flags, dimmed,
     <span className="relative flex min-w-0 items-center gap-1.5">
       <span className="inline-flex size-4 shrink-0 items-center justify-center" data-freshness={freshness}>{summary?.closedAt ? <ArchiveGlyph size={14} strokeWidth={1.5} /> : summary ? <WorkspaceStatusDot space={summary} /> : <StatusDot color="dim" />}</span>
       {renaming ? <RenameInline name={item.name} onDone={renaming.onDone} />
-        : <span onDoubleClick={onStartRename ? (event) => { event.preventDefault(); onStartRename(); } : undefined} className={`min-w-0 truncate text-body ${released ? 'text-muted-foreground' : item.state === 'needs-you' || selected ? 'font-medium text-foreground' : 'text-foreground/90'}`}>{item.name}</span>}
+        : <span onDoubleClick={onStartRename && !target ? (event) => { event.preventDefault(); onStartRename(); } : undefined} className={`min-w-0 truncate text-body ${released ? 'text-muted-foreground' : item.state === 'needs-you' || (selected && !target) || source ? 'font-medium text-foreground' : 'text-foreground/90'}`}>{item.name}</span>}
+      {renaming ? null : caption}
       {flags}
     </span>
-    {/* The second line is as tall as a pull request chip, its tallest part, whatever it holds: a preview never changes the row's height. */}
-    <span className="relative flex min-h-[18px] min-w-0 items-center gap-1.5 pl-[22px] text-[11px] text-muted-foreground">{meta}{summary?.preview && !summary.closedAt ? <span data-workspace-preview="" className="min-w-0 flex-1 truncate text-muted-foreground/90">{summary.preview}</span> : null}</span>
+    {/* The second line is as tall as a pull request chip, its tallest part, whatever it holds: a preview never changes the
+        row's height. It is clipped, so nothing on it runs under the row's actions. */}
+    <span className="relative flex min-h-[18px] min-w-0 items-center gap-1.5 overflow-hidden pl-[22px] text-[11px] text-muted-foreground">
+      {override ?? <>{meta}{summary?.preview && !summary.closedAt ? <span data-workspace-preview="" className="min-w-0 flex-1 truncate text-muted-foreground/90">{summary.preview}</span> : null}</>}
+    </span>
+    {target?.role === 'choice' ? <Ring chosen={target.chosen} /> : null}
   </>;
   return <SidebarMenuSubItem data-workspace={item.id} data-relation={kin}>
-    {renaming ? <div className={className} style={{ paddingLeft: inset }}>{body}</div>
-      : <button type="button" aria-current={selected ? 'page' : undefined} title={`${item.branch} · ${summary ? summaryLabel(summary) : 'Status unknown'}${released && !summary?.closedAt ? ' · released' : ''}`} aria-description={summary?.detail ?? undefined}
-        onMouseEnter={() => onHover(item.id)} onMouseLeave={() => onHover(null)} onFocus={() => onHover(item.id)} onBlur={() => onHover(null)} onClick={onSelect}
-        className={className} style={{ paddingLeft: inset }}>{body}</button>}
-    {renaming ? null : <SidebarMenuActions showOnHover className="top-1/2 -translate-y-1/2">{actions}</SidebarMenuActions>}
+    {renaming ? <div className={className} style={style}>{body}</div>
+      : <button type="button" aria-current={selected && !target ? 'page' : undefined} title={title} aria-description={summary?.detail ?? undefined} data-pick={target?.role}
+        draggable={drag?.draggable} onDragStart={drag ? (event) => { event.dataTransfer.setData('text/plain', item.id); drag.start(); } : undefined}
+        onDragOver={drag ? (event) => event.preventDefault() : undefined} onDrop={drag ? (event) => { event.preventDefault(); drag.drop(); } : undefined} onDragEnd={drag?.end}
+        onMouseEnter={() => onHover(item.id)} onMouseLeave={() => onHover(null)} onFocus={() => onHover(item.id)} onBlur={() => onHover(null)} onClick={onClick}
+        className={className} style={style}>{body}</button>}
+    {renaming || target ? null : <SidebarMenuActions showOnHover className="top-1/2 -translate-y-1/2">{actions}</SidebarMenuActions>}
   </SidebarMenuSubItem>;
+}
+
+/** The source as it would sit after the stack being previewed: faint, at its new level, saying what it would be on. */
+function Ghost({ source, parent, carried, stacked }: { source: RowItem; parent: RowItem | undefined; carried: number; stacked: boolean }) {
+  return <motion.li initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} transition={{ duration: 0.14 }} className="relative list-none overflow-hidden" aria-hidden data-landing={source.id}>
+    {(stacked ? STACK_GUIDES : FIRST_GUIDES).map(x => <span key={x} className="pointer-events-none absolute inset-y-0 w-px bg-border" style={{ left: x }} />)}
+    <div className="relative my-0.5 flex min-h-[38px] items-center gap-1.5 rounded-[10px] border border-dashed pr-2" style={{ marginLeft: (stacked ? INSET.stacked : INSET.first) - 6, paddingLeft: 5, borderColor: `color-mix(in oklab, ${ACCENT} 60%, transparent)`, background: `color-mix(in oklab, ${ACCENT} 6%, transparent)` }}>
+      <span className="inline-flex size-4 items-center justify-center opacity-60"><StatusDot color={STATE_COLOR[source.state]} /></span>
+      <span className="flex min-w-0 flex-col">
+        <span className="truncate text-body" style={{ color: ACCENT }}>{source.name}</span>
+        <span className="truncate text-[11px] text-muted-foreground">{parent ? `↳ on ${parent.name}` : 'top level'}{carried ? ` · +${carried} stacked on it` : ''}</span>
+      </span>
+    </div>
+  </motion.li>;
 }
 
 /** Orange and green counts after a project's name: how many of its workspaces need you and how many run. Inline in the
@@ -363,7 +521,7 @@ function StateCounts({ items }: { items: readonly RowItem[] }) {
   const needs = items.filter(item => item.state === 'needs-you').length;
   const running = items.filter(item => item.state === 'running').length;
   if (!needs && !running) return null;
-  return <span className="ml-1.5 inline-flex shrink-0 items-center gap-1.5 text-[11px] tabular-nums" title={[needs ? `${needs} need you` : null, running ? `${running} last reported working` : null].filter(Boolean).join(' · ')}>
+  return <span className="ml-1.5 inline-flex shrink-0 items-center gap-1.5 text-[11px] font-normal tabular-nums" title={[needs ? `${needs} need you` : null, running ? `${running} last reported working` : null].filter(Boolean).join(' · ')}>
     {needs ? <span className="inline-flex items-center gap-1"><span className="size-1.5 rounded-full" style={{ background: STATUS_COLOR.orange }} />{needs}</span> : null}
     {running ? <span className="inline-flex items-center gap-1 text-muted-foreground"><span className="size-1.5 rounded-full" style={{ background: STATUS_COLOR.green }} />{running}</span> : null}
   </span>;
@@ -379,10 +537,12 @@ interface ProjectRowsProps extends Pick<AppSidebarProps, 'selected' | 'deploymen
   groupBy: SidebarGroupBy;
   hovered: string | null;
   onHover(id: string | null): void;
-  stackStatuses: ReadonlyMap<string, StackStatus>;
+  picker: Picker;
+  edit: EditRelations | null;
+  move: MovePhase | null;
 }
 
-function ProjectRows({ project, archived: projectArchived, collapsed, onCollapse, selected, deployment, onSelectProject, onSelectWorkspace, onReleaseMachines, releasePendingSpaceId, onArchive, onRestore, onDelete, onRename, onNewWorkspace, onOpenProjectSettings, onOpenProjectAutomations, filter, groupBy, hovered, onHover, stackStatuses }: ProjectRowsProps) {
+function ProjectRows({ project, archived: projectArchived, collapsed, onCollapse, selected, deployment, onSelectProject, onSelectWorkspace, onReleaseMachines, releasePendingSpaceId, onArchive, onRestore, onDelete, onRename, onNewWorkspace, onOpenProjectSettings, onOpenProjectAutomations, filter, groupBy, hovered, onHover, picker, edit, move }: ProjectRowsProps) {
   const { base, workspaces, graph } = project;
   const [showArchived, setShowArchived] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
@@ -395,57 +555,78 @@ function ProjectRows({ project, archived: projectArchived, collapsed, onCollapse
   const baseSummary = project.baseSummary ?? base;
   const baseReleased = baseSummary && !baseSummary.closedAt && baseSummary.holder.kind === 'released';
   const createWorkspace = onNewWorkspace && !projectArchived ? () => onNewWorkspace(project.id) : undefined;
-  const names = new Map(items.map((item) => [item.id, item.name]));
   const byId = new Map(items.map((item) => [item.id, item]));
-  const caption = (item: RowItem) => {
-    const parent = item.stackedOn ? byId.get(item.stackedOn) : undefined;
-    return parent ? <StackCaption parent={parent.name} position={stackPosition(stackStatuses.get(item.id), parent)} /> : null;
+  const mode = picker.mode?.projectId === project.id ? picker.mode : null;
+  const source = mode ? byId.get(mode.id) : undefined;
+  const stacking = mode?.kind === 'stack' ? mode : null;
+  // A focus with nothing related lights nothing, rather than fading every other row; choosing lights nothing.
+  const focus = picker.mode ? null : [hovered, selectedId].map((id) => lit(items, id)).find((light): light is Lit => light !== null && light.upstream.size + light.downstream.size > 0) ?? null;
+  const target = (item: RowItem, archivedRow: boolean): Target | null => {
+    if (!picker.mode) return null;
+    if (!mode || !source) return { role: 'refused', why: 'in another project' };
+    if (item.id === mode.id) return { role: 'source' };
+    if (archivedRow) return { role: 'refused', why: 'archived' };
+    const why = pickRefusal(items, mode.kind, source, item);
+    return why ? { role: 'refused', why } : { role: 'choice', chosen: mode.draft.includes(item.id) };
   };
-  // A focus with nothing related lights nothing, rather than fading every other row.
-  const focus = [hovered, selectedId].map((id) => lit(items, id)).find((light): light is Lit => light !== null && light.upstream.size + light.downstream.size > 0) ?? null;
-  const row = (item: RowItem, inset: number, guides: readonly number[], meta: ReactNode, dimmed: boolean) => {
+  const sourceLine = (): ReactNode => {
+    if (!mode) return null;
+    const into = byId.get(picker.hover ?? '');
+    const named = mode.draft.map((id) => byId.get(id)?.name ?? id).join(', ');
+    const text = mode.kind === 'stack' ? picker.hover === 'top' ? 'to the top level' : into ? `on ${into.name}` : 'choosing where it stacks…'
+      : mode.kind === 'waits' ? `waits on ${named || 'nothing'}` : `related to ${named || 'nothing'}`;
+    return <span className="truncate" style={{ color: ACCENT }}>{text}</span>;
+  };
+  const row = (item: RowItem, stacked: boolean, dimmed: boolean, archivedRow: boolean) => {
     const summary = item.summary;
+    const choosing = target(item, archivedRow);
+    const parentWorkspace = item.stackedOn ? workspaces.find((workspace) => workspace.id === item.stackedOn) : undefined;
+    const position = parentWorkspace ? stackPosition(item.position, parentWorkspace) : null;
+    const head = !archivedRow && !(item.stackedOn && byId.has(item.stackedOn)) && items.some((other) => other.stackedOn === item.id);
+    const released = summary?.holder.kind === 'released' && !summary.closedAt;
     const startRename = onRename && !summary?.creation ? () => setRenaming(item.id) : undefined;
     const renamed = renaming === item.id && onRename ? { onDone: (name: string | null) => { setRenaming(null); if (name !== null && name !== item.name) void onRename(item.id, name); } } : undefined;
-    return <WorkspaceRow key={item.id} item={item} kin={relation(focus, item.id)} selected={selectedId === item.id} inset={inset} guides={guides} dimmed={dimmed} onHover={onHover} onSelect={() => onSelectWorkspace(item.workspace)} meta={meta}
+    const editable = !archivedRow && item.known;
+    const restackOnto = item.stackedOn && item.position?.parentMerged === 'merged' ? item.position.baseBranch : null;
+    const stack: StackAction[] = edit && editable ? [
+      { key: 'stack', label: 'Stack on…', icon: StackGlyph, act: () => picker.start(item, 'stack') },
+      ...(item.stackedOn ? [{ key: 'unstack', label: 'Remove from stack', icon: UnstackGlyph, act: () => edit(item, { ...relationsOf(item), stackedOn: null }, `${item.name} back at the top level`) }] : []),
+      ...(restackOnto ? [{ key: 'restack', label: `Restack onto ${restackOnto}`, icon: ReopenGlyph, act: () => edit(item, { ...relationsOf(item), stackedOn: null }, `${item.name} is measured against ${restackOnto} now; its branch is untouched`) }] : []),
+      { key: 'waits', label: 'Waits on…', icon: WaitsGlyph, act: () => picker.start(item, 'waits') },
+      { key: 'related', label: 'Related to…', icon: RelatedGlyph, act: () => picker.start(item, 'related') },
+    ] : [];
+    const phase: PhaseSection | undefined = move && editable ? { current: item.phase, refusal: (next) => phaseRefusal(items, item, next), onSet: (next) => move(item, next) } : undefined;
+    const waits = item.dependsOn.flatMap((id) => byId.get(id)?.name ?? []);
+    const blocked = blocks(items, item.id).flatMap((id) => byId.get(id)?.name ?? []);
+    const title = choosing?.role === 'refused' ? choosing.why : [
+      `${item.branch} · ${summary ? summaryLabel(summary) : 'Status unknown'}${released ? ' · released' : ''}`,
+      parentWorkspace ? `on ${parentWorkspace.name}${position?.short ? ` · ${position.short}` : ''}` : null,
+    ].filter(Boolean).join(' · ');
+    return <WorkspaceRow key={item.id} item={item} kin={relation(focus, item.id)} selected={selectedId === item.id} inset={stacked ? INSET.stacked : INSET.first} guides={archivedRow ? [] : stacked ? STACK_GUIDES : FIRST_GUIDES} dimmed={dimmed} title={title} target={choosing}
+      onHover={(id) => { onHover(id); if (mode) picker.setHover(id && choosing?.role === 'choice' ? id : null); }}
+      onClick={() => { if (!picker.mode) onSelectWorkspace(item.workspace); else if (mode) picker.pick(item.id); }}
+      caption={<>{parentWorkspace ? <StackCaption parent={parentWorkspace.name} position={position} /> : null}{head ? <HeadTag /> : null}</>}
+      meta={archivedRow ? <PhaseTag phase={item.phase} /> : <><PhaseTag phase={item.phase} /><PrChips pulls={graph?.pullRequests[item.id] ?? []} /><StackMarker position={position} ahead={item.aheadOfParent} /><LabelText waits={waits} blocks={blocked} /></>}
+      override={choosing?.role === 'source' ? sourceLine() : choosing?.role === 'refused' ? <><Lock01 width={11} height={11} className="shrink-0" /><span className="truncate">{choosing.why}</span></> : null}
       renaming={renamed} onStartRename={startRename}
-      flags={<>{item.workspace.definition?.remote?.behind ? <BehindOriginGlyph branch={item.branch} /> : null}{launchedFrom(deployment, item.id) ? <LaunchedGlyph /> : null}{summary?.holder.kind === 'released' && !summary.closedAt ? <span className="ml-1 shrink-0 text-caption text-muted-foreground/70">· released</span> : null}</>}
-      actions={<SpaceMenu space={item.workspace} kind="workspace" summary={summary} deployment={deployment} onReleaseMachines={onReleaseMachines} releasePendingSpaceId={releasePendingSpaceId} onArchive={onArchive} onRestore={onRestore} onDelete={onDelete} onRename={startRename} />} />;
+      drag={edit && editable ? { draggable: !picker.mode && renaming !== item.id, start: () => { picker.setDragging(item.id); picker.start(item, 'stack'); }, drop: () => { if (picker.dragging) picker.pick(item.id); picker.setDragging(null); }, end: () => { picker.setDragging(null); if (picker.dragging) picker.leave(); } } : undefined}
+      flags={<>{item.workspace.definition?.remote?.behind ? <BehindOriginGlyph branch={item.branch} /> : null}{launchedFrom(deployment, item.id) ? <LaunchedGlyph /> : null}{released ? <span className="ml-1 shrink-0 text-caption text-muted-foreground/70">· released</span> : null}</>}
+      actions={<SpaceMenu space={item.workspace} kind="workspace" summary={summary} deployment={deployment} onReleaseMachines={onReleaseMachines} releasePendingSpaceId={releasePendingSpaceId} onArchive={onArchive} onRestore={onRestore} onDelete={onDelete} onRename={startRename} phase={phase} stack={stack} />} />;
   };
-  /** The second line after the stack caption and phase or state: the linked pull request and what blocks it or what it
-   * blocks. A dependency blocks while it is open and not in Ship, as the server's `blockedBy` reads it; an archived one
-   * is not listed here, and one of unknown phase says nothing. */
-  const markers = (item: RowItem) => {
-    const pulls = graph?.pullRequests[item.id] ?? [];
-    const holds = (id: string) => {
-      const phase = byId.get(id)?.phase;
-      return !!phase && phase !== 'ship';
-    };
-    return <><PrChips pulls={pulls} /><DependencyText blockedBy={waitsOn(item).filter(holds).flatMap((id) => names.get(id) ?? [])} blocking={holds(item.id) ? blocks(items, item.id).flatMap((id) => names.get(id) ?? []) : []} /></>;
-  };
-  const tree = () => {
-    // One run per first-level row and its stack; a run shows whole while any of it matches the filter, its other rows dimmed.
-    const runs: { item: RowItem; stacked: boolean }[][] = [];
-    for (const entry of stackTree(items)) {
-      if (!entry.stacked || !runs.length) runs.push([entry]);
-      else runs.at(-1)?.push(entry);
-    }
-    return runs.filter((run) => run.some(({ item }) => matches(item, filter))).flat().map(({ item, stacked }) =>
-      row(item, stacked ? INSET.stacked : INSET.first, stacked ? STACK_GUIDES : FIRST_GUIDES, <>{stacked ? caption(item) : null}<PhaseTag phase={item.phase} />{markers(item)}</>, !matches(item, filter)));
-  };
-  const grouped = (by: 'state' | 'phase') => {
-    const shown = items.filter((item) => matches(item, filter));
-    const groups = by === 'state'
-      ? STATE_ORDER.map((state) => ({ key: state, label: STATE_LABEL[state], tone: STATUS_COLOR[STATE_COLOR[state]], items: shown.filter((item) => item.state === state) }))
-      : [...[...PHASES].reverse().map((phase) => ({ key: phase, label: PHASE_LABEL[phase], tone: undefined, items: shown.filter((item) => item.phase === phase) })), { key: 'unknown', label: 'Phase unknown', tone: undefined, items: shown.filter((item) => item.phase === null) }];
-    return groups.filter((group) => group.items.length).map((group) => <Fragment key={group.key}>
-      <li className="list-none"><GroupHeading tone={group.tone} count={group.items.length}>{group.label}</GroupHeading></li>
-      {group.items.map((item) => row(item, INSET.grouped, [], <>{caption(item)}<PhaseTag phase={item.phase} />{markers(item)}</>, false))}
-    </Fragment>);
-  };
+  const entries = listEntries(items, filter, groupBy);
+  const spot = stacking && source && picker.hover ? landing(items, source, picker.hover, filter, groupBy) : null;
+  const ghost = spot && source ? <Ghost key={`ghost-${picker.hover}`} source={source} parent={byId.get(picker.hover ?? '')} carried={stackBelow(items, source.id).length} stacked={spot.stacked} /> : null;
   return <SidebarMenuItem>
     <SpaceSummaryContext.Provider value={baseSummary}>
-      <SidebarMenuButton className={projectArchived ? 'opacity-60' : baseReleased ? 'text-muted-foreground' : undefined} icon={SpaceStatusGlyph} isActive={baseSelected} title={[baseSummary ? `Base · ${summaryLabel(baseSummary)}${baseReleased ? ' · released' : ''}` : project.lifecycle === 'cloud-only' ? 'Saved in your account · no checkout' : `${project.name} · Status unknown`, project.error].filter(Boolean).join(' · ')} aria-description={project.error ?? undefined} onClick={() => onSelectProject?.(project.id)}>{project.name}<StateCounts items={items} />{project.operations?.length ? <ProjectOperationsGlyph operations={project.operations} /> : null}{project.remote?.behind ? <BehindOriginGlyph branch={base?.branch ?? null} /> : null}{baseReleased ? <span className="ml-1 truncate text-caption text-muted-foreground/70">· released</span> : null}</SidebarMenuButton>
+      <SidebarMenuButton className={projectArchived ? 'opacity-60' : baseReleased ? 'text-muted-foreground' : undefined} icon={AgentGlyph} isActive={baseSelected && !picker.mode} aria-description={project.error ?? undefined}
+        title={stacking ? 'Move to the top level' : [baseSummary ? `${project.name} · project agent · ${summaryLabel(baseSummary)}${baseReleased ? ' · released' : ''}` : project.lifecycle === 'cloud-only' ? 'Saved in your account · no checkout' : `${project.name} · Status unknown`, project.error].filter(Boolean).join(' · ')}
+        onClick={() => { if (!picker.mode) onSelectProject?.(project.id); else if (stacking) picker.pick('top'); }}
+        onMouseEnter={() => { if (stacking) picker.setHover('top'); }} onMouseLeave={() => { if (stacking) picker.setHover(null); }}
+        onDragOver={(event) => { if (stacking) event.preventDefault(); }} onDrop={(event) => { if (!stacking || !picker.dragging) return; event.preventDefault(); picker.pick('top'); picker.setDragging(null); }}>
+        <span className="font-semibold">{project.name}</span>
+        {stacking ? <span className="ml-1.5 text-[11px] font-normal" style={{ color: ACCENT }}>top level</span> : <StateCounts items={items} />}
+        {project.operations?.length ? <ProjectOperationsGlyph operations={project.operations} /> : null}{project.remote?.behind ? <BehindOriginGlyph branch={base?.branch ?? null} /> : null}{baseReleased ? <span className="ml-1 truncate text-caption text-muted-foreground/70">· released</span> : null}
+      </SidebarMenuButton>
     </SpaceSummaryContext.Provider>
     <SidebarMenuActions showOnHover={open}>
       <SidebarMenuAction aria-label={`${open ? 'Collapse' : 'Expand'} ${project.name}`} aria-expanded={open} onClick={() => onCollapse(project.id, open)}><ChevronRight width={16} height={16} strokeWidth={1.5} className={open ? 'rotate-90 transition-[rotate] duration-80' : 'transition-[rotate] duration-80'} /></SidebarMenuAction>
@@ -453,15 +634,56 @@ function ProjectRows({ project, archived: projectArchived, collapsed, onCollapse
       <SpaceMenu space={base ?? project} kind="project" summary={baseSummary} deployment={deployment} onReleaseMachines={onReleaseMachines} releasePendingSpaceId={releasePendingSpaceId} onArchive={onArchive} onRestore={onRestore} onInspect={onSelectProject ? () => onSelectProject(project.id) : undefined} onNewWorkspace={createWorkspace} onOpenProjectSettings={onOpenProjectSettings ? () => onOpenProjectSettings(project.id) : undefined} onOpenAutomations={onOpenProjectAutomations ? () => onOpenProjectAutomations(project.id) : undefined} triggerClassName={open ? undefined : FOLDED_ACTION_REVEAL} />
     </SidebarMenuActions>
     <SidebarMenuSub open={open} className="ml-0 gap-0 border-l-0 pl-1">
-      {groupBy === 'none' ? tree() : grouped(groupBy)}
+      {/* A hairline under the project row: it heads the workspaces below. */}
+      <li aria-hidden className="mx-2 mb-1 mt-0.5 h-px list-none bg-foreground/15" />
+      <AnimatePresence initial={false}>{spot?.after === null ? ghost : null}</AnimatePresence>
+      {entries.map((entry) => <Fragment key={entry.key}>
+        {entry.kind === 'heading' ? <li className="list-none"><GroupHeading tone={entry.tone} count={entry.count}>{entry.label}</GroupHeading></li> : row(entry.item, entry.stacked, entry.dimmed, false)}
+        <AnimatePresence initial={false}>{spot?.after === entry.key ? ghost : null}</AnimatePresence>
+      </Fragment>)}
       {items.length && !items.some((item) => matches(item, filter)) ? <li className="list-none px-2 py-1 text-[11px] text-muted-foreground">No workspaces match this filter</li> : null}
       {archived.length ? <SidebarMenuSubItem>
         <SidebarMenuSubButton render={<button type="button" onClick={() => setShowArchived((value) => !value)} aria-expanded={showArchived} />} icon={ArchiveGlyph}>Archived</SidebarMenuSubButton>
         <SidebarMenuBadge>{archived.length}</SidebarMenuBadge>
       </SidebarMenuSubItem> : null}
-      {showArchived || archived.some((item) => item.id === selectedId) ? archived.map((item) => row(item, INSET.first, [], <PhaseTag phase={item.phase} />, false)) : null}
+      {showArchived || archived.some((item) => item.id === selectedId) ? archived.map((item) => row(item, false, false, true)) : null}
     </SidebarMenuSub>
   </SidebarMenuItem>;
+}
+
+/**
+ * The header's mode bar while choosing, over the page nav so nothing below moves: what is being chosen for which
+ * workspace (its name scrolls its row into view), what the choice would do, Cancel (Esc) and, for waits-on and related,
+ * Done (Enter).
+ */
+function PickerBar({ mode, source, items, hover, onReveal, onCancel, onDone }: { mode: Mode; source: RowItem; items: readonly RowItem[]; hover: string | null; onReveal(): void; onCancel(): void; onDone(): void }) {
+  const name = <button type="button" onClick={onReveal} className="font-semibold underline decoration-white/40 underline-offset-2 hover:decoration-white">{source.name}</button>;
+  const named = (ids: readonly string[]) => ids.map((id) => items.find((item) => item.id === id)?.name ?? id).join(', ');
+  let title: ReactNode;
+  let detail: string;
+  if (mode.kind === 'stack') {
+    title = <>Stack {name} on…</>;
+    const into = items.find((item) => item.id === hover);
+    const carried = stackBelow(items, mode.id).length;
+    detail = hover === 'top' ? 'Moves to the top level' : into ? `On ${into.name}${carried ? ` · its ${carried} stacked come too` : ''}` : 'Pick a workspace, or the project for top level';
+  } else {
+    title = mode.kind === 'waits' ? <>{name} waits on…</> : <>{name} is related to…</>;
+    const was = mode.kind === 'waits' ? source.dependsOn : source.relatedTo;
+    const added = mode.draft.filter((id) => !was.includes(id));
+    const removed = was.filter((id) => !mode.draft.includes(id));
+    detail = added.length || removed.length ? [added.length ? `+ ${named(added)}` : '', removed.length ? `− ${named(removed)}` : ''].filter(Boolean).join('  ') : 'Pick to check or uncheck';
+  }
+  const enter = { opacity: 0, y: 8 };
+  return <motion.div key="mode" role="group" aria-label="Choosing" initial={enter} exit={enter} transition={{ duration: 0.2, ease: 'easeOut' }}
+    animate={{ opacity: 1, y: 0, boxShadow: [`0 0 0 0px color-mix(in oklab, ${ACCENT} 70%, transparent)`, `0 0 0 6px color-mix(in oklab, ${ACCENT} 0%, transparent)`] }}
+    className="absolute inset-x-0 -inset-y-1.5 z-10 flex items-center gap-2 rounded-[12px] pl-3 pr-1.5 text-white" style={{ background: ACCENT }}>
+    <span className="flex min-w-0 flex-1 flex-col leading-tight">
+      <span className="truncate text-[12.5px]">{title}</span>
+      <span className="truncate text-[11px] opacity-85">{detail}</span>
+    </span>
+    <button type="button" onClick={onCancel} title="Cancel (Esc)" className="h-7 shrink-0 rounded-[8px] px-2 text-caption font-medium hover:bg-white/15">Cancel</button>
+    {mode.kind === 'stack' ? null : <button type="button" onClick={onDone} title="Done (Enter)" className="h-7 shrink-0 rounded-[8px] bg-white px-2.5 text-caption font-semibold" style={{ color: ACCENT }}>Done</button>}
+  </motion.div>;
 }
 
 const COLLAPSED_PROJECTS_KEY = 'gitspace.sidebar.collapsedProjects';
@@ -485,7 +707,12 @@ function readGroupBy(): SidebarGroupBy {
   return GROUP_BYS.find((option) => option.id === stored)?.id ?? 'none';
 }
 
-export function AppSidebar({ view, onView, selected, selectedSummary, projects, onSelectProject, onSelectWorkspace, onReleaseMachines, releasePendingSpaceId = null, onArchive, onRestore, onDelete, onRename, onNewWorkspace, onNewProject, onOpenSettings, onOpenProjectSettings, onOpenProjectAutomations, failedAutomationRuns = 0, user, deployment, stackStatuses = new Map() }: AppSidebarProps) {
+/** The account sidebar. Stack, relation and phase changes made from it report in the stack pill, with Undo. */
+export function AppSidebar(props: AppSidebarProps) {
+  return <StackToasts><SidebarBody {...props} /></StackToasts>;
+}
+
+function SidebarBody({ view, onView, selected, selectedSummary, projects, onSelectProject, onSelectWorkspace, onReleaseMachines, releasePendingSpaceId = null, onArchive, onRestore, onDelete, onRename, onNewWorkspace, onNewProject, onOpenSettings, onOpenProjectSettings, onOpenProjectAutomations, failedAutomationRuns = 0, user, deployment, onSetRelations, onSetPhase }: AppSidebarProps) {
   const userName = user?.name || 'Your account';
   const [collapsedProjects, setCollapsedProjects] = useState(readCollapsedProjects);
   const [filter, setFilter] = useState<SidebarFilter>('all');
@@ -494,6 +721,11 @@ export function AppSidebar({ view, onView, selected, selectedSummary, projects, 
   const [showArchivedProjects, setShowArchivedProjects] = useState(false);
   // Archived projects start folded; the ones the user opened, not stored.
   const [openArchivedProjects, setOpenArchivedProjects] = useState<ReadonlySet<string>>(new Set());
+  const [mode, setMode] = useState<Mode | null>(null);
+  const [pickHover, setPickHover] = useState<string | null>(null);
+  const [dragging, setDragging] = useState<string | null>(null);
+  const scroller = useRef<HTMLDivElement>(null);
+  const toast = useStackToast();
   const collapseProject = (projectId: string, collapse: boolean): void => {
     const next = new Set(collapsedProjects);
     if (collapse) next.add(projectId);
@@ -521,22 +753,91 @@ export function AppSidebar({ view, onView, selected, selectedSummary, projects, 
     setOpenArchivedProjects(next);
   };
   const all = active.flatMap((project) => project.workspaces.filter((workspace) => !workspace.closedAt).map((workspace) => rowItem(workspace, undefined)));
-  const rowProps = { selected, deployment, onSelectProject, onSelectWorkspace, onReleaseMachines, releasePendingSpaceId, onArchive, onRestore, onDelete, onRename, onNewWorkspace, onOpenProjectSettings, onOpenProjectAutomations, filter, groupBy, hovered, onHover: setHovered, stackStatuses };
-  return <Sidebar variant="inset">
+  const modeProject = mode ? shown.find((project) => project.id === mode.projectId) : undefined;
+  const modeItems = modeProject ? modeProject.workspaces.filter((workspace) => !workspace.closedAt).map((workspace) => rowItem(workspace, modeProject.graph)) : [];
+  const source = mode ? modeItems.find((item) => item.id === mode.id) : undefined;
+  const leave = (): void => { setMode(null); setPickHover(null); };
+  // The workspace being chosen for left the list (archived, deleted): nothing is left to choose for.
+  useEffect(() => { if (mode && !source) leave(); });
+  const edit: EditRelations | null = onSetRelations ? (item, after, text) => {
+    const before = relationsOf(item);
+    void onSetRelations(item.id, after, before).then(
+      (applied) => toast.applied(text, async () => { await onSetRelations(item.id, before, applied); }),
+      (failure: unknown) => toast.refused(failure, 'Change relations'),
+    );
+  } : null;
+  const move: MovePhase | null = onSetPhase ? (item, phase) => {
+    const previous = item.phase;
+    void onSetPhase(item.workspace.projectId, item.id, phase, previous).then(
+      // A phase that was never read has nothing to go back to: the move is reported without Undo.
+      () => toast.applied(`${item.name} moved to ${PHASE_LABEL[phase]}`, previous === null ? null : () => onSetPhase(item.workspace.projectId, item.id, previous, phase)),
+      (failure: unknown) => toast.refused(failure, 'Change phase'),
+    );
+  } : null;
+  const done = (): void => {
+    if (!mode || !source || mode.kind === 'stack') return;
+    leave();
+    const was = mode.kind === 'waits' ? source.dependsOn : source.relatedTo;
+    if (was.length === mode.draft.length && was.every((id) => mode.draft.includes(id))) return;
+    const named = mode.draft.map((id) => modeItems.find((item) => item.id === id)?.name ?? id).join(', ') || 'nothing';
+    edit?.(source, mode.kind === 'waits' ? { ...relationsOf(source), dependsOn: mode.draft } : { ...relationsOf(source), relatedTo: mode.draft }, `${source.name} ${mode.kind === 'waits' ? 'waits on' : 'related to'} ${named}`);
+  };
+  const picker: Picker = {
+    mode, hover: pickHover, setHover: setPickHover, dragging, setDragging, leave,
+    start: (item, kind) => {
+      toast.clear();
+      setPickHover(null);
+      setMode({ kind, projectId: item.workspace.projectId, id: item.id, draft: kind === 'stack' ? item.stackedOn ? [item.stackedOn] : [] : kind === 'waits' ? item.dependsOn : item.relatedTo });
+    },
+    pick: (id) => {
+      if (!mode || !source) return;
+      if (id === mode.id) { if (mode.kind === 'stack') leave(); else done(); return; }
+      if (id === 'top') {
+        if (mode.kind !== 'stack') return;
+        leave();
+        if (source.stackedOn !== null) edit?.(source, { ...relationsOf(source), stackedOn: null }, `${source.name} back at the top level`);
+        return;
+      }
+      const chosen = modeItems.find((item) => item.id === id);
+      if (!chosen || pickRefusal(modeItems, mode.kind, source, chosen)) return;
+      if (mode.kind !== 'stack') { setMode({ ...mode, draft: mode.draft.includes(id) ? mode.draft.filter((other) => other !== id) : [...mode.draft, id] }); return; }
+      leave();
+      if (source.stackedOn !== chosen.id) edit?.(source, { ...relationsOf(source), stackedOn: chosen.id }, `${source.name} on ${chosen.name}`);
+    },
+  };
+  useEffect(() => {
+    if (!mode) return;
+    const key = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') leave();
+      // Enter applies the draft; it does not also click the focused row.
+      if (event.key === 'Enter') { event.preventDefault(); done(); }
+    };
+    window.addEventListener('keydown', key);
+    return () => window.removeEventListener('keydown', key);
+  });
+  const rowProps = { selected, deployment, onSelectProject, onSelectWorkspace, onReleaseMachines, releasePendingSpaceId, onArchive, onRestore, onDelete, onRename, onNewWorkspace, onOpenProjectSettings, onOpenProjectAutomations, filter, groupBy, hovered, onHover: setHovered, picker, edit, move };
+  return <Sidebar ref={scroller} variant="inset">
     <SidebarHeader>
-      <nav aria-label="Navigate" className="flex items-center justify-between px-0.5">
-        {NAV.map((item) => <Tooltip key={item.view} content={item.view === 'automations' && failedAutomationRuns > 0 ? `${PRODUCT_ROUTE_LABELS[item.view]} · ${failedAutomationRuns} ${failedAutomationRuns === 1 ? 'run' : 'runs'} failed today` : PRODUCT_ROUTE_LABELS[item.view]} side="bottom">
-          <button type="button" aria-label={PRODUCT_ROUTE_LABELS[item.view]} aria-current={view === item.view ? 'page' : undefined} onClick={() => onView(item.view)}
-            className={`relative flex size-7 items-center justify-center rounded-lg hover:bg-hover hover:text-foreground ${view === item.view ? 'bg-active text-foreground' : 'text-muted-foreground'}`}>
-            <item.icon size={16} strokeWidth={1.5} />
-            {item.view === 'automations' && failedAutomationRuns > 0 ? <span className="absolute right-1 top-1 size-1.5 rounded-full" style={{ background: STATUS_COLOR.red }} /> : null}
-          </button>
-        </Tooltip>)}
-      </nav>
+      <div className="relative">
+        <nav aria-label="Navigate" aria-hidden={mode ? true : undefined} className={`flex items-center justify-between px-0.5 transition-opacity duration-200 ${mode ? 'pointer-events-none opacity-0' : ''}`}>
+          {NAV.map((item) => <Tooltip key={item.view} content={item.view === 'automations' && failedAutomationRuns > 0 ? `${PRODUCT_ROUTE_LABELS[item.view]} · ${failedAutomationRuns} ${failedAutomationRuns === 1 ? 'run' : 'runs'} failed today` : PRODUCT_ROUTE_LABELS[item.view]} side="bottom">
+            <button type="button" aria-label={PRODUCT_ROUTE_LABELS[item.view]} aria-current={view === item.view ? 'page' : undefined} onClick={() => onView(item.view)}
+              className={`relative flex size-7 items-center justify-center rounded-lg hover:bg-hover hover:text-foreground ${view === item.view ? 'bg-active text-foreground' : 'text-muted-foreground'}`}>
+              <item.icon size={16} strokeWidth={1.5} />
+              {item.view === 'automations' && failedAutomationRuns > 0 ? <span className="absolute right-1 top-1 size-1.5 rounded-full" style={{ background: STATUS_COLOR.red }} /> : null}
+            </button>
+          </Tooltip>)}
+        </nav>
+        <AnimatePresence initial={false}>
+          {mode && source ? <PickerBar mode={mode} source={source} items={modeItems} hover={pickHover} onCancel={leave} onDone={done}
+            onReveal={() => scroller.current?.querySelector(`[data-workspace="${CSS.escape(mode.id)}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' })} /> : null}
+        </AnimatePresence>
+      </div>
     </SidebarHeader>
 
     <SidebarContent>
-      <div className="flex flex-col gap-1.5 pb-1 pt-1">
+      {/* The filters rest while the list is a picker. */}
+      <div className={`flex flex-col gap-1.5 pb-1 pt-1 transition-opacity duration-200 ${mode ? 'pointer-events-none opacity-35' : ''}`}>
         <div role="group" aria-label="Filter workspaces" className="flex flex-wrap items-center gap-1 px-2">
           {FILTERS.map((option) => {
             const pressed = option.id === filter;
@@ -554,7 +855,8 @@ export function AppSidebar({ view, onView, selected, selectedSummary, projects, 
           Group by
           {GROUP_BYS.map((option) => <button type="button" key={option.id} aria-pressed={groupBy === option.id} onClick={() => chooseGroupBy(option.id)}
             className={`rounded-md px-1.5 py-0.5 ${groupBy === option.id ? 'bg-active text-foreground' : 'hover:bg-hover hover:text-foreground'}`}>{option.label}</button>)}
-          {groupBy === 'none' ? <span className="ml-auto truncate text-muted-foreground/80">stacks</span> : null}
+          {/* Every grouping draws stacks whole. */}
+          <span className="ml-auto truncate text-muted-foreground/80">stacks</span>
         </div>
       </div>
 

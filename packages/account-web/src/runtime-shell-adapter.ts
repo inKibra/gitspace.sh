@@ -28,7 +28,7 @@ export function runtimeScope(snapshot: RuntimeSnapshot, inspection: Pick<Inspect
   const workspaces: WorkspaceView[] = definitions.filter(item => item.kind === 'worktree').map(item => {
     const saved = relationWorkspaces.find(workspace => workspace.id === item.id);
     const open = item.id === snapshot.workspaceId;
-    return { ...common, kind: 'workspace', id: item.id, name: item.name, branch: item.branch, phase: open ? phase : item.phase ?? 'plan', status: open ? status : saved?.status ?? unreported, closedAt: item.archivedAt ? new Date(item.archivedAt) : null, relations: saved?.relations ?? { dependsOn: [], relatedTo: [], stackedOn: null }, stack: saved?.stack ?? { blockedBy: [], blocking: [], findings: [] } };
+    return { ...common, kind: 'workspace', id: item.id, name: item.name, branch: item.branch, phase: open ? phase : item.phase ?? 'plan', status: open ? status : saved?.status ?? unreported, closedAt: item.archivedAt ? new Date(item.archivedAt) : null, relations: saved?.relations ?? { dependsOn: [], relatedTo: [], stackedOn: null }, stack: saved?.stack ?? { waitsOn: [], blocks: [], findings: [], position: null } };
   });
   const relationsReady = workspaces.every(workspace => relationWorkspaces.some(saved => saved.id === workspace.id));
   return { baseSpace, workspaces, relationsReady, workspace: inspection.workspace.kind === 'base' ? baseSpace : workspaces.find(item => item.id === inspection.workspace.id)! };

@@ -127,7 +127,7 @@ describe('Goal tab', () => {
 
   it('says automations are unavailable when they could not be read, instead of showing an empty grid', async () => {
     const retry = vi.fn();
-    props.scope = { kind: 'workspace', id: 'ws', projectId: 'project', projectName: 'acme', name: 'durable-queue', branch: 'feat/durable-queue', phase: 'code', generation: 1, possessedBy: 'cloud', holder: { kind: 'cloud' }, status: { primaryColor: 'dim', agents: { green: 0, blue: 0, orange: 0, red: 0 }, machines: { attached: 0, online: 0, ready: 0 }, sync: { conflicts: 0, problems: 0 } }, closedAt: null, relations: { dependsOn: [], relatedTo: [], stackedOn: null }, stack: { blockedBy: [], blocking: [], findings: [] } };
+    props.scope = { kind: 'workspace', id: 'ws', projectId: 'project', projectName: 'acme', name: 'durable-queue', branch: 'feat/durable-queue', phase: 'code', generation: 1, possessedBy: 'cloud', holder: { kind: 'cloud' }, status: { primaryColor: 'dim', agents: { green: 0, blue: 0, orange: 0, red: 0 }, machines: { attached: 0, online: 0, ready: 0 }, sync: { conflicts: 0, problems: 0 } }, closedAt: null, relations: { dependsOn: [], relatedTo: [], stackedOn: null }, stack: { waitsOn: [], blocks: [], findings: [], position: null } };
     props.automations = { automations: [], exceptions: [], read: false, busy: null, error: 'Read automations: offline', set() {}, retry };
     await render();
     expect(container.querySelector('[role="alert"]')?.textContent).toContain('Automations are unavailable. Read automations: offline');

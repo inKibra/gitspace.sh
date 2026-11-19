@@ -157,9 +157,9 @@ export function AccountWorkPages(props: AccountWorkPagesProps) {
 
 function KanbanView({ workspaces, onOpen, onSetRelations, onNewWorkspace }: { workspaces: readonly AccountWorkspace[]; onOpen: (workspace: AccountWorkspace) => void; onSetRelations?: GitSpaceShellProps['onSetWorkspaceRelations']; onNewWorkspace?: (phase: WorkspaceView['phase']) => void }) {
   const [graph, setGraph] = useState(false);
-  const blocked = workspaces.filter((workspace) => workspace.stack?.blockedBy.length).length;
+  const waiting = workspaces.filter((workspace) => workspace.stack?.waitsOn.length).length;
   const header = <>
-    <PageHeader kicker="Work" title="Kanban" actions={<span className="text-caption text-muted-foreground tabular-nums">{workspaces.length} workspaces{blocked ? ` · ${blocked} blocked` : ''}</span>} />
+    <PageHeader kicker="Work" title="Kanban" actions={<span className="text-caption text-muted-foreground tabular-nums">{workspaces.length} workspaces{waiting ? ` · ${waiting} with waits-on` : ''}</span>} />
     <TabsSubtle size="compact" className="mb-4 self-start" selectedIndex={graph ? 1 : 0} onSelect={(index) => setGraph(index === 1)} aria-label="Kanban view"><TabsSubtleItem index={0} label="Board" /><TabsSubtleItem index={1} label="Graph" /></TabsSubtle>
   </>;
   if (graph) {
@@ -185,7 +185,7 @@ function KanbanView({ workspaces, onOpen, onSetRelations, onNewWorkspace }: { wo
                 <WorkspaceStatus workspace={workspace} />
                 <span className="ml-auto flex shrink-0 items-center gap-1">
                   {workspace.relations?.stackedOn ? <Badge variant="dot" size="compact" color="blue" title={`Stacked on ${workspaces.find((candidate) => candidate.id === workspace.relations?.stackedOn)?.name ?? workspace.relations.stackedOn}`}>stacked</Badge> : null}
-                  {workspace.stack?.blockedBy.length ? <Badge size="compact" color="amber">blocked · {workspace.stack.blockedBy.length}</Badge> : null}
+                  {workspace.stack?.waitsOn.length ? <Badge size="compact" color="gray">waits on · {workspace.stack.waitsOn.length}</Badge> : null}
                 </span>
               </CardFooter>
             </Card>)}

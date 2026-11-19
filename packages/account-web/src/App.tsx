@@ -10,7 +10,7 @@ const status = (primaryColor: WorkspaceStatusSummary['primaryColor']): Workspace
   agents: { green: primaryColor === 'green' ? 1 : 0, blue: primaryColor === 'blue' ? 1 : 0, orange: primaryColor === 'orange' ? 1 : 0, red: primaryColor === 'red' ? 1 : 0 },
 });
 
-const unrelated: Pick<WorkspaceView, 'relations' | 'stack'> = { relations: { dependsOn: [], relatedTo: [], stackedOn: null }, stack: { blockedBy: [], blocking: [], findings: [] } };
+const unrelated: Pick<WorkspaceView, 'relations' | 'stack'> = { relations: { dependsOn: [], relatedTo: [], stackedOn: null }, stack: { waitsOn: [], blocks: [], findings: [], position: null } };
 
 export const verticalSliceFixture: GitSpaceShellProps = {
   project: { id: 'project-a', name: 'GitSpace', repository: 'gitspace.sh', connected: true },

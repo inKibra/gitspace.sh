@@ -825,7 +825,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       }
       if (input.tool === 'space_phase') {
         const { phase } = RuntimeSpacePhaseArgumentsSchema.parse(input.args);
-        // The canonical definition enforces the dependency ceiling; the runtime's workspace document drives this agent.
+        // The workspace object enforces the phase rule against its stack; the runtime's workspace document drives this agent.
         const workspace = await setCloudWorkspacePhase(env, env.ACCOUNT_ID, identity, phase);
         await options.runtime().session(input.conversationId, { type: 'setWorkspacePhase', phase });
         return completed(input, workspace);

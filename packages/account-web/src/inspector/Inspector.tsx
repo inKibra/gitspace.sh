@@ -57,7 +57,6 @@ export interface InspectorProps {
   workspaces: readonly WorkspaceView[];
   onSelectWorkspace(workspaceId: string): void;
   onSetRelations?: OverviewViewProps['onSetRelations'];
-  stackStatus?: OverviewViewProps['stackStatus'];
   /** The Environment tab; `openAgentSetup` switches to the Agent setup tab, `openBrowser` to the Browser tab. */
   environment?: (openAgentSetup: () => void, openBrowser: () => void) => ReactNode;
   /** The Browser tab: this workspace's browsers; `openEnvironment` switches to the Environment tab, where sites are approved. */
@@ -425,7 +424,7 @@ export function Inspector(props: InspectorProps) {
       return id === 'files' || id === 'artifacts' ? fileWorkbench(id, alert) : alert;
     }
     switch (id) {
-      case 'overview': return props.scope ? <OverviewView scope={props.scope} workspaces={props.workspaces} onSelectWorkspace={props.onSelectWorkspace} onSetRelations={props.onSetRelations} stackStatus={props.stackStatus} /> : null;
+      case 'overview': return props.scope ? <OverviewView scope={props.scope} workspaces={props.workspaces} onSelectWorkspace={props.onSelectWorkspace} onSetRelations={props.onSetRelations} /> : null;
       case 'environment': return props.environment?.(() => selectSurface('agents'), () => selectSurface('browser')) ?? <Padded><EmptyState icon={ic(Tool02, 22)} title="Workspace setup unavailable" description="This machine does not expose the workspace environment contract." /></Padded>;
       case 'browser': return props.browser?.(() => selectSurface('environment')) ?? <Padded><EmptyState icon={ic(Globe01, 22)} title="Browsers unavailable" description="This view has no workspace browsers to show." /></Padded>;
       case 'goal': return goalSurface();

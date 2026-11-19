@@ -1,6 +1,6 @@
 import { rpcErrorMessage } from './rpc-error-message.js';
 import type { AskBlock, TransportBlock, TurnBlock } from '@gitspace/blocks';
-import type { SessionControlView } from '@gitspace/protocol';
+import type { SessionControlView, StackStatus } from '@gitspace/protocol';
 import type { AgentSessionRenderState, SessionHistoryPage, SessionHistoryPageRequest } from '@gitspace/protocol-agent';
 import type { RuntimeMessageDecision, SessionControlView as RuntimeSessionControlView } from '@gitspace/protocol-runtime/session-controls';
 import type { CommentAnchor, SentAnswer } from '@gitspace/protocol-runtime/comments';
@@ -10,6 +10,10 @@ import {
   Badge,
   Button,
   Dialog,
+  DropdownContent,
+  DropdownLabel,
+  DropdownMenu,
+  DropdownTrigger,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -28,9 +32,11 @@ import {
   Tooltip,
   useShape,
 } from '@gitspace/ui';
-import { Archive, ArrowDown, GitBranch01, LayoutRight, RefreshCcw01, Terminal, XClose } from '@untitledui/icons';
+import { Archive, ArrowDown, ChevronDown, GitBranch01, LayoutRight, RefreshCcw01, Terminal, XClose } from '@untitledui/icons';
 import { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
-import { AccountSidebarContext, AppSidebar, type AppSidebarProps, type SidebarDeploymentProps, type SidebarProject, type SidebarSpaceSummary } from './AppSidebar.js';
+import { AccountSidebarContext, AppSidebar, PhaseMenuItems, type AppSidebarProps, type SidebarDeploymentProps, type SidebarProject, type SidebarSpaceSummary } from './AppSidebar.js';
+import { phaseRefusal } from './sidebar/stack-rules.js';
+import { StackToasts, useStackToast } from './sidebar/stack-toast.js';
 import { Composer, type ComposerProps, type SendBehavior } from './Composer.js';
 import type { ArtifactUploadClient } from './inspector/artifact-upload.js';
 import { InspectorLayout } from './inspector/inspector-shared.js';
@@ -82,10 +88,12 @@ export interface WorkspaceView {
   holder: SpaceHolderView;
   status: WorkspaceStatusSummary;
   closedAt: Date | null;
-  /** Workspace ids this workspace depends on / is related to (project-local); `stackedOn` is the single branch parent and always also a dependency. */
+  /** Workspace ids (project-local): `stackedOn` is the single branch parent, merge order and branch content; `dependsOn`
+   * (waits on) and `relatedTo` are planning labels that never block anything, and never include `stackedOn`. */
   relations: { dependsOn: readonly string[]; relatedTo: readonly string[]; stackedOn: string | null };
-  /** Derived by the machine's stack validations: what blocks this workspace, what it blocks, and every finding. */
-  stack: { blockedBy: readonly string[]; blocking: readonly string[]; findings: ReadonlyArray<{ code: string; message: string; workspaceId: string | null }> };
+  /** Derived by the project's relation checks: its open waits-on, the open workspaces waiting on it, every finding, and,
+   * when stacked, its branch's position against its parent (null when unstacked or unread). */
+  stack: { waitsOn: readonly string[]; blocks: readonly string[]; findings: ReadonlyArray<{ code: string; message: string; workspaceId: string | null }>; position: StackStatus | null };
 }
 export interface ProjectLifecycleView {
   id: string;
@@ -185,7 +193,8 @@ export interface GitSpaceShellProps {
   onRetryAgent?: () => Promise<void>;
   /** Runs the agent again from its conversation as it is, without a message: after its last run ended unanswered. */
   onContinueAgent?: () => Promise<void>;
-  onSetWorkspacePhase?: (workspaceId: string, phase: WorkspaceView['phase']) => void | Promise<void>;
+  /** Moves the open workspace's phase; `expectedPhase` is the phase the person last read (refused when it changed). */
+  onSetWorkspacePhase?: (workspaceId: string, phase: WorkspaceView['phase'], expectedPhase: WorkspaceView['phase']) => void | Promise<void>;
   /** Fast-forwards the project's base branch from origin (Update base); offered on the project's Behind marker. */
   onUpdateBase?: () => Promise<void>;
   /** The project change running or failed; the project page's top bar shows it. */
@@ -574,8 +583,10 @@ export function CreateWorkspaceDialog({ projectId, workspaces, initialPhase = 'p
   const set = (key: keyof typeof form) => (value: string) => setForm((current) => ({ ...current, [key]: value }));
   const candidates = workspaces.filter((workspace) => workspace.projectId === projectId && !workspace.closedAt);
   const source = sourceKind === 'workspace' ? candidates.find((workspace) => workspace.id === form.sourceRef || workspace.name === form.sourceRef) ?? null : null;
-  const dependencies = [...(source ? [source] : []), ...dependsOn.flatMap((id) => candidates.find((workspace) => workspace.id === id) ?? [])];
-  const ceiling = dependencies.find((dependency) => dependency.phase != null && PHASES.indexOf(dependency.phase) < PHASES.indexOf(phase));
+  const waitsOn = dependsOn.flatMap((id) => candidates.find((workspace) => workspace.id === id) ?? []);
+  // Only the source workspace limits the phase: it becomes the stack parent, and a workspace is never ahead of its
+  // parent. Waits-on is a planning label and never does.
+  const ahead = source && source.phase != null && PHASES.indexOf(source.phase) < PHASES.indexOf(phase) ? source : null;
   return <Dialog open={projectId !== null} onOpenChange={(next) => { if (!pending) onOpenChange(next); }}>
     <DialogContent>
       <DialogHeader><DialogTitle>Create from source</DialogTitle><DialogDescription>Start a workspace from a branch, pull request, tag, commit, or another workspace.</DialogDescription></DialogHeader>
@@ -594,22 +605,45 @@ export function CreateWorkspaceDialog({ projectId, workspaces, initialPhase = 'p
           {source ? null : <WorkspacePicker workspaces={candidates} onPick={set('sourceRef')} label="Pick the source workspace" placeholder="Search for the workspace to stack on" empty="No open workspaces to stack on." />}
         </section> : null}
         <section className="flex flex-col gap-2">
-          <span className="flex flex-wrap items-center gap-1 text-caption font-medium text-muted-foreground">Depends on{dependencies.length ? null : <span className="font-normal"> · none</span>}
-            {dependencies.map((dependency) => <span key={dependency.id} className="inline-flex items-center gap-0.5">
-              <Badge variant="dot" size="compact" color={dependency.id === source?.id ? 'blue' : 'gray'}>{dependency.name}</Badge>
-              {dependency.id === source?.id ? null : <Button variant="ghost" size="icon-compact" type="button" aria-label={`Remove dependency ${dependency.name}`} onClick={() => setDependsOn((current) => current.filter((id) => id !== dependency.id))}><XClose width={12} height={12} strokeWidth={1.5} /></Button>}
+          <span className="flex flex-wrap items-center gap-1 text-caption font-medium text-muted-foreground">Waits on{waitsOn.length ? null : <span className="font-normal"> · nothing</span>}
+            {waitsOn.map((dependency) => <span key={dependency.id} className="inline-flex items-center gap-0.5">
+              <Badge variant="dot" size="compact" color="gray">{dependency.name}</Badge>
+              <Button variant="ghost" size="icon-compact" type="button" aria-label={`Remove waits-on ${dependency.name}`} onClick={() => setDependsOn((current) => current.filter((id) => id !== dependency.id))}><XClose width={12} height={12} strokeWidth={1.5} /></Button>
             </span>)}
           </span>
-          <WorkspacePicker workspaces={candidates} exclude={dependencies.map((dependency) => dependency.id)} onPick={(id) => setDependsOn((current) => [...current, id])} label="Add a dependency" placeholder="Search workspaces to depend on" limit={4} empty="No other open workspaces." />
-          {ceiling ? <p className="text-caption text-destructive">{PHASE_LABEL[phase]} is ahead of {ceiling.name} ({workspacePhaseLabel(ceiling.phase)}); a workspace cannot pass the phase of what it depends on.</p> : null}
+          <WorkspacePicker workspaces={candidates} exclude={[...dependsOn, ...(source ? [source.id] : [])]} onPick={(id) => setDependsOn((current) => [...current, id])} label="Add a waits-on" placeholder="Search workspaces it waits on" limit={4} empty="No other open workspaces." />
+          {ahead ? <p className="text-caption text-destructive">{PHASE_LABEL[phase]} is ahead of {ahead.name} ({workspacePhaseLabel(ahead.phase)}), which it would be stacked on; a workspace is never in a later phase than its parent.</p> : null}
         </section>
       </form>
       <DialogFooter>
         <Button variant="secondary" type="button" disabled={pending} onClick={() => onOpenChange(false)}>Cancel</Button>
-        <Button type="submit" form="create-workspace-form" variant="primary" loading={pending} disabled={pending || ceiling !== undefined}>{pending ? 'Creating workspace…' : 'Create workspace'}</Button>
+        <Button type="submit" form="create-workspace-form" variant="primary" loading={pending} disabled={pending || ahead !== null}>{pending ? 'Creating workspace…' : 'Create workspace'}</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>;
+}
+
+/** The pane header's phase control: every phase, one the phase rule refuses disabled with why under it before you choose
+ * it. A move reports in the stack pill with Undo; a refusal the server still makes shows there too. */
+function PhaseControl({ workspace, workspaces, onSetPhase }: { workspace: WorkspaceView; workspaces: readonly WorkspaceView[]; onSetPhase: NonNullable<GitSpaceShellProps['onSetWorkspacePhase']> }) {
+  const toast = useStackToast();
+  const rule = (item: WorkspaceView) => ({ id: item.id, name: item.name, phase: item.phase, dependsOn: item.relations.dependsOn, relatedTo: item.relations.relatedTo, stackedOn: item.relations.stackedOn });
+  const self = rule(workspace);
+  const items = [self, ...workspaces.filter((item) => item.projectId === workspace.projectId && item.id !== workspace.id && !item.closedAt).map(rule)];
+  const move = (next: WorkspaceView['phase']): void => {
+    const previous = workspace.phase;
+    void Promise.resolve(onSetPhase(workspace.id, next, previous)).then(
+      () => toast.applied(`${workspace.name} moved to ${PHASE_LABEL[next]}`, async () => { await onSetPhase(workspace.id, previous, next); }),
+      (failure: unknown) => toast.refused(failure, 'Change phase'),
+    );
+  };
+  return <DropdownMenu>
+    <DropdownTrigger render={<button type="button" aria-label="Workspace phase" className="inline-flex h-7 items-center gap-1 rounded-[8px] px-2 text-caption text-foreground hover:bg-hover">{PHASE_LABEL[workspace.phase]}<ChevronDown width={14} height={14} className="text-muted-foreground" /></button>} />
+    <DropdownContent className="w-[240px]" align="center" sideOffset={4} checkedIndex={PHASES.indexOf(workspace.phase)}>
+      <DropdownLabel>Phase · never ahead of its parent</DropdownLabel>
+      <PhaseMenuItems phase={{ current: workspace.phase, refusal: (next) => phaseRefusal(items, self, next), onSet: move }} from={0} />
+    </DropdownContent>
+  </DropdownMenu>;
 }
 
 
@@ -662,7 +696,7 @@ function TerminalResizeHandle({ height, onHeight }: { height: number; onHeight: 
 // ── Shell ──
 /** The shell brings its own toast area when it is rendered outside the app's. */
 export function GitSpaceShell(props: GitSpaceShellProps) {
-  return <Toasts><Shell {...props} /></Toasts>;
+  return <Toasts><StackToasts><Shell {...props} /></StackToasts></Toasts>;
 }
 
 function Shell({ project, projects, workspace, baseSpace, workspaces, mainAgent, turns, transcript, history, transport, runtimeSummary, machines = [], onSend, draft, artifactUpload, sessionCommand, resolveResourceFile, sessionControls, controlsError, onRetryControls, onRetryAgent, onContinueAgent, onSetWorkspacePhase, onUpdateBase, projectOperation, sendPending = false, sendError, onSelectWorkspace, onSelectProject, onArchiveWorkspace, onCreateProject, onCreateWorkspace, onOpenSettings, onNavigateView, terminals, skills, renderInspector, renderEnvironmentStatus, user, providers, deployment, access }: GitSpaceShellProps) {
@@ -730,7 +764,7 @@ function Shell({ project, projects, workspace, baseSpace, workspaces, mainAgent,
     }
     // The pane's own listing carries its project's relations; it knows of no linked pull requests.
     const own = byProject.get(baseSpace.projectId);
-    if (own) own.graph = { baseBranch: baseSpace.branch, relations: Object.fromEntries(workspaces.filter((item) => item.projectId === baseSpace.projectId).map((item) => [item.id, { dependsOn: item.relations.dependsOn, stackedOn: item.relations.stackedOn }])), pullRequests: {} };
+    if (own) own.graph = { baseBranch: baseSpace.branch, relations: Object.fromEntries(workspaces.filter((item) => item.projectId === baseSpace.projectId).map((item) => [item.id, { ...item.relations, position: item.stack.position, aheadOfParent: item.stack.findings.find((finding) => finding.code === 'ahead-of-parent')?.message ?? null }])), pullRequests: {} };
     return [...byProject.values()];
   }, [accountSidebar, projects, baseSpace, workspaces, workspace.id, selectedSummary]);
   const projectGraph = useContext(ProjectGraphsContext)[workspace.projectId];
@@ -744,8 +778,6 @@ function Shell({ project, projects, workspace, baseSpace, workspaces, mainAgent,
       openWorkspace: onSelectWorkspace ?? null,
     };
   }, [project.repository, workspaces, workspace.projectId, projectGraph, onSelectWorkspace]);
-  const [phaseRefusal, setPhaseRefusal] = useState<{ workspaceId: string; message: string } | null>(null);
-  useToasts([phaseRefusal?.workspaceId === workspace.id ? { key: `phase-refusal:${phaseRefusal.message}`, tone: 'error', message: phaseRefusal.message, onDismiss: () => setPhaseRefusal(null) } : null]);
   const recovering = selectedSummary.detail === 'Agent is recovering';
   const inferenceState = useInference()?.state;
   const assignedProfileId = inferenceState?.assignments.find((entry) => entry.projectId === workspace.projectId)?.profileId;
@@ -805,13 +837,7 @@ function Shell({ project, projects, workspace, baseSpace, workspaces, mainAgent,
             {profileChange ? <span className="px-2 text-caption text-muted-foreground">{profileChange}</span> : null}
             {workspace.kind === 'project' ? projectOperation : null}
             {remote?.behind ? <BehindOrigin branch={workspace.branch} kind={workspace.kind} checkedAt={remote.checkedAt} onUpdate={workspace.kind === 'project' ? onUpdateBase : undefined} /> : null}
-            {workspace.kind === 'workspace' && onSetWorkspacePhase ? <Select size="compact" value={workspace.phase} onValueChange={(value) => {
-              const next = PHASES.find((phase) => phase === value);
-              if (!next) return;
-              setPhaseRefusal(null);
-              // The server keeps the phase ceiling: a refusal leaves the phase as it was and says why.
-              void Promise.resolve(onSetWorkspacePhase(workspace.id, next)).catch((failure: unknown) => setPhaseRefusal({ workspaceId: workspace.id, message: rpcErrorMessage(failure, 'Change phase') }));
-            }}><SelectTrigger variant="borderless" aria-label="Workspace phase" />{selectOptions(PHASES.map((phase) => ({ value: phase, label: PHASE_LABEL[phase] })))}</Select> : null}
+            {workspace.kind === 'workspace' && onSetWorkspacePhase ? <PhaseControl workspace={workspace} workspaces={workspaces} onSetPhase={onSetWorkspacePhase} /> : null}
             {sessionControls?.value.context ? <Tooltip content={`${Math.round(sessionControls.value.context.tokens).toLocaleString()} of ${Math.round(sessionControls.value.context.contextWindow).toLocaleString()} tokens`} side="bottom"><span className="tabular-nums px-2 text-caption text-muted-foreground">{Math.round(sessionControls.value.context.percent)}%</span></Tooltip> : null}
             {terminals ? <Tooltip content="Terminals" side="bottom"><Button variant="ghost" size="icon-compact" aria-label="Open terminals" aria-pressed={terminalOpen} onClick={() => setTerminalOpen((value) => !value)}><Terminal width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
             {renderInspector ? <Tooltip content="Inspector" side="bottom"><Button variant="ghost" size="icon-compact" aria-label="Open Inspector" aria-pressed={inspectorOpen} onClick={() => { if (inspectorOpen && inspectorFull) setInspectorFull(false); else setInspectorOpen((value) => !value); }}><LayoutRight width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}

@@ -323,7 +323,7 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
     try {
       const projectId = await projectIndex.locateWorkspace(input.workspaceId);
       if (!projectId) return err(errors.WorkspaceNotFound({ workspaceId: input.workspaceId }));
-      const updated = await (await authorityFor(projectId)).setWorkspaceRelations(input.workspaceId, { dependsOn: input.dependsOn, relatedTo: input.relatedTo, stackedOn: input.stackedOn });
+      const updated = await (await authorityFor(projectId)).setWorkspaceRelations(input.workspaceId, { dependsOn: input.dependsOn, relatedTo: input.relatedTo, stackedOn: input.stackedOn }, input.expected);
       if (updated.status === 'error') return err(errors.WorkspaceFailure(updated.failure));
       const workspace = (await readCloudSpaceView(env, userId, projectId)).workspaces.find((candidate) => candidate.id === input.workspaceId);
       return workspace ? ok(workspace) : err(errors.WorkspaceNotFound({ workspaceId: input.workspaceId }));
