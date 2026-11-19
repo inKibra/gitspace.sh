@@ -1,4 +1,4 @@
-import { APPROVAL_DECISION, APPROVAL_NOTE, APPROVE, REJECT, type AskAnswerer, type AskBlock, type ToolCallBlock } from '@gitspace/blocks';
+import { APPROVAL_DECISION, APPROVAL_NOTE, APPROVE, REJECT, askAnswererName, type AskAnswerer, type AskBlock, type ToolCallBlock } from '@gitspace/blocks';
 import type { PendingAskAnswer } from '@gitspace/protocol';
 import { askAnswerParts, questionState, RuntimeApprovalAnswerSchema, type RuntimeApprovalAnswer, type RuntimeQuestion } from '@gitspace/protocol-runtime';
 import { AskUserQuestions, Badge, Button, badgeColors, useShape, type AskUserAnswer } from '@gitspace/ui';
@@ -22,14 +22,14 @@ function ChosenMark() {
   </span>;
 }
 
-/** What the card asks and of whom, above it: an open one waits for the person; one the project agent answered says so
- * (and for whom); any other says how it ended. */
+/** What the card asks and of whom, above it: an open one waits for the person; one the project agent or a stack's head
+ * answered says which (and for whom); any other says how it ended. */
 function AskOrigin({ item, waiting, answeredBy, ended }: { item: AskBlock; waiting: boolean; answeredBy: AskAnswerer | undefined; ended: string }) {
   return <p className="flex min-w-0 flex-wrap items-center gap-2 text-caption text-muted-foreground" data-ask-origin>
     <span className="flex size-5 items-center justify-center rounded-full" style={{ color: badgeColors.orange, background: `color-mix(in oklab, ${badgeColors.orange} 14%, transparent)` }}><MessageQuestionCircle width={12} height={12} strokeWidth={1.75} aria-hidden /></span>
     <span className="text-foreground">{item.kind === 'plan' ? 'Plan approval' : item.questions.length > 1 ? 'Questions' : 'Question'}</span>
     <span>asked by the workspace agent</span>
-    {waiting ? <Badge size="compact" variant="dot" color="orange">Waiting for you</Badge> : answeredBy ? <span title={answeredBy.at}>· Answered by the project agent{answeredBy.for ? ` for ${answeredBy.for}` : ''}</span> : <span>· {ended}</span>}
+    {waiting ? <Badge size="compact" variant="dot" color="orange">Waiting for you</Badge> : answeredBy ? <span title={answeredBy.at}>· Answered by {askAnswererName(answeredBy)}{answeredBy.for ? ` for ${answeredBy.for}` : ''}</span> : <span>· {ended}</span>}
   </p>;
 }
 

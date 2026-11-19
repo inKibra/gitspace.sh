@@ -83,3 +83,21 @@ test('the changes between two reads name only the workspaces whose line changed,
   expect(workspaceBoardChanges(rows, rows.filter(item => item.workspaceId !== 'sync'), at, later)).toContain('- Removed: Sync repair (sync), deleted');
   expect(workspaceBoardChanges(rows, rows, at, later)).toBeNull();
 });
+
+test('a stack head\'s board line says what the member is stacked on and its stack state, under the board\'s own title', () => {
+  const members = [
+    row('ledger', 'Ledger', { stack: { on: 'Billing export', position: { behind: 3, baseRewritten: false, parentMerged: false } } }),
+    row('invoices', 'Invoices', { stack: { on: 'Ledger', position: { behind: 0, baseRewritten: true, parentMerged: true } } }),
+    row('receipts', 'Receipts', { stack: { on: 'Ledger', position: null } }),
+  ];
+  expect(workspaceBoard(members, at, 'Stack board')).toBe([
+    'Stack board, 2026-11-08 18:46:05 UTC (3 workspaces):',
+    '- Ledger (ledger) · on Billing export · 3 behind · code · idle · since 17:02',
+    '- Invoices (invoices) · on Ledger · base rewritten · parent merged · code · idle · since 17:02',
+    '- Receipts (receipts) · on Ledger · code · idle · since 17:02',
+  ].join('\n'));
+  expect(workspaceBoardChanges(members, [members[0]!, members[1]!, row('receipts', 'Receipts', { stack: { on: 'Ledger', position: { behind: 1, baseRewritten: false, parentMerged: false } } })], at, at, 'Stack board')).toBe([
+    'Stack board changes since 18:46 (now 2026-11-08 18:46:05 UTC); each line replaces that workspace\'s line:',
+    '- Receipts (receipts) · on Ledger · 1 behind · code · idle · since 17:02',
+  ].join('\n'));
+});

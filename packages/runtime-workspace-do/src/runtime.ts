@@ -1,4 +1,4 @@
-import { providerErrorText, WORKSPACE_REPORT_ENTRY, type WorkspaceTurnReport } from '@gitspace/blocks';
+import { providerErrorText, WORKSPACE_REPORT_ENTRY, type AskAnswerSource, type WorkspaceTurnReport } from '@gitspace/blocks';
 import { createWithdrawnNotices } from './withdrawn-notices.js';
 import { SqliteStorage } from '@earendil-works/pi-durable/storage/sqlite';
 import type { Conversation, ConversationId, ConversationRecord, Cursor, EntryRecord, Harness, TaskId, TaskRecord, EntryId, CommitPublication, SubmissionRecord, RunFailure, RunFailureReason } from '@earendil-works/pi-durable';
@@ -113,15 +113,16 @@ export type WorkspaceRuntime = {
   turn(requestId: string): Promise<RuntimeTurn | null>;
   /** The newest `limit` messages of that turn, oldest first, each cut short. */
   turnItems(requestId: string, limit: number): Promise<RuntimeTurnItem[]>;
-  /** Project base workspace: a workspace's report of a turn the project agent started. Quiet, a line the agent reads on
-   * its next turn; wake, an event that starts one (after the current one when it is busy). */
+  /** A workspace's report of a turn this workspace (the project agent, or a stack's head) started there. Quiet, a line
+   * the agent reads on its next turn; wake, an event that starts one (after the current one when it is busy). */
   workspaceReport(report: WorkspaceTurnReport, onDone: 'quiet' | 'wake'): Promise<void>;
-  /** The questions open in this workspace, main and subagents, as the project agent reads them. */
+  /** The questions open in this workspace, main and subagents, as the project agent or its stack's head reads them. */
   projectQuestions(): Promise<ProjectQuestion[]>;
-  /** The project agent answers a plain ask in the person's place, with that person's approval (`for`, their name): the
-   * question records it, and the asking conversation's next input says who answered. A question no longer open is not
-   * delivered (a retry of this same answer is); approvals, take-over requests and answers that do not fit are refused. */
-  projectAnswer(input: { questionId: string; answers: readonly PendingAskAnswer[]; for: string }): Promise<ProjectAnswerOutcome>;
+  /** The project agent or this workspace's stack head (`by`) answers a plain ask in the person's place, with that
+   * person's approval (`for`, their name): the question records both, and the asking conversation's next input says who
+   * answered. A question no longer open is not delivered (a retry of this same answer is); approvals, take-over requests
+   * and answers that do not fit are refused. */
+  projectAnswer(input: { questionId: string; answers: readonly PendingAskAnswer[]; for: string; by: AskAnswerSource }): Promise<ProjectAnswerOutcome>;
   /** You took a tab the agent was using, or handed one back (docs/APERTURE-DESIGN.md §7.2), or asked for a capture's
    * steps to be replayed (§11); a person commented on a page or replied in a comment thread (§9): an event for the
    * main conversation, which starts a turn when it is idle (after the current one when it is busy). */
@@ -802,19 +803,21 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
       if (!current) throw new Error(`Question ${input.questionId} is not one this workspace's agents asked`);
       if (questionState(current) !== 'open') {
         // A delivery retried after the first one landed finds its own answer.
-        if (current.answeredBy?.by === 'project-agent' && JSON.stringify(current.answer) === JSON.stringify(answer)) return { delivered: true };
+        const by = input.by.by === 'stack-head' ? input.by.workspaceId : input.by.by;
+        const answeredBy = current.answeredBy?.by === 'stack-head' ? current.answeredBy.workspaceId : current.answeredBy?.by;
+        if (answeredBy === by && JSON.stringify(current.answer) === JSON.stringify(answer)) return { delivered: true };
         return { delivered: false, reason: questionRefusal(current) };
       }
       const at = new Date().toISOString();
       await runtime.lifecycle.closeQuestion(input.questionId, async question => {
         const kind = projectQuestionKind(question);
-        if (kind !== 'ask') throw new Error(`Question ${input.questionId} is a ${kind}, not a plain question. ${PERSON_DECIDES[kind]} The project agent answers only plain questions (ask).`);
+        if (kind !== 'ask') throw new Error(`Question ${input.questionId} is a ${kind}, not a plain question. ${PERSON_DECIDES[kind]} Only plain questions (ask) are answered in a person's place.`);
         const stray = input.answers.find(item => item.id !== question.id);
         if (stray) throw new Error(`Each answer's id is the question's id, ${question.id}; ${stray.id} is not`);
         const unknown = question.choices.length > 0 ? input.answers.flatMap(item => item.selectedOptions).filter(option => !question.choices.includes(option)) : [];
         if (unknown.length > 0) throw new Error(`${unknown.join(', ')} ${unknown.length === 1 ? 'is not one of its choices' : 'are not its choices'}: ${question.choices.join(', ')}`);
         if (input.answers.every(item => item.selectedOptions.length === 0 && !item.customInput?.trim())) throw new Error('An answer selects a choice or writes customInput');
-        return { closure: { answer, answeredBy: { by: 'project-agent', at, for: input.for } }, value: undefined };
+        return { closure: { answer, answeredBy: { ...input.by, at, for: input.for } }, value: undefined };
       });
       publish(); await line;
       return { delivered: true };

@@ -37,7 +37,7 @@ import { adoptWorkspaceMetadata, authorizeWorkspaceRuntime, createWorkspaceMetad
 import { projectProgress, startFromProject, type ProjectProgress } from './project-watch.js';
 import { cancelAutomationTurn, submitAutomationTurn } from './automation-turns.js';
 import { AUTOMATION_REQUEST_PREFIX } from './project-automations.js';
-import { workspaceTurnReportSchema, type WorkspaceTurnReport } from '@gitspace/blocks';
+import { workspaceTurnReportSchema, type AskAnswerSource, type WorkspaceTurnReport } from '@gitspace/blocks';
 import { z } from 'zod';
 import type { CloudProjectSummary, CloudWorkspaceDefinition, ProjectLifecycle, WorkspaceLifecycle } from '@gitspace/protocol';
 import { assertPhaseMove, PHASE_LABEL, type GitLfsConfirmedObject, type WorkspacePhase, type WorkspaceReport, type WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
@@ -194,35 +194,35 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     return readWorkspaceReport(this.ctx.storage);
   }
 
-  /** The project agent's instruction to this workspace, queued or steering a running turn: the turn it starts or steers
-   * reports once to the project conversation. */
-  async runtimeStartFromProject(raw: unknown, input: { name: string; requestId: string; text: string; whenBusy: 'steer' | 'followUp'; onDone: 'quiet' | 'wake' }): Promise<RuntimeAccepted> {
+  /** An instruction to this workspace from the project agent or its stack's head (`from`, the workspace that sent it),
+   * queued or steering a running turn: the turn it starts or steers reports once to that workspace's conversation. */
+  async runtimeStartFromProject(raw: unknown, input: { name: string; from: string; requestId: string; text: string; whenBusy: 'steer' | 'followUp'; onDone: 'quiet' | 'wake' }): Promise<RuntimeAccepted> {
     const identity = RuntimeIdentitySchema.parse(raw);
     const runtime = await this.getRuntime(identity);
-    return startFromProject(this.ctx.storage, runtime, RuntimeSubmitInputSchema.parse({ ...identity, requestId: input.requestId, text: input.text, whenBusy: input.whenBusy }), { name: input.name, onDone: input.onDone });
+    return startFromProject(this.ctx.storage, runtime, RuntimeSubmitInputSchema.parse({ ...identity, requestId: input.requestId, text: input.text, whenBusy: input.whenBusy }), { name: input.name, from: input.from, onDone: input.onDone });
   }
 
-  /** The turn the project agent started here, for the project agent; the runtime opens only while that turn runs. */
+  /** The turn the project agent or the stack's head started here; the runtime opens only while that turn runs. */
   async projectProgress(raw: unknown): Promise<ProjectProgress> {
     const identity = RuntimeIdentitySchema.parse(raw);
     return projectProgress(this.ctx.storage, () => this.getRuntime(identity));
   }
 
-  /** The questions open in this workspace, for the project agent. */
+  /** The questions open in this workspace, for the project agent or its stack's head. */
   async projectQuestions(raw: unknown): Promise<ProjectQuestion[]> {
     return (await this.getRuntime(RuntimeIdentitySchema.parse(raw))).projectQuestions();
   }
 
-  /** The project agent's answer to a plain ask here, which `for` (the person) approved: recorded as its answer, not a
-   * person's, and delivered only while the question is open. */
-  async projectAnswer(raw: unknown, input: { questionId: string; answers: PendingAskAnswer[]; for: string }): Promise<ProjectAnswerOutcome> {
+  /** The answer of the project agent or of this workspace's stack head (`by`) to a plain ask here, which `for` (the
+   * person) approved: recorded as that agent's answer, not a person's, and delivered only while the question is open. */
+  async projectAnswer(raw: unknown, input: { questionId: string; answers: PendingAskAnswer[]; for: string; by: AskAnswerSource }): Promise<ProjectAnswerOutcome> {
     return (await this.getRuntime(RuntimeIdentitySchema.parse(raw))).projectAnswer(input);
   }
 
-  /** Base workspace only: a workspace's report of a turn the project agent started. */
+  /** A workspace's report of a turn this workspace started there: the project base workspace, or a stack's head. Only
+   * the workspace the watch recorded as the instruction's sender (`project-watch.ts`) is sent one. */
   async runtimeWorkspaceReport(raw: unknown, report: WorkspaceTurnReport, onDone: 'quiet' | 'wake'): Promise<void> {
     const identity = RuntimeIdentitySchema.parse(raw);
-    if (String(identity.workspaceId) !== String(identity.projectId)) throw new Error('Workspace reports go to the project base workspace');
     await (await this.getRuntime(identity)).workspaceReport(workspaceTurnReportSchema.parse(report), onDone);
   }
 
@@ -1035,9 +1035,9 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
   async runtimeCancel(raw: unknown) { const input = RuntimeCancelInputSchema.parse(raw); return (await this.getRuntime(input)).cancel(input); }
   /** Approving an agent's machine-attach question attaches that machine; the asking conversation hears when it is ready.
    * Approving a lifecycle approval card approves its scripts at the chosen scope as the answering person, who needs
-   * lifecycle control, before the card records the answer and the agent hears it. Approving the project agent's batch
-   * card (`project-answers.ts`) sends each of its answers, as the project agent's for this person, before the card
-   * records the decision; the project agent hears each answer's outcome. Only an open question takes an answer. */
+   * lifecycle control, before the card records the answer and the agent hears it. Approving the batch card of the project
+   * agent or a stack's head (`project-answers.ts`) sends each of its answers, as that agent's for this person, before the
+   * card records the decision; that agent hears each answer's outcome. Only an open question takes an answer. */
   async runtimeAnswer(raw: unknown, actor: { deviceId: string; kind: LifecycleActor['kind']; canApprove: boolean; lifecycleControl: boolean }) {
     const input = RuntimeAnswerInputSchema.parse(raw);
     const runtime = await this.getRuntime(input);

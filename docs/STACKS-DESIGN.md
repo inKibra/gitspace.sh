@@ -1,8 +1,8 @@
 # Stacks — Design Doc
 
 How workspaces relate to each other: what a stack is, the phase rule that keeps one in order, the state each member
-shows, and how the sidebar draws it. Step 1 of the stacks work (this doc); the head's stack board and tools (step 2)
-and Merge with promotion (step 3) build on it.
+shows, how the sidebar draws it (step 1), and how a stack's head leads its stack (step 2). Merge with promotion (step 3)
+builds on them.
 
 ## 1. Two kinds of relation
 
@@ -102,3 +102,80 @@ Restack is a hint: it changes what "behind" is measured against and never touche
   chosen.
 - The Relations card has a Stack section (Stacked on, Stacked on this) and a Planning labels section (Waits on, Blocks,
   Related to).
+
+## 7. A head leads its stack (step 2)
+
+A stack's head leads its stack with the project agent's existing tools, scoped to the stack. No tool is new.
+
+- **Head:** a workspace stacked on nothing with at least one open (not archived, not deleting) workspace stacked on it,
+  directly or through another. **Its stack:** every open workspace whose stack chain reaches it, a chain through an
+  archived workspace included. **A member** is any stacked workspace; it keeps a workspace agent's abilities (`list`,
+  `board`, `status`, its own questions, the Base line). **The project agent** (the base workspace) keeps everything.
+- `ProjectAuthorityDO.workspaceStackRole(id)` answers who a workspace is, from relation rows and definitions, at every
+  call: its name, what it is stacked on, and the members of the stack it heads in stack order (`stackBelow`, the
+  sidebar's own order, now in `protocol-workspace` and shared with `sidebar/graph.ts`).
+
+### Who instructs whom
+
+`space_workspace start`, `questions` and `answer` (`runtime-services.ts`, `leader`):
+
+| Caller | Target | Result |
+| --- | --- | --- |
+| The project agent | any workspace | allowed, as before |
+| A head | a member of its stack | allowed |
+| A head | any other workspace | "Billing export can't start Zeta: Zeta isn't in your stack. …" |
+| A member | any workspace | "Ledger can't start Invoices: members don't instruct other workspaces. …" |
+| A workspace in no stack | any workspace | "Search index can't start Invoices: only a stack's head can instruct its members, …" |
+
+Instructions so only flow down a stack: the project agent is no workspace's target, members instruct no one, and a head
+reaches only workspaces stacked on it, none of which can instruct it back. No chain of starts and answers returns to the
+workspace that began it, so agents can't keep each other going in a loop without a person. Automations stay the project
+agent's.
+
+### Reports go to the starter
+
+The watch a start arms (`ProjectWatch`, `project-watch.ts`) records who sent the instruction (`from`: the base workspace
+or the head; watches armed before this have none and are the project agent's). The watched turn's report goes to that
+workspace's runtime (`account-runtime-host.ts` → `SpaceAuthorityDO.runtimeWorkspaceReport`, no longer base-only) with the
+same text and the same `quiet`/`wake`: `wake` starts the receiver's turn from its own alarm, never inside the report
+call, so the subrequest-depth rule holds for heads too. A newer instruction, from either, replaces the watch. The
+instruction reads "Instruction from Billing export, the head of your stack:" where the project agent's reads
+"Instruction from the project agent:".
+
+### Answers on the head's card
+
+A head's `answer` posts the same approval card (`project-answers.ts`) in its own conversation; the card keeps who answers
+(`by`, `AskAnswerSource` in `@gitspace/blocks`) and says "Billing export (stack head) asks to answer this question for
+you". Approved, each answer is recorded as `answeredBy: { by: 'stack-head', workspaceId, name, at, for }`; the member's
+chat card reads "Answered by Billing export (stack head) for Ada" (`AskCards.tsx`, `askAnswererName`), the asking agent
+hears "Billing export, the head of your stack, answered your question … for Ada", and a later answer is refused "(by
+Billing export (stack head))".
+
+### The stack board
+
+A head's turns start with a stack board, by the project board's logic (`boardForTurn`, `ProjectBoardDoc`,
+`BOARD_CHANGES_CHARACTERS`, `boardAfterCompaction`): a full board first, after a compaction and when the changes would
+pass the budget, otherwise the lines that changed. Its rows (`stackBoard` in `runtime-services.ts`) are the stack's
+members only, in stack order, each line also carrying what it is stacked on and its stack state from the step 1 position
+(`readCloudStackPositions` for the members and their parents):
+
+```
+Stack board, 2026-11-19 10:00:00 UTC (2 workspaces):
+- Ledger (ledger) · on Billing export · 3 behind · code · idle · since 09:40
+- Invoices (invoices) · on Ledger · base rewritten · parent merged · plan · working · since 09:52
+```
+
+- A workspace that stops being a head (unstacked, merged, its members archived) reads null: no board, and its board
+  state starts over, so once it heads a stack again its next turn gets a full board.
+- `STACK_BOARD_INSTRUCTION` joins a head's instructions while its board state holds members. The sections render before
+  the turn's board is read, so the sentence arrives from the second request of its first turn as head and leaves on the
+  turn after it stops; the board message itself says what it is.
+- A head also keeps its Base line, after the board.
+- The project agent's board is unchanged except its order: stack by stack in the sidebar's order (`stackTree` over the
+  open workspaces in `readProjectWorkspaces`), one line per workspace. `space_workspace list` reads the same order.
+
+### When a head has members sync
+
+The `space-chain` skill says it: a member syncs when it enters Review or before it ships, or when its Base line shows
+files overlapping its own changes, and never mid-turn (queued). The head syncs itself first. Members in Plan, or in Code
+without overlapping files, are left alone.

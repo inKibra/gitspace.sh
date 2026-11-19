@@ -8,8 +8,9 @@ import { deleteProjectWatch, readProjectWatch, readWorkspaceReport, writeProject
 /** Messages of a running turn `progress` shows, newest last. */
 const PROGRESS_ITEMS = 8;
 
-/** What the project agent sees of the turn it started: its state, the workspace's stored report, and while it runs the
- * turn's newest messages. No watched turn (null): it ended and reported, a person took over, or none was started. */
+/** What the project agent or the stack's head sees of the turn it started: its state, the workspace's stored report,
+ * and while it runs the turn's newest messages. No watched turn (null): it ended and reported, a person took over, or
+ * none was started. */
 export type ProjectProgress = {
   turn: { requestId: string; state: 'queued' | 'running' | 'ended'; onDone: ProjectWatch['onDone']; armedAt: string; startedAt: string | null } | null;
   report: WorkspaceReport | null;
@@ -24,12 +25,13 @@ export type ProjectWatchHooks = {
 };
 
 /**
- * The project agent's instruction, watched: the watch is armed before the submission exists, so the turn that submission
- * starts (pi places it only once any turn ahead of it ends) is the one that reports. A retried call names a request
- * already submitted: it delivers nothing new and leaves the watch, or its report, as they are. A newer instruction
- * replaces the watch; the turn of the older one no longer reports.
+ * The instruction of the project agent or of the stack's head (`from`), watched: the watch is armed before the
+ * submission exists, so the turn that submission starts (pi places it only once any turn ahead of it ends) is the one
+ * that reports, to `from`. A retried call names a request already submitted: it delivers nothing new and leaves the
+ * watch, or its report, as they are. A newer instruction, from either, replaces the watch; the turn of the older one no
+ * longer reports.
  */
-export async function startFromProject(storage: DurableObjectStorage, runtime: WorkspaceRuntime, input: RuntimeSubmitInput, watch: Pick<ProjectWatch, 'name' | 'onDone'>): Promise<RuntimeAccepted> {
+export async function startFromProject(storage: DurableObjectStorage, runtime: WorkspaceRuntime, input: RuntimeSubmitInput, watch: { name: string; from: string; onDone: ProjectWatch['onDone'] }): Promise<RuntimeAccepted> {
   if (await runtime.turn(input.requestId) !== null) return runtime.submit(input);
   writeProjectWatch(storage, { ...watch, requestId: input.requestId, armedAt: Date.now(), startedAt: null });
   try { return await runtime.submit(input); } catch (error) {
@@ -40,20 +42,21 @@ export async function startFromProject(storage: DurableObjectStorage, runtime: W
 
 /**
  * The watch ends three ways: the watched turn ends (finished or failed), it stops for a person (a question or an
- * approval), or a person prompts in the workspace. The first two report once through `send`; the third says nothing.
- * Every other turn, a person's or one that started before the instruction, is not watched.
+ * approval), or a person prompts in the workspace. The first two report once through `send`, to the workspace that
+ * sent the instruction; the third says nothing. Every other turn, a person's or one that started before the
+ * instruction, is not watched.
  */
-export function projectWatchHooks(storage: DurableObjectStorage, identity: RuntimeIdentity, send: (report: WorkspaceTurnReport, onDone: ProjectWatch['onDone']) => void): ProjectWatchHooks {
+export function projectWatchHooks(storage: DurableObjectStorage, identity: RuntimeIdentity, send: (report: WorkspaceTurnReport, onDone: ProjectWatch['onDone'], to: string) => void): ProjectWatchHooks {
   const end = (watch: ProjectWatch, outcome: WorkspaceTurnReport['outcome'], excerpt: string | null, source: WorkspaceTurnReport['source']) => {
     deleteProjectWatch(storage);
-    send({ projectId: identity.projectId, workspaceId: identity.workspaceId, name: watch.name, requestId: watch.requestId, outcome, excerpt, source }, watch.onDone);
+    send({ projectId: identity.projectId, workspaceId: identity.workspaceId, name: watch.name, requestId: watch.requestId, outcome, excerpt, source }, watch.onDone, watch.from ?? identity.projectId);
   };
   return {
     turnChanged: (requestId, turn) => {
       const watch = readProjectWatch(storage);
       if (watch?.requestId !== requestId) return;
       if (turn.state === 'running' && watch.startedAt === null) writeProjectWatch(storage, { ...watch, startedAt: Date.now() });
-      // The project agent hears a withdrawn instruction as failed, with why: it never ran.
+      // The sender hears a withdrawn instruction as failed, with why: it never ran.
       else if (turn.state === 'ended') end(watch, turn.outcome === 'withdrawn' ? 'failed' : turn.outcome, turn.text, turn.source);
     },
     // A question only counts once the watched turn runs: one still pending from an earlier turn is not this turn's.

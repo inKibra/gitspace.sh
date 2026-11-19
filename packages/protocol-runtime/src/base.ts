@@ -54,7 +54,7 @@ export const RuntimeQuestionClosedSchema = z.object({ reason: z.enum(['dismissed
 export type RuntimeQuestionClosed = z.infer<typeof RuntimeQuestionClosedSchema>;
 /** A question for the person. Asking it ends the asking agent's turn; its answer, or its dismissal, is that
  * conversation's next input. `askedAt` is absent on questions asked before it was recorded; `answeredAt` on ones
- * answered before it was. `answeredBy`: the project agent answered in the person's place. */
+ * answered before it was. `answeredBy`: the project agent or the workspace's stack head answered in the person's place. */
 export const RuntimeQuestionSchema = z.object({ id: z.string(), conversationId: z.string(), kind: z.enum(['ask', 'approval', 'takeover', 'lifecycle-approval']), prompt: z.string(), choices: z.array(z.string()), answer: RuntimeJsonSchema.nullable(), askedAt: z.iso.datetime().optional(), answeredAt: z.iso.datetime().optional(), answeredBy: askAnswererSchema.optional(), closed: RuntimeQuestionClosedSchema.optional(), tool: RuntimeQuestionToolSchema.optional(), takeover: RuntimeTakeoverQuestionSchema.optional(), lifecycle: RuntimeLifecycleApprovalQuestionSchema.optional() });
 export type RuntimeQuestion = z.infer<typeof RuntimeQuestionSchema>;
 /** `open` until answered or closed; only an open question waits on a person, and only an open one takes an answer. */

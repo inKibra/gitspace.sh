@@ -1,6 +1,6 @@
 import type { DeploymentStatusView } from '@gitspace/protocol';
 import type { CloudProjectOperation, CloudWorkspaceDefinition, RemoteBranchState } from '@gitspace/protocol/project-authority';
-import type { WorkspaceStatusColor } from '@gitspace/protocol-workspace';
+import { stackBelow, stackTree, type WorkspaceStatusColor } from '@gitspace/protocol-workspace';
 import type { IconComponentProps } from '@gitspace/ui';
 import {
   DropdownContent,
@@ -39,7 +39,7 @@ import { converging, latestLaunchProgress, launchPhaseLabel, machineConvergence,
 import { PRODUCT_ROUTE_LABELS, type AppView, type ProductRoute } from './routes.js';
 import { operationActive } from './OperationProgress.js';
 import { PHASE_LABEL, PHASES, STATUS_COLOR, StatusDot, workspaceStatusColor, workspaceStatusLabel, WorkspaceStatusDot, type AgentScopeView, type ProjectAgentView, type ProjectLifecycleView, type WorkspaceCreationState, type WorkspaceView } from './GitSpaceShell.js';
-import { blocks, lit, relation, stackBelow, stackTree, type Lit, type Relation } from './sidebar/graph.js';
+import { blocks, lit, relation, type Lit, type Relation } from './sidebar/graph.js';
 import { ACCENT, DOWNSTREAM_TONE, GroupHeading, HeadTag, LabelText, PhaseTag, PrChips, StackCaption, StackMarker, UPSTREAM_TONE } from './sidebar/parts.js';
 import type { ProjectGraph } from './sidebar/project-graph.js';
 import { stackPosition, type ChainWorkspace } from './sidebar/StackChain.js';

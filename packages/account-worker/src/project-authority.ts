@@ -33,7 +33,7 @@ import { DEVICE_AUTHORITY_UNAVAILABLE, deviceAuthority, withDeviceAuthority } fr
 import type { CredentialVaultDO } from './application.js';
 import type { SpaceAuthorityDO } from './space-authority.js';
 import type { FleetCatalogDO } from './fleet-catalog.js';
-import { WorkspaceDomainError, WorkspaceRelationsSchema, WorkspaceReportSchema, emptyRelations, normalizeRelations, resolveWorkspaceRelations, type PhaseCarrier, type WorkspaceFailure, type GitLfsSnapshot, type GitLfsObject, type GitLfsConfirmedObject, type WorkspacePhase, type WorkspaceRelations, type WorkspaceRelationsInput, type WorkspaceReport } from '@gitspace/protocol-workspace';
+import { WorkspaceDomainError, WorkspaceRelationsSchema, WorkspaceReportSchema, emptyRelations, normalizeRelations, resolveWorkspaceRelations, stackBelow, type PhaseCarrier, type WorkspaceFailure, type GitLfsSnapshot, type GitLfsObject, type GitLfsConfirmedObject, type WorkspacePhase, type WorkspaceRelations, type WorkspaceRelationsInput, type WorkspaceReport } from '@gitspace/protocol-workspace';
 import { GitLfsRetention, type RetainedLfsSnapshot } from './git-lfs-retention.js';
 import { confirmCloudOrigin } from './git-lfs-origin.js';
 import { gitLfsObjectKey } from './git-lfs-store.js';
@@ -1654,6 +1654,19 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
     const project = this.getProject();
     if (!project || project.lifecycle === 'deleting') return null;
     return { project, workspace: workspaceId === project.id ? this.ensureBaseWorkspace({ userId: this.env.ACCOUNT_ID, projectId: project.id }) : this.getWorkspace(workspaceId) };
+  }
+
+  /** Where a workspace stands in the stacks, read from relation rows and definitions: its name, what it is stacked on
+   * (null: nothing, so it may head a stack), and the members of the stack it heads, depth-first in the sidebar's order
+   * (empty when it heads none). A member is every open workspace whose stack chain reaches it, a chain through an
+   * archived workspace included; archived and deleting workspaces are no members. */
+  workspaceStackRole(workspaceId: string): { name: string; stackedOn: string | null; members: { id: string; name: string }[] } {
+    const relations = this.listWorkspaceRelations();
+    const stackedOn = relations[workspaceId]?.stackedOn ?? null;
+    const worktrees = this.listWorkspaces().filter(workspace => workspace.kind === 'worktree')
+      .map(workspace => ({ id: workspace.id, name: workspace.name, open: workspace.lifecycle !== 'archived' && workspace.lifecycle !== 'deleting', stackedOn: relations[workspace.id]?.stackedOn ?? null }));
+    const members = stackedOn === null ? stackBelow(worktrees, workspaceId).filter(member => member.open).map(member => ({ id: member.id, name: member.name })) : [];
+    return { name: this.getWorkspace(workspaceId)?.name ?? workspaceId, stackedOn, members };
   }
 
   /** What the phase rule weighs a workspace's phase against: the open workspace it is stacked on and the open ones

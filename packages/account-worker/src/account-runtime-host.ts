@@ -141,7 +141,9 @@ export async function createAccountWorkspaceRuntime(
   } });
   const lfs = await createAccountGitLfsStore(env, env.ACCOUNT_ID, identity.projectId, `runtime:${identity.workspaceId}`);
   const qa = createRuntimeQaServices(env, identity);
-  const watch = projectWatchHooks(ctx.storage, identity, (report, onDone) => waitUntil('project report', env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`).runtimeWorkspaceReport({ projectId: identity.projectId, workspaceId: identity.projectId }, report, onDone).catch((error: unknown) => console.error('Workspace report was not sent', { workspaceId: identity.workspaceId, error }))));
+  // A watched turn reports to the workspace that started it, the project's base or a stack's head; the report wakes that
+  // workspace through its own alarm, never inline (`WorkspaceRuntime.workspaceReport`).
+  const watch = projectWatchHooks(ctx.storage, identity, (report, onDone, to) => waitUntil('project report', env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${to}`).runtimeWorkspaceReport({ projectId: identity.projectId, workspaceId: to }, report, onDone).catch((error: unknown) => console.error('Workspace report was not sent', { workspaceId: identity.workspaceId, to, error }))));
   const automationTurns = automationTurnHooks(ctx.storage, identity, report => env.PROJECT_AUTOMATIONS.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`).runTurnChanged(report), waitUntil);
   // The account's copy of this workspace's status: the sidebar's and the project agent's board. A send that fails stays
   // owed (retried, and sent again by every publication until one arrives); before, a failed send left the account on the

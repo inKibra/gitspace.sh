@@ -1,5 +1,4 @@
-import { PHASE_LABEL, PHASE_ORDER, transitiveDependents, type WorkspacePhase } from '@gitspace/protocol-workspace';
-import { stackBelow } from './graph.js';
+import { PHASE_LABEL, PHASE_ORDER, stackBelow, transitiveDependents, type WorkspacePhase } from '@gitspace/protocol-workspace';
 
 /** An open workspace as the phase rule and the list's picker read it. An unknown phase reads as Plan, as the server
  * reads it. */

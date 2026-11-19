@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { RuntimeApprovalAnswerSchema, RuntimeLifecycleApprovalAnswerSchema, RuntimeTakeoverQuestionSchema, TAKEOVER_ANSWERS, askAnswerParts, questionState, type RuntimeQuestionClosed } from '@gitspace/protocol-runtime';
 import type { SentAnswer } from '@gitspace/protocol-runtime/comments';
 import { PendingAskAnswerSchema } from '@gitspace/protocol-runtime/session-controls';
-import { openerAt, piMessageRowId, type AskAnswerer } from '@gitspace/blocks';
+import { askAnswererName, openerAt, piMessageRowId, type AskAnswerer } from '@gitspace/blocks';
 import { blockAskQuestionId, requiredBlockAsks } from '@gitspace/protocol/gitspace-ui';
 import { BlockAsksDoc, QuestionsDoc, StagedCommentsDoc, WorkspaceDoc, type Question } from './documents.js';
 import { turnOpeners } from './transcript-rows.js';
@@ -39,7 +39,7 @@ const TakeoverQuestionFields = z.object(RuntimeTakeoverQuestionSchema.shape);
 /** Why `question`, which is not open, takes no answer. */
 export function questionRefusal(question: Pick<Question, 'id' | 'answeredBy' | 'closed'>): string {
   if (question.closed) return `Question ${question.id} is closed (${CLOSED_BECAUSE[question.closed.reason]}), so it can no longer be answered.`;
-  return `Question ${question.id} is already answered${question.answeredBy ? ' (by the project agent)' : ''}; it takes no other answer.`;
+  return `Question ${question.id} is already answered${question.answeredBy ? ` (by ${askAnswererName(question.answeredBy)})` : ''}; it takes no other answer.`;
 }
 
 /** Records the question a call asks, once: a rerun of the call finds it, and one asked before questions recorded when
@@ -148,7 +148,8 @@ function answerText(question: Question, answer: JsonValue, answeredBy: AskAnswer
   const asked = `Question: ${shownPrompt(question.prompt)}`;
   if (question.kind === 'ask') {
     const parts = askAnswerParts(answer).map(part => [...part.selectedOptions, ...part.customInput?.trim() ? [part.customInput.trim()] : []].join('; ')).filter(Boolean);
-    const who = answeredBy ? `The project agent answered your question (question ${question.id}) for ${answeredBy.for ?? 'the user'}, who approved its answer; the user did not write it themself.` : `The user answered your question (question ${question.id}).`;
+    const by = answeredBy?.by === 'stack-head' ? `${answeredBy.name}, the head of your stack,` : 'The project agent';
+    const who = answeredBy ? `${by} answered your question (question ${question.id}) for ${answeredBy.for ?? 'the user'}, who approved its answer; the user did not write it themself.` : `The user answered your question (question ${question.id}).`;
     return `${who}\n${asked}\nAnswer: ${parts.length > 0 ? parts.join('\n') : JSON.stringify(answer)}`;
   }
   if (question.kind === 'lifecycle-approval') {
@@ -195,7 +196,10 @@ export async function settleQuestion(tx: Tx, conversationId: ConversationId, que
     text = closure.text ?? answerText(question, closure.answer, closure.answeredBy);
   }
   await dropStagedAnswers(tx, [question.id]);
-  const sender = question.answeredBy ? { id: 'project-agent', name: `Project agent for ${question.answeredBy.for ?? 'the user'}` } : { id: 'user', name: 'The user' };
+  const answerer = question.answeredBy;
+  const sender = !answerer ? { id: 'user', name: 'The user' }
+    : answerer.by === 'project-agent' ? { id: 'project-agent', name: `Project agent for ${answerer.for ?? 'the user'}` }
+    : { id: answerer.workspaceId, name: `${askAnswererName(answerer)} for ${answerer.for ?? 'the user'}` };
   return { conversationId: question.conversationId, requestId: `question-closed:${question.id}`, kind: 'question', sender, text,
     payload: { questionId: question.id, kind: question.kind, state: questionState(question), answer: question.answer, ...(question.answeredBy ? { answeredBy: question.answeredBy } : {}), ...(question.closed ? { closed: question.closed } : {}) } };
 }

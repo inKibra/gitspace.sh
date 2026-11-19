@@ -6,7 +6,7 @@ import { AgentDoc, type JsonObject } from '@earendil-works/pi-durable';
 import { RuntimeGitCheckpointSchema, RuntimeIdentitySchema, type RuntimeTakeoverQuestion } from '@gitspace/protocol-runtime';
 import { QuestionsDoc } from '@gitspace/runtime-core';
 import { createWorkspaceRuntime, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
-import type { WorkspaceTurnReport } from '@gitspace/blocks';
+import type { AskAnswerSource, WorkspaceTurnReport } from '@gitspace/blocks';
 import type { ProjectQuestion } from '@gitspace/runtime-workspace-do';
 import { projectProgress, projectWatchHooks, startFromProject } from '../src/project-watch.js';
 import { proposeProjectAnswers, settleProjectAnswers } from '../src/project-answers.js';
@@ -46,9 +46,9 @@ async function watchFixture(ctx: DurableObjectState) {
   };
   const models = createModels();
   models.setProvider({ id: 'fixture', name: 'Fixture', auth: { apiKey: { name: 'Fixture', resolve: async () => ({ auth: { apiKey: 'fixture' } }) } }, getModels: () => [{ id: 'fixture', name: 'Fixture', provider: 'fixture', api: 'fixture', baseUrl: 'https://fixture.invalid', input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, reasoning: false, contextWindow: 200000, maxTokens: 1024 }], stream, streamSimple: stream });
-  const reports: Array<{ report: WorkspaceTurnReport; onDone: string }> = [];
+  const reports: Array<{ report: WorkspaceTurnReport; onDone: string; to: string }> = [];
   let reported = Promise.withResolvers<void>();
-  const hooks = projectWatchHooks(ctx.storage, identity, (report, onDone) => { reports.push({ report, onDone }); reported.resolve(); reported = Promise.withResolvers(); });
+  const hooks = projectWatchHooks(ctx.storage, identity, (report, onDone, to) => { reports.push({ report, onDone, to }); reported.resolve(); reported = Promise.withResolvers(); });
   const waits: Promise<unknown>[] = [];
   const failures: unknown[] = [];
   /** When the runtime asked its object's alarm to wake it. */
@@ -81,7 +81,8 @@ async function watchFixture(ctx: DurableObjectState) {
     while (waits.length) await Promise.all(waits.splice(0));
     if (failures.length) throw new AggregateError(failures, 'The runtime reported failures');
   };
-  const start = (requestId: string, text: string, onDone: 'quiet' | 'wake' = 'quiet', whenBusy: 'steer' | 'followUp' = 'steer') => startFromProject(ctx.storage, runtime, { ...identity, requestId, text: `Instruction from the project agent:\n\n${text}`, whenBusy }, { name: 'FEAT-33', onDone });
+  /** An instruction from `from`: the project's base workspace (the project agent) unless a stack's head is named. */
+  const start = (requestId: string, text: string, onDone: 'quiet' | 'wake' = 'quiet', whenBusy: 'steer' | 'followUp' = 'steer', from = identity.projectId) => startFromProject(ctx.storage, runtime, { ...identity, requestId, text: `Instruction from ${from === identity.projectId ? 'the project agent' : 'Billing export, the head of your stack'}:\n\n${text}`, whenBusy }, { name: 'FEAT-33', from, onDone });
   const submit = (requestId: string, text: string, deviceId?: string) => runtime.submit({ ...identity, requestId, text }, deviceId);
   const automate = (requestId: string, text: string, whenBusy?: 'steer' | 'followUp') => submitAutomationTurn(ctx.storage, runtime, { requestId, text, ...(whenBusy === undefined ? {} : { whenBusy }) });
   /** The open questions once there are any: a block ask is posted after the commit that stored its reply. */
@@ -109,7 +110,7 @@ test('only the turn the project agent started reports, once; later turns, a pers
       f.reply('Plan drafted.');
       await f.start('start:one', 'Draft the plan.');
       await f.settle();
-      expect(f.reports).toEqual([{ onDone: 'quiet', report: { projectId: f.identity.projectId, workspaceId: f.identity.workspaceId, name: 'FEAT-33', requestId: 'start:one', outcome: 'finished', excerpt: 'Plan drafted.', source: { conversationId: expect.any(String), ordinal: expect.any(Number), characters: 13 } } }]);
+      expect(f.reports).toEqual([{ onDone: 'quiet', to: f.identity.projectId, report: { projectId: f.identity.projectId, workspaceId: f.identity.workspaceId, name: 'FEAT-33', requestId: 'start:one', outcome: 'finished', excerpt: 'Plan drafted.', source: { conversationId: expect.any(String), ordinal: expect.any(Number), characters: 13 } } }]);
       // The watch is gone with its report: the project agent sees no watched turn.
       expect((await f.progress()).turn).toBeNull();
       f.reply('Done with your edit.');
@@ -137,7 +138,7 @@ test('a steered instruction reaches the running turn at its next model call, and
       tool.resolve();
       await f.settle();
       expect(f.requests).toEqual(['Run the tests.', 'Instruction from the project agent:\n\nAlso rename the bucket.']);
-      expect(f.reports).toEqual([{ onDone: 'quiet', report: { projectId: f.identity.projectId, workspaceId: f.identity.workspaceId, name: 'FEAT-33', requestId: 'start:steer', outcome: 'finished', excerpt: 'Tests pass, and the bucket is renamed.', source: { conversationId: expect.any(String), ordinal: expect.any(Number), characters: 38 } } }]);
+      expect(f.reports).toEqual([{ onDone: 'quiet', to: f.identity.projectId, report: { projectId: f.identity.projectId, workspaceId: f.identity.workspaceId, name: 'FEAT-33', requestId: 'start:steer', outcome: 'finished', excerpt: 'Tests pass, and the bucket is renamed.', source: { conversationId: expect.any(String), ordinal: expect.any(Number), characters: 38 } } }]);
     } finally { await f.runtime.harness.close(BACKGROUND_CONTEXT); }
   });
 });
@@ -372,10 +373,10 @@ test('the project agent answers an open ask for the person: the answer is the as
       expect(others).toEqual([]);
       expect(question).toEqual({ id: question.id, conversation: 'main', kind: 'ask', prompt: 'Which bucket?', choices: ['assets', 'uploads'], answerable: true, why: null });
       // An option the question does not offer is refused before anything is recorded.
-      await expect(f.runtime.projectAnswer({ questionId: question.id, answers: [{ id: question.id, selectedOptions: ['archive'], customInput: null }], for: 'Brad' })).rejects.toThrow('archive is not one of its choices: assets, uploads');
+      await expect(f.runtime.projectAnswer({ questionId: question.id, answers: [{ id: question.id, selectedOptions: ['archive'], customInput: null }], for: 'Brad', by: { by: 'project-agent' } })).rejects.toThrow('archive is not one of its choices: assets, uploads');
       f.reply('Moved to uploads.');
       const answers = [{ id: question.id, selectedOptions: ['uploads'], customInput: null }];
-      expect(await f.runtime.projectAnswer({ questionId: question.id, answers, for: 'Brad' })).toEqual({ delivered: true });
+      expect(await f.runtime.projectAnswer({ questionId: question.id, answers, for: 'Brad', by: { by: 'project-agent' } })).toEqual({ delivered: true });
       await f.settle();
       const stored = (await f.runtime.harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items.find(item => item.id === question.id);
       expect(stored).toMatchObject({ answer: answers, answeredBy: { by: 'project-agent', for: 'Brad' } });
@@ -384,8 +385,8 @@ test('the project agent answers an open ask for the person: the answer is the as
       expect(heard).toBe(true);
       expect(await f.runtime.projectQuestions()).toEqual([]);
       // A retried delivery of the same answer is delivered; another answer is not.
-      expect(await f.runtime.projectAnswer({ questionId: question.id, answers, for: 'Brad' })).toEqual({ delivered: true });
-      expect(await f.runtime.projectAnswer({ questionId: question.id, answers: [{ id: question.id, selectedOptions: ['assets'], customInput: null }], for: 'Brad' })).toEqual({ delivered: false, reason: `Question ${question.id} is already answered (by the project agent); it takes no other answer.` });
+      expect(await f.runtime.projectAnswer({ questionId: question.id, answers, for: 'Brad', by: { by: 'project-agent' } })).toEqual({ delivered: true });
+      expect(await f.runtime.projectAnswer({ questionId: question.id, answers: [{ id: question.id, selectedOptions: ['assets'], customInput: null }], for: 'Brad', by: { by: 'project-agent' } })).toEqual({ delivered: false, reason: `Question ${question.id} is already answered (by the project agent); it takes no other answer.` });
     } finally { await f.runtime.harness.close(BACKGROUND_CONTEXT); }
   });
 });
@@ -399,13 +400,13 @@ test('the project agent\'s batch of answers posts one approval card and sends no
       const workspace = async (id: string) => { const found = workspaces[id]; if (!found) throw new Error(`Workspace ${id} is not a workspace in this project`); return found; };
       const answers = [{ workspaceId: 'ws-a', questionId: 'question:1', answer: 'uploads' }, { workspaceId: 'ws-b', questionId: 'question:2', answer: 'In the wiki' }, { workspaceId: 'ws-b', questionId: 'question:3', answer: ['assets'] }];
       // A question that is not open is refused before any card is posted.
-      await expect(proposeProjectAnswers({ runtime: f.runtime, conversationId: String(f.root.id), attemptId: 'attempt-0', answers: [{ workspaceId: 'ws-a', questionId: 'question:9', answer: 'uploads' }], workspace })).rejects.toThrow('Question question:9 is not open in workspace Uploads');
-      const posted = await proposeProjectAnswers({ runtime: f.runtime, conversationId: String(f.root.id), attemptId: 'attempt-1', answers, workspace });
+      await expect(proposeProjectAnswers({ runtime: f.runtime, conversationId: String(f.root.id), attemptId: 'attempt-0', by: { by: 'project-agent' }, answers: [{ workspaceId: 'ws-a', questionId: 'question:9', answer: 'uploads' }], workspace })).rejects.toThrow('Question question:9 is not open in workspace Uploads');
+      const posted = await proposeProjectAnswers({ runtime: f.runtime, conversationId: String(f.root.id), attemptId: 'attempt-1', by: { by: 'project-agent' }, answers, workspace });
       const card = (await f.runtime.harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items.find(item => item.id === posted.questionId);
       expect(card).toMatchObject({ kind: 'approval', answer: null, conversationId: String(f.root.id), tool: { name: 'space_workspace' } });
-      expect(card?.prompt).toContain('1. Uploads: Which bucket?\n   Answer: uploads');
+      expect(card?.prompt).toContain('The project agent asks to answer these 3 questions for you:\n1. Uploads: Which bucket?\n   Answer: uploads');
       expect(card?.prompt).toContain('2. Docs: Where do the docs go?\n   Answer: In the wiki');
-      const delivered: { workspaceId: string; questionId: string; answers: unknown; for: string }[] = [];
+      const delivered: { workspaceId: string; questionId: string; answers: unknown; for: string; by: unknown }[] = [];
       const settle = (approved: boolean) => settleProjectAnswers({ questionId: posted.questionId, card: card?.tool?.args, decision: { approved, note: null }, person: 'Brad', async deliver(workspaceId, answer) {
         delivered.push({ workspaceId, ...answer });
         if (answer.questionId === 'question:2') return { delivered: false, reason: 'Question question:2 is closed (the person dismissed it), so it can no longer be answered.' };
@@ -417,9 +418,9 @@ test('the project agent\'s batch of answers posts one approval card and sends no
       expect(rejected).toBe(`The user rejected your proposed answers (question ${posted.questionId}); nothing was sent.`);
       const outcome = await settle(true);
       expect(delivered).toEqual([
-        { workspaceId: 'ws-a', questionId: 'question:1', answers: [{ id: 'question:1', selectedOptions: ['uploads'], customInput: null }], for: 'Brad' },
-        { workspaceId: 'ws-b', questionId: 'question:2', answers: [{ id: 'question:2', selectedOptions: [], customInput: 'In the wiki' }], for: 'Brad' },
-        { workspaceId: 'ws-b', questionId: 'question:3', answers: [{ id: 'question:3', selectedOptions: ['assets'], customInput: null }], for: 'Brad' },
+        { workspaceId: 'ws-a', questionId: 'question:1', answers: [{ id: 'question:1', selectedOptions: ['uploads'], customInput: null }], for: 'Brad', by: { by: 'project-agent' } },
+        { workspaceId: 'ws-b', questionId: 'question:2', answers: [{ id: 'question:2', selectedOptions: [], customInput: 'In the wiki' }], for: 'Brad', by: { by: 'project-agent' } },
+        { workspaceId: 'ws-b', questionId: 'question:3', answers: [{ id: 'question:3', selectedOptions: ['assets'], customInput: null }], for: 'Brad', by: { by: 'project-agent' } },
       ]);
       expect(outcome).toContain('- Uploads (ws-a), question question:1: delivered');
       expect(outcome).toContain('- Docs (ws-b), question question:2: not delivered, the question had already closed.');
@@ -446,7 +447,7 @@ test('plan, tool and lifecycle approvals and take-over requests are listed as a 
       expect(listed.map(question => [question.id, question.kind, question.answerable])).toEqual([['plan', 'plan-approval', false], ['machine', 'tool-approval', false], ['scripts', 'lifecycle-approval', false], ['tab', 'takeover', false]]);
       expect(listed.every(question => question.why?.startsWith('A person'))).toBe(true);
       for (const { id, choice, kind } of [{ id: 'plan', choice: 'Approve', kind: 'plan-approval' }, { id: 'machine', choice: 'Approve', kind: 'tool-approval' }, { id: 'scripts', choice: 'project', kind: 'lifecycle-approval' }, { id: 'tab', choice: 'Not now', kind: 'takeover' }]) {
-        await expect(f.runtime.projectAnswer({ questionId: id, answers: [{ id, selectedOptions: [choice], customInput: null }], for: 'Brad' })).rejects.toThrow(`Question ${id} is a ${kind}, not a plain question`);
+        await expect(f.runtime.projectAnswer({ questionId: id, answers: [{ id, selectedOptions: [choice], customInput: null }], for: 'Brad', by: { by: 'project-agent' } })).rejects.toThrow(`Question ${id} is a ${kind}, not a plain question`);
       }
       const items = (await f.runtime.harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items ?? [];
       expect(items.map(item => [item.id, item.answer, item.answeredBy])).toEqual([['plan', null, undefined], ['machine', null, undefined], ['scripts', null, undefined], ['tab', null, undefined]]);
@@ -482,6 +483,67 @@ test('a wake report starts the project agent\'s turn with a workspace event from
       await answered.requested.promise;
       await f.settle();
       expect(f.requests).toEqual(['<gitspace-event kind="workspace" source="FEAT-33">\nWorkspace FEAT-33 failed: "Model request failed"\n</gitspace-event>']);
+    } finally { await f.runtime.harness.close(BACKGROUND_CONTEXT); }
+  });
+});
+
+test('a stack head\'s instruction reports to the head, quiet or wake, steered or queued; a newer instruction from the project agent replaces its watch', async () => {
+  await runInDurableObject(room(), async (_instance, ctx) => {
+    const f = await watchFixture(ctx);
+    const held = Promise.withResolvers<void>();
+    try {
+      f.reply('Ledger synced.');
+      await f.start('start:head-quiet', 'Sync onto Billing export.', 'quiet', 'steer', 'billing');
+      await f.settle();
+      f.reply('Ledger rebased.');
+      await f.start('start:head-wake', 'Rebase again.', 'wake', 'followUp', 'billing');
+      await f.settle();
+      expect(f.requests).toEqual(['Instruction from Billing export, the head of your stack:\n\nSync onto Billing export.', 'Instruction from Billing export, the head of your stack:\n\nRebase again.']);
+      expect(f.reports.map(({ report, onDone, to }) => [report.requestId, report.excerpt, onDone, to])).toEqual([['start:head-quiet', 'Ledger synced.', 'quiet', 'billing'], ['start:head-wake', 'Ledger rebased.', 'wake', 'billing']]);
+
+      // Both wait behind a running turn; the project agent's instruction, the newer one, is the one watched.
+      const earlier = f.reply('Earlier work done.', held.promise);
+      await f.submit('earlier', 'Nightly cleanup.');
+      await earlier.requested.promise;
+      f.reply('Queued work done.');
+      f.reply('Queued work done.');
+      await f.start('start:head-queued', 'Sync later.', 'quiet', 'followUp', 'billing');
+      await f.start('start:project-queued', 'Then report.', 'quiet', 'followUp');
+      held.resolve();
+      await f.settle();
+      expect(f.reports.slice(2).map(({ report, to }) => [report.requestId, to])).toEqual([['start:project-queued', f.identity.projectId]]);
+    } finally { held.resolve(); await f.runtime.harness.close(BACKGROUND_CONTEXT); }
+  });
+});
+
+test('a stack\'s head answers a member\'s plain question through its own approval card: the card, the answer and the asking agent say the head answered', async () => {
+  await runInDurableObject(room(), async (_instance, ctx) => {
+    const f = await watchFixture(ctx);
+    const head: AskAnswerSource = { by: 'stack-head', workspaceId: 'billing', name: 'Billing export' };
+    try {
+      const asking = f.reply(ASK_BUCKET);
+      const reported = f.reported();
+      await f.start('start:ask', 'Move the uploads.', 'quiet', 'steer', 'billing');
+      await asking.requested.promise;
+      await reported;
+      const [question] = await f.asked();
+      if (!question) throw new Error('The ask left no open question');
+      // This runtime plays both the member that asked and the head's conversation the card is posted in.
+      const posted = await proposeProjectAnswers({ runtime: f.runtime, conversationId: String(f.root.id), attemptId: 'attempt-head', by: head, answers: [{ workspaceId: 'ledger', questionId: question.id, answer: 'uploads' }], workspace: async () => ({ name: 'Ledger', questions: await f.runtime.projectQuestions() }) });
+      const card = (await f.runtime.harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items.find(item => item.id === posted.questionId);
+      expect(card?.prompt).toMatch(/^Billing export \(stack head\) asks to answer this question for you:\n1\. Ledger: Which bucket\?\n {3}Answer: uploads\n/u);
+      f.reply('Moved to uploads.');
+      const outcome = await settleProjectAnswers({ questionId: posted.questionId, card: card?.tool?.args, decision: { approved: true, note: null }, person: 'Brad', deliver: (_workspaceId, answer) => f.runtime.projectAnswer(answer) });
+      expect(outcome).toBe(`The user approved your proposed answers (question ${posted.questionId}); each went to its workspace as answered by Billing export (stack head) for Brad:\n- Ledger (ledger), question ${question.id}: delivered`);
+      await f.settle();
+      const stored = (await f.runtime.harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items.find(item => item.id === question.id);
+      expect(stored?.answeredBy).toEqual({ by: 'stack-head', workspaceId: 'billing', name: 'Billing export', at: expect.any(String), for: 'Brad' });
+      const heard = (await f.root.context(BACKGROUND_CONTEXT)).messages.some(message => message.role === 'user' && JSON.stringify(message.content).includes(`Billing export, the head of your stack, answered your question (question ${question.id}) for Brad`));
+      expect(heard).toBe(true);
+      // A retry from the head is delivered; the same answer from the project agent is another answerer's, and refused.
+      const answers = [{ id: question.id, selectedOptions: ['uploads'], customInput: null }];
+      expect(await f.runtime.projectAnswer({ questionId: question.id, answers, for: 'Brad', by: head })).toEqual({ delivered: true });
+      expect(await f.runtime.projectAnswer({ questionId: question.id, answers, for: 'Brad', by: { by: 'project-agent' } })).toEqual({ delivered: false, reason: `Question ${question.id} is already answered (by Billing export (stack head)); it takes no other answer.` });
     } finally { await f.runtime.harness.close(BACKGROUND_CONTEXT); }
   });
 });

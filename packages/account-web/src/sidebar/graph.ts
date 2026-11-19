@@ -1,3 +1,5 @@
+import { stackBelow } from '@gitspace/protocol-workspace';
+
 /** A workspace as the sidebar's stack tree and the Relations tab's chain and graph read it: `stackedOn` is the branch it
  * builds on and merges after; `dependsOn` what it waits on, a planning label that never includes `stackedOn`. */
 export interface GraphWorkspace { id: string; dependsOn: readonly string[]; stackedOn: string | null }
@@ -46,14 +48,6 @@ export function relation(light: Lit | null, id: string): Relation {
   return 'unrelated';
 }
 
-/** Everything stacked on `id`, depth-first: each branch of a fork fully before the next, in list order. */
-export function stackBelow<T extends GraphWorkspace>(items: readonly T[], id: string, seen: ReadonlySet<string> = new Set([id])): readonly T[] {
-  return items.filter(item => item.stackedOn === id && !seen.has(item.id)).flatMap(child => {
-    const visited = new Set([...seen, child.id]);
-    return [child, ...stackBelow(items, child.id, visited)];
-  });
-}
-
 /** The bottom of the stack a workspace is in: itself when it is stacked on nothing listed. */
 export function stackRoot(items: readonly GraphWorkspace[], id: string): string {
   const byId = new Map(items.map(item => [item.id, item]));
@@ -70,17 +64,6 @@ export function stackRoot(items: readonly GraphWorkspace[], id: string): string 
 export function stackOf<T extends GraphWorkspace>(items: readonly T[], id: string): readonly T[] {
   const root = items.find(item => item.id === stackRoot(items, id));
   return root ? [root, ...stackBelow(items, root.id)] : [];
-}
-
-/** Group by none: every workspace stacked on nothing listed, each followed by its whole stack (depth-first, a fork's
- * branches one after another). `stacked` rows sit one level in; there is no third level. */
-export function stackTree<T extends GraphWorkspace>(items: readonly T[]): readonly { item: T; stacked: boolean }[] {
-  const listed = new Set(items.map(item => item.id));
-  const roots = items.filter(item => !item.stackedOn || !listed.has(item.stackedOn));
-  const placed = roots.flatMap(root => [{ item: root, stacked: false }, ...stackBelow(items, root.id).map(item => ({ item, stacked: true }))]);
-  // A stack whose parents form a loop has no root; its rows still show, at the first level.
-  const shown = new Set(placed.map(entry => entry.item.id));
-  return [...placed, ...items.filter(item => !shown.has(item.id)).map(item => ({ item, stacked: false }))];
 }
 
 export interface LaneNode { id: string; column: number; row: number }

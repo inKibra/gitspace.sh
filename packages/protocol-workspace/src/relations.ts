@@ -83,6 +83,28 @@ export function normalizeRelations(selfId: string, input: WorkspaceRelationsInpu
   return { dependsOn, relatedTo: unique(input.relatedTo.filter((id) => id !== selfId && !taken.has(id))), stackedOn };
 }
 
+/** A workspace as stack order reads it: the workspace it is stacked on, null for none. */
+export interface StackOrderItem { id: string; stackedOn: string | null }
+
+/** Everything stacked on `id`, depth-first: each branch of a fork fully before the next, in list order. */
+export function stackBelow<T extends StackOrderItem>(items: readonly T[], id: string, seen: ReadonlySet<string> = new Set([id])): readonly T[] {
+  return items.filter(item => item.stackedOn === id && !seen.has(item.id)).flatMap(child => {
+    const visited = new Set([...seen, child.id]);
+    return [child, ...stackBelow(items, child.id, visited)];
+  });
+}
+
+/** Every workspace stacked on nothing listed, each followed by its whole stack (depth-first, a fork's branches one after
+ * another): the sidebar's order. `stacked` entries belong to the stack of the root before them. */
+export function stackTree<T extends StackOrderItem>(items: readonly T[]): readonly { item: T; stacked: boolean }[] {
+  const listed = new Set(items.map(item => item.id));
+  const roots = items.filter(item => !item.stackedOn || !listed.has(item.stackedOn));
+  const placed = roots.flatMap(root => [{ item: root, stacked: false }, ...stackBelow(items, root.id).map(item => ({ item, stacked: true }))]);
+  // A stack whose parents form a loop has no root; its rows still show, at the first level.
+  const shown = new Set(placed.map(entry => entry.item.id));
+  return [...placed, ...items.filter(item => !shown.has(item.id)).map(item => ({ item, stacked: false }))];
+}
+
 export interface PhaseCarrier {
   id: string;
   name?: string;

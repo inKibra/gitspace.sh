@@ -88,6 +88,11 @@ describe('an ask card that posted a workspace question', () => {
     expect(button('Dismiss')).toBeUndefined();
   });
 
+  it('one a stack\'s head answered names the head', async () => {
+    await render(ask, [{ ...asked, answer: [{ id: 'question-1', selectedOptions: ['uploads'], customInput: null }], answeredBy: { by: 'stack-head', workspaceId: 'billing', name: 'Billing export', at: '2026-11-07T10:00:00.000Z', for: 'Brad' } }]);
+    expect(origin()).toBe('Questionasked by the workspace agent· Answered by Billing export (stack head) for Brad');
+  });
+
   it('a plan answered shows the decision and the note it stored', async () => {
     await render(plan, [{ ...proposed, answer: { approved: false, note: 'Keep the stamp card behind the flag.' } }]);
     expect(container.textContent).toContain('Plan approval · answered');

@@ -115,15 +115,18 @@ export function readWorkspaceReport(storage: DurableObjectStorage): WorkspaceRep
 const ProjectWatchSchema = z.object({
   /** The workspace name the report shows. */
   name: z.string(),
-  /** The project agent's submission: only the turn it starts reports. */
+  /** The workspace that sent the instruction and hears the report: the project base workspace or a stack's head. Watches
+   * armed before stack heads could start a turn have none; they are the project agent's. */
+  from: z.string().min(1).optional(),
+  /** The sender's submission: only the turn it starts reports. */
   requestId: z.string().min(1),
   onDone: z.enum(['quiet', 'wake']),
   armedAt: z.number().int(),
   /** When that turn started; null while the submission waits behind another turn. */
   startedAt: z.number().int().nullable(),
 });
-/** The one turn of this workspace the project agent started and has not heard back from: it reports once, when it
- * ends or stops for a person, and a person writing here ends it silently. */
+/** The one turn of this workspace the project agent or its stack's head started and has not heard back from: it reports
+ * once, when it ends or stops for a person, and a person writing here ends it silently. */
 export type ProjectWatch = z.infer<typeof ProjectWatchSchema>;
 
 export function writeProjectWatch(storage: DurableObjectStorage, watch: ProjectWatch): void {

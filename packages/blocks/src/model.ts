@@ -65,14 +65,27 @@ export const toolCallBlockSchema = base.extend({
   details: z.unknown().optional(),
 });
 
-/** Who answered a question in a person's place: the project agent, when (ISO), and for whom: the person who approved its
+/** Who answers a workspace's question in a person's place: the project agent, or the head of the workspace's stack (its
+ * id and name as they were when it answered). */
+const projectAgentSource = z.object({ by: z.literal('project-agent') });
+const stackHeadSource = z.object({ by: z.literal('stack-head'), workspaceId: z.string(), name: z.string() });
+export const askAnswerSourceSchema = z.discriminatedUnion('by', [projectAgentSource, stackHeadSource]);
+export type AskAnswerSource = z.infer<typeof askAnswerSourceSchema>;
+
+/** Who answered a question in a person's place (`AskAnswerSource`), when (ISO), and for whom: the person who approved its
  * answer (absent on answers from before a person approved them). A question without one was answered by a person. */
-export const askAnswererSchema = z.object({ by: z.literal('project-agent'), at: z.string(), for: z.string().optional() });
+const answeredWhen = { at: z.string(), for: z.string().optional() };
+export const askAnswererSchema = z.discriminatedUnion('by', [projectAgentSource.extend(answeredWhen), stackHeadSource.extend(answeredWhen)]);
 export type AskAnswerer = z.infer<typeof askAnswererSchema>;
 
+/** How a card or a message names who answered: "the project agent", or "Billing export (stack head)". */
+export function askAnswererName(source: AskAnswerSource): string {
+  return source.by === 'project-agent' ? 'the project agent' : `${source.name} (stack head)`;
+}
+
 /** `kind: 'plan'` is a `propose_plan` call (`planQuestions`), with the `steps` it proposes. A question with
- * `written: false` is answered only by its options; an `optional` one may be skipped. `answeredBy`: the project agent
- * answered it, not the person. `questionId`: the workspace question the call posted, which says whether it is open,
+ * `written: false` is answered only by its options; an `optional` one may be skipped. `answeredBy`: the project agent or
+ * a stack's head answered it, not the person. `questionId`: the workspace question the call posted, which says whether it is open,
  * answered or closed; a `pending` card with one stays pending here, since its answer arrives as a later message. Calls
  * that held their answer (before questions outlived their call) have none, and their result settles the card. */
 export const askBlockSchema = base.extend({

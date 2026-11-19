@@ -1,7 +1,7 @@
 import { imageReference } from '@gitspace/protocol-runtime/image-reference';
 import { z } from 'zod';
-import { APPROVE, REJECT } from '@gitspace/blocks';
-import { canonicalJson, isToolResultReference, parseToolResultReference, RuntimeDispatchSelectionSchema, RuntimeIdentitySchema, RuntimeJsonSchema, RuntimeSnapshotSchema, RuntimeToolDispatchSchema, RuntimeToolResultRequestSchema, RuntimeToolResultSchema, type RuntimeAttachment, type RuntimeSnapshot, type RuntimeToolResult, type RuntimeToolDispatch } from '@gitspace/protocol-runtime';
+import { APPROVE, REJECT, type AskAnswerSource } from '@gitspace/blocks';
+import { canonicalJson, isToolResultReference, parseToolResultReference, RuntimeDispatchSelectionSchema, RuntimeIdentitySchema, RuntimeJsonSchema, RuntimeSnapshotSchema, RuntimeToolDispatchSchema, RuntimeToolResultRequestSchema, RuntimeToolResultSchema, type RuntimeAttachment, type RuntimeSnapshot, type RuntimeToolResult, type RuntimeToolDispatch, type WorkspaceBoardRow } from '@gitspace/protocol-runtime';
 import { LifecycleMutationSchema, approvedBrowserSites, projectEnvironmentState, type LifecycleRun } from '@gitspace/protocol-environment';
 import type { WorkspaceEnvironment } from './space-environment.js';
 import { lifecycleApprovalRequest } from './lifecycle-approval-card.js';
@@ -42,7 +42,7 @@ import { changeAgentWorkspace, setCloudWorkspacePhase } from './cloud-workspace-
 import { readProjectWorkspaces } from './workspace-board.js';
 import { cutForAgent } from '@gitspace/protocol-workspace';
 import { machineCapabilities } from './runtime-attachments.js';
-import { compareCloudHistory, readCloudBaseTip, readCloudWorkspaceBase } from './cloud-stack-status.js';
+import { compareCloudHistory, readCloudBaseTip, readCloudStackPositions, readCloudWorkspaceBase } from './cloud-stack-status.js';
 import type { FleetMachineDefinition } from './fleet-catalog.js';
 import { QuestionsDoc, postQuestion } from '@gitspace/runtime-core';
 import { proposeProjectAnswers } from './project-answers.js';
@@ -224,8 +224,30 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
   // A stub per call: one that saw an error, such as the project object resetting for a release, stays broken.
   const authority = () => env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`);
   const source = () => readInspectorContext(env, env.ACCOUNT_ID, identity.workspaceId, identity.projectId);
-  /** The project's workspaces as the board shows them; the base workspace is the project agent's own. */
+  /** The project's workspaces as the board shows them, stack by stack in the sidebar's order; the base workspace is the
+   * project agent's own. */
   const boardRows = async () => (await readProjectWorkspaces(env, identity.projectId)).flatMap(({ definition, board }) => definition.kind === 'worktree' ? [board] : []);
+  /** The members of the stack this workspace heads, in stack order, each with the workspace it is stacked on and its
+   * position against it (`readCloudStackPositions`: stored checkpoints and cloud history, no runtime opens); null when it
+   * heads none. Relations are read at each call, so a workspace that stops heading a stack stops getting a board. */
+  const stackBoard = async (): Promise<WorkspaceBoardRow[] | null> => {
+    const role = await authority().workspaceStackRole(identity.workspaceId);
+    if (role.members.length === 0) return null;
+    const [workspaces, project] = await Promise.all([readProjectWorkspaces(env, identity.projectId), authority().getProject()]);
+    if (!project) throw new Error('Project is not configured');
+    const byId = new Map(workspaces.map(entry => [entry.definition.id, entry]));
+    const members = role.members.flatMap(member => byId.get(member.id) ?? []);
+    // Each member and the workspace it is stacked on: only their positions are read.
+    const compared = [...new Set(members.flatMap(member => [member.definition.id, member.relations.stackedOn ?? '']))].flatMap(id => byId.get(id) ?? []);
+    const positions = await readCloudStackPositions(env, env.ACCOUNT_ID, project, compared.map(entry => entry.definition), Object.fromEntries(compared.map(entry => [entry.definition.id, entry.relations])));
+    return members.map(({ definition, board, relations }) => {
+      const position = positions.get(definition.id);
+      return { ...board, stack: {
+        on: byId.get(relations.stackedOn ?? '')?.definition.name ?? relations.stackedOn ?? '',
+        position: position ? { behind: position.parentAhead, baseRewritten: position.baseRewritten, parentMerged: position.parentMerged === 'merged' } : null,
+      } };
+    });
+  };
   const browser = createRuntimeBrowserAuthority({
     storage: ctx.storage, env, identity, runtime: options.runtime,
     selectExecution: (args, candidates) => selections.cache(args, candidates),
@@ -728,8 +750,21 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       if (runtimeSpaceToolNames.includes(input.tool)) return completed(input, await invokeRuntimeSpaceTool(env, identity, input));
       if (input.tool === 'space_workspace') {
         const args = RuntimeWorkspaceArgumentsSchema.parse(input.args);
-        // Only the project agent acts on other workspaces' agents: workspaces starting or answering each other could loop without a person.
-        const projectAgentOnly = (what: string) => { if (identity.workspaceId !== baseWorkspaceId) throw new Error(`Only the project agent (the project's base workspace) can ${what}`); };
+        // The project agent starts, questions and answers for any workspace; a stack's head only for the members of its
+        // stack, read fresh from the project at each call. Instructions so only flow down a stack: the project agent is
+        // no workspace's target, members instruct no one, and a head reaches only workspaces stacked on it, none of which
+        // can instruct it back. No chain of starts and answers can return to the workspace that began it, so agents
+        // cannot keep each other going in a loop without a person.
+        const leader = async () => {
+          const role = identity.workspaceId === baseWorkspaceId ? null : await authority().workspaceStackRole(identity.workspaceId);
+          const by: AskAnswerSource = role === null ? { by: 'project-agent' } : { by: 'stack-head', workspaceId: identity.workspaceId, name: role.name };
+          return { by, check(target: { id: string; name: string }, what: string) {
+            if (role === null) return;
+            if (role.stackedOn !== null) throw new Error(`${role.name} can't ${what} ${target.name}: members don't instruct other workspaces. Its stack's head or the project agent can.`);
+            if (role.members.length === 0) throw new Error(`${role.name} can't ${what} ${target.name}: only a stack's head can instruct its members, and nothing is stacked on ${role.name}. The project agent can.`);
+            if (!role.members.some(member => member.id === target.id)) throw new Error(`${role.name} can't ${what} ${target.name}: ${target.name} isn't in your stack. A stack's head reaches only the workspaces stacked on it; the project agent reaches any.`);
+          } };
+        };
         switch (args.method) {
           case 'get': case 'current': {
             if (args.workspaceId === undefined || args.workspaceId === identity.workspaceId) return completed(input, identity.workspaceId === baseWorkspaceId ? await authority().getProject() : (await source()).workspace);
@@ -772,28 +807,32 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
             return completed(input, { workspaceId: target.id, name: target.name, ...await env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${target.id}`).projectProgress({ projectId: identity.projectId, workspaceId: target.id }) });
           }
           case 'questions': {
-            projectAgentOnly('read other workspaces\' questions');
             const target = await authority().getWorkspace(args.workspaceId);
             if (!target || target.kind !== 'worktree') throw new Error(`Workspace ${args.workspaceId} is not a workspace in this project`);
+            (await leader()).check(target, 'read the questions of');
             return completed(input, { workspaceId: target.id, name: target.name, questions: await env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${target.id}`).projectQuestions({ projectId: identity.projectId, workspaceId: target.id }) });
           }
           case 'answer': {
-            projectAgentOnly('answer other workspaces\' questions');
-            const posted = await proposeProjectAnswers({ runtime: options.runtime(), conversationId: input.conversationId, attemptId: input.attemptId, answers: args.answers, async workspace(workspaceId) {
+            const lead = await leader();
+            const posted = await proposeProjectAnswers({ runtime: options.runtime(), conversationId: input.conversationId, attemptId: input.attemptId, by: lead.by, answers: args.answers, async workspace(workspaceId) {
               const target = await authority().getWorkspace(workspaceId);
               if (!target || target.kind !== 'worktree') throw new Error(`Workspace ${workspaceId} is not a workspace in this project`);
+              lead.check(target, 'answer for');
               return { name: target.name, questions: await env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${target.id}`).projectQuestions({ projectId: identity.projectId, workspaceId: target.id }) };
             } });
             return { requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: posted.text }] };
           }
           case 'start': {
-            projectAgentOnly('start other workspaces');
             const target = await authority().getWorkspace(args.workspaceId);
             if (!target || target.kind !== 'worktree') throw new Error(`Workspace ${args.workspaceId} is not a workspace in this project`);
+            const lead = await leader();
+            lead.check(target, 'start');
             if (target.lifecycle !== 'active') throw new Error(`Workspace ${target.name} is ${target.lifecycle}; only an active workspace can be started`);
-            // The attempt names the request, so a retried call delivers the instruction once; only the turn it starts reports.
+            // The attempt names the request, so a retried call delivers the instruction once; only the turn it starts
+            // reports, to this workspace.
             const accepted = await env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${target.id}`).runtimeStartFromProject({ projectId: identity.projectId, workspaceId: target.id }, {
-              name: target.name, requestId: `start:${input.attemptId}`, text: `Instruction from the project agent:\n\n${args.instruction}`, whenBusy: args.when === 'queue' ? 'followUp' : 'steer', onDone: args.onDone,
+              name: target.name, from: identity.workspaceId, requestId: `start:${input.attemptId}`, whenBusy: args.when === 'queue' ? 'followUp' : 'steer', onDone: args.onDone,
+              text: `Instruction from ${lead.by.by === 'stack-head' ? `${lead.by.name}, the head of your stack` : 'the project agent'}:\n\n${args.instruction}`,
             });
             // `historyFrom` reads the instruction and everything the workspace does after it: history_read { workspaceId, offset: historyFrom }.
             return completed(input, { workspaceId: target.id, name: target.name, conversationId: accepted.conversationId ?? null, historyFrom: accepted.historyFrom ?? null });
@@ -971,9 +1010,11 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
   return {
     browser: browser.manage,
     tools: { invoke, prepareBrowser: browser.prepare, takeoverTab: browser.takeoverTab, images: options.images,
-      // Only the project agent's turns carry the workspace board; a workspace agent's start with a Base line when its
-      // base changed, read from the cloud whether its checkout is there or on a machine.
+      // The project agent's turns carry the workspace board; a workspace agent's carry its stack board while it heads a
+      // stack, and start with a Base line when its base changed, read from the cloud whether its checkout is there or on
+      // a machine.
       ...(identity.workspaceId === baseWorkspaceId ? { projectBoard: boardRows } : {
+        stackBoard,
         workspaceBase: async () => readCloudWorkspaceBase(env, ctx.storage, env.ACCOUNT_ID, identity.projectId, identity.workspaceId, (await readCurrentCheckpoint(ctx.storage))?.headCommit ?? null),
       }),
       // A message's embedded drive media are pinned at their versions in the drive catalog when it is stored.

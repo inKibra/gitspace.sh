@@ -152,17 +152,6 @@ test('codemode executes in a cloud isolate without a machine and composes cloud 
       const legacy = await execute('return await space.create({ name: "x" });');
       expect(legacy.error).toBe(true);
       expect(legacy.text).toContain('tools.space_workspace');
-      // Only the project agent starts other workspaces; this fixture runs in a workspace.
-      const started = await invoke('space_workspace', { method: 'start', workspaceId: 'sibling', instruction: 'Begin.' });
-      expect(started.status).toBe('failed');
-      expect(text(started)).toContain('Only the project agent');
-      // Nor does a workspace read or answer another workspace's questions.
-      const read = await invoke('space_workspace', { method: 'questions', workspaceId: 'sibling' });
-      expect(read.status).toBe('failed');
-      expect(text(read)).toContain('Only the project agent (the project\'s base workspace) can read other workspaces\' questions');
-      const answered = await invoke('space_workspace', { method: 'answer', answers: [{ workspaceId: 'sibling', questionId: 'question', answer: 'Yes' }] });
-      expect(answered.status).toBe('failed');
-      expect(text(answered)).toContain('Only the project agent (the project\'s base workspace) can answer other workspaces\' questions');
       const child = await runtime.harness.commit(async tx => (await tx.createConversation({ ownership: { kind: 'ownerless' } })).id, BACKGROUND_CONTEXT);
       const denied = await services.tools.invoke({ tool: 'codemode', args: { code: 'return 1' }, conversationId: String(child), taskId: 'subagent', requestId: 'subagent', attemptId: 'subagent', replay: 'unsafe' });
       expect(denied.status).toBe('failed');
@@ -702,4 +691,110 @@ test('the project agent\'s start steers a busy workspace\'s running turn unless 
       expect(started.mock.calls.map(([, input]) => input.whenBusy)).toEqual(['steer', 'followUp']);
     } finally { started.mockRestore(); await runtime.harness.close(BACKGROUND_CONTEXT); }
   });
+});
+
+/** A project with the stacks Billing export ← Ledger ← Invoices (and an archived Old ledger once stacked on Billing
+ * export) and Alpha ← Zeta, and Search index in no stack; each workspace has a stored status row. */
+async function stackProject() {
+  const projectId = `stack-${crypto.randomUUID().slice(0, 8)}`;
+  const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`);
+  await authority.bootstrap({ id: projectId, name: 'Stack project', repositoryReference: null, baseBranch: 'main', createdBy: 'test' });
+  const workspace = { projectId, kind: 'worktree', sourceKind: 'base', sourceRef: 'main', sourceCommit: null, goalId: null, expectedRevision: 0, phase: 'code' } satisfies Partial<Parameters<typeof authority.putWorkspace>[0]>;
+  const index = env.USER_PROJECTS.getByName(env.ACCOUNT_ID);
+  const names: Array<[string, string]> = [['alpha', 'Alpha'], ['billing', 'Billing export'], ['ledger', 'Ledger'], ['invoices', 'Invoices'], ['old', 'Old ledger'], ['search', 'Search index'], ['zeta', 'Zeta']];
+  for (const [id, name] of names) {
+    await authority.putWorkspace({ ...workspace, id, name, branch: id, lifecycle: id === 'old' ? 'archived' : 'active' });
+    await index.setWorkspaceStatus({ projectId, workspaceId: id, status: emptyWorkspaceStatus, waitingOn: null, lastReply: null, cursor: 1 });
+  }
+  const stacked: Array<[string, string]> = [['ledger', 'billing'], ['invoices', 'ledger'], ['old', 'billing'], ['zeta', 'alpha']];
+  for (const [id, stackedOn] of stacked) expect(await authority.setWorkspaceRelations(id, { dependsOn: [], relatedTo: [], stackedOn })).toMatchObject({ status: 'ok' });
+  await index.projectWorkspaceStatuses(projectId);
+  return projectId;
+}
+
+test('a stack\'s head starts, questions and answers only its stack\'s members; a member and a workspace in no stack instruct no one; the project agent reaches any', async () => {
+  const projectId = await stackProject();
+  const started = vi.spyOn(SpaceAuthorityDO.prototype, 'runtimeStartFromProject').mockResolvedValue({ accepted: true, cursor: 1, conversationId: 'root', historyFrom: 0 });
+  const asked = vi.spyOn(SpaceAuthorityDO.prototype, 'projectQuestions').mockResolvedValue([{ id: 'question:1', conversation: 'main', kind: 'ask', prompt: 'Which bucket?', choices: ['assets', 'uploads'], answerable: true, why: null }]);
+  const stub = () => env.SPACE_AUTHORITY.getByName(`stack-gate:${crypto.randomUUID()}`);
+  try {
+    await runInDurableObject(stub(), async (_instance, ctx) => {
+      const { runtime, invoke, text } = await ownerFixture(ctx, RuntimeIdentitySchema.parse({ projectId, workspaceId: 'billing' }));
+      try {
+        // Its members at any depth, steered or queued; the turn each starts reports to the head.
+        expect((await invoke('space_workspace', { method: 'start', workspaceId: 'invoices', instruction: 'Sync onto Ledger.' })).status).toBe('completed');
+        expect((await invoke('space_workspace', { method: 'start', workspaceId: 'ledger', instruction: 'Then review.', when: 'queue' })).status).toBe('completed');
+        expect(started.mock.calls.map(([, input]) => [input.name, input.from, input.whenBusy, input.text])).toEqual([
+          ['Invoices', 'billing', 'steer', 'Instruction from Billing export, the head of your stack:\n\nSync onto Ledger.'],
+          ['Ledger', 'billing', 'followUp', 'Instruction from Billing export, the head of your stack:\n\nThen review.'],
+        ]);
+        // A member's questions, and answers proposed on a card in the head's own conversation that names the head.
+        expect(text(await invoke('space_workspace', { method: 'questions', workspaceId: 'ledger' }))).toContain('Which bucket?');
+        expect((await invoke('space_workspace', { method: 'answer', answers: [{ workspaceId: 'ledger', questionId: 'question:1', answer: 'uploads' }] })).status).toBe('completed');
+        const card = (await runtime.harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items.find(item => item.tool?.name === 'space_workspace');
+        expect(card?.prompt).toMatch(/^Billing export \(stack head\) asks to answer this question for you:\n1\. Ledger: Which bucket\?/u);
+        expect(card?.tool?.args).toMatchObject({ by: { by: 'stack-head', workspaceId: 'billing', name: 'Billing export' } });
+        // Nothing outside its stack: another stack, a workspace in none, an archived one once stacked on it.
+        expect(text(await invoke('space_workspace', { method: 'start', workspaceId: 'zeta', instruction: 'Begin.' }))).toBe('Billing export can\'t start Zeta: Zeta isn\'t in your stack. A stack\'s head reaches only the workspaces stacked on it; the project agent reaches any.');
+        expect(text(await invoke('space_workspace', { method: 'questions', workspaceId: 'search' }))).toContain('Search index isn\'t in your stack');
+        expect(text(await invoke('space_workspace', { method: 'questions', workspaceId: 'old' }))).toContain('Old ledger isn\'t in your stack');
+        expect(text(await invoke('space_workspace', { method: 'answer', answers: [{ workspaceId: 'zeta', questionId: 'question:1', answer: 'uploads' }] }))).toContain('Zeta isn\'t in your stack');
+        expect(started).toHaveBeenCalledTimes(2);
+      } finally { await runtime.harness.close(BACKGROUND_CONTEXT); }
+    });
+    for (const [workspaceId, refusal] of [['ledger', /^Ledger can't (start|read the questions of|answer for) Invoices: members don't instruct other workspaces\./u], ['search', /^Search index can't (start|read the questions of|answer for) Invoices: only a stack's head can instruct its members/u]] satisfies Array<[string, RegExp]>) {
+      await runInDurableObject(stub(), async (_instance, ctx) => {
+        const { runtime, invoke, text } = await ownerFixture(ctx, RuntimeIdentitySchema.parse({ projectId, workspaceId }));
+        try {
+          for (const call of [{ method: 'start', workspaceId: 'invoices', instruction: 'Begin.' }, { method: 'questions', workspaceId: 'invoices' }, { method: 'answer', answers: [{ workspaceId: 'invoices', questionId: 'question:1', answer: 'uploads' }] }]) {
+            const result = await invoke('space_workspace', call);
+            expect(result.status).toBe('failed');
+            expect(text(result)).toMatch(refusal);
+          }
+        } finally { await runtime.harness.close(BACKGROUND_CONTEXT); }
+      });
+    }
+    expect(started).toHaveBeenCalledTimes(2);
+    await runInDurableObject(stub(), async (_instance, ctx) => {
+      const { runtime, invoke } = await ownerFixture(ctx, RuntimeIdentitySchema.parse({ projectId, workspaceId: projectId }));
+      try {
+        for (const workspaceId of ['search', 'zeta', 'invoices']) expect((await invoke('space_workspace', { method: 'start', workspaceId, instruction: 'Begin.' })).status).toBe('completed');
+        expect(started.mock.calls.slice(2).map(([, input]) => [input.name, input.from, input.text])).toEqual(['Search index', 'Zeta', 'Invoices'].map(name => [name, projectId, 'Instruction from the project agent:\n\nBegin.']));
+      } finally { await runtime.harness.close(BACKGROUND_CONTEXT); }
+    });
+  } finally { started.mockRestore(); asked.mockRestore(); }
+});
+
+test('the project agent\'s board lists the project stack by stack in the sidebar\'s order; a head\'s turns read its open members in stack order with what each is stacked on, and a workspace heading no stack reads none', async () => {
+  const projectId = await stackProject();
+  const stub = () => env.SPACE_AUTHORITY.getByName(`stack-board:${crypto.randomUUID()}`);
+  await runInDurableObject(stub(), async (_instance, ctx) => {
+    const { runtime, invoke, text, services } = await ownerFixture(ctx, RuntimeIdentitySchema.parse({ projectId, workspaceId: projectId }));
+    try {
+      expect((await services.tools.projectBoard?.())?.map(row => row.name)).toEqual(['Alpha', 'Zeta', 'Billing export', 'Ledger', 'Invoices', 'Search index', 'Old ledger']);
+      expect(text(await invoke('space_workspace', { method: 'board' })).split('\n').slice(1).map(line => line.replace(/ \(.*$/u, ''))).toEqual(['- Alpha', '- Zeta', '- Billing export', '- Ledger', '- Invoices', '- Search index']);
+      expect(services.tools.stackBoard).toBeUndefined();
+    } finally { await runtime.harness.close(BACKGROUND_CONTEXT); }
+  });
+  for (const [workspaceId, members] of [['billing', [['Ledger', 'Billing export'], ['Invoices', 'Ledger']]], ['alpha', [['Zeta', 'Alpha']]], ['ledger', null], ['search', null]] satisfies Array<[string, string[][] | null]>) {
+    await runInDurableObject(stub(), async (_instance, ctx) => {
+      const { runtime, services } = await ownerFixture(ctx, RuntimeIdentitySchema.parse({ projectId, workspaceId }));
+      try {
+        const rows = await services.tools.stackBoard?.();
+        expect(rows === null || rows === undefined ? rows : rows.map(row => [row.name, row.stack?.on]), workspaceId).toEqual(members);
+        expect(services.tools.projectBoard).toBeUndefined();
+      } finally { await runtime.harness.close(BACKGROUND_CONTEXT); }
+    });
+  }
+  // Unstacked, Ledger heads Invoices, and Billing export no stack.
+  expect(await env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`).setWorkspaceRelations('ledger', { dependsOn: [], relatedTo: [], stackedOn: null })).toMatchObject({ status: 'ok' });
+  for (const [workspaceId, members] of [['ledger', [['Invoices', 'Ledger']]], ['billing', null]] satisfies Array<[string, string[][] | null]>) {
+    await runInDurableObject(stub(), async (_instance, ctx) => {
+      const { runtime, services } = await ownerFixture(ctx, RuntimeIdentitySchema.parse({ projectId, workspaceId }));
+      try {
+        const rows = await services.tools.stackBoard?.();
+        expect(rows === null || rows === undefined ? rows : rows.map(row => [row.name, row.stack?.on]), workspaceId).toEqual(members);
+      } finally { await runtime.harness.close(BACKGROUND_CONTEXT); }
+    });
+  }
 });

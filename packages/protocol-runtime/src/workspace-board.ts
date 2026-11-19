@@ -23,7 +23,13 @@ export type WorkspaceBoardRow = {
   lastReplySource: TextSource | null;
   /** Its journal's newest entries, newest first, as the workspace last reported them. */
   journal: WorkspaceJournalLine[];
+  /** On a stack head's board only: where the member sits in the stack. */
+  stack?: BoardStackPosition;
 };
+/** A stack member as its head's board shows it: the workspace it is stacked on (by name) and how its branch stands
+ * against that workspace's (commits behind, the parent rewrote what it was built on, the parent merged into the base);
+ * `position` is null while it can't be read (no commits to compare yet, or a failing read). */
+export type BoardStackPosition = { on: string; position: { behind: number; baseRewritten: boolean; parentMerged: boolean } | null };
 /** A pull request linked to a workspace, with its state and checks as last read from GitHub (null until first read). */
 export type BoardPullRequest = {
   number: number;
@@ -88,14 +94,17 @@ function pullRequestWords(pull: BoardPullRequest): string {
   return `PR #${pull.number} (${pull.state}${checks ? `, ${checks}` : ''})`;
 }
 
-/** `Name (id) · phase · activity · PR #n (state) · since HH:MM`, the lifecycle only when the workspace is not active;
- * its pull requests open and draft first, then merged and closed, each in the order it was linked. Then its latest
- * message and its newest journal entries, each on its own indented line when it has them. */
+/** `Name (id) · on X · 3 behind · phase · activity · PR #n (state) · since HH:MM`, the stack only on a stack head's
+ * board, the lifecycle only when the workspace is not active; its pull requests open and draft first, then merged and
+ * closed, each in the order it was linked. Then its latest message and its newest journal entries, each on its own
+ * indented line when it has them. */
 export function workspaceBoardLine(row: WorkspaceBoardRow, at: Date): string {
   // A stable sort: merged and closed after the rest, each group in the order it was linked.
   const pulls = [...row.pullRequests].sort((left, right) => Number(left.state === 'merged' || left.state === 'closed') - Number(right.state === 'merged' || right.state === 'closed'));
+  const position = row.stack?.position;
+  const stack = row.stack ? [`on ${row.stack.on}`, ...position?.behind ? [`${position.behind} behind`] : [], ...position?.baseRewritten ? ['base rewritten'] : [], ...position?.parentMerged ? ['parent merged'] : []] : [];
   const head = [
-    `${row.name} (${row.workspaceId})`, row.phase ?? 'no phase', ...(row.lifecycle === 'active' ? [] : [row.lifecycle]), workspaceActivity(row),
+    `${row.name} (${row.workspaceId})`, ...stack, row.phase ?? 'no phase', ...(row.lifecycle === 'active' ? [] : [row.lifecycle]), workspaceActivity(row),
     ...pulls.map(pullRequestWords), ...(row.since === null ? [] : [`since ${clock(new Date(row.since), at)}`]),
   ].join(' · ');
   const lines = [head];
@@ -104,15 +113,15 @@ export function workspaceBoardLine(row: WorkspaceBoardRow, at: Date): string {
   return lines.join('\n');
 }
 
-/** Every workspace on the board, one line each, stamped with the time it was read. */
-export function workspaceBoard(rows: readonly WorkspaceBoardRow[], at: Date): string {
+/** Every workspace on the board, one line each, under `title` and the time it was read. */
+export function workspaceBoard(rows: readonly WorkspaceBoardRow[], at: Date, title = 'Workspace board'): string {
   const shown = rows.filter(onBoard);
-  if (shown.length === 0) return `Workspace board, ${timestamp(at)}: no workspaces.`;
-  return [`Workspace board, ${timestamp(at)} (${shown.length} workspace${shown.length === 1 ? '' : 's'}):`, ...shown.map(row => `- ${workspaceBoardLine(row, at)}`)].join('\n');
+  if (shown.length === 0) return `${title}, ${timestamp(at)}: no workspaces.`;
+  return [`${title}, ${timestamp(at)} (${shown.length} workspace${shown.length === 1 ? '' : 's'}):`, ...shown.map(row => `- ${workspaceBoardLine(row, at)}`)].join('\n');
 }
 
 /** The workspaces whose line changed between two reads, new ones and those that left the board; null when none did. */
-export function workspaceBoardChanges(previous: readonly WorkspaceBoardRow[], current: readonly WorkspaceBoardRow[], since: Date, at: Date): string | null {
+export function workspaceBoardChanges(previous: readonly WorkspaceBoardRow[], current: readonly WorkspaceBoardRow[], since: Date, at: Date, title = 'Workspace board'): string | null {
   const before = new Map(previous.filter(onBoard).map(row => [row.workspaceId, row]));
   const after = new Map(current.filter(onBoard).map(row => [row.workspaceId, row]));
   const lines: string[] = [];
@@ -128,5 +137,5 @@ export function workspaceBoardChanges(previous: readonly WorkspaceBoardRow[], cu
     lines.push(`- Removed: ${row.name} (${row.workspaceId}), ${left ? left.lifecycle : 'deleted'}`);
   }
   if (lines.length === 0) return null;
-  return [`Workspace board changes since ${clock(since, at)} (now ${timestamp(at)}); each line replaces that workspace's line:`, ...lines].join('\n');
+  return [`${title} changes since ${clock(since, at)} (now ${timestamp(at)}); each line replaces that workspace's line:`, ...lines].join('\n');
 }

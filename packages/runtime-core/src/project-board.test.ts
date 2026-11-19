@@ -5,7 +5,7 @@ import { createAssistantMessageEventStream, createModels, type Api, type Assista
 import { RuntimeIdentitySchema, type WorkspaceBoardRow } from '@gitspace/protocol-runtime';
 import { boundedReplay } from './documents.js';
 import { createRuntimeHarness } from './harness.js';
-import { PROJECT_BOARD_INSTRUCTION } from './project-board.js';
+import { PROJECT_BOARD_INSTRUCTION, STACK_BOARD_INSTRUCTION } from './project-board.js';
 
 const model: Model<Api> = { id: 'board', name: 'Board', provider: 'test', api: 'test', baseUrl: 'https://invalid.test', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1_000_000, maxTokens: 4096 };
 const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
@@ -22,11 +22,13 @@ const text = (message: Message | undefined) => typeof message?.content === 'stri
 const instructions = (request: Context | undefined) => JSON.stringify(request?.messages.filter(message => String(message.role) === 'system'));
 
 /** The project agent's harness (its base workspace), whose board reads `board.rows` (or fails with `board.failure`);
+ * with `stack`, a workspace agent's harness whose stack board reads `board.rows`, or null while `board.heads` is false.
  * `script` holds the model's replies in order, then it answers "Done.". `history` is appended before the first turn. */
-async function fixture(options: { history?: number; script?: AssistantMessage[] } = {}) {
+async function fixture(options: { history?: number; script?: AssistantMessage[]; stack?: true } = {}) {
   const requests: Context[] = [];
   const script = [...options.script ?? []];
-  const board: { rows: WorkspaceBoardRow[]; failure: string | null } = { rows: [row('billing', 'Billing export'), row('search', 'Search index', { status: colored('green') })], failure: null };
+  const board: { rows: WorkspaceBoardRow[]; failure: string | null; heads: boolean } = { rows: [row('billing', 'Billing export'), row('search', 'Search index', { status: colored('green') })], failure: null, heads: true };
+  const read = async () => { if (board.failure !== null) throw new Error(board.failure); return board.rows; };
   const models = Object.assign(createModels(), { getModel: () => model,
     async completeSimple(_model: Model<Api>, request: Context) {
       requests.push(request);
@@ -41,10 +43,10 @@ async function fixture(options: { history?: number; script?: AssistantMessage[] 
       return stream;
     } });
   const { harness, root } = await createRuntimeHarness({
-    identity: RuntimeIdentitySchema.parse({ projectId: 'project', workspaceId: 'project' }), storage: new MemoryStorage(), models, model: { provider: 'test', modelId: model.id },
+    identity: RuntimeIdentitySchema.parse({ projectId: 'project', workspaceId: options.stack ? 'billing' : 'project' }), storage: new MemoryStorage(), models, model: { provider: 'test', modelId: model.id },
     tools: { images: { store: async image => image, load: async image => image }, prepareBrowser: unused, takeoverTab: unused, lifecycleApproval: async () => null, instructions: async () => 'Project instructions.', preflight: async () => {}, results: { put: unused, text: unused },
       async invoke(input) { return { requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: '[]' }] }; },
-      async projectBoard() { if (board.failure !== null) throw new Error(board.failure); return board.rows; } },
+      ...options.stack ? { stackBoard: async () => board.heads ? read() : null } : { projectBoard: read } },
     operations: { execute: unused, reconcile: async () => null, cancel: unused, jobScope: () => ({ projectId: 'project', workspaceId: 'project' }), controlJob: unused, observeProcess: unused, stopProcess: unused, wakeAt: async () => {} },
     retainedRules: { loadRules: async () => [] }, editTool: () => 'edit',
     onReport: error => { throw error; }, admitInference: unused, bindInferenceConversation: async () => {}, refuseRequest: unused,
@@ -160,5 +162,36 @@ test('a call this project\'s object restart cut off reaches the model with the l
     const [request] = await f.turn('Well?');
     const result = request!.messages.find(message => message.role === 'toolResult');
     expect(text(result)).toContain('Tool space_workspace was interrupted because this project\'s object restarted (often its memory limit; see Monitoring); it may have partially run.');
+  } finally { await f.harness.close(context); }
+}, 20_000);
+
+test('a stack\'s head starts its turns with its stack board, its members with their stack state, then only what changed; one that stops heading a stack gets none, and a full board once it heads one again', async () => {
+  const f = await fixture({ stack: true });
+  const told = JSON.stringify(STACK_BOARD_INSTRUCTION).slice(1, -1);
+  try {
+    f.board.rows = [row('ledger', 'Ledger', { stack: { on: 'Billing export', position: { behind: 3, baseRewritten: false, parentMerged: false } } }), row('invoices', 'Invoices', { stack: { on: 'Ledger', position: { behind: 0, baseRewritten: true, parentMerged: false } } })];
+    const [first] = await f.turn('How is my stack?');
+    expect(text(first!.messages.at(-1))).toMatch(/^Stack board, \d{4}-\d\d-\d\d \d\d:\d\d:\d\d UTC \(2 workspaces\):\n- Ledger \(ledger\) · on Billing export · 3 behind · code · idle · since 17:00\n- Invoices \(invoices\) · on Ledger · base rewritten · code · idle · since 17:00$/u);
+    expect(instructions(first)).not.toContain(JSON.stringify(PROJECT_BOARD_INSTRUCTION).slice(1, -1));
+
+    f.board.rows = [f.board.rows[0]!, row('invoices', 'Invoices', { stack: { on: 'Ledger', position: { behind: 2, baseRewritten: false, parentMerged: true } } })];
+    const [second] = await f.turn('And now?');
+    expect(text(second!.messages.at(-1))).toMatch(/^Stack board changes since \d\d:\d\d \(now .+ UTC\); each line replaces that workspace's line:\n- Invoices \(invoices\) · on Ledger · 2 behind · parent merged · code · idle · since 17:00$/u);
+    // The instructions in effect (the newest system message) say what the board is once the head has one.
+    expect(JSON.stringify(second!.messages.filter(message => String(message.role) === 'system').at(-1))).toContain(told);
+
+    // Unstacked or merged: no board, and the instruction leaves with it.
+    f.board.heads = false;
+    const [third] = await f.turn('Still there?');
+    expect(text(third!.messages.at(-1))).toBe('Still there?');
+    const [fourth] = await f.turn('Anything?');
+    // Nothing follows the person's message but the system message that takes the instruction away.
+    expect(text(fourth!.messages.findLast(message => message.role === 'user'))).toBe('Anything?');
+    expect(String(fourth!.messages.at(-1)?.role)).toBe('system');
+    expect(JSON.stringify(fourth!.messages.filter(message => String(message.role) === 'system').at(-1))).not.toContain(told);
+
+    f.board.heads = true;
+    const [fifth] = await f.turn('Back?');
+    expect(text(fifth!.messages.at(-1))).toMatch(/^Stack board, .+ UTC \(2 workspaces\):\n- Ledger \(ledger\)/u);
   } finally { await f.harness.close(context); }
 }, 20_000);

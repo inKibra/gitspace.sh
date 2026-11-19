@@ -880,28 +880,30 @@ export const RuntimeWorkspaceMutationArgumentsSchema = z.discriminatedUnion('met
   RuntimeDispatchSelectionSchema.extend({ method: z.enum(['open', 'restore']).describe('open: the workspace\'s definition, refused while it is archived; restore: bring back an archived workspace.'), workspaceId: otherWorkspace, expectedGeneration: z.number().int().nonnegative().describe('The workspace\'s current generation, from get; a stale one is refused.') }).strict(),
   RuntimeDispatchSelectionSchema.extend({ method: z.literal('setRelations').describe('Replace the workspace\'s relations.'), workspaceId: otherWorkspace, expectedRevision: z.number().int().nonnegative().describe('The workspace\'s current revision, from get; a stale one is refused.'), dependsOn: z.array(z.string()).describe('Workspaces it waits on: planning labels that never block anything.'), relatedTo: z.array(z.string()).describe('Workspaces related to it: planning labels.'), stackedOn: z.string().nullable().describe('The workspace it is stacked on (merge order and branch content), never one it is further along than; null for none.') }).strict(),
 ]);
-/** The project agent sends another workspace's main agent an instruction, as its first message or a later one: `steer`
- * (the default) brings it into a running turn at its next tool boundary, `queue` runs it after that turn ends. The turn
- * it starts or steers reports once to the project conversation; `wake` makes that report start the project agent's next
- * turn. */
-export const RuntimeWorkspaceStartArgumentsSchema = z.object({ method: z.literal('start').describe('Project agent only: send a workspace\'s agent an instruction.'), workspaceId: targetWorkspace, instruction: z.string().trim().min(1).max(32_768).describe('The instruction, complete in itself.'), when: z.enum(['queue', 'steer']).default('steer').describe('steer (the default): into the running turn at its next tool boundary; queue: after it ends.'), onDone: z.enum(['quiet', 'wake']).default('quiet').describe('quiet (the default): its report waits for your next turn; wake: its report starts your next turn.') }).strict();
-/** The turn the project agent started in a workspace, while it is watched: its state and its newest items. */
+/** The project agent, or a stack's head for its members, sends another workspace's main agent an instruction, as its
+ * first message or a later one: `steer` (the default) brings it into a running turn at its next tool boundary, `queue`
+ * runs it after that turn ends. The turn it starts or steers reports once to the sender's conversation; `wake` makes
+ * that report start the sender's next turn. */
+export const RuntimeWorkspaceStartArgumentsSchema = z.object({ method: z.literal('start').describe('The project agent, or a stack\'s head for its members: send a workspace\'s agent an instruction.'), workspaceId: targetWorkspace, instruction: z.string().trim().min(1).max(32_768).describe('The instruction, complete in itself.'), when: z.enum(['queue', 'steer']).default('steer').describe('steer (the default): into the running turn at its next tool boundary; queue: after it ends.'), onDone: z.enum(['quiet', 'wake']).default('quiet').describe('quiet (the default): its report waits for your next turn; wake: its report starts your next turn.') }).strict();
+/** The turn the project agent or a stack's head started in a workspace, while it is watched: its state and its newest
+ * items. */
 export const RuntimeWorkspaceProgressArgumentsSchema = z.object({ method: z.literal('progress').describe('The turn you started in a workspace: its state and newest items.'), workspaceId: targetWorkspace }).strict();
 /** What `space_workspace answer` takes, said whole when an answer or the list is not that shape. */
 const PROJECT_ANSWERS_SHAPE = 'answers is a list of { workspaceId, questionId, answer }, one per question: workspaceId and questionId as questions lists them, answer the chosen choice or your own words as a string (a list of strings picks several choices). Example: { method: "answer", answers: [{ workspaceId: "ws-1", questionId: "question:42", answer: "uploads" }] }';
-/** One answer the project agent proposes for a workspace's open plain question. */
+/** One answer the project agent, or a stack's head, proposes for a workspace's open plain question. */
 export const RuntimeProjectAnswerSchema = z.object({
   workspaceId: z.string({ error: 'the workspace id, as a string, as questions lists it' }).min(1).describe('The workspace, as questions names it.'),
   questionId: z.string({ error: 'the question id, as a string, as questions lists it' }).min(1).describe('The question, from questions.'),
   answer: z.union([z.string().trim().min(1), z.array(z.string().trim().min(1)).min(1)], { error: 'the chosen choice or your own words, as a string (a list of strings picks several choices)' }).describe('The chosen choice or your own words, as a string; a list of strings picks several choices.'),
 }, { error: PROJECT_ANSWERS_SHAPE }).strict();
 export type RuntimeProjectAnswer = z.infer<typeof RuntimeProjectAnswerSchema>;
-/** The project agent reads the questions open in a workspace, and proposes answers to plain asks (`ask`) in the person's
- * place: one approval card in its own conversation lists the batch, nothing is sent before the person approves it, and
- * each answer's outcome is the project agent's next input. Approvals and take-over requests stay a person's. */
+/** The project agent, or a stack's head for its members, reads the questions open in a workspace, and proposes answers
+ * to plain asks (`ask`) in the person's place: one approval card in its own conversation lists the batch, nothing is
+ * sent before the person approves it, and each answer's outcome is its next input. Approvals and take-over requests
+ * stay a person's. */
 export const RuntimeWorkspaceQuestionsArgumentsSchema = z.discriminatedUnion('method', [
-  z.object({ method: z.literal('questions').describe('The questions open in a workspace.'), workspaceId: targetWorkspace }).strict(),
-  z.object({ method: z.literal('answer').describe('Propose answers to plain questions open in this project\'s workspaces, in the person\'s place; approvals and take-overs stay theirs. It posts one approval card listing every answer and your turn ends: nothing is sent until the person approves. Your next message says, per answer, whether it was delivered, its question had already closed, or it failed; if they reject the card, nothing was sent.'), answers: z.array(RuntimeProjectAnswerSchema, { error: PROJECT_ANSWERS_SHAPE }).min(1, PROJECT_ANSWERS_SHAPE).max(20, 'answers: at most 20 per card').describe('One per question.') }).strict(),
+  z.object({ method: z.literal('questions').describe('The project agent, or a stack\'s head for its members: the questions open in a workspace.'), workspaceId: targetWorkspace }).strict(),
+  z.object({ method: z.literal('answer').describe('The project agent, or a stack\'s head for its members: propose answers to plain questions open in workspaces, in the person\'s place; approvals and take-overs stay theirs. It posts one approval card listing every answer and your turn ends: nothing is sent until the person approves. Your next message says, per answer, whether it was delivered, its question had already closed, or it failed; if they reject the card, nothing was sent.'), answers: z.array(RuntimeProjectAnswerSchema, { error: PROJECT_ANSWERS_SHAPE }).min(1, PROJECT_ANSWERS_SHAPE).max(20, 'answers: at most 20 per card').describe('One per question.') }).strict(),
 ]);
 /** Subject links (docs/AUTOMATIONS-DESIGN.md §4): a pull request, issue or branch linked to this workspace, or to a named
  * one, gets the project's events about it through its automations; one subject has one workspace. */

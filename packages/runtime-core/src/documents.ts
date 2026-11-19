@@ -27,8 +27,8 @@ export const PlanDoc = defineDoc<{ text: string; status: 'draft' | 'proposed' | 
  * a removed `ask` tool), plan and machine approvals, the project agent's batch of answers (`tool.name`
  * `space_workspace`), ask_takeover cards (`takeover`), and the lifecycle approval cards an `environment` run posts
  * (`lifecycle-approval`). No call waits on one: asking ends the agent's turn, and answering or closing it delivers the
- * conversation's next input (`questions.ts`). `answeredBy`: the project agent answered a plain ask in the person's
- * place; absent, a person answered. `closed`: it closed unanswered and takes no answer. */
+ * conversation's next input (`questions.ts`). `answeredBy`: the project agent or the workspace's stack head answered a
+ * plain ask in the person's place; absent, a person answered. `closed`: it closed unanswered and takes no answer. */
 export type Question = { id: string; conversationId: string; kind: 'ask' | 'approval' | 'takeover' | 'lifecycle-approval'; prompt: string; choices: string[]; answer: JsonValue | null; askedAt?: string; answeredAt?: string; answeredBy?: AskAnswerer; closed?: RuntimeQuestionClosed; tool?: RuntimeQuestionTool; takeover?: RuntimeTakeoverQuestion; lifecycle?: RuntimeLifecycleApprovalQuestion };
 export const QuestionsDoc = defineDoc<{ items: Question[] }>({ kind: 'gitspace.questions', version: 1, scope: 'session', initial: () => ({ items: [] }), checkpointWhen: boundedReplay });
 /** The newest entry whose replies' required block asks are posted as questions (`repairBlockAsks`), session-wide; null

@@ -127,6 +127,14 @@ describe('tenant MCP authority boundary', () => {
     } finally { await value.client.close(); }
   });
 
+  it('states what a stack\'s head leads and when it has members sync in the space-chain skill, and who starts, questions and answers in the space_workspace tool', () => {
+    const skill = DEFAULT_SKILLS['space-chain'];
+    expect(skill).toContain('A stack\'s head leads its stack with the project agent\'s tools, scoped to its members');
+    expect(skill).toContain('Members don\'t instruct other workspaces');
+    expect(skill).toContain('a member syncs when it enters Review or before it ships, or when its Base line shows files overlapping its own changes, and never mid-turn (send it with `when: \'queue\'`). The head syncs itself first. Members in Plan, or in Code without overlapping files, are left alone.');
+    expect(scriptToolSources.find(source => source.name === 'space_workspace')?.description.match(/the project agent, or a stack's head for its members/gu)).toHaveLength(3);
+  });
+
   it('returns the bearer once, rotates it, and disables both bearer and dedicated grant', async () => {
     const value = await fixture(['rpc.read']);
     const status = mcpAccessResultSchema.parse(await (await value.management('status')).json());
