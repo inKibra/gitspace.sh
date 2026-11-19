@@ -271,21 +271,27 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, reads, 
     if (result.status === 'error') throw result.error;
   }, [snapshot.projectId, spaceId, generation]);
   // One resolver per workspace version, so every message showing a file shares its URL.
-  const resolveResourceFile = useMemo(() => async (uri: string): Promise<ResourceFile> => {
-    const resource = parseResourceUri(uri);
-    if (resource?.kind === 'repo') {
-      const read = await rpcClient.inspector.repository.file({ spaceId, expectedGeneration: generation, mode: 'current', path: resource.path, ...(resource.commit ? { commit: resource.commit } : {}) });
-      if (read.status === 'error') throw new Error(rpcErrorMessage(read.error, 'Open repository file'));
-      const bytes = read.value.encoding === 'base64' ? Uint8Array.from(atob(read.value.content), character => character.charCodeAt(0)) : new TextEncoder().encode(read.value.content);
-      const mediaType = resourceMediaType(resource.path);
-      // Kept for the page's life like any cached file; a pinned version never changes, the current one is re-read after a minute.
-      const url = URL.createObjectURL(new Blob([bytes], { type: mediaType ?? 'application/octet-stream' }));
-      return { url, downloadUrl: url, size: bytes.length, mediaType, version: read.value.blobId ?? undefined, expiresAt: new Date(Date.now() + (resource.commit ? 24 * 60 : 11) * 60_000).toISOString() };
-    }
-    if (resource?.kind !== 'drive') throw new Error('Only drive:// and repo:// files can be shown here');
-    const result = await rpcClient.inspector.artifacts.file({ spaceId, expectedGeneration: generation, url: canonicalDriveResourceUrl(resource, String(spaceId) === String(snapshot.projectId) ? 'base' : 'workspace'), hash: null });
-    if (result.status === 'error') throw new Error(rpcErrorMessage(result.error, 'Open file'));
-    return result.value;
+  const resolveResourceFile = useMemo(() => {
+    // A repository file's bytes by version and type: one object URL each for the page's life.
+    const repositoryUrls = new Map<string, string>();
+    return async (uri: string): Promise<ResourceFile> => {
+      const resource = parseResourceUri(uri);
+      if (resource?.kind === 'repo') {
+        const read = await rpcClient.inspector.repository.file({ spaceId, expectedGeneration: generation, mode: 'current', path: resource.path, ...(resource.commit ? { commit: resource.commit } : {}) });
+        if (read.status === 'error') throw new Error(rpcErrorMessage(read.error, 'Open repository file'));
+        const bytes = read.value.encoding === 'base64' ? Uint8Array.from(atob(read.value.content), character => character.charCodeAt(0)) : new TextEncoder().encode(read.value.content);
+        const mediaType = resourceMediaType(resource.path);
+        const version = read.value.blobId ?? undefined;
+        const key = version ? `${version}:${mediaType}` : null;
+        const url = (key ? repositoryUrls.get(key) : undefined) ?? URL.createObjectURL(new Blob([bytes], { type: mediaType ?? 'application/octet-stream' }));
+        if (key) repositoryUrls.set(key, url);
+        return { url, downloadUrl: url, size: bytes.length, mediaType, version, expiresAt: new Date(Date.now() + 24 * 60 * 60_000).toISOString() };
+      }
+      if (resource?.kind !== 'drive') throw new Error('Only drive:// and repo:// files can be shown here');
+      const result = await rpcClient.inspector.artifacts.file({ spaceId, expectedGeneration: generation, url: canonicalDriveResourceUrl(resource, String(spaceId) === String(snapshot.projectId) ? 'base' : 'workspace'), hash: null });
+      if (result.status === 'error') throw new Error(rpcErrorMessage(result.error, 'Open file'));
+      return result.value;
+    };
   }, [spaceId, snapshot.projectId, generation]);
   const sessionCommand = useCallback(async (command: RuntimeSessionCommand) => {
     const response = await rpcClient.runtime.session({ ...identity, ...(conversationId ? { conversationId } : {}), command });
@@ -330,7 +336,7 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, reads, 
       runtimeSummary={{ holder: scope.workspace.holder, closedAt: scope.workspace.closedAt, generation: scope.workspace.generation, status: scope.workspace.status, freshness: connected ? 'fresh' : 'stale', detail: connected ? null : 'Reconnecting to cloud runtime' }}
       onSetWorkspacePhase={async (_id, phase) => { await run({ type: 'setWorkspacePhase', phase }); await refreshInspection(); }}
       projectOperation={props.projectOperation
-        ? <Button variant="ghost" size="compact" onClick={props.onOpenProjectSettings}><span className="flex min-w-0 items-center gap-1 text-caption text-muted-foreground"><OperationStatusLine operation={props.projectOperation} /><span className="shrink-0">· Details</span></span></Button>
+        ? <Button variant="ghost" size="compact" className="max-w-80" onClick={props.onOpenProjectSettings}><span className="flex min-w-0 items-center gap-1 text-caption text-muted-foreground"><OperationStatusLine operation={props.projectOperation} /><span className="shrink-0">· Details</span></span></Button>
         : undefined}
       onUpdateBase={props.projectOperation && operationActive(props.projectOperation) ? undefined : () => perform(async () => {
         const result = await rpcClient.project.updateBase({ projectId: inspection.project.id });

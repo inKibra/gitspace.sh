@@ -28,7 +28,7 @@ import {
   Tooltip,
   useShape,
 } from '@gitspace/ui';
-import { Archive, GitBranch01, LayoutRight, RefreshCcw01, Terminal, XClose } from '@untitledui/icons';
+import { Archive, ArrowDown, GitBranch01, LayoutRight, RefreshCcw01, Terminal, XClose } from '@untitledui/icons';
 import { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { AccountSidebarContext, AppSidebar, type AppSidebarProps, type SidebarDeploymentProps, type SidebarProject, type SidebarSpaceSummary } from './AppSidebar.js';
 import { Composer, type ComposerProps, type SendBehavior } from './Composer.js';
@@ -307,13 +307,16 @@ export function WorkspaceStatusDot({ space }: { space: SpaceStatusView }) {
 
 // ── Page scaffolding shared by the wide views ──
 /** The origin has commits this branch lacks. On a project it is also the way to catch up: Update base fast-forwards the
- * project's copy, and the marker clears when the project list reports it current. */
+ * project's copy, and the marker clears when the project list reports it current. The button reads only "Update"; its
+ * tooltip and accessible name carry the full "Behind origin/<branch> · Update base". The origin check records whether
+ * the branch is behind, not by how many commits, so no count is shown. */
 function BehindOrigin({ branch, kind, checkedAt, onUpdate }: { branch: string; kind: 'project' | 'workspace'; checkedAt: string; onUpdate?: () => Promise<void> }) {
   const [pending, setPending] = useState(false);
-  const explanation = `origin/${branch} has commits this ${kind} lacks · checked ${new Date(checkedAt).toLocaleString()}`;
-  if (!onUpdate) return <Tooltip content={explanation} side="bottom"><Badge size="compact" color="amber">Behind origin/{branch}</Badge></Tooltip>;
-  return <Tooltip content={`${explanation} · Update base fast-forwards it`} side="bottom">
-    <Button variant="secondary" size="compact" loading={pending} disabled={pending} onClick={() => { setPending(true); void onUpdate().finally(() => setPending(false)); }}>Behind origin/{branch} · Update</Button>
+  const checked = `checked ${new Date(checkedAt).toLocaleString()}`;
+  if (!onUpdate) return <Tooltip content={`origin/${branch} has commits this ${kind} lacks · ${checked}`} side="bottom"><Badge size="compact" color="amber">Behind origin/{branch}</Badge></Tooltip>;
+  const action = `Behind origin/${branch} · Update base`;
+  return <Tooltip content={`${action} · ${checked}`} side="bottom">
+    <Button variant="secondary" size="compact" aria-label={action} leadingIcon={glyph(ArrowDown)} loading={pending} disabled={pending} onClick={() => { setPending(true); void onUpdate().finally(() => setPending(false)); }}>Update</Button>
   </Tooltip>;
 }
 
@@ -789,16 +792,16 @@ function Shell({ project, projects, workspace, baseSpace, workspaces, mainAgent,
   const content = <BlockReferences.Provider value={referenceTargets}><ResourceFiles.Provider value={resolveResourceFile ?? null}><ResourceNavigation.Provider value={renderInspector ? (request) => { setResourceRequest({ spaceId: workspace.id, request }); setInspectorSection(undefined); setInspectorOpen(true); } : null}><GuideSectionNavigation.Provider value={renderInspector ? (id: string) => openGuideEntity(`section:${id}`) : null}><DocumentNavigation.Provider value={renderInspector ? openDocument : null}>
     <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
       <SidebarInsetTopbar className="pr-3">
-        <nav aria-label="Location" className="flex min-w-0 flex-1 items-center gap-2 text-body">
-          <span className="flex min-w-0 items-center gap-1.5 text-muted-foreground max-xl:hidden"><GitBranch01 width={14} height={14} strokeWidth={1.5} /><span className="truncate">{workspace.projectName}</span><span>/</span><span className="truncate font-mono text-caption">{workspace.branch}</span></span>
-          {workspace.kind === 'workspace' ? <><span className="text-muted-foreground max-xl:hidden">·</span><span className="truncate font-semibold text-foreground">{workspace.name}</span></> : null}
-          <span className="max-md:hidden"><StatusBadge color={workspaceStatusColor(selectedSummary)} label={recovering ? 'Recovering agent…' : workspaceStatusLabel(selectedSummary)} /></span>
+        <nav aria-label="Location" className="flex flex-[1_0_auto] items-center gap-2 text-body">
+          <span className="flex items-center gap-1.5 text-muted-foreground"><GitBranch01 width={14} height={14} strokeWidth={1.5} /><span className="max-w-48 truncate" title={workspace.projectName}>{workspace.projectName}</span><span>/</span><span className="max-w-64 truncate font-mono text-caption" title={workspace.branch}>{workspace.branch}</span></span>
+          {workspace.kind === 'workspace' ? <><span className="text-muted-foreground">·</span><span className="max-w-80 truncate font-semibold text-foreground" title={workspace.name}>{workspace.name}</span></> : null}
+          <StatusBadge color={workspaceStatusColor(selectedSummary)} label={recovering ? 'Recovering agent…' : workspaceStatusLabel(selectedSummary)} />
           {history?.saved ? <SavedCopyIndicator loading={history.loading} /> : null}
-          {workspace.kind === 'workspace' && projectGraph ? pullRequests.length ? <PrChips pulls={pullRequests} full /> : <span className="shrink-0 text-caption text-muted-foreground max-lg:hidden">no PR</span> : null}
+          {workspace.kind === 'workspace' && projectGraph ? pullRequests.length ? <PrChips pulls={pullRequests} full /> : <span className="text-caption text-muted-foreground">no PR</span> : null}
         </nav>
-        <div className="flex items-center gap-1">
+        <div className="flex shrink-0 items-center gap-1">
             {renderEnvironmentStatus?.(openEnvironment, (name) => { setRequestedTerminal({ spaceId: workspace.id, name }); setTerminalOpen(true); })}
-            {profileChange ? <span className="px-2 text-caption text-muted-foreground max-md:hidden">{profileChange}</span> : null}
+            {profileChange ? <span className="px-2 text-caption text-muted-foreground">{profileChange}</span> : null}
             {workspace.kind === 'project' ? projectOperation : null}
             {remote?.behind ? <BehindOrigin branch={workspace.branch} kind={workspace.kind} checkedAt={remote.checkedAt} onUpdate={workspace.kind === 'project' ? onUpdateBase : undefined} /> : null}
             {workspace.kind === 'workspace' && onSetWorkspacePhase ? <Select size="compact" value={workspace.phase} onValueChange={(value) => {

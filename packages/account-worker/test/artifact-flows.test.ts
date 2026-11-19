@@ -14,6 +14,7 @@ import { tenantRootPrivateKey } from './setup.js';
 import { createHash } from 'node:crypto';
 import { tenantObjectKey, tenantStore } from '../src/tenant-store.js';
 import { InspectorCloudArtifacts, readInspectorContext } from '../src/account-inspector-data.js';
+import { mintArtifactFileUrl } from '../src/artifact-file-url.js';
 import { pattern, streamedSha256 } from './drive-bytes.js';
 
 const sha256 = (bytes: Uint8Array) => `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
@@ -352,6 +353,41 @@ describe('user artifact flows', () => {
     if (pinned.status === 'error') throw pinned.error;
     expect(pinned.value.size).toBe(1000);
     expect(await (await get(pinned.value.url, { range: 'bytes=0-1' })).text()).toBe('AB');
+  });
+
+  it('mints one URL per file version all hour, and a new URL once the path has new bytes', async () => {
+    const { client, workspaceId, publish, origin } = await fixture();
+    const [first] = await publish(workspaceId, 1, [{ path: 'shots/home.png', content: 'first image', mediaType: 'image/png' }]);
+    const mint = async (hash: string | null) => {
+      const minted = await client.inspector.artifacts.file({ spaceId: workspaceId, expectedGeneration: 0, url: 'drive://workspace/shots/home.png', hash });
+      if (minted.status === 'error') throw minted.error;
+      return minted.value;
+    };
+    try {
+      // One clock hour throughout: a version mints one URL within an hour.
+      vi.spyOn(Date, 'now').mockReturnValue(Date.now());
+      const earlier = await mint(null);
+      expect(await mint(null)).toEqual(earlier);
+      await publish(workspaceId, 2, [{ path: 'shots/home.png', content: 'second image', mediaType: 'image/png' }]);
+      const later = await mint(null);
+      expect(later.url).not.toBe(earlier.url);
+      const served = await worker.fetch(new Request(new URL(later.url, origin)), env);
+      expect(await served.text()).toBe('second image');
+      expect(served.headers.get('cache-control')).toMatch(/^private, max-age=\d+, immutable$/u);
+      // The earlier version pinned by its hash is the URL it had.
+      expect(await mint(first!.blobHash)).toEqual(earlier);
+
+      // The URL holds until the end of the hour two hours on, and is the same all hour.
+      const grant = { scopeId: `space:${workspaceId}`, hash: first!.blobHash, size: 11, mediaType: 'image/png', name: 'home.png' };
+      const hour = Date.UTC(2026, 10, 18, 12);
+      vi.spyOn(Date, 'now').mockReturnValue(hour + 5 * 60_000);
+      const minted = await mintArtifactFileUrl(env, grant);
+      expect(minted.expiresAt).toBe('2026-11-18T15:00:00.000Z');
+      vi.spyOn(Date, 'now').mockReturnValue(hour + 55 * 60_000);
+      expect(await mintArtifactFileUrl(env, grant)).toEqual(minted);
+      vi.spyOn(Date, 'now').mockReturnValue(hour + 65 * 60_000);
+      expect((await mintArtifactFileUrl(env, grant)).url).not.toBe(minted.url);
+    } finally { vi.restoreAllMocks(); }
   });
 
   it('serves a range at the end of a multipart file', async () => {

@@ -1,5 +1,6 @@
 import type { CloudWorkspaceDefinition, StackStatus } from '@gitspace/protocol';
 import { RuntimeIdentitySchema } from '@gitspace/protocol-runtime';
+import type { WorkspaceBase } from '@gitspace/runtime-core';
 import { z } from 'zod';
 import { ArtifactsCodeStore, artifactsProjectRepository, artifactsWorkspaceRepository } from '@gitspace/runtime-workspace-do';
 
@@ -208,4 +209,64 @@ export function stackPositionNote(parent: { name: string; branch: string }, base
   if (parentMerged === 'merged') return `${parent.name} merged into ${baseBranch}. If you want your branch to hold only your own commits: \`git rebase --onto ${baseBranch} ${parent.branch}\`. Optional.`;
   if (parentAhead > 0) return `You merge after ${parent.name}. Its branch has ${parentAhead} ${parentAhead === 1 ? 'commit' : 'commits'} yours doesn't. If you want to build on them: \`git rebase ${parent.branch}\`. Optional.`;
   return null;
+}
+
+/** The history walks of a workspace's last base reading, with the commits and branches they were read from. */
+const BaseReadingSchema = z.object({ source: z.string(), merged: z.boolean(), subject: z.string().nullable(), behind: z.number().nullable(), overlapping: z.number().nullable() });
+
+/**
+ * What a workspace builds on, for its agent's Base line (runtime-core `workspace-base.ts`): its stack parent's branch
+ * when it is stacked, else the project's base branch. Read from cloud checkpoints and Artifacts history, so no runtime
+ * and no machine opens. `head` is the workspace's own committed cloud head; without one (a checkout only on a machine)
+ * the reading has no behind count or overlap. `overlapping` counts the files changed both on the branch and on the base
+ * since their merge base, two tree comparisons that read only differing directories. The walks depend only on the
+ * commits and branches read, so `storage` (the workspace's own) keeps the last reading and an unchanged one walks
+ * nothing. Null when the workspace is not in the project.
+ */
+export async function readCloudWorkspaceBase(env: Env, storage: DurableObjectStorage, userId: string, projectId: string, workspaceId: string, head: string | null): Promise<WorkspaceBase | null> {
+  const authority = env.PROJECT_AUTHORITY.getByName(`${userId}:${projectId}`);
+  const [project, workspaces, relations] = await Promise.all([authority.getProject(), authority.listWorkspaces(), authority.listWorkspaceRelations()]);
+  if (!project) throw new Error(`Project ${projectId} is unavailable`);
+  if (!workspaces.some(entry => entry.id === workspaceId && entry.lifecycle !== 'deleting')) return null;
+  const baseBranch = project.baseBranch;
+  const stackedOn = relations[workspaceId]?.stackedOn ?? null;
+  const parent = workspaces.find(entry => entry.id === stackedOn && entry.lifecycle !== 'deleting');
+  const [saved, base] = await Promise.all([
+    parent ? env.SPACE_AUTHORITY.getByName(`${userId}:${parent.id}`).runtimeCodeCheckpoint(RuntimeIdentitySchema.parse({ projectId, workspaceId: parent.id })) : null,
+    readCloudBaseTip(env, userId, projectId, baseBranch),
+  ]);
+  // A parent whose checkout is only on a machine has no cloud head: nothing is read for it.
+  const target = parent ? (saved?.headCommit ? { head: saved.headCommit, repositories: [artifactsWorkspaceRepository(parent.id)] } : null) : base;
+  const position = parent ? { id: parent.id, name: parent.name, branch: parent.branch } : null;
+  if (!target) return { baseBranch, parent: position && { ...position, merged: false }, head: null, subject: null, behind: null, overlapping: null };
+  const source = JSON.stringify([head, target.head, parent?.branch ?? null, parent ? base?.head ?? null : null, baseBranch]);
+  const stored: unknown = await storage.get('base.reading');
+  let reading = stored === undefined ? null : BaseReadingSchema.parse(stored);
+  if (reading?.source !== source) {
+    const code = new ArtifactsCodeStore(env.ARTIFACTS);
+    const [repository] = target.repositories;
+    if (repository === undefined) throw new Error('The base has no repository');
+    const commit = await code.readCommit(repository, target.head);
+    // A parent working on the base branch itself trivially reaches it; that is not a merge.
+    const merged = parent && parent.branch !== baseBranch && base ? (await compareCloudHistory(code, target, base)).bases.includes(target.head) : false;
+    let behind: number | null = null;
+    let overlapping: number | null = null;
+    if (head !== null) {
+      const own = artifactsWorkspaceRepository(workspaceId);
+      const comparison = await compareCloudHistory(code, target, { head, repositories: [own, artifactsProjectRepository(projectId)] });
+      behind = comparison.leftAhead;
+      const [mergeBase] = comparison.bases;
+      if (behind && mergeBase !== undefined && commit) {
+        const [from, mine] = await Promise.all([code.readCommit(repository, mergeBase), code.readCommit(own, head)]);
+        if (from && mine) {
+          const [theirs, ours] = await Promise.all([code.changedSnapshotPaths(repository, from.treeHash, commit.treeHash), code.changedSnapshotPaths(own, from.treeHash, mine.treeHash)]);
+          const changed = new Set(ours.map(change => change.path));
+          overlapping = theirs.filter(change => changed.has(change.path)).length;
+        }
+      }
+    }
+    reading = { source, merged, subject: commit?.message.split('\n', 1)[0]?.trim() || null, behind, overlapping };
+    await storage.put('base.reading', reading);
+  }
+  return { baseBranch, parent: position && { ...position, merged: reading.merged }, head: target.head, subject: reading.subject, behind: reading.behind, overlapping: reading.overlapping };
 }

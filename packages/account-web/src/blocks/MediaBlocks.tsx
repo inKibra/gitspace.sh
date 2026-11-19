@@ -22,24 +22,22 @@ type VideoProps = z.output<typeof gitspaceUiCatalog.components.Video.props>;
 type Media = { kind: 'video' | 'image'; url: string } | { kind: 'frames'; data: string; index: string; lengthMs: number };
 
 const CAPTURE_PREFIX = 'capture:';
-/** The workspace's captures are read again after this, so their signed file links stay fresh. */
-const CAPTURES_FRESH_MS = 5 * 60_000;
-const captureLists = new WeakMap<QuestionCards['request'], { request: Promise<readonly RuntimeBrowserCaptureView[]>; freshUntil: number }>();
+/** The workspace's captures are read again for each block that shows one: a capture gains files as it records, and a
+ * new one may have started since the last read. Blocks that ask while a read is out share it; a file that has not
+ * changed keeps its link, so the browser shows its bytes from its cache. */
+const captureLists = new WeakMap<QuestionCards['request'], Promise<readonly RuntimeBrowserCaptureView[]>>();
 
-/** The workspace's captures, one request for every block that shows one. */
 function workspaceCaptures(request: QuestionCards['request']): Promise<readonly RuntimeBrowserCaptureView[]> {
   const known = captureLists.get(request);
-  if (known && known.freshUntil > Date.now()) return known.request;
-  const entry = {
-    request: request({ type: 'browserCaptures' }).then((result) => {
-      if (!result.browserCaptures) throw new Error('the workspace did not return its captures');
-      return result.browserCaptures;
-    }),
-    freshUntil: Date.now() + CAPTURES_FRESH_MS,
-  };
-  captureLists.set(request, entry);
-  entry.request.catch(() => { if (captureLists.get(request) === entry) captureLists.delete(request); });
-  return entry.request;
+  if (known) return known;
+  const read = request({ type: 'browserCaptures' }).then((result) => {
+    if (!result.browserCaptures) throw new Error('the workspace did not return its captures');
+    return result.browserCaptures;
+  });
+  captureLists.set(request, read);
+  const forget = () => { if (captureLists.get(request) === read) captureLists.delete(request); };
+  read.then(forget, forget);
+  return read;
 }
 
 /** What a capture shows as a still: its image, else its thumbnail. */

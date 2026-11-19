@@ -23,7 +23,7 @@ import { z } from 'zod';
 import { LIFECYCLE_APPROVAL_CHOICES, RuntimeAttachmentSchema, RuntimeIdentitySchema, RuntimeLifecycleDispatchArgumentsSchema, RuntimeSnapshotSchema, type RuntimeGitCheckpoint, type RuntimeLifecycleApprovalAnswer, type RuntimeLifecycleApprovalRequest, type RuntimeToolDispatch } from '@gitspace/protocol-runtime';
 import { Result } from 'better-result';
 import { SpaceAuthorityDO } from '../src/space-authority.js';
-import { noticeStackChanges } from '../src/stack-notices.js';
+import { readCloudWorkspaceBase } from '../src/cloud-stack-status.js';
 import { createAccountWorkspaceRuntime } from '../src/account-runtime-host.js';
 import { QuestionsDoc } from '@gitspace/runtime-core';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
@@ -1305,64 +1305,46 @@ describe('workspace environment edits and stack status with no machines', () => 
     expect(await client.workspace.stackStatus({ workspaceId: 'missing' })).toMatchObject({ status: 'error', error: { _tag: rpcErrors.workspaceNotFound.tag, data: { workspaceId: 'missing' } } });
   });
 
-  it('tells a stacked workspace’s agent of each change of its stack position once, as a notice that starts no turn', async () => {
+  it('reads what a workspace builds on from the cloud: the project base when unstacked, its stack parent when stacked, and whether that parent merged', async () => {
     const fixture = await account(['rpc.read', 'rpc.write']);
     const { projectId, spaceId: parentId, authority } = await inspectorWorkspace(fixture.userId);
     const childId = `space-${crypto.randomUUID()}`;
     await authority.putWorkspace({ id: childId, projectId, kind: 'worktree', name: 'Child', branch: 'child', phase: 'code', sourceKind: 'base', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
     await env.USER_PROJECTS.getByName(fixture.userId).putWorkspaceLocation(childId, projectId);
-    expect(await authority.setWorkspaceRelations(childId, { dependsOn: [], relatedTo: [], stackedOn: parentId })).toMatchObject({ status: 'ok' });
     const [projectRepository, baseRepository, parentRepository, childRepository] = [`project-${projectId}`, `workspace-${projectId}`, `workspace-${parentId}`, `workspace-${childId}`];
     const history = artifactsHistory();
     const root = history.commit([], projectRepository, baseRepository, parentRepository, childRepository);
     const main = history.commit([root], projectRepository, baseRepository, parentRepository, childRepository);
-    const fork = history.commit([main], parentRepository, childRepository);
-    const parentCommits = [history.commit([fork], parentRepository)];
-    const parentCommit = () => { const next = history.commit([parentCommits.at(-1) ?? fork], parentRepository); parentCommits.push(next); return next; };
-    let parentHead = parentCommit();
-    let childHead = history.commit([fork], childRepository);
-    vi.spyOn(ArtifactsCodeStore.prototype, 'resolveRef').mockImplementation(async (repository, ref) => repository === projectRepository && ref === 'refs/heads/main' ? main : null);
-    const parent = env.SPACE_AUTHORITY.getByName(`${fixture.userId}:${parentId}`);
+    const childHead = history.commit([main], childRepository);
+    let projectHead = main;
+    vi.spyOn(ArtifactsCodeStore.prototype, 'resolveRef').mockImplementation(async (repository, ref) => repository === projectRepository && ref === 'refs/heads/main' ? projectHead : null);
+    // A commit's tree is its hash in this history: the files that changed from one tree to another.
+    const changes = new Map<string, Array<{ path: string; present: boolean }>>();
+    vi.spyOn(ArtifactsCodeStore.prototype, 'changedSnapshotPaths').mockImplementation(async (_repository, before, after) => changes.get(`${before}..${after}`) ?? []);
     const child = env.SPACE_AUTHORITY.getByName(`${fixture.userId}:${childId}`);
-    await seedCheckpoint(parent, checkpointAt(parentId, 'review', parentHead));
     await seedCheckpoint(child, checkpointAt(childId, 'child', childHead));
-    const identity = { projectId, workspaceId: childId };
-    const notices = async () => (await (await child.runtimeTranscript(identity, 'ndjson')).text()).split('\n').filter(Boolean).flatMap(line => {
-      const message = JSON.parse(line)?.payload?.message;
-      return message?.customType === 'gitspace.machine-notice' ? [String(message.content)] : [];
-    });
-    const ahead = (commits: string) => `Stack · You merge after Review. Its branch has ${commits} yours doesn't. If you want to build on them: \`git rebase review\`. Optional.`;
+    const read = () => runInDurableObject(child, (_instance, state) => readCloudWorkspaceBase(env, state.storage, fixture.userId, projectId, childId, childHead));
 
-    // The parent's new head reaches what is stacked on it; reading the same position again says nothing.
-    await noticeStackChanges(env, fixture.userId, projectId, parentId);
-    await noticeStackChanges(env, fixture.userId, projectId, parentId);
-    expect(await notices()).toEqual([ahead('2 commits')]);
+    // Unstacked: the project's base branch, which the branch holds.
+    expect(await read()).toEqual({ baseBranch: 'main', parent: null, head: main, subject: main, behind: 0, overlapping: null });
 
-    // Still behind after another parent commit: the position has not changed, so nothing more is said.
-    parentHead = parentCommit();
-    await seedCheckpoint(parent, checkpointAt(parentId, 'review', parentHead));
-    await noticeStackChanges(env, fixture.userId, projectId, parentId);
-    expect(await notices()).toEqual([ahead('2 commits')]);
+    // The project base moves two commits; one file the branch changed changed there too.
+    projectHead = history.commit([history.commit([main], projectRepository)], projectRepository);
+    changes.set(`${main}..${projectHead}`, [{ path: 'src/export.ts', present: true }, { path: 'README.md', present: true }]);
+    changes.set(`${main}..${childHead}`, [{ path: 'src/export.ts', present: true }]);
+    expect(await read()).toEqual({ baseBranch: 'main', parent: null, head: projectHead, subject: projectHead, behind: 2, overlapping: 1 });
 
-    // Caught up (merged the parent in), then the parent moves on again: a new change, told once.
-    history.copy(childRepository, ...parentCommits);
-    childHead = history.commit([childHead, parentHead], childRepository);
-    await seedCheckpoint(child, checkpointAt(childId, 'child', childHead));
-    await noticeStackChanges(env, fixture.userId, projectId, childId);
-    parentHead = parentCommit();
-    await seedCheckpoint(parent, checkpointAt(parentId, 'review', parentHead));
-    await noticeStackChanges(env, fixture.userId, projectId, parentId);
-    expect(await notices()).toEqual([ahead('2 commits'), ahead('1 commit')]);
+    // Stacked on Review: its branch, two commits the child lacks.
+    const reviewFirst = history.commit([main], parentRepository);
+    const reviewHead = history.commit([reviewFirst], parentRepository);
+    await seedCheckpoint(env.SPACE_AUTHORITY.getByName(`${fixture.userId}:${parentId}`), checkpointAt(parentId, 'review', reviewHead));
+    expect(await authority.setWorkspaceRelations(childId, { dependsOn: [], relatedTo: [], stackedOn: parentId })).toMatchObject({ status: 'ok' });
+    const review = { id: parentId, name: 'Review', branch: 'review' };
+    expect(await read()).toEqual({ baseBranch: 'main', parent: { ...review, merged: false }, head: reviewHead, subject: reviewHead, behind: 2, overlapping: 0 });
 
-    // Restacked onto nothing: told where it merges now.
-    expect(await authority.setWorkspaceRelations(childId, { dependsOn: [], relatedTo: [], stackedOn: null })).toMatchObject({ status: 'ok' });
-    await noticeStackChanges(env, fixture.userId, projectId, childId);
-    expect(await notices()).toEqual([ahead('2 commits'), ahead('1 commit'), 'Stack · Restacked: you no longer merge after another workspace; you merge into main on your own.']);
-
-    // None of it woke the agent: no conversation runs and no turn was started.
-    const snapshot = RuntimeSnapshotSchema.parse(await (await child.runtimeSnapshot(identity)).json());
-    expect(snapshot.conversations.map(conversation => conversation.status)).toEqual(snapshot.conversations.map(() => 'idle'));
-    expect(snapshot.conversations.flatMap(conversation => conversation.messages).filter(message => message.role === 'assistant')).toEqual([]);
-    expect(snapshot.tasks.filter(task => task.conversationId !== null && (task.state === 'pending' || task.state === 'running'))).toEqual([]);
+    // The base workspace merges Review: its checkpoint, not the imported branch, says the parent landed.
+    history.copy(baseRepository, reviewFirst, reviewHead);
+    await seedCheckpoint(env.SPACE_AUTHORITY.getByName(`${fixture.userId}:${projectId}`), checkpointAt(projectId, 'main', history.commit([main, reviewHead], baseRepository)));
+    expect(await read()).toMatchObject({ parent: { ...review, merged: true }, head: reviewHead });
   });
 });

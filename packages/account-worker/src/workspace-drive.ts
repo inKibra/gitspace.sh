@@ -23,7 +23,7 @@ export interface WorkspaceDrive {
   list(prefix: string): Promise<WorkspaceDriveFile[]>;
   /** The file's bytes, or one range of them; null when no file has the path. */
   read(path: string, range?: TenantRange): Promise<Uint8Array | null>;
-  /** An absolute sealed `/files/` link to the file's current version, valid for `ARTIFACT_FILE_URL_MS`. */
+  /** An absolute sealed `/files/` link to the file's current version, valid two to three hours (`mintArtifactFileUrl`). */
   url(path: string): Promise<string>;
   /** What a file link grants for the file's current version, for a route that serves it under its own token. */
   grant(path: string): Promise<ArtifactFileGrant>;

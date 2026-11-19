@@ -91,6 +91,24 @@ describe('files in messages', () => {
     expect(container.textContent).toContain(`Unchanged since ${commit.slice(0, 8)}`);
   });
 
+  it('shows the new bytes in a later message after a file is written again under the same address; a pinned address is read once', async () => {
+    const commit = 'c'.repeat(40);
+    let written = 'first';
+    const resolve = vi.fn(async (uri: string): Promise<ResourceFile> => {
+      const url = uri.includes('@') ? `blob:${uri}` : `/files/${written}`;
+      return { url, downloadUrl: url, size: 10, mediaType: 'image/png', expiresAt: new Date(Date.now() + 7_200_000).toISOString() };
+    });
+    const markdown = `![Home](drive://workspace/shots/home.png)\n\n![Logo](repo://shots/logo.png@${commit})`;
+    await act(async () => root.render(<Message key="earlier" markdown={markdown} resolve={resolve} />));
+    await settle();
+    expect([...container.querySelectorAll('img[alt="Home"]')].map((image) => image.getAttribute('src'))).toEqual(['/files/first']);
+    written = 'second';
+    await act(async () => root.render(<><Message key="earlier" markdown={markdown} resolve={resolve} /><Message key="later" markdown={markdown} resolve={resolve} /></>));
+    await settle();
+    expect([...container.querySelectorAll('img[alt="Home"]')].map((image) => image.getAttribute('src'))).toEqual(['/files/first', '/files/second']);
+    expect(resolve.mock.calls.filter(([uri]) => uri.includes('@'))).toHaveLength(1);
+  });
+
   it('shows a tool call’s images while the call itself is collapsed', () => {
     const turns: TurnBlock[] = [{ id: 'turn', type: 'turn', status: 'done', sideAgents: [], items: [{
       id: 'call', type: 'tool-call', toolCallId: 'call', tool: 'read', target: 'screen.png', status: 'done',

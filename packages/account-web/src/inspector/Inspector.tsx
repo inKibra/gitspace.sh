@@ -345,8 +345,12 @@ export function Inspector(props: InspectorProps) {
   }));
   const threadPanel = activeThread ? <ThreadPanel thread={activeThread} onClose={closeThread} /> : null;
   let documentBody: ReactNode = null;
-  if (activeDocument?.kind === 'resource') documentBody = <ResourceDocument key={`${props.overview.spaceId}:${activeDocument.target}`} uri={activeDocument.target} mode={artifactModeById[activeDocument.id] ?? 'preview'} onRequest={props.onRequestResource} artifactReferences={artifacts} artifactContent={artifactContent} onRequestArtifact={loadArtifact} />;
-  else if (activeDocument?.kind === 'artifact') {
+  if (activeDocument?.kind === 'resource') {
+    const resource = parseResourceUri(activeDocument.target);
+    // The drive's current version of the file, so the document reads it again once the path gets new bytes.
+    const version = resource?.kind === 'drive' ? driveFiles.find((file) => file.scope === (resource.mount ?? props.drive?.own) && file.path === resource.path)?.hash ?? null : null;
+    documentBody = <ResourceDocument key={`${props.overview.spaceId}:${activeDocument.target}`} uri={activeDocument.target} version={version} mode={artifactModeById[activeDocument.id] ?? 'preview'} onRequest={props.onRequestResource} artifactReferences={artifacts} artifactContent={artifactContent} onRequestArtifact={loadArtifact} />;
+  } else if (activeDocument?.kind === 'artifact') {
     const focus = props.driveFocus?.anchor.document.kind === 'drive' && props.driveFocus.anchor.document.path === activeArtifact?.url ? props.driveFocus : null;
     documentBody = activeArtifact ? <ArtifactDocument
       reference={activeArtifact}

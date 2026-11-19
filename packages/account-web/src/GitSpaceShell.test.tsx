@@ -37,14 +37,11 @@ describe('GitSpaceShell', () => {
     expect(workspaceStatusColor({ ...cloud, status: undefined, freshness: 'unknown' })).toBe('dim');
   });
 
-  it('offers Update base on a behind project and only explains a behind workspace', () => {
+  it('only explains a behind project when Update base is unavailable', () => {
     const checkedAt = '2026-10-18T12:00:00.000Z';
     const remote = { head: 'a'.repeat(40), checkedAt, behind: true };
     const project: ProjectAgentView = { ...verticalSliceFixture.workspace, kind: 'project', phase: null, id: verticalSliceFixture.workspace.projectId };
     const projects: ProjectLifecycleView[] = [{ id: project.projectId, name: 'Project', lifecycle: 'active', repositoryReference: 'https://github.com/example/project.git', baseBranch: project.branch, role: null, source: null, revision: 1, remote, archivedAt: null, updatedAt: new Date(checkedAt) }];
-    const behindProject = renderToStaticMarkup(<GitSpaceShell {...verticalSliceFixture} workspace={project} projects={projects} onUpdateBase={async () => undefined} />);
-    expect(behindProject).toContain(`Behind origin/${project.branch} · Update`);
-    expect(behindProject).toContain('<button');
     const withoutAction = renderToStaticMarkup(<GitSpaceShell {...verticalSliceFixture} workspace={project} projects={projects} />);
     expect(withoutAction).toContain(`Behind origin/${project.branch}`);
     expect(withoutAction).not.toContain('· Update');

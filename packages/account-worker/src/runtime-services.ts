@@ -8,7 +8,7 @@ import { lifecycleApprovalRequest } from './lifecycle-approval-card.js';
 import type { DocumentMarkdown } from './document-markdown.js';
 import { GITSPACE_SOURCE_REPOSITORY } from '@gitspace/protocol/project-authority';
 import { RuntimeQaItemSchema, type RuntimeQaActionInput, type RuntimeQaItem } from '@gitspace/protocol-runtime/workspace-controls';
-import { ArtifactsCodeStore, artifactsWorkspaceRepository, textPage, snapshotEntries, hasSnapshotConflictMarkers, readSnapshotText, resolveSnapshotConflictText, CloudPublicationUncertain, isAttachmentOnline, isAttachmentReady, type WorkspaceRuntime, type WorkspaceRuntimeOptions } from '@gitspace/runtime-workspace-do';
+import { ArtifactsCodeStore, artifactsWorkspaceRepository, readCurrentCheckpoint, textPage, snapshotEntries, hasSnapshotConflictMarkers, readSnapshotText, resolveSnapshotConflictText, CloudPublicationUncertain, isAttachmentOnline, isAttachmentReady, type WorkspaceRuntime, type WorkspaceRuntimeOptions } from '@gitspace/runtime-workspace-do';
 import { RuntimeAgentLifecycleRunArgumentsSchema, RuntimeGenerateImageArgumentsSchema, RuntimeLifecycleDispatchArgumentsSchema, RuntimeEnvironmentArgumentsSchema, RuntimeMachinesArgumentsSchema, RuntimeSpaceArtifactsArgumentsSchema, RuntimeDriveTransferStoredSchema, RuntimeSpacePhaseArgumentsSchema, RuntimeReadArgumentsSchema, RuntimeWriteArgumentsSchema, RuntimeEditArgumentsSchema, RuntimeReportIssueArgumentsSchema, RuntimeHistoryReadArgumentsSchema, RuntimeHistorySearchArgumentsSchema, RuntimeWebFetchArgumentsSchema, RuntimeWebSearchArgumentsSchema } from '@gitspace/protocol-runtime';
 import { fetchWeb, renderWebFetchPage, windowWebFetchPage } from 'agents/webfetch';
 import { isSubagentToolCallAllowed, runtimeOperationIsReadOnly, workspaceActivity, workspaceBoard, RuntimeBashCommandArgumentsSchema, RuntimeSyncArgumentsSchema, RuntimeSyncMachineArgumentsSchema, RuntimeSyncMachineCaptureSchema, RuntimeSyncMachineDiffSchema, RuntimeSyncMachineDiscardSchema, RuntimeSyncMachineRestoreSchema, RuntimeSyncMachineStatusSchema } from '@gitspace/protocol-runtime';
@@ -42,7 +42,7 @@ import { changeAgentWorkspace, setCloudWorkspacePhase } from './cloud-workspace-
 import { readProjectWorkspaces } from './workspace-board.js';
 import { cutForAgent } from '@gitspace/protocol-workspace';
 import { machineCapabilities } from './runtime-attachments.js';
-import { compareCloudHistory, readCloudBaseTip } from './cloud-stack-status.js';
+import { compareCloudHistory, readCloudBaseTip, readCloudWorkspaceBase } from './cloud-stack-status.js';
 import type { FleetMachineDefinition } from './fleet-catalog.js';
 import { QuestionsDoc, postQuestion } from '@gitspace/runtime-core';
 import { proposeProjectAnswers } from './project-answers.js';
@@ -971,8 +971,11 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
   return {
     browser: browser.manage,
     tools: { invoke, prepareBrowser: browser.prepare, takeoverTab: browser.takeoverTab, images: options.images,
-      // Only the project agent's turns carry the workspace board.
-      ...(identity.workspaceId === baseWorkspaceId ? { projectBoard: boardRows } : {}),
+      // Only the project agent's turns carry the workspace board; a workspace agent's start with a Base line when its
+      // base changed, read from the cloud whether its checkout is there or on a machine.
+      ...(identity.workspaceId === baseWorkspaceId ? { projectBoard: boardRows } : {
+        workspaceBase: async () => readCloudWorkspaceBase(env, ctx.storage, env.ACCOUNT_ID, identity.projectId, identity.workspaceId, (await readCurrentCheckpoint(ctx.storage))?.headCommit ?? null),
+      }),
       // A machine tool with no ready machine attaches one and fails here, before the user is asked to approve it.
       async preflight(input) {
         // Replay/reconciliation follows the admitted identity, not today's cache availability.

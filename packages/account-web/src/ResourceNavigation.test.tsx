@@ -7,6 +7,7 @@ import { GitSpaceMarkdown } from './GitSpaceMarkdown.js';
 import { ResourceNavigation } from './ResourceNavigation.js';
 import type { ResourceRequest } from './ResourceNavigation.js';
 import { Inspector } from './inspector/Inspector.js';
+import type { DriveFileView } from './inspector/DriveSurface.js';
 import type { InspectorArtifactContent } from './inspector/inspector-shared.js';
 import { loadInspectorResource } from './resource-content.js';
 import { Toasts } from './toasts.js';
@@ -35,7 +36,7 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-function Harness({ read }: { read: (uri: string) => Promise<InspectorArtifactContent> }) {
+function Harness({ read, driveFiles }: { read: (uri: string) => Promise<InspectorArtifactContent>; driveFiles?: readonly DriveFileView[] }) {
   const [request, setRequest] = useState<ResourceRequest>();
   const unavailable = async (): Promise<never> => { throw new Error('Unexpected unrelated action'); };
   return <Toasts><ResourceNavigation.Provider value={setRequest}>
@@ -50,6 +51,7 @@ function Harness({ read }: { read: (uri: string) => Promise<InspectorArtifactCon
       reviewerId="reviewer" resourceRequest={request} onRequestResource={read} onRequestArtifact={unavailable}
       onRequestRepositoryFile={unavailable} onRequestRepositoryDiff={unavailable} onLoadGuideDiff={unavailable}
       onMarkGuideSectionRead={unavailable}
+      drive={driveFiles ? { files: driveFiles, own: 'workspace', captures: new Map(), remove: unavailable } : undefined}
     />
   </ResourceNavigation.Provider></Toasts>;
 }
@@ -117,6 +119,19 @@ describe('Markdown resource navigation', () => {
     expect(container.querySelector('audio')?.getAttribute('src')).toBe('blob:output');
     await act(async () => root.render(null));
     expect(outputDispose).toHaveBeenCalledOnce();
+  });
+
+  it('reads an open drive file again once the drive lists new bytes at its path', async () => {
+    let reads = 0;
+    const read = async (uri: string): Promise<InspectorArtifactContent> => ({ url: uri, source: `Plan, read ${++reads}`, mediaType: 'text/plain', previewUrl: '' });
+    const plan = (hash: string): DriveFileView => ({ url: 'drive://workspace/PLAN.md', path: 'PLAN.md', hash, size: 10, mediaType: 'text/markdown', scope: 'workspace', workspaceId: null, writtenAt: null });
+    await act(async () => root.render(<Harness read={read} driveFiles={[plan(`sha256:${'a'.repeat(64)}`)]} />));
+    await clickLink('Plan');
+    expect(container.querySelector('[aria-label="Workspace Inspector"]')?.textContent).toContain('Plan, read 1');
+    await act(async () => root.render(<Harness read={read} driveFiles={[plan(`sha256:${'a'.repeat(64)}`)]} />));
+    expect(reads).toBe(1);
+    await act(async () => root.render(<Harness read={read} driveFiles={[plan(`sha256:${'b'.repeat(64)}`)]} />));
+    expect(container.querySelector('[aria-label="Workspace Inspector"]')?.textContent).toContain('Plan, read 2');
   });
 
   it('keeps external-link confirmation and rejects raw tags that try to bypass it', async () => {

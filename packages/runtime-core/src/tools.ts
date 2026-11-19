@@ -18,6 +18,7 @@ import { postQuestion, questionPosted } from './questions.js';
 import { watchSteer } from './steer.js';
 import { CODEMODE_CHILD_OUTPUT_LIMITS, keepWholeOutput, TOOL_OUTPUT_LIMITS, type ToolResultStore } from './tool-results.js';
 import { declareTool, inputJsonSchema, toolCatalog, type ToolDeclarationSource } from './tool-declarations.js';
+import type { WorkspaceBase } from './workspace-base.js';
 export type CodemodeToolCall = { tool: string; args: JsonValue; callId: string; signal: AbortSignal };
 export type CodemodeToolOutcome =
   | { status: 'completed'; value: JsonValue }
@@ -64,6 +65,10 @@ export type ToolServices = {
   /** The project's workspaces, read from stored rows; present only for the project agent, whose main conversations'
    * turns carry them as a board (project-board.ts). */
   projectBoard?(): Promise<WorkspaceBoardRow[]>;
+  /** What the workspace builds on, read without opening a machine; present only for workspace agents (not the project
+   * agent), whose main conversations' turns start with a Base line when it changed (workspace-base.ts). Null when the
+   * workspace is not in its project. */
+  workspaceBase?(): Promise<WorkspaceBase | null>;
 };
 const workspaceId = z.string().min(1).optional().describe('Another workspace of this project to act on; this workspace when omitted.');
 const get = z.object({ method: z.literal('get').describe('Read the current record.'), workspaceId });

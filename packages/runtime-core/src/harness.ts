@@ -23,6 +23,7 @@ import type { WorkspacePhase } from '@gitspace/protocol-runtime/session-controls
 import { MODEL_ROLE_LABELS, type ModelRoleSelector } from '@gitspace/protocol/inference';
 import { fitRequestImages, imageLimits, SUBAGENT_REQUEST_IMAGE_BYTES, SUBAGENT_REQUEST_IMAGES } from './inference/image-limits.js';
 import { boardAfterCompaction, boardForTurn, PROJECT_BOARD_INSTRUCTION } from './project-board.js';
+import { baseAfterCompaction, baseForTurn, WORKSPACE_BASE_INSTRUCTION } from './workspace-base.js';
 import { messageAttachments, withAttachmentRenditions, type AttachmentRendition } from './inference/attachments.js';
 import type { ChatAttachment } from '@gitspace/protocol-runtime/chat-attachments';
 /** `role` is the profile role the model came from, when it came from one. `withoutTools` are the tools the profile's
@@ -157,7 +158,7 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
     const workspace = await input.read.snapshot(WorkspaceDoc, context);
     const child = (await input.read.snapshot(AgentDefinitionContextDoc, input.conversationId, context))?.child;
     const extra = await options.tools.instructions(String(input.conversationId), context);
-    return [workspace?.instructions, !child ? workspace?.goal : '', !child && workspace?.phase === 'plan' ? 'This workspace is in plan mode: in general, use it for planning rather than coding.' : '', extra, !child && options.tools.projectBoard ? PROJECT_BOARD_INSTRUCTION : ''].filter(Boolean).join('\n\n');
+    return [workspace?.instructions, !child ? workspace?.goal : '', !child && workspace?.phase === 'plan' ? 'This workspace is in plan mode: in general, use it for planning rather than coding.' : '', extra, !child && options.tools.projectBoard ? PROJECT_BOARD_INSTRUCTION : '', !child && options.tools.workspaceBase ? WORKSPACE_BASE_INSTRUCTION : ''].filter(Boolean).join('\n\n');
   } }], hooks: [hook(GenerationTask, { async beforeRequest(input, runtime, context) {
     const signal = context.abortSignal;
     if (!signal) throw new Error('Generation hook requires an invocation abort signal');
@@ -211,9 +212,13 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
       const fitted = fitRequestImages(request, { ...limits, maxInlinePerRequest: Math.min(limits.maxInlinePerRequest, SUBAGENT_REQUEST_IMAGES), maxInlineBytes: Math.min(limits.maxInlineBytes, SUBAGENT_REQUEST_IMAGE_BYTES) });
       if (fitted !== request) return { messages: fitted.messages };
     }
-    // The project agent's turn starts with its workspace board, appended after everything earlier requests sent.
-    const board = !child && options.tools.projectBoard && live?.run ? await boardForTurn(harness, runtime.conversationId, String(live.run.taskId), input.messages, options.tools.projectBoard, context) : null;
-    if (board) return { messages: [...outgoing, board] };
+    // The project agent's turn starts with its workspace board, a workspace agent's with a Base line when its base
+    // changed, appended after everything earlier requests sent.
+    const turn = !child && live?.run ? String(live.run.taskId) : null;
+    const line = turn === null ? null
+      : options.tools.projectBoard ? await boardForTurn(harness, runtime.conversationId, turn, input.messages, options.tools.projectBoard, context)
+      : options.tools.workspaceBase ? await baseForTurn(harness, runtime.conversationId, turn, options.tools.workspaceBase, context) : null;
+    if (line) return { messages: [...outgoing, line] };
     return described || lean || attached || repaired ? { messages: outgoing } : undefined;
   }, afterResponse(_message, runtime) { options.unfinished.end(`turn:${String(runtime.conversationId)}`); } }), hook(CompactionTask, { async beforeCompact(input, api, context) {
     const signal = context.abortSignal;
@@ -256,11 +261,13 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
       const text = response.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n');
       if (!text.trim()) throw new Error('Compaction returned no summary');
       const summarized = dropped ? `${DROPPED_SUMMARY_NOTE}\n\n${text}` : text;
-      // The project agent's summary ends with the full workspace board.
+      // The project agent's summary ends with the full workspace board; a workspace agent's next turn says its base again.
       const projectBoard = options.tools.projectBoard;
-      const summary = projectBoard && !(await api.snapshot(AgentDefinitionContextDoc, api.conversationId, context))?.child ? await boardAfterCompaction(harness, api.conversationId, summarized, projectBoard, context) : summarized;
+      const main = !(await api.snapshot(AgentDefinitionContextDoc, api.conversationId, context))?.child;
+      const summary = projectBoard && main ? await boardAfterCompaction(harness, api.conversationId, summarized, projectBoard, context) : summarized;
       const bytes = utf8ByteLength(JSON.stringify(summary));
       if (bytes > COMPACTION_SUMMARY_BYTES) throw new Error(`The compaction summary was ${(bytes / 1024 / 1024).toFixed(1)} MB, more than the ${COMPACTION_SUMMARY_BYTES / 1024 / 1024} MB a conversation entry holds, so GitSpace did not keep it. Send a message to try again.`);
+      if (options.tools.workspaceBase && main) await baseAfterCompaction(harness, api.conversationId, context);
       return { summary };
     } catch (error) {
       if (signal.aborted) throw error;

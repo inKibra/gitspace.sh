@@ -96,8 +96,11 @@ function ArtifactPreview({ reference, content, mode, artifactReferences, artifac
   return content.source !== null ? <SourceArtifact source={content.source} /> : <Padded><EmptyState icon={ic(Archive, 22)} title="Preview is unavailable" description="This artifact type has no inline renderer." action={download} /></Padded>;
 }
 
-export function ResourceDocument({ uri, mode, onRequest, artifactReferences, artifactContent, onRequestArtifact }: {
+/** A resource opened from a link; `version` is the drive's current hash for it, when the drive lists it, so the
+ * document reads the file again once its path gets new bytes. */
+export function ResourceDocument({ uri, version, mode, onRequest, artifactReferences, artifactContent, onRequestArtifact }: {
   uri: string;
+  version: string | null;
   mode: 'preview' | 'source';
   onRequest: InspectorProps['onRequestResource'];
   artifactReferences: readonly ArtifactReference[];
@@ -122,7 +125,7 @@ export function ResourceDocument({ uri, mode, onRequest, artifactReferences, art
       }
     })();
     return () => { cancelled = true; controller.abort(); loaded?.dispose?.(); };
-  }, [uri, attempt]);
+  }, [uri, version, attempt]);
   if (!result) return <div className="flex flex-1 items-center justify-center p-6"><ThinkingIndicator aria-label={`Loading ${uri}…`} /></div>;
   if ('error' in result) return <Padded><EmptyState icon={ic(AlertCircle, 22)} title="Resource could not load" description={`${uri}: ${result.error}`} action={<Button variant="secondary" size="compact" type="button" onClick={() => setAttempt((value) => value + 1)}>Retry</Button>} /></Padded>;
   return <ArtifactPreview reference={{ url: uri, label: uri, mediaType: result.content.mediaType }} content={result.content} mode={mode} artifactReferences={artifactReferences} artifactContent={artifactContent} onRequest={onRequestArtifact} drive={null} />;

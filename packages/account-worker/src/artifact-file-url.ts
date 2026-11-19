@@ -3,9 +3,10 @@ import { DriveFiles } from './drive-files.js';
 import { openToken, sealToken, type SealedTokenKind } from './sealed-token.js';
 import { tenantStore, type TenantRange } from './tenant-store.js';
 
-/** How long a minted file URL serves its file. A media element keeps requesting ranges while it plays, so a URL
- * outlasts a viewing; the inspector mints a new one each time a file is opened. */
-export const ARTIFACT_FILE_URL_MS = 2 * 60 * 60_000;
+/** A minted file URL serves its file until the end of the hour two hours after it was minted (two to three hours): a
+ * media element keeps requesting ranges while it plays, so a URL outlasts a viewing. One version of one file mints the
+ * same URL all hour, so a browser shows bytes it already has from its cache, and a new version is a new URL. */
+const HOUR_MS = 60 * 60_000;
 
 /** What a file URL grants: one stored version of one drive file, until `expiresAt`. The device that asked for it was
  * authorized for the file at the time, exactly as a preview read is. */
@@ -28,8 +29,8 @@ const FILE_URL: SealedTokenKind = { scope: 'file-url:v1', context: 'gitspace-art
 
 /** A sealed URL for one file version: it names nothing readable and cannot be altered or extended. */
 export async function mintArtifactFileUrl(env: Env, grant: ArtifactFileGrant): Promise<{ url: string; downloadUrl: string; expiresAt: string }> {
-  const expiresAt = Date.now() + ARTIFACT_FILE_URL_MS;
-  const token = await sealToken(env, FILE_URL, FileGrantSchema.parse({ version: 1, ...grant, expiresAt }));
+  const expiresAt = (Math.floor(Date.now() / HOUR_MS) + 3) * HOUR_MS;
+  const token = await sealToken(env, FILE_URL, FileGrantSchema.parse({ version: 1, ...grant, expiresAt }), { stable: true });
   return { url: `/files/${token}`, downloadUrl: `/files/${token}?download=1`, expiresAt: new Date(expiresAt).toISOString() };
 }
 
