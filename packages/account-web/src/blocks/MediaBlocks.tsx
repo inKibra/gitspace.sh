@@ -11,8 +11,8 @@ import { useContext, useEffect, useRef, useState } from 'react';
 import type { z } from 'zod';
 import { CAPTURE_THUMBNAIL, FramesPlayer, captureMedia, formatClock } from '../capture/CapturePlayer.js';
 import { QuestionCardsContext, type QuestionCards } from '../QuestionCards.js';
-import { useResourceFile } from '../resource-files.js';
-import { TranscriptImage } from '../resource-media.js';
+import { useMediaPin, useResourceFile } from '../resource-files.js';
+import { TranscriptImage, UpdatedSince } from '../resource-media.js';
 import { SequenceFrame } from './BlockDocument.js';
 import { LightboxComments, LightboxPlaceReport, type LightboxPlace } from '../comments/LightboxComments.js';
 
@@ -48,10 +48,11 @@ function captureStill(view: RuntimeBrowserCaptureView): Media | null {
   return thumbnail ? { kind: 'image', url: thumbnail } : null;
 }
 
-/** The media a source names: a drive file by its URL and type, or a capture's recording or still. */
+/** The media a source names: a drive file by its URL and type (in a message, at the version the message pinned it at),
+ * or a capture's recording or still. */
 function useMedia(src: string, still: boolean, enabled = true): { media: Media | null; error: string | null } {
   const capture = src.startsWith(CAPTURE_PREFIX) ? src.slice(CAPTURE_PREFIX.length) : null;
-  const drive = useResourceFile(src, enabled && capture === null);
+  const drive = useResourceFile(src, enabled && capture === null, useMediaPin(src));
   const cards = useContext(QuestionCardsContext);
   const [captured, setCaptured] = useState<{ src: string; media: Media | null; error: string | null } | null>(null);
   useEffect(() => {
@@ -89,10 +90,12 @@ function MediaPending({ label, error }: { label: string; error: string | null })
 
 export function ImageView({ src, alt, caption }: ImageProps) {
   const { media, error } = useMedia(src, true);
+  const pin = useMediaPin(src);
   // An SVG without width and height has no size of its own and would shrink to nothing in the thumbnail's fit-content
   // frame; a minimum width lets its aspect ratio set the height.
   return <figure className="flex flex-col gap-1.5 [&_img]:min-w-64">
     {media && media.kind !== 'frames' ? <TranscriptImage alt={alt} label={`Open ${alt}`} src={media.url} /> : <MediaPending label={alt} error={error} />}
+    <UpdatedSince uri={src} pin={pin} />
     {caption ? <figcaption className="text-caption text-muted-foreground">{caption}</figcaption> : null}
   </figure>;
 }

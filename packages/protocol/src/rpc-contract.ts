@@ -2024,11 +2024,12 @@ export const inspectorReadArtifactPageContract = gitspaceRpc
   .query();
 
 /** A short-lived URL serving one drive file over plain HTTP (byte ranges, caching): media elements play it and
- * downloads save it, with no bytes copied through RPC. */
+ * downloads save it, with no bytes copied through RPC. `hash` asks for that version (`sha256:…`) rather than the
+ * current one; `hash` in the output is the version served. */
 export const inspectorArtifactFileContract = gitspaceRpc
   .procedure()
   .input(wire.object({ spaceId: wire.string, expectedGeneration: wire.integer({ min: 0 }), url: wire.string, hash: wire.nullable(wire.string) }))
-  .output(wire.object({ url: wire.string, downloadUrl: wire.string, size: wire.integer({ min: 0 }), mediaType: wire.nullable(wire.string), expiresAt: wire.string }))
+  .output(wire.object({ url: wire.string, downloadUrl: wire.string, size: wire.integer({ min: 0 }), mediaType: wire.nullable(wire.string), expiresAt: wire.string, hash: wire.string }))
   .errors(inspectorReadErrors)
   .query();
 

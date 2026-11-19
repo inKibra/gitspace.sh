@@ -976,6 +976,8 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       ...(identity.workspaceId === baseWorkspaceId ? { projectBoard: boardRows } : {
         workspaceBase: async () => readCloudWorkspaceBase(env, ctx.storage, env.ACCOUNT_ID, identity.projectId, identity.workspaceId, (await readCurrentCheckpoint(ctx.storage))?.headCommit ?? null),
       }),
+      // A message's embedded drive media are pinned at their versions in the drive catalog when it is stored.
+      driveVersions: async urls => new InspectorCloudArtifacts(env, env.ACCOUNT_ID, await source()).currentVersions(urls),
       // A machine tool with no ready machine attaches one and fails here, before the user is asked to approve it.
       async preflight(input) {
         // Replay/reconciliation follows the admitted identity, not today's cache availability.

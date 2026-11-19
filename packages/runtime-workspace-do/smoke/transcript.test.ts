@@ -5,7 +5,8 @@ import { createAssistantMessageEventStream, createModels, type Api, type Assista
 import { RuntimeIdentitySchema, RuntimeTranscriptSchema } from '@gitspace/protocol-runtime';
 import { formatConversationEvents, piMessageRowId, type TranscriptRow } from '@gitspace/blocks';
 import { createTranscriptReader, transcriptResponse, type WithdrawnNotices } from '../src/transcript.js';
-import { BlockCorrectionsDoc, QuestionsDoc, createRuntimeHarness, repairBlockAsks } from '@gitspace/runtime-core';
+import { BlockCorrectionsDoc, MediaPinsDoc, QuestionsDoc, createRuntimeHarness, repairBlockAsks } from '@gitspace/runtime-core';
+import { createSessionControls } from '@gitspace/runtime-core/session-controls';
 
 const fixtureModel: Model<Api> = { id: 'fixture', name: 'Fixture', provider: 'openai', api: 'openai-responses', baseUrl: 'https://invalid.test', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100_000, maxTokens: 1000 };
 
@@ -376,5 +377,58 @@ test('a reply whose block the agent corrected shows once, as one message row wit
     // The fix step is stored, for the inspector and the model; the person's transcript has none of it.
     expect(entries.map(entry => entry.kind)).toEqual(expect.arrayContaining(['gitspace.block-fix', 'gitspace.block-correction', 'pi.tool-result']));
     expect(rows.some(row => JSON.stringify(row.item).includes('fix_block') || JSON.stringify(row.item).includes('Fix it.'))).toBe(false);
+  } finally { await runtime.harness.close(context); }
+});
+
+test('a message shows a drive file it embeds at the version it had when stored: its own tool call rewriting the file, a later message, a missing file and a person\'s message', async () => {
+  const storage = new MemoryStorage();
+  const dot = 'drive://workspace/check/dot.svg';
+  const red = `sha256:${'a'.repeat(64)}`;
+  const blue = `sha256:${'b'.repeat(64)}`;
+  const files: Record<string, string> = { [dot]: red };
+  const script: AssistantMessage[] = [
+    assistant([{ type: 'text', text: `Red: ![dot](${dot})` }, { type: 'toolCall', id: 'paint', name: 'write', arguments: { path: dot, content: '<svg fill="blue"/>', message: 'Paint it blue' } }], 1_001),
+    assistant([{ type: 'text', text: `Blue: ![dot](${dot}), and ![gone](drive://workspace/check/gone.svg).` }], 1_002),
+  ];
+  const models = Object.assign(createModels(), { getModel: () => fixtureModel, streamSimple() {
+    const message = script.shift();
+    if (!message) throw new Error('No more replies');
+    const stream = createAssistantMessageEventStream();
+    stream.push({ type: 'done', reason: message.stopReason === 'toolUse' ? 'toolUse' : 'stop', message }); stream.end(message);
+    return stream;
+  } });
+  const admit = async () => ({ provider: 'openai', modelId: 'fixture' });
+  const unused = async (): Promise<never> => { throw new Error('Unexpected service'); };
+  const runtime = await createRuntimeHarness({
+    identity: RuntimeIdentitySchema.parse({ projectId: 'project', workspaceId: 'workspace' }), storage, models, model: { provider: 'openai', modelId: 'fixture' },
+    tools: { images: { store: async image => image, load: async image => image }, prepareBrowser: unused, takeoverTab: unused, lifecycleApproval: async () => null, instructions: async () => '', preflight: async () => {}, results: { put: unused, text: unused },
+      // The write the reply's own call makes rewrites the file it shows.
+      async invoke(input) {
+        files[dot] = blue;
+        return { requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: 'Wrote it.' }] };
+      },
+      driveVersions: async urls => Object.fromEntries(urls.flatMap(url => files[url] ? [[url, files[url]]] : [])) },
+    operations: { execute: unused, reconcile: async () => null, cancel: unused, jobScope: () => ({ projectId: 'project', workspaceId: 'workspace' }), controlJob: unused, observeProcess: unused, stopProcess: unused, wakeAt: async () => {} },
+    retainedRules: { loadRules: async () => [] }, editTool: () => 'edit', onReport: error => { throw error; },
+    admitInference: admit, bindInferenceConversation: async () => {}, refuseRequest: unused, unfinished: { begin: () => 0, end: () => {} },
+  });
+  const controls = createSessionControls({ ...runtime, admitInference: admit, reload: async () => {}, catalog: async () => ({ models: [], roles: [] }),
+    history: { conversation: unused, recent: async () => ({ anchorId: null, prompts: [], tokens: null }), page: unused, resolve: unused, transcriptPage: unused, transcriptContent: unused, usage: unused } });
+  try {
+    const root = runtime.root;
+    await controls.execute(String(root.id), { type: 'prompt', text: `Draw this: ![mine](${dot})` }, false, 'device-a');
+    await root.waitForIdle(context);
+    expect(files[dot]).toBe(blue);
+    const media = async (id: ConversationId) => (await runtime.harness.snapshot(MediaPinsDoc, id, context)) ?? { inputs: {}, replies: {} };
+    // A fresh read of the stored rows, as after a reload.
+    const { rows } = await createTranscriptReader(storage, none, undefined, undefined, undefined, undefined, media).page(root.id, { generation: null, before: null, after: null, around: null });
+    const messages = rows.flatMap(row => row.item.type === 'message' ? [{ role: row.item.role, text: row.item.text, pins: row.item.pins }] : []);
+    expect(messages).toEqual([
+      { role: 'user', text: `Draw this: ![mine](${dot})`, pins: { [dot]: red } },
+      // Pinned before its own call wrote the file blue.
+      { role: 'assistant', text: `Red: ![dot](${dot})`, pins: { [dot]: red } },
+      // A file that does not exist is not pinned.
+      { role: 'assistant', text: `Blue: ![dot](${dot}), and ![gone](drive://workspace/check/gone.svg).`, pins: { [dot]: blue } },
+    ]);
   } finally { await runtime.harness.close(context); }
 });

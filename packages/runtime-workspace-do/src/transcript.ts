@@ -61,9 +61,10 @@ function inTurn(event: TranscriptEvent, entry: EntryRecord): TranscriptEvent {
 }
 
 /** What a page reads once: the entries that open the conversation's turns (where its inputs were placed), ascending, and
- * the same as a set; where its block fix steps start, ascending (`transcriptInputs`); and each corrected reply's newest
- * correction entry, by the reply's entry id. */
-type Openers = { readonly ids: readonly number[]; readonly set: ReadonlySet<number>; readonly fixes: readonly number[]; readonly corrections: Readonly<Record<string, number>> };
+ * the same as a set; where its block fix steps start, ascending (`transcriptInputs`); each corrected reply's newest
+ * correction entry, by the reply's entry id; each placed input's request id, by its entry; and the media pins of its
+ * messages (`MediaPinsDoc`). */
+type Openers = { readonly ids: readonly number[]; readonly set: ReadonlySet<number>; readonly fixes: readonly number[]; readonly corrections: Readonly<Record<string, number>>; readonly requests: Readonly<Record<string, string>>; readonly media: MediaPins };
 
 /** Whether entry `entry` lies in a block fix step: a step starts at or below it with no turn opening between. */
 function inFixStep(openers: Openers, entry: number): boolean {
@@ -81,8 +82,9 @@ function positionOf(rowId: string): number | undefined {
 }
 
 /** One Pi entry as transcript events. Tool results recorded by reference show the executor's stored result. A reply
- * with block corrections (`correctedReply`) shows its corrected messages, each message's event listing its corrections. */
-export function entryEvents(entry: EntryRecord, executorResult?: ExecutorResultReader, withdrawn?: WithdrawnNotices, correction?: { model: readonly Message[]; corrected: readonly BlockCorrection[] }): TranscriptEvent[] {
+ * with block corrections (`correctedReply`) shows its corrected messages, each message's event listing its corrections.
+ * A message's event carries the versions its embedded drive media were pinned at (`pins`), by address. */
+export function entryEvents(entry: EntryRecord, executorResult?: ExecutorResultReader, withdrawn?: WithdrawnNotices, correction?: { model: readonly Message[]; corrected: readonly BlockCorrection[] }, pinsOf?: (message: Message) => Readonly<Record<string, string>> | undefined): TranscriptEvent[] {
   if (withdrawn?.has(String(entry.id))) return [];
   const base = Number(entry.id) * ENTRY_ORDINALS;
   return (correction?.model ?? entry.model ?? []).map((source, index) => {
@@ -105,7 +107,8 @@ export function entryEvents(entry: EntryRecord, executorResult?: ExecutorResultR
       }
     }
     const corrected = correction?.corrected.flatMap(item => item.message === index ? [{ part: item.part, block: item.block, at: item.at, issues: item.issues }] : []) ?? [];
-    return { ordinal: base + index, kind: 'message_end', payload: { message, entryId: String(entry.id), ...(corrected.length ? { corrected } : {}) }, createdAt: new Date(message.timestamp).toISOString() };
+    const pins = pinsOf?.(source);
+    return { ordinal: base + index, kind: 'message_end', payload: { message, entryId: String(entry.id), ...(corrected.length ? { corrected } : {}), ...(pins ? { pins } : {}) }, createdAt: new Date(message.timestamp).toISOString() };
   });
 }
 
@@ -223,10 +226,13 @@ function withImageUrls<T>(item: T, imageUrl: TranscriptImageUrl | undefined): T 
 export type InProgressReply = (conversationId: ConversationId) => Promise<unknown>;
 /** A conversation's replies with block corrections: each reply's newest correction entry, by the reply's entry id. */
 export type BlockCorrectionsReader = (conversationId: ConversationId) => Promise<Readonly<Record<string, number>>>;
+/** The versions a conversation's messages pin their embedded drive media at (`MediaPinsDoc`). */
+export type MediaPins = { readonly inputs: Readonly<Record<string, Readonly<Record<string, string>>>>; readonly replies: Readonly<Record<string, Readonly<Record<string, string>>>> };
+export type MediaPinsReader = (conversationId: ConversationId) => Promise<MediaPins>;
 /** Transcript pages are projected per request from small windows of Pi entries, each told the name of the turn it
  * starts in. Nothing is persisted: Pi's entries and submissions are the only transcript storage. A block fix step shows
- * nothing, and a reply shows with its block corrections. */
-export function createTranscriptReader(storage: Storage, withdrawn: WithdrawnNotices, executorResult?: ExecutorResultReader, imageUrl?: TranscriptImageUrl, inProgress?: InProgressReply, blockCorrections?: BlockCorrectionsReader) {
+ * nothing, a reply shows with its block corrections, and a message with its media pins. */
+export function createTranscriptReader(storage: Storage, withdrawn: WithdrawnNotices, executorResult?: ExecutorResultReader, imageUrl?: TranscriptImageUrl, inProgress?: InProgressReply, blockCorrections?: BlockCorrectionsReader, mediaPins?: MediaPinsReader) {
   async function live(conversationId: ConversationId): Promise<boolean> {
     for (const status of LIVE_STATUSES) {
       const query: TaskQuery = { conversationId, status, background: false };
@@ -285,10 +291,10 @@ export function createTranscriptReader(storage: Storage, withdrawn: WithdrawnNot
     return found;
   }
 
-  /** Where each of the conversation's turns opens and each fix step starts, and its replies' corrections. */
+  /** Where each of the conversation's turns opens and each fix step starts, its replies' corrections and its media pins. */
   async function openersOf(conversationId: ConversationId): Promise<Openers> {
-    const [{ openers: ids, fixes }, corrections] = await Promise.all([transcriptInputs(storage, conversationId, ctx), blockCorrections?.(conversationId) ?? {}]);
-    return { ids, set: new Set(ids), fixes, corrections };
+    const [{ openers: ids, fixes, requests }, corrections, media] = await Promise.all([transcriptInputs(storage, conversationId, ctx), blockCorrections?.(conversationId) ?? {}, mediaPins?.(conversationId) ?? { inputs: {}, replies: {} }]);
+    return { ids, set: new Set(ids), fixes, corrections, requests, media };
   }
 
   /** The conversation's entry `id`, read as its newest at or below it. */
@@ -373,7 +379,10 @@ export function createTranscriptReader(storage: Storage, withdrawn: WithdrawnNot
       const correction = correctionId === undefined ? undefined : correctedReply(entry, view.entries.find(item => Number(item.id) === correctionId) ?? await entryAt(conversationId, correctionId));
       const opens = openers.set.has(entryId);
       if (opens) projector.apply({ sessionId, ordinal: entryId * ENTRY_ORDINALS, kind: 'turn_start', payload: {} });
-      for (const event of entryEvents(entry, executorResult, withdrawn, correction)) projector.apply({ ...(opens ? event : inTurn(event, entry)), sessionId });
+      // A person's message pins under its request id, a reply under its model message's timestamp.
+      const input = openers.requests[String(entry.id)];
+      const pinsOf = (message: Message) => message.role === 'user' ? (input === undefined ? undefined : openers.media.inputs[input]) : message.role === 'assistant' ? openers.media.replies[String(message.timestamp)] : undefined;
+      for (const event of entryEvents(entry, executorResult, withdrawn, correction, pinsOf)) projector.apply({ ...(opens ? event : inTurn(event, entry)), sessionId });
       const notice = noticeEvent(entry);
       if (notice) projector.apply({ ...notice, sessionId });
     }

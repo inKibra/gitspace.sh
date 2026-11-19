@@ -176,8 +176,9 @@ export interface GitSpaceShellProps {
   artifactUpload?: ArtifactUploadClient;
   /** Runs a command of the workspace's session: the composer connects a pasted share link's tab with it. */
   sessionCommand?: ComposerProps['sessionCommand'];
-  /** Turns a `drive://` address into a short-lived file URL for images, video and audio shown in messages. */
-  resolveResourceFile?: (uri: string) => Promise<ResourceFile>;
+  /** Turns a `drive://` address into a short-lived file URL for images, video and audio shown in messages: the file's
+   * current version, or the version `hash` a message pinned it at. */
+  resolveResourceFile?: (uri: string, hash: string | null) => Promise<ResourceFile>;
   sessionControls?: SessionControlsProps;
   controlsError?: string;
   onRetryControls?: () => void;

@@ -11,6 +11,7 @@ import { CaptureChip } from '../capture-chip.js';
 import { MessageBlockDocument } from '../blocks/BlockDocument.js';
 import { GitSpaceMarkdown } from '../GitSpaceMarkdown.js';
 import { glyph } from '../glyph.js';
+import { MediaPins } from '../resource-files.js';
 import { AskBlockView, AskTakeoverCall, EnvironmentCall } from './AskCards.js';
 import { AutomationCard, EventCard, Notice, NoticeRow, PERMISSION_BADGE, WorkspaceReportRow } from './EventCards.js';
 import { Execution, SideAgents } from './ExecutionCard.js';
@@ -99,8 +100,10 @@ export function TranscriptItemView({ item, active, onAnswer, state, onStateChang
         <GitSpaceMarkdown>{userMessageMarkdown(sent.text)}</GitSpaceMarkdown>
         <SentComments comments={messageComments(item.text)} />
       </>}</ChatMessage>;
-      // The person's message shows when it was sent under its bubble.
-      return item.role === 'user' && item.at ? <div className="flex min-w-0 flex-col items-end gap-0.5">{message}<ItemTime at={item.at} className="px-1" /></div> : message;
+      // The person's message shows when it was sent under its bubble. The drive media a message embeds show at the
+      // versions it pinned them at.
+      const pinned = <MediaPins.Provider value={item.pins ?? null}>{message}</MediaPins.Provider>;
+      return item.role === 'user' && item.at ? <div className="flex min-w-0 flex-col items-end gap-0.5">{pinned}<ItemTime at={item.at} className="px-1" /></div> : pinned;
     }
     case 'thinking':
       return <ThinkingBlock active={active} text={item.text} state={state} onStateChange={onStateChange} />;

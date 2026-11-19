@@ -1,6 +1,6 @@
 import { planQuestions } from './approval.js';
 import { providerErrorText } from './provider-error.js';
-import { WORKSPACE_REPORT_ENTRY, askAnswererSchema, messageCorrectionsSchema, workspaceTurnReportSchema, type AskBlock, type MessageImage, type RichContentBlock, type ToolCallBlock, type TransportBlock, type TurnBlock, type todoBlockSchema } from './model.js';
+import { WORKSPACE_REPORT_ENTRY, askAnswererSchema, mediaPinsSchema, messageCorrectionsSchema, workspaceTurnReportSchema, type AskBlock, type MessageImage, type RichContentBlock, type ToolCallBlock, type TransportBlock, type TurnBlock, type todoBlockSchema } from './model.js';
 import type { z } from 'zod';
 import type { TranscriptItem } from './history.js';
 import { executionIdentity, executionSettled, extractExecutions, mergeExecution } from './execution.js';
@@ -380,8 +380,10 @@ export class TranscriptProjector {
   #assistantParts(event: TranscriptEventInput, content: unknown[], final: boolean): void {
     const turn = this.#ensureTurn(event);
     const message = this.#message ??= { ordinal: event.ordinal, parts: new Map(), ...createdAt(event) };
-    // A stored message whose blocks the agent corrected arrives with the corrections in its text and lists them.
+    // A stored message whose blocks the agent corrected arrives with the corrections in its text and lists them, and one
+    // that embeds drive media with the versions they had when it was stored.
     const corrections = final ? messageCorrectionsSchema.safeParse(event.payload.corrected).data ?? [] : [];
+    const pins = final ? mediaPinsSchema.safeParse(event.payload.pins).data : undefined;
     for (const [index, rawPart] of content.entries()) {
       const part = record(rawPart);
       if (!part || typeof part.type !== 'string') continue;
@@ -398,6 +400,7 @@ export class TranscriptProjector {
             text: part.text,
             ...(!final ? { pending: true } : previous?.type === 'message' ? { pending: false } : {}),
             ...(corrected.length ? { corrected } : {}),
+            ...(pins ? { pins } : {}),
             ...(at ? { at } : {}),
           }, previous);
           message.parts.set(index, 'message');
@@ -480,7 +483,8 @@ export class TranscriptProjector {
         // Saved transcripts omit turn markers: the next user opens a new turn.
         if (this.#current?.hasContent) this.#commit('done');
         const turn = this.#ensureTurn(event);
-        this.#write({ id: userRowId(turn.id), type: 'message', role: 'user', text, ...(images.length ? { images } : {}), ...createdAt(event) });
+        const pins = mediaPinsSchema.safeParse(event.payload.pins).data;
+        this.#write({ id: userRowId(turn.id), type: 'message', role: 'user', text, ...(images.length ? { images } : {}), ...(pins ? { pins } : {}), ...createdAt(event) });
         return;
       }
       const turn = this.#ensureTurn(event);

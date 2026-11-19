@@ -7,7 +7,7 @@ import {
   type InspectorView, type InspectorIdentity,
 } from '@gitspace/protocol';
 import type { TranscriptEvent } from '@gitspace/protocol/transcript';
-import { createResourcePreview, parseResourceUri, resourceMediaType } from '@gitspace/protocol/resource-uri';
+import { canonicalDriveResourceUrl, createResourcePreview, parseResourceUri, resourceMediaType } from '@gitspace/protocol/resource-uri';
 import { streamBytes } from '@gitspace/protocol-workspace';
 import type { ProjectAuthorityDO, UserProjectIndexDO } from './project-authority.js';
 import type { SpaceAuthorityDO } from './space-authority.js';
@@ -204,6 +204,26 @@ export class InspectorCloudArtifacts {
     return { scope: resolved.scope, path: resolved.path, entry, mediaType: entry.mediaType ?? resourceMediaType(resource.path) };
   }
 
+  /** The current version (`sha256:…`) of each drive address that names a file, by the address as given, for a message
+   * to pin the media it embeds. An address naming no file, or a scope this workspace cannot reach, is left out; a
+   * manifest that cannot be read fails the whole read. Each scope's manifest is read once. */
+  async currentVersions(urls: readonly string[]): Promise<Record<string, string>> {
+    const scopes = await this.source.authority.listArtifactScopes();
+    const mount = this.source.workspace.kind === 'base' ? 'base' : 'workspace';
+    const found: Record<string, string> = {};
+    await Promise.all(urls.map(async (url) => {
+      const resource = parseResourceUri(url);
+      if (resource?.kind !== 'drive') return;
+      let target: { spaceId: string; path: string };
+      try { target = this.target(canonicalDriveResourceUrl(resource, mount)); }
+      catch { return; }
+      const scope = scopes.find((candidate) => candidate.workspaceId === target.spaceId);
+      const entry = scope ? (await this.entries(scope)).find((candidate) => candidate.path === target.path) : undefined;
+      if (entry) found[url] = entry.blobHash;
+    }));
+    return found;
+  }
+
   /** A raster image file as one of `workspaceId`'s conversation images, without reading it: the stored object itself
    * when it is in the workspace's scope under its digest, else a copy there (a project file, or one streamed before
    * its digest was known). Null for any other file. */
@@ -234,10 +254,11 @@ export class InspectorCloudArtifacts {
     return { scopeId: scope.id, hash: entry.blobHash, ...(object ? { object } : {}), size, mediaType, name: (path.split('/').at(-1) || 'file').slice(0, 255) };
   }
 
-  /** A short-lived URL serving a drive file's bytes over HTTP, for media elements and downloads. */
+  /** A short-lived URL serving a drive file's bytes over HTTP, for media elements and downloads, with the version
+   * (`sha256:…`) it serves. */
   async file(url: string, hash?: string | null) {
     const grant = await this.grant(url, hash);
-    return { ...await mintArtifactFileUrl(this.env, grant), size: grant.size, mediaType: grant.mediaType };
+    return { ...await mintArtifactFileUrl(this.env, grant), size: grant.size, mediaType: grant.mediaType, hash: grant.hash };
   }
 
   /** The stored object a drive URL names and the scope whose key opens it, for a machine to fetch itself. */

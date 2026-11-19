@@ -8,14 +8,15 @@ export const BLOCK_FIX_REQUEST = 'block-fix:';
 
 /**
  * Where a conversation's inputs were placed, ascending, and its fork ancestors' through the fork: `openers`, where its
- * transcript turns open, and `fixes`, where its block fix steps start. The transcript reader names turns after the
- * openers (`turnRowId`) and shows nothing of a fix step: the entries from its start to the next opener that it made
- * (its input, replies and tool results). A block ask's question names the message row (`piMessageRowId`) after the
- * opener at or below the message (`openerAt`).
+ * transcript turns open, and `fixes`, where its block fix steps start; and `requests`, each placed input's request id
+ * by its entry. The transcript reader names turns after the openers (`turnRowId`) and shows nothing of a fix step: the
+ * entries from its start to the next opener that it made (its input, replies and tool results). A block ask's question
+ * names the message row (`piMessageRowId`) after the opener at or below the message (`openerAt`).
  */
-export async function transcriptInputs(storage: Storage, conversationId: ConversationId, context: Context): Promise<{ openers: number[]; fixes: number[] }> {
+export async function transcriptInputs(storage: Storage, conversationId: ConversationId, context: Context): Promise<{ openers: number[]; fixes: number[]; requests: Record<string, string> }> {
   const openers: number[] = [];
   const fixes: number[] = [];
+  const requests: Record<string, string> = {};
   let current: ConversationId | undefined = conversationId;
   let through = Number.POSITIVE_INFINITY;
   while (current !== undefined) {
@@ -25,6 +26,7 @@ export async function transcriptInputs(storage: Storage, conversationId: Convers
       for (const record of page.items) {
         if (record.type !== 'input' || record.entry === undefined || Number(record.entry) > through) continue;
         (record.requestId?.startsWith(BLOCK_FIX_REQUEST) ? fixes : openers).push(Number(record.entry));
+        if (record.requestId !== undefined) requests[String(record.entry)] = record.requestId;
       }
       cursor = page.next;
     } while (cursor);
@@ -33,7 +35,7 @@ export async function transcriptInputs(storage: Storage, conversationId: Convers
     through = Math.min(through, Number(parent.at));
     current = parent.conversationId;
   }
-  return { openers: openers.sort((left, right) => left - right), fixes: fixes.sort((left, right) => left - right) };
+  return { openers: openers.sort((left, right) => left - right), fixes: fixes.sort((left, right) => left - right), requests };
 }
 
 /** Where a conversation's transcript turns open, ascending (`transcriptInputs`). */

@@ -18,6 +18,9 @@ export type BlockCorrection = z.infer<typeof blockCorrectionSchema>;
 /** What a transcript event of a stored assistant message carries as `payload.corrected`: its block corrections, each
  * naming the content part (the message row) its block is in. */
 export const messageCorrectionsSchema = z.array(blockCorrectionSchema.extend({ part: z.number().int().nonnegative() }));
+/** The version (`sha256:…`) each drive file a stored message embeds had when the message was stored, by its address
+ * (`parseResourceUri(...).url`); a transcript event of a stored message carries them as `payload.pins`. */
+export const mediaPinsSchema = z.record(z.string(), z.string());
 
 export const messageBlockSchema = base.extend({
   type: z.literal('message'),
@@ -27,6 +30,8 @@ export const messageBlockSchema = base.extend({
   pending: z.boolean().optional(),
   /** The message's blocks the agent corrected; `text` holds the corrections. */
   corrected: z.array(blockCorrectionSchema).optional(),
+  /** Its embedded drive media's versions when it was stored; a file it embeds that is not here shows as it is now. */
+  pins: mediaPinsSchema.optional(),
   at,
 });
 

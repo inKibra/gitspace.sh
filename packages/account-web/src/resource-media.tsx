@@ -3,7 +3,7 @@ import { parseResourceUri, resolveResourceReference, resourceMediaType, resource
 import { Dialog, DialogContent, DialogTitle, Tooltip, useShape } from '@gitspace/ui';
 import { Download01, File06, PlayCircle } from '@untitledui/icons';
 import { formatBytes } from './inspector/artifact-upload.js';
-import { useResourceFile } from './resource-files.js';
+import { useMediaPin, useResourceFile } from './resource-files.js';
 import { MarkdownResourceLink, ResourceLink } from './ResourceNavigation.js';
 
 /** An image as a thumbnail that opens full size. */
@@ -81,8 +81,18 @@ export function ResourceMedia({ uri, alt }: { uri: string; alt?: string }) {
   return <ResourceFileView uri={uri} label={label} named={named} />;
 }
 
+/** The mark of media a message pinned at a version of a drive file that has since been written again; it opens the
+ * file as it is now in the Inspector. Nothing for media without a pin, or whose file is unchanged. */
+export function UpdatedSince({ uri, pin }: { uri: string; pin: string | null }) {
+  const current = useResourceFile(uri, pin !== null);
+  if (pin === null || current.file?.version === undefined || current.file.version === pin) return null;
+  return <ResourceLink className="w-fit rounded-full border border-border px-1.5 text-[10px] leading-4 text-muted-foreground hover:text-foreground" href={uri}>updated since</ResourceLink>;
+}
+
 function ResourceFileView({ uri, label, named }: { uri: string; label: string; named: string | null }) {
-  const { file, error, unavailable } = useResourceFile(uri);
+  // In a message, a drive file it embeds shows at the version it had when the message was stored.
+  const pin = useMediaPin(uri);
+  const { file, error, unavailable } = useResourceFile(uri, true, pin);
   const mediaType = file?.mediaType ?? named;
   if (unavailable || error) return <span className="inline-flex flex-col gap-1">
     <FileCard uri={uri} label={label} size={null} downloadUrl={null} />
@@ -90,8 +100,8 @@ function ResourceFileView({ uri, label, named }: { uri: string; label: string; n
   </span>;
   if (!file) return <span aria-busy="true" aria-label={`Loading ${label}`} className="block h-24 w-40 animate-pulse rounded-md bg-surface-2" />;
   // In an <img>, an SVG runs no script and loads nothing else.
-  if (mediaType?.startsWith('image/')) return <TranscriptImage alt={label} label={`Open ${label}`} src={file.url} />;
-  if (mediaType?.startsWith('video/')) return <VideoPoster label={label} src={file.url} />;
+  if (mediaType?.startsWith('image/')) return <span className="flex flex-col items-start gap-1"><TranscriptImage alt={label} label={`Open ${label}`} src={file.url} /><UpdatedSince uri={uri} pin={pin} /></span>;
+  if (mediaType?.startsWith('video/')) return <span className="flex flex-col items-start gap-1"><VideoPoster label={label} src={file.url} /><UpdatedSince uri={uri} pin={pin} /></span>;
   if (mediaType?.startsWith('audio/')) return <audio aria-label={label} className="block w-full max-w-md" controls preload="metadata" src={file.url} />;
   return <FileCard uri={uri} label={label} size={file.size} downloadUrl={file.downloadUrl} />;
 }

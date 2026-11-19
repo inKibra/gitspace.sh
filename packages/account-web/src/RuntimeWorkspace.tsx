@@ -274,7 +274,7 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, reads, 
   const resolveResourceFile = useMemo(() => {
     // A repository file's bytes by version and type: one object URL each for the page's life.
     const repositoryUrls = new Map<string, string>();
-    return async (uri: string): Promise<ResourceFile> => {
+    return async (uri: string, hash: string | null): Promise<ResourceFile> => {
       const resource = parseResourceUri(uri);
       if (resource?.kind === 'repo') {
         const read = await rpcClient.inspector.repository.file({ spaceId, expectedGeneration: generation, mode: 'current', path: resource.path, ...(resource.commit ? { commit: resource.commit } : {}) });
@@ -288,9 +288,11 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, reads, 
         return { url, downloadUrl: url, size: bytes.length, mediaType, version, expiresAt: new Date(Date.now() + 24 * 60 * 60_000).toISOString() };
       }
       if (resource?.kind !== 'drive') throw new Error('Only drive:// and repo:// files can be shown here');
-      const result = await rpcClient.inspector.artifacts.file({ spaceId, expectedGeneration: generation, url: canonicalDriveResourceUrl(resource, String(spaceId) === String(snapshot.projectId) ? 'base' : 'workspace'), hash: null });
+      // A message's pinned version (`hash`) is served as that version's immutable URL.
+      const result = await rpcClient.inspector.artifacts.file({ spaceId, expectedGeneration: generation, url: canonicalDriveResourceUrl(resource, String(spaceId) === String(snapshot.projectId) ? 'base' : 'workspace'), hash });
       if (result.status === 'error') throw new Error(rpcErrorMessage(result.error, 'Open file'));
-      return result.value;
+      const { hash: version, ...file } = result.value;
+      return { ...file, version };
     };
   }, [spaceId, snapshot.projectId, generation]);
   const sessionCommand = useCallback(async (command: RuntimeSessionCommand) => {

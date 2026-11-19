@@ -355,6 +355,23 @@ describe('user artifact flows', () => {
     expect(await (await get(pinned.value.url, { range: 'bytes=0-1' })).text()).toBe('AB');
   });
 
+  it('reads the current version of each drive file a message embeds, leaving out a file that does not exist, and serves a pinned version by its hash', async () => {
+    const { client, workspaceId, projectId, publish, origin } = await fixture();
+    const [red] = await publish(workspaceId, 1, [{ path: 'check/dot.svg', content: '<svg fill="red"/>', mediaType: 'image/svg+xml' }]);
+    const artifacts = new InspectorCloudArtifacts(env, env.ACCOUNT_ID, await readInspectorContext(env, env.ACCOUNT_ID, workspaceId, projectId));
+    const dot = 'drive://workspace/check/dot.svg';
+    expect(await artifacts.currentVersions([dot, 'drive://workspace/check/gone.svg', 'drive://check/dot.svg'])).toEqual({ [dot]: red!.blobHash, 'drive://check/dot.svg': red!.blobHash });
+    const [blue] = await publish(workspaceId, 2, [{ path: 'check/dot.svg', content: '<svg fill="blue"/>', mediaType: 'image/svg+xml' }]);
+    expect(await artifacts.currentVersions([dot])).toEqual({ [dot]: blue!.blobHash });
+    const pinned = await client.inspector.artifacts.file({ spaceId: workspaceId, expectedGeneration: 0, url: dot, hash: red!.blobHash });
+    if (pinned.status === 'error') throw pinned.error;
+    expect(pinned.value.hash).toBe(red!.blobHash);
+    expect(await (await worker.fetch(new Request(new URL(pinned.value.url, origin)), env)).text()).toBe('<svg fill="red"/>');
+    const current = await client.inspector.artifacts.file({ spaceId: workspaceId, expectedGeneration: 0, url: dot, hash: null });
+    if (current.status === 'error') throw current.error;
+    expect(current.value.hash).toBe(blue!.blobHash);
+  });
+
   it('mints one URL per file version all hour, and a new URL once the path has new bytes', async () => {
     const { client, workspaceId, publish, origin } = await fixture();
     const [first] = await publish(workspaceId, 1, [{ path: 'shots/home.png', content: 'first image', mediaType: 'image/png' }]);

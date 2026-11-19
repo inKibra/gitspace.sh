@@ -121,3 +121,40 @@ describe('files in messages', () => {
     expect(page.body.textContent).not.toContain('Read 1 image');
   });
 });
+
+describe('pinned media in stored messages', () => {
+  it('after a reload each message shows a drive image as it was when stored, marks one written again since, and a message without pins shows it as it is now', async () => {
+    opened.length = 0;
+    const dot = 'drive://workspace/check/dot.svg';
+    const red = `sha256:${'a'.repeat(64)}`;
+    const blue = `sha256:${'b'.repeat(64)}`;
+    // The drive holds the blue dot now; the red one is served only by its hash.
+    const resolve = vi.fn(async (_uri: string, hash: string | null): Promise<ResourceFile> => {
+      const version = hash ?? blue;
+      const url = `/files/${version === red ? 'red' : 'blue'}`;
+      return { url, downloadUrl: url, size: 20, mediaType: 'image/svg+xml', expiresAt: new Date(Date.now() + 7_200_000).toISOString(), version };
+    });
+    const fence = '```';
+    const message = (id: string, text: string, pins?: Record<string, string>) => ({ id, type: 'message' as const, role: 'assistant' as const, text, ...(pins ? { pins } : {}) });
+    // The rows as a fresh page load reads them from the workspace.
+    const turns: TurnBlock[] = [{ id: 'turn', type: 'turn', status: 'done', sideAgents: [], items: [
+      message('first', `Red: ![Red dot](${dot})\n\n${fence}gitspace-ui Image\n${JSON.stringify({ src: dot, alt: 'Block dot' })}\n${fence}`, { [dot]: red }),
+      message('second', `Blue: ![Blue dot](${dot})`, { [dot]: blue }),
+      message('older', `Before pins: ![Old dot](${dot})`),
+    ] }];
+    await act(async () => root.render(<ResourceFiles.Provider value={resolve}>
+      <ResourceNavigation.Provider value={(request) => { opened.push(request.uri); }}><TurnTranscript turns={turns} transport={[]} /></ResourceNavigation.Provider>
+    </ResourceFiles.Provider>));
+    const source = (alt: string) => container.querySelector(`img[alt="${alt}"]`)?.getAttribute('src');
+    // The block's renderer loads on demand.
+    await vi.waitFor(async () => { await settle(); expect(source('Block dot')).toBeTruthy(); });
+    expect([source('Red dot'), source('Block dot'), source('Blue dot'), source('Old dot')]).toEqual(['/files/red', '/files/red', '/files/blue', '/files/blue']);
+    // A pinned version's URL is reused: the block drawn after the Markdown image reads it no more.
+    expect(resolve.mock.calls.filter(([, hash]) => hash === red)).toHaveLength(1);
+    // Only the first message's images, pinned at the red version, are marked; the mark opens the file as it is now.
+    const marks = [...container.querySelectorAll('a')].filter((anchor) => anchor.textContent === 'updated since');
+    expect(marks).toHaveLength(2);
+    await click(marks[0]);
+    expect(opened).toEqual([dot]);
+  });
+});

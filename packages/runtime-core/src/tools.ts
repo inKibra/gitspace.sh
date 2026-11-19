@@ -19,6 +19,7 @@ import { watchSteer } from './steer.js';
 import { CODEMODE_CHILD_OUTPUT_LIMITS, keepWholeOutput, TOOL_OUTPUT_LIMITS, type ToolResultStore } from './tool-results.js';
 import { declareTool, inputJsonSchema, toolCatalog, type ToolDeclarationSource } from './tool-declarations.js';
 import type { WorkspaceBase } from './workspace-base.js';
+import type { DriveVersions } from './media-pins.js';
 export type CodemodeToolCall = { tool: string; args: JsonValue; callId: string; signal: AbortSignal };
 export type CodemodeToolOutcome =
   | { status: 'completed'; value: JsonValue }
@@ -69,6 +70,9 @@ export type ToolServices = {
    * agent), whose main conversations' turns start with a Base line when it changed (workspace-base.ts). Null when the
    * workspace is not in its project. */
   workspaceBase?(): Promise<WorkspaceBase | null>;
+  /** The current version of drive files from the drive catalog, read once per message that embeds any, to pin them
+   * (media-pins.ts); absent where there is no drive. */
+  driveVersions?: DriveVersions;
 };
 const workspaceId = z.string().min(1).optional().describe('Another workspace of this project to act on; this workspace when omitted.');
 const get = z.object({ method: z.literal('get').describe('Read the current record.'), workspaceId });

@@ -3,7 +3,7 @@ import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { z } from 'zod';
 import { parse as parseYaml } from 'yaml';
 import { AgentDefinitionSchema, SessionControlSchema, ModelSelectionIntentSchema, type AgentSetupView, type RuntimeMessageDecision, type RuntimeSessionCommand, type RuntimeSessionResult, type SessionControlView } from '@gitspace/protocol-runtime/session-controls';
-import { PlanDoc, QuestionsDoc, TodosDoc, WorkspaceDoc, boundedReplay, type Question } from './documents.js';
+import { MediaPinsDoc, PlanDoc, QuestionsDoc, TodosDoc, WorkspaceDoc, boundedReplay, type Question } from './documents.js';
 import { boundSessionControl, type SessionHistoryPage, type SessionHistoryPageRequest } from '@gitspace/protocol-agent';
 import type { InferenceModelAdmission, RuntimeHarnessOptions } from './harness.js';
 import type { TranscriptPageRequest, TranscriptPage, TranscriptContentRequest, TranscriptContentPage } from '@gitspace/blocks';
@@ -114,6 +114,8 @@ export type SessionControlServices = Pick<RuntimeHarnessOptions, 'admitInference
   holdDecisions?(conversationId: string, requestId: string, held: HeldDecisions): void;
   /** Journals a plan's approval or rejection a person's message carried, as that person's device. */
   recordDecision?(decision: PlanDecision & { deviceId: string }): Promise<void>;
+  /** The current version of each drive file a person's message embeds, by address (media-pins.ts); never throws. */
+  mediaVersions?(text: string): Promise<Record<string, string>>;
   /** Answers each management command with what it returns; `stop`, `closeTab` and `focusTab` return nothing (null);
    * `tabGroup` the group's id. */
   browser?(conversationId: string, machineId: string | undefined, command: RuntimeBrowserManagement): Promise<RuntimeBrowserStatus | RuntimeBrowserArtifactPage | RuntimeBrowserOverview | RuntimeBrowserPreview | RuntimeBrowserCaptureView | RuntimeBrowserCaptureView[] | RuntimeBrowserShare | RuntimeBrowserShare[] | RuntimeBrowserConnectedTab | RuntimeBrowserCommentThreadView[] | RuntimeBrowserCommentThread | RuntimeBrowserCaptureShare | RuntimeBrowserCaptureShare[] | string | null>;
@@ -326,6 +328,8 @@ export function createSessionControls(services: SessionControlServices) {
           const answered = command.answers?.map(answer => answer.questionId) ?? [];
           let decisions: PlanDecision[] = [];
           let approved = false;
+          // The drive media its text embeds are pinned at the versions they have now, in the commit that takes it.
+          const pins = await services.mediaVersions?.(command.text) ?? {};
           // A person's message (one sent from a device) replies to the conversation's open questions, in the commit that
           // takes it; a prompt with no device (an inspector's, a machine's) closes none. The staged answers it carries
           // answer their questions in that commit, and go as its lines and data after its text; the staged comments it
@@ -337,6 +341,7 @@ export function createSessionControls(services: SessionControlServices) {
             approved = taken.approved;
             const content = commentsMessage(answersMessage(command.text, taken.answers), comments);
             if (deviceId !== undefined && command.decisions?.length) services.holdDecisions?.(String(target.id), requestId, { deviceId, text: content, decisions: command.decisions });
+            if (Object.keys(pins).length) (await tx.doc(MediaPinsDoc, target.id)).inputs[requestId] = pins;
             await target.submit(tx, { type: 'input', requestId, content, whenBusy: command.streamingBehavior ?? 'followUp' });
           }, ctx);
           if (command.comments?.length) await unstageComments(harness, command.comments);

@@ -4,7 +4,8 @@ import type { Message, Models } from '@earendil-works/pi-ai';
 import { utf8ByteLength } from '@earendil-works/chord/output';
 import { BROWSER_TOOL_NAME, CODE_ONLY_TOOLS, SERVICE_TOOLS, createRuntimeTools, runtimeToolParameters, type ToolServices } from './tools.js';
 import { createOperationalTasks, type OperationalServices } from './tasks.js';
-import { BlockAsksDoc, CommentLookupDoc, QuestionsDoc, WorkspaceDoc } from './documents.js';
+import { BlockAsksDoc, CommentLookupDoc, MediaPinsDoc, QuestionsDoc, WorkspaceDoc } from './documents.js';
+import { embeddedDriveMedia } from './media-pins.js';
 import { expireLegacyQuestions, repairBlockAsks } from './questions.js';
 import { requiredBlockAsks } from '@gitspace/protocol/gitspace-ui';
 import { carriesComments, repairCommentLookup } from './comments.js';
@@ -154,6 +155,15 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
   const jobs: JobServices = { ...options.operations, deliverConversationEvent: deliver };
   const backgroundAgentTask = createBackgroundAgentTask(deliver);
   const tools: ToolRegistration[] = [...createRuntimeTools(options.tools, jobs, (id, context) => harness.abortTask(id, context)), fixBlockTool];
+  // The current version of each drive file a message embeds (media-pins.ts). A failed catalog read leaves the message
+  // without pins, showing its files as they are now, and is reported: pinning never holds up a message.
+  const driveVersions = options.tools.driveVersions;
+  const mediaVersions = async (text: string): Promise<Record<string, string>> => {
+    const urls = embeddedDriveMedia(text);
+    if (!urls.length || !driveVersions) return {};
+    try { return await driveVersions(urls); }
+    catch (error) { options.onReport(error); return {}; }
+  };
   const extension = defineExtension({ name: 'gitspace', tools, tasks: [...createOperationalTasks(options.operations), backgroundAgentTask, createJobTask(jobs), createProcessExitTask(jobs)], sections: [{ key: 'gitspace', async render(input, context) {
     const workspace = await input.read.snapshot(WorkspaceDoc, context);
     const child = (await input.read.snapshot(AgentDefinitionContextDoc, input.conversationId, context))?.child;
@@ -220,7 +230,13 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
       : options.tools.workspaceBase ? await baseForTurn(harness, runtime.conversationId, turn, options.tools.workspaceBase, context) : null;
     if (line) return { messages: [...outgoing, line] };
     return described || lean || attached || repaired ? { messages: outgoing } : undefined;
-  }, afterResponse(_message, runtime) { options.unfinished.end(`turn:${String(runtime.conversationId)}`); } }), hook(CompactionTask, { async beforeCompact(input, api, context) {
+  }, async afterResponse(message, runtime, context) {
+    options.unfinished.end(`turn:${String(runtime.conversationId)}`);
+    // Pi stores the reply after this hook and runs its tool calls after that, so the versions read here are the ones its
+    // media had before any of its calls could write them.
+    const pins = await mediaVersions(message.content.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n'));
+    if (Object.keys(pins).length) await harness.commit(async tx => { (await tx.doc(MediaPinsDoc, runtime.conversationId)).replies[String(message.timestamp)] = pins; }, context);
+  } }), hook(CompactionTask, { async beforeCompact(input, api, context) {
     const signal = context.abortSignal;
     if (!signal) throw new Error('Compaction requires an invocation abort signal');
     // Pi reports a throw here and summarizes the full prefix itself, without this hook's binding or dropped form: every
@@ -389,5 +405,5 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
   await expireLegacyQuestions(harness);
   await repairAsks();
   await repairLookup();
-  return { harness, storage: options.storage, root, registry, configureModel, lifecycle, backgroundAgentTask };
+  return { harness, storage: options.storage, root, registry, configureModel, lifecycle, backgroundAgentTask, mediaVersions };
 }

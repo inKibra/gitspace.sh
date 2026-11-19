@@ -103,6 +103,27 @@ old anchors; new comments use this layer.
 - `Sequence`, `Image`, `Video`, `CallDiff`, `StateFlow`, `SchemaDiff`, `MetricDelta`, `Timeline`, … join the
   `gitspace-ui` catalog (today they exist only in the private mock).
 
+### Media in messages
+
+A message shows each drive file it embeds as the file was when the message was stored, however often the file is
+written again under its name. Embedded means drawn: a Markdown image `![…](drive://…)`, a gitspace-ui `Image`'s or
+`Video`'s `src` and a `Video`'s `poster`, in the spec's elements or a `Sequence` frame. A plain link stays live: it opens
+the file as it is now.
+
+- **When:** a reply's versions are read in the generation's `afterResponse` hook, before pi stores the reply and before
+  any of its tool calls runs, so a call in the same reply writing the file cannot change what the reply shows. A
+  person's message is pinned in the commit that takes it.
+- **What is kept:** `MediaPinsDoc` (`runtime-core/src/documents.ts`), a rewindable conversation document that forks as
+  of the fork point: `{ [driveUrl]: 'sha256:…' }` per message, a person's by its request id, a reply by its model
+  message's `timestamp`. A file that does not exist then is not pinned and stays live. Nothing can rebuild it: the
+  drive keeps no record of which version was current when.
+- **Reading:** the transcript reader puts a message's pins on its event (`payload.pins`) and its row (`pins`); the
+  page asks `inspector.artifacts.file` for `pins[url]` (or the current version without one), and a pinned image whose
+  file has changed since shows an "updated since" mark that opens the file as it is now. Messages from before pins
+  stay live.
+- **Drive cleanup:** any future removal of drive versions (old manifests' objects, superseded blobs) must keep every
+  version a `MediaPinsDoc` of any conversation names, or those messages lose what they showed.
+
 ## 6. Change Guide walkthrough
 
 `space_guide.put` takes an optional `walkthrough`: a `Sequence` whose frames are the guide at a glance (`overview`) and

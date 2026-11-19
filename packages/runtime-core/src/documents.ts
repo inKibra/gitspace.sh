@@ -15,6 +15,10 @@ export const TodosDoc = defineDoc<{ items: RuntimeTodoItem[] }>({ kind: 'gitspac
 /** Each reply's newest block correction entry (`block-fixes.ts`), by the reply's entry id: how the transcript reader finds
  * the corrections of the replies it shows without reading past them. */
 export const BlockCorrectionsDoc = defineDoc<{ replies: Record<string, number> }>({ kind: 'gitspace.block-corrections', version: 1, scope: 'conversation', history: 'rewindable', fork: 'asOf', initial: () => ({ replies: {} }), checkpointWhen: boundedReplay });
+/** The drive media a conversation's messages embed, each address at the version it had when its message was stored
+ * (`media-pins.ts`): a person's message by its request id, a reply by its model message's `timestamp`. The only record
+ * of those versions: nothing can rebuild it, as the drive keeps no history of which version was current when. */
+export const MediaPinsDoc = defineDoc<{ inputs: Record<string, Record<string, string>>; replies: Record<string, Record<string, string>> }>({ kind: 'gitspace.media-pins', version: 1, scope: 'conversation', history: 'rewindable', fork: 'asOf', initial: () => ({ inputs: {}, replies: {} }), checkpointWhen: boundedReplay });
 /** A conversation's plan. `text`, `steps`, `status` and `questionId` are its latest proposal's; once that is approved
  * they are the plan in effect, and `revision` counts approvals. While a later proposal waits or after it is rejected,
  * `approved` holds the plan in effect. Records from before plans had steps have no `steps`, `revision` or `approved`. */

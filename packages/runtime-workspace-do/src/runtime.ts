@@ -6,7 +6,7 @@ import { AssistantEntry, GenerationTask, LiveDoc, ToolResultEntry, UserEntry } f
 import { appendNotice, CacheNoticesDoc } from './notices.js';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { diffRevisions } from '@earendil-works/chord/delta';
-import { createRuntimeHarness, createConversationTools, AgentDefinitionContextDoc, BlockCorrectionsDoc, BlockFixEntry, CommentLookupDoc, StagedCommentsDoc, SubagentRunQueueDoc, commentWindow, correctedReply, type SubagentMetadata, ProcessExitsDoc, QuestionsDoc, WorkspaceDoc, answerPlan, closeRepliedQuestions, questionRefusal, recordMachineReconnection, recordProcessExit, replyQuestion, type PlanDecision, type QuestionClosure, type ToolServices, type RuntimeHarnessOptions } from '@gitspace/runtime-core';
+import { createRuntimeHarness, createConversationTools, AgentDefinitionContextDoc, BlockCorrectionsDoc, BlockFixEntry, CommentLookupDoc, MediaPinsDoc, StagedCommentsDoc, SubagentRunQueueDoc, commentWindow, correctedReply, type SubagentMetadata, ProcessExitsDoc, QuestionsDoc, WorkspaceDoc, answerPlan, closeRepliedQuestions, questionRefusal, recordMachineReconnection, recordProcessExit, replyQuestion, type PlanDecision, type QuestionClosure, type ToolServices, type RuntimeHarnessOptions } from '@gitspace/runtime-core';
 import { RuntimeApprovalAnswerSchema, RuntimeLifecycleApprovalAnswerSchema, RuntimeSnapshotSchema, RuntimeWatchEventSchema, RuntimeToolResultSchema, WORKSPACE_TOOL_RESULTS_MAX_BYTES, questionState, receiptDigest, type RuntimeToolResult, type RuntimeSnapshot, type RuntimeWatchEvent, type RuntimeSubmitInput, type RuntimeCancelInput, type RuntimeAnswerInput, type RuntimeGitCheckpoint, type RuntimeWorkspaceStatus } from '@gitspace/protocol-runtime';
 import type { CommentsDocument } from '@gitspace/protocol-runtime/comments';
 import { DurableObjectSqliteDatabase } from './sqlite.js';
@@ -347,7 +347,8 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
     } finally { await reader.close(); }
   };
   const history = createSessionHistory(options.storage, storage, withdrawn, undefined, options.imageUrl, async id => (await harness.snapshot(LiveDoc, id, BACKGROUND_CONTEXT))?.generation?.message,
-    async id => (await harness.snapshot(BlockCorrectionsDoc, id, BACKGROUND_CONTEXT))?.replies ?? {});
+    async id => (await harness.snapshot(BlockCorrectionsDoc, id, BACKGROUND_CONTEXT))?.replies ?? {},
+    async id => (await harness.snapshot(MediaPinsDoc, id, BACKGROUND_CONTEXT)) ?? { inputs: {}, replies: {} });
   const recordMessageDecisions = options.recordMessageDecisions;
   const messageDecisions = recordMessageDecisions ? createMessageDecisions(options.storage.sql, recordMessageDecisions) : undefined;
   /** A failed pass keeps its decisions for the next one; it is only logged. */
