@@ -348,7 +348,7 @@ export class InspectorCloudArtifacts {
       });
     }
     const manifestHash = await this.persistManifest(destination, generation, destinationByPath.values());
-    await this.source.authority.commitArtifactCopies({ id: destination.id, workspaceId: destination.workspaceId, generation, manifestHash, expectedGeneration: destination.generation }, copies);
+    await this.source.authority.commitArtifactCopies({ id: destination.id, workspaceId: destination.workspaceId, generation, manifestHash, expectedGeneration: destination.generation, committedAt: createdAt }, copies);
     return this.catalog();
   }
 
@@ -361,10 +361,11 @@ export class InspectorCloudArtifacts {
       const { scope, entries } = await this.writableEntries();
       const missing = [...paths].find((path) => !entries.some((entry) => entry.path === path));
       if (missing) throw new Error(`${missing} is not in this drive. Refresh and select again.`);
+      const committedAt = new Date().toISOString();
       const generation = scope.generation + 1;
       const manifestHash = await this.persistManifest(scope, generation, entries.filter((entry) => !paths.has(entry.path)));
       try {
-        await this.source.authority.putArtifactScope({ id: scope.id, workspaceId: scope.workspaceId, generation, manifestHash, expectedGeneration: scope.generation });
+        await this.source.authority.putArtifactScope({ id: scope.id, workspaceId: scope.workspaceId, generation, manifestHash, expectedGeneration: scope.generation, committedAt });
         return this.catalog();
       } catch (error) {
         if (attempt === ARTIFACT_WRITE_ATTEMPTS || !(error instanceof Error) || !error.message.startsWith('Artifact scope generation conflict')) throw error;
@@ -415,7 +416,9 @@ export class InspectorCloudArtifacts {
     return this.target(resource.url).path;
   }
 
-  private async put(path: string, change: ArtifactChange): Promise<InspectorView['artifacts'][number]> {
+  /** Writes `path` in one new generation, and answers the file with that generation and when it was committed: a
+   * drive read at that time or later (`asOf`) reads this version, until a later write. */
+  private async put(path: string, change: ArtifactChange): Promise<{ artifact: InspectorView['artifacts'][number]; generation: number; committedAt: string }> {
     const { mount, spaceId } = this.writable();
     const scopeId = `space:${spaceId}`;
     // New bytes are stored once, before the manifest, so a generation conflict retries only the manifest.
@@ -450,15 +453,15 @@ export class InspectorCloudArtifacts {
       }
       // A replayed publication of the same object is already committed, with the time it was first written.
       if (current?.blobHash === entry.blobHash && current.mediaType === entry.mediaType && current.object === entry.object) {
-        return { url: driveUrl(mount, path), path, hash: current.blobHash, size: current.size, mediaType: current.mediaType, scope: mount, workspaceId: mount === 'base' ? null : spaceId, writtenAt: current.writtenAt ?? null };
+        return { artifact: { url: driveUrl(mount, path), path, hash: current.blobHash, size: current.size, mediaType: current.mediaType, scope: mount, workspaceId: mount === 'base' ? null : spaceId, writtenAt: current.writtenAt ?? null }, generation: scope.generation, committedAt: scope.updatedAt };
       }
-      const view = { url: driveUrl(mount, path), path, hash: entry.blobHash, size: entry.size, mediaType: entry.mediaType, scope: mount, workspaceId: mount === 'base' ? null : spaceId, writtenAt };
+      const artifact = { url: driveUrl(mount, path), path, hash: entry.blobHash, size: entry.size, mediaType: entry.mediaType, scope: mount, workspaceId: mount === 'base' ? null : spaceId, writtenAt };
       entries.set(path, entry);
       const generation = scope.generation + 1;
       const manifestHash = await this.persistManifest(scope, generation, entries.values());
       try {
-        await this.source.authority.putArtifactScope({ id: scope.id, workspaceId: scope.workspaceId, generation, manifestHash, expectedGeneration: scope.generation });
-        return view;
+        const committed = await this.source.authority.putArtifactScope({ id: scope.id, workspaceId: scope.workspaceId, generation, manifestHash, expectedGeneration: scope.generation, committedAt: writtenAt });
+        return { artifact, generation, committedAt: committed.updatedAt };
       } catch (error) {
         if (attempt === ARTIFACT_WRITE_ATTEMPTS || !(error instanceof Error) || !error.message.startsWith('Artifact scope generation conflict')) throw error;
       }
@@ -597,7 +600,7 @@ export class InspectorCloudArtifacts {
       await this.saveUpload(uploadId, state);
     }
     const file = await this.files.finish(state.upload);
-    const artifact = await this.put(state.path, { stored: file, mediaType: state.mediaType });
+    const { artifact } = await this.put(state.path, { stored: file, mediaType: state.mediaType });
     await this.deleteUpload(uploadId, state);
     return artifact;
   }

@@ -276,12 +276,14 @@ describe('ProjectAuthorityDO', () => {
       generation: 1,
       manifestHash: `sha256:${'b'.repeat(64)}`,
       expectedGeneration: 0,
+      committedAt: new Date().toISOString(),
     }));
     expect(scope).toMatchObject({ generation: 1, workspaceId: 'workspace-a' });
     await expect(runInDurableObject(stub, (authority: ProjectAuthorityDO) => authority.putArtifactScope({
       ...scope,
       generation: 2,
       expectedGeneration: 0,
+      committedAt: scope.updatedAt,
     }))).rejects.toThrow();
   });
 

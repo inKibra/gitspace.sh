@@ -64,7 +64,7 @@ export function workspaceDrive(env: Env, workspace: { projectId: string; workspa
     opened.catch(() => { opened = null; });
     return opened;
   };
-  const written = (view: { path: string; size: number; hash: string }): WorkspaceDriveWritten => ({ path: view.path, size: view.size, blobHash: view.hash });
+  const written = ({ artifact }: { artifact: { path: string; size: number; hash: string } }): WorkspaceDriveWritten => ({ path: artifact.path, size: artifact.size, blobHash: artifact.hash });
   const scopeId = `space:${workspace.workspaceId}`;
   const owned = (upload: DriveUpload) => {
     if (upload.scopeId !== scopeId) throw new Error('This upload belongs to another workspace drive');

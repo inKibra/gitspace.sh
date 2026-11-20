@@ -2008,8 +2008,13 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
     return { scope, historyStartsAt: scope.updatedAt <= at ? null : scope.updatedAt };
   }
 
+  /** Moves a scope to `generation`. `committedAt` is the writer's time just before this call: the times drive reads
+   * are asked at come from the workspace side (scripts, transcript entries), whose clock this object does not share.
+   * The scope's `updatedAt` and its history row take it, or the scope's last committed time when that is later, so a
+   * scope's generations and committed times run in the same order. */
   putArtifactScope(input: Omit<CanonicalArtifactScope, 'updatedAt'> & {
     expectedGeneration: number;
+    committedAt: string;
   }): CanonicalArtifactScope {
     return this.commit('artifact', input.workspaceId, () => {
     const current = this.getArtifactScope(input.id);
@@ -2019,7 +2024,21 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
     if (input.generation < input.expectedGeneration) {
       throw new Error('Artifact scope generation cannot move backward');
     }
-    const now = new Date().toISOString();
+    const written = new Date(input.committedAt);
+    if (Number.isNaN(written.getTime())) throw new Error(`committedAt is not a time: ${input.committedAt}`);
+    // A scope's first history row comes with the generation it replaces: the current one, committed at its
+    // `updated_at`, or for a new scope the empty generation 0, empty since its workspace was created.
+    if (this.ctx.storage.sql.exec('SELECT 1 FROM artifact_scope_history WHERE scope_id=? LIMIT 1', input.id).toArray().length === 0) {
+      this.ctx.storage.sql.exec(
+        'INSERT INTO artifact_scope_history VALUES(?,?,?,?)',
+        input.id,
+        current?.generation ?? 0,
+        current?.manifestHash ?? null,
+        current?.updatedAt ?? this.ctx.storage.sql.exec<{ created_at: string }>('SELECT created_at FROM workspaces WHERE workspace_id=?', input.workspaceId).toArray()[0]?.created_at ?? written.toISOString(),
+      );
+    }
+    const last = this.ctx.storage.sql.exec<{ committed_at: string }>('SELECT committed_at FROM artifact_scope_history WHERE scope_id=? ORDER BY generation DESC LIMIT 1', input.id).one().committed_at;
+    const committed = written.toISOString() > last ? written.toISOString() : last;
     this.ctx.storage.sql.exec(
       `INSERT INTO artifact_scopes VALUES(?,?,?,?,?)
        ON CONFLICT(scope_id) DO UPDATE SET
@@ -2031,26 +2050,15 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
       input.workspaceId,
       input.generation,
       input.manifestHash,
-      now,
+      committed,
     );
-    // A scope's first history row comes with the generation it replaces: the current one, committed at its
-    // `updated_at`, or for a new scope the empty generation 0, empty since its workspace was created.
-    if (this.ctx.storage.sql.exec('SELECT 1 FROM artifact_scope_history WHERE scope_id=? LIMIT 1', input.id).toArray().length === 0) {
-      this.ctx.storage.sql.exec(
-        'INSERT INTO artifact_scope_history VALUES(?,?,?,?)',
-        input.id,
-        current?.generation ?? 0,
-        current?.manifestHash ?? null,
-        current?.updatedAt ?? this.ctx.storage.sql.exec<{ created_at: string }>('SELECT created_at FROM workspaces WHERE workspace_id=?', input.workspaceId).toArray()[0]?.created_at ?? now,
-      );
-    }
     this.ctx.storage.sql.exec(
       `INSERT INTO artifact_scope_history VALUES(?,?,?,?)
        ON CONFLICT(scope_id, generation) DO UPDATE SET manifest_hash=excluded.manifest_hash, committed_at=excluded.committed_at`,
       input.id,
       input.generation,
       input.manifestHash,
-      now,
+      committed,
     );
     return this.getArtifactScope(input.id)!;
     });

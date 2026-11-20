@@ -908,7 +908,8 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
             const text = result.content.find(item => item.type === 'text');
             if (text?.type !== 'text') throw new Error('The machine did not report the file it stored');
             const stored = RuntimeDriveTransferStoredSchema.parse(JSON.parse(text.text));
-            return completed(input, await artifacts.write(args.url, { stored, mediaType: resourceMediaType(target.path) }));
+            const { artifact, ...committed } = await artifacts.write(args.url, { stored, mediaType: resourceMediaType(target.path) });
+            return completed(input, { ...artifact, ...committed });
           }
           default: throw new Error('Artifact sharing requires an explicit human action');
         }
@@ -918,7 +919,9 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
         if (input.tool === 'read') return artifactContent(input, input.args.path, artifacts, identity.workspaceId, options.documentMarkdown, RuntimeReadArgumentsSchema.parse(input.args));
         if (!conversation.root) throw new Error('Only the main workspace conversation can write artifacts');
         const change = input.tool === 'write' ? { bytes: new TextEncoder().encode(RuntimeWriteArgumentsSchema.parse(input.args).content) } : RuntimeEditArgumentsSchema.parse(input.args);
-        return completed(input, await artifacts.write(input.args.path, change));
+        // The file with the generation it committed and when: an asOf read at that time or later reads it.
+        const { artifact, ...committed } = await artifacts.write(input.args.path, change);
+        return completed(input, { ...artifact, ...committed });
       }
       if (input.tool === 'history_search' || input.tool === 'history_read') {
         const args = object.parse(input.args);

@@ -10,7 +10,7 @@ import { ArtifactsCodeStore, createToolResultStore, createWorkspaceRuntime, type
 import { z } from 'zod';
 import { createRuntimeServices } from '../src/runtime-services.js';
 import { InspectorCloudArtifacts, readInspectorContext } from '../src/account-inspector-data.js';
-import type { ProjectAuthorityDO } from '../src/project-authority.js';
+import { ProjectAuthorityDO } from '../src/project-authority.js';
 import { SpaceAuthorityDO } from '../src/space-authority.js';
 import { createDispatchSelector } from '../src/runtime-dispatch-selection.js';
 import { executorCapabilities } from '../src/runtime-attachments.js';
@@ -801,7 +801,8 @@ test('the project agent\'s board lists the project stack by stack in the sidebar
   }
 });
 
-test('an agent reads a drive file as the drive held it at a time, and before the drive\'s recorded history its oldest version, told where that history starts', async () => {
+/** A project with one worktree workspace, the account vault that seals drive files, and that workspace's drive. */
+async function driveWorkspace() {
   const projectId = `drive-history-${crypto.randomUUID()}`, workspaceId = `${projectId}-worker`;
   await env.CREDENTIALS.getByName(env.ACCOUNT_ID).bootstrap({ userId: env.ACCOUNT_ID, rootPublicKey: env.AUTH_PUBLIC_KEY, vaultKey: credentialProtocolBase64.encode(crypto.getRandomValues(new Uint8Array(32))) });
   const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`);
@@ -809,6 +810,11 @@ test('an agent reads a drive file as the drive held it at a time, and before the
   await authority.setProjectLifecycle(created.revision, 'active');
   await authority.putWorkspace({ id: workspaceId, projectId, kind: 'worktree', name: 'Plans', branch: 'plans', phase: 'code', sourceKind: 'branch', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
   const drive = new InspectorCloudArtifacts(env, env.ACCOUNT_ID, await readInspectorContext(env, env.ACCOUNT_ID, workspaceId, projectId));
+  return { projectId, workspaceId, authority, drive };
+}
+
+test('an agent reads a drive file as the drive held it at a time, and before the drive\'s recorded history its oldest version, told where that history starts', async () => {
+  const { projectId, workspaceId, authority, drive } = await driveWorkspace();
   const start = Date.now();
   const at = (offset: number) => new Date(start + offset).toISOString();
   vi.useFakeTimers({ toFake: ['Date'] });
@@ -831,4 +837,26 @@ test('an agent reads a drive file as the drive held it at a time, and before the
       expect([refused.status, text(refused)]).toEqual(['failed', expect.stringContaining('asOf reads drive:// paths only')]);
     } finally { await runtime.harness.close(BACKGROUND_CONTEXT); }
   });
+});
+
+test('an agent\'s drive write is read as of the time the write returned on the workspace\'s clock, though the project object\'s clock runs ahead', async () => {
+  const { projectId, workspaceId } = await driveWorkspace();
+  const put = ProjectAuthorityDO.prototype.putArtifactScope;
+  // The project object's clock is 5 s ahead of the workspace's while it commits.
+  const ahead = vi.spyOn(ProjectAuthorityDO.prototype, 'putArtifactScope').mockImplementation(function (this: ProjectAuthorityDO, input) {
+    vi.setSystemTime(Date.now() + 5_000);
+    try { return put.call(this, input); } finally { vi.setSystemTime(Date.now() - 5_000); }
+  });
+  vi.useFakeTimers({ toFake: ['Date'] });
+  try {
+    await runInDurableObject(env.SPACE_AUTHORITY.getByName(`drive-clock:${crypto.randomUUID()}`), async (_instance, ctx) => {
+      const { runtime, invoke, text } = await ownerFixture(ctx, RuntimeIdentitySchema.parse({ projectId, workspaceId }));
+      try {
+        const written = JSON.parse(text(await invoke('write', { path: 'drive://workspace/plan.md', content: 'plan one' })));
+        const returned = new Date().toISOString();
+        expect(written).toMatchObject({ generation: 1, committedAt: returned });
+        expect(text(await invoke('read', { path: 'drive://workspace/plan.md', asOf: returned }))).toBe(`The drive as of ${returned}: generation 1, committed ${returned}.\nplan one`);
+      } finally { await runtime.harness.close(BACKGROUND_CONTEXT); }
+    });
+  } finally { vi.useRealTimers(); ahead.mockRestore(); }
 });

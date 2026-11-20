@@ -90,7 +90,7 @@ async function legacyTenant(driveFiles = 1) {
   }
   const entries: ArtifactManifest['entries'] = files.map((file, index) => ({ path: `file-${index}.txt`, blobHash: file.hash, size: file.bytes.byteLength, mediaType: 'text/plain' }));
   const manifestHash = await storeDrive(new TextEncoder().encode(JSON.stringify({ version: 1, scopeId: driveScope, generation: 1, entries })), driveScope);
-  await authority.putArtifactScope({ id: driveScope, workspaceId, generation: 1, expectedGeneration: 0, manifestHash });
+  await authority.putArtifactScope({ id: driveScope, workspaceId, generation: 1, expectedGeneration: 0, manifestHash, committedAt: new Date().toISOString() });
 
   // An earlier version in the base drive: no manifest names it, but the base scope's key opens it.
   const unreferenced = { bytes: new TextEncoder().encode('an earlier base drive version'), hash: '' };

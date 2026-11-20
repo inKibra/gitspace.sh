@@ -428,7 +428,7 @@ export function inspectorCloudProcedures(env: Env, userId: string, currentDevice
   const writeArtifact = server.implement(inspectorWriteArtifactContract).handler(async ({ input, errors }) => {
     try {
       const source = await readInspectorContext(env, userId, input.spaceId, undefined, input.expectedGeneration);
-      return ok(await new InspectorCloudArtifacts(env, userId, source).write(input.url, { bytes: credentialProtocolBase64.decode(input.base64), mediaType: input.mediaType }));
+      return ok((await new InspectorCloudArtifacts(env, userId, source).write(input.url, { bytes: credentialProtocolBase64.decode(input.base64), mediaType: input.mediaType })).artifact);
     } catch (error) {
       if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));
       if (error instanceof InspectorGenerationConflict) return err(errors.SpaceGenerationConflict({ spaceId: error.spaceId, expected: error.expected, actual: error.actual }));

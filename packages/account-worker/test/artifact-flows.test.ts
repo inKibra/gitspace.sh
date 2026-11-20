@@ -53,7 +53,7 @@ async function fixture() {
     const entries: ArtifactManifest['entries'] = [];
     for (const file of files) entries.push({ path: file.path, blobHash: await persist(scopeId, file.content), size: new TextEncoder().encode(file.content).length, mediaType: file.mediaType ?? 'text/plain' });
     const manifestHash = await persist(scopeId, JSON.stringify({ version: 1, scopeId, generation, entries }));
-    await authority.putArtifactScope({ id: scopeId, workspaceId: spaceId, generation, expectedGeneration: generation - 1, manifestHash });
+    await authority.putArtifactScope({ id: scopeId, workspaceId: spaceId, generation, expectedGeneration: generation - 1, manifestHash, committedAt: new Date().toISOString() });
     return entries;
   };
   /** A file above one part: stored as uniform multipart parts, ones then a 17-byte tail of twos. */
@@ -69,7 +69,7 @@ async function fixture() {
     await writer.close();
     const entries = [{ path: 'large.bin', blobHash, size, mediaType: 'application/octet-stream' }];
     const manifestHash = await persist(scopeId, JSON.stringify({ version: 1, scopeId, generation: 1, entries }));
-    await authority.putArtifactScope({ id: scopeId, workspaceId, generation: 1, expectedGeneration: 0, manifestHash });
+    await authority.putArtifactScope({ id: scopeId, workspaceId, generation: 1, expectedGeneration: 0, manifestHash, committedAt: new Date().toISOString() });
     return { blobHash, size, bytes, key: tenantObjectKey(userId, name) };
   };
   const origin = `https://${handle}.gitspace.sh`;
@@ -211,7 +211,7 @@ describe('user artifact flows', () => {
     const stored = { blobHash: await store(target.scopeId, zip), size: zip.byteLength };
     await expect(artifacts.write('drive://workspace/uploads/font.zip', { stored: { ...stored, size: zip.byteLength + 1 }, mediaType: 'application/zip' })).rejects.toThrow();
     expect((await artifacts.list()).map(entry => entry.path)).toEqual([]);
-    const written = await artifacts.write('drive://workspace/uploads/font.zip', { stored, mediaType: 'application/zip' });
+    const { artifact: written } = await artifacts.write('drive://workspace/uploads/font.zip', { stored, mediaType: 'application/zip' });
     expect(written).toMatchObject({ url: 'drive://workspace/uploads/font.zip', hash: stored.blobHash, size: zip.byteLength, mediaType: 'application/zip' });
     expect(await artifacts.locate('drive://workspace/uploads/font.zip')).toEqual({ scopeId: target.scopeId, ...stored });
     const bytes = await readBytes(client.inspector.artifacts.read({ spaceId: workspaceId, expectedGeneration: 0, url: 'drive://workspace/uploads/font.zip', hash: null }));
@@ -241,7 +241,7 @@ describe('user artifact flows', () => {
     const { workspaceId, projectId } = await fixture();
     const artifacts = new InspectorCloudArtifacts(env, env.ACCOUNT_ID, await readInspectorContext(env, env.ACCOUNT_ID, workspaceId, projectId));
     const bytes = new TextEncoder().encode('drive notes');
-    const written = await artifacts.write('drive://workspace/notes.txt', { bytes });
+    const { artifact: written } = await artifacts.write('drive://workspace/notes.txt', { bytes });
     expect(written.hash).toBe(`sha256:${createHash('sha256').update(bytes).digest('hex')}`);
     const stored = await env.DATA.head(tenantObjectKey(env.ACCOUNT_ID, artifactObjectKey(env.ACCOUNT_ID, `space:${workspaceId}`, written.hash)));
     expect(stored?.customMetadata).toEqual({ scope: `space:${workspaceId}`, sha256: written.hash, size: String(bytes.byteLength) });
@@ -280,6 +280,22 @@ describe('user artifact flows', () => {
     expect(await artifacts.scopeAt('drive://workspace/notes.md', at(30_000))).toMatchObject({ scope: { generation: 0, manifestHash: null, updatedAt: created }, historyStartsAt: null });
     expect(await artifacts.scopeAt('drive://workspace/notes.md', '2000-01-01T00:00:00Z')).toMatchObject({ scope: { generation: 0, manifestHash: null }, historyStartsAt: created });
     await expect(read('notes.md', '2000-01-01T00:00:00Z')).rejects.toThrow('Artifact does not exist');
+  });
+
+  it('keeps a drive\'s committed times in generation order when a writer\'s clock is behind the last commit', async () => {
+    const { workspaceId, projectId } = await fixture();
+    const artifacts = new InspectorCloudArtifacts(env, env.ACCOUNT_ID, await readInspectorContext(env, env.ACCOUNT_ID, workspaceId, projectId));
+    const start = Date.now();
+    const at = (offset: number) => new Date(start + offset).toISOString();
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(start + 60_000);
+      expect(await artifacts.write('drive://workspace/notes.md', { bytes: new TextEncoder().encode('first') })).toMatchObject({ generation: 1, committedAt: at(60_000) });
+      vi.setSystemTime(start + 30_000);
+      expect(await artifacts.write('drive://workspace/notes.md', { bytes: new TextEncoder().encode('second') })).toMatchObject({ generation: 2, committedAt: at(60_000) });
+    } finally { vi.useRealTimers(); }
+    expect(new TextDecoder().decode((await artifacts.bytes('drive://workspace/notes.md', null, at(60_000))).bytes)).toBe('second');
+    expect(await artifacts.scopeAt('drive://workspace/notes.md', at(45_000))).toMatchObject({ scope: { generation: 0 } });
   });
 
   it('deletes a drive\'s history with its workspace, and every drive\'s with the project', async () => {

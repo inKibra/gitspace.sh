@@ -1082,7 +1082,7 @@ async function inspectorWorkspace(userId: string, repositoryReference: string | 
     await authority.putWorkspace({ id, projectId, kind, name: kind === 'base' ? 'Project' : 'Review', branch: kind === 'base' ? 'main' : 'review', phase: kind === 'base' ? null : 'review', sourceKind: 'base', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
     await env.USER_PROJECTS.getByName(userId).putWorkspaceLocation(id, projectId);
   }
-  await authority.putArtifactScope({ id: `artifacts-${spaceId}`, workspaceId: spaceId, expectedGeneration: 0, generation: 0, manifestHash: null });
+  await authority.putArtifactScope({ id: `artifacts-${spaceId}`, workspaceId: spaceId, expectedGeneration: 0, generation: 0, manifestHash: null, committedAt: new Date().toISOString() });
   const placement = env.SPACE_AUTHORITY.getByName(`${userId}:${spaceId}`);
   return { projectId, spaceId, authority, placement };
 }
