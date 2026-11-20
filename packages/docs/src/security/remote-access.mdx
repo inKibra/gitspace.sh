@@ -13,11 +13,19 @@ This page describes the current implementation in `packages/`. It separates auth
 
 Account creation generates an Ed25519 root key. The private key is encoded as the `gsr_` recovery key and shown to the user. The control plane receives the public key.
 
-The root key signs browser authority. An account-wide delegating browser can approve a machine grant without copying the root key to that machine. Possession of the recovery key is account-root authority.
+The root key signs browser authority. An account-wide delegating browser can approve a machine grant without copying the root key to that machine. Possession of the recovery key is account-root authority: it enrolls a browser and can confirm any action that asks for a passkey.
 
 <Warning>
 GitSpace does not store the recovery key and cannot restore it. Keep it outside source control, chat, workspace notes, and browser screenshots.
 </Warning>
+
+## Passkeys
+
+A passkey is a WebAuthn credential bound to the account host, requiring user verification (biometric or the security key's PIN). Its registration (credential id, public key, host, origin) is signed by the device key of the browser that enrolled it, which must be an account-wide delegating browser. GitSpace stores the public key and the signed registration, never a secret.
+
+Passkey sign-in on a new browser: the account issues an invitation naming the new browser's device key, valid two minutes, and the passkey signs its hash. The registration and the assertion travel in the device grant, so every verifier, including machines, checks the passkey's signature itself. GitSpace's servers hold no key that can mint a device.
+
+Sensitive actions take a step-up: a passkey assertion over a one-time challenge naming the exact action and its targets, for one browser, expiring after two minutes. Enrolling or revoking a passkey, creating a browser invitation link, and opening or answering a secure-input request need one. The recovery key can sign the same challenge instead. Revoking a passkey stops its sign-ins and step-ups; browsers it already connected stay until revoked. See `docs/PASSKEYS-DESIGN.md` in the repository.
 
 ## Machine identity
 
@@ -29,7 +37,7 @@ Pairing tokens expire after ten minutes and cannot bind a second set of machine 
 
 ## Browser identity
 
-Account creation or recovery in the web page creates a short-lived signed browser invitation. The browser creates a non-extractable Ed25519 key in IndexedDB and redeems the invitation for a device grant. The account root key is not persisted in browser storage.
+Account creation or recovery in the web page creates a short-lived signed browser invitation; passkey sign-in has the passkey sign one. The browser creates a non-extractable Ed25519 key in IndexedDB and redeems the invitation for a device grant. The account root key is not persisted in browser storage.
 
 Browser RPC requests are signed. Verification binds a request to the enrolled device and detects changes to the signed request.
 

@@ -26,7 +26,9 @@ import { serveArtifactFile } from './artifact-file-url.js';
 import { serveRuntimeImage } from './runtime-images.js';
 import { serveGuideShare } from './guide-shares.js';
 import { ensureAccountGitSpaceProject } from './gitspace-project.js';
-import { createDeviceBinding, encodeApiKey } from '@gitspace/protocol/device-grant';
+import { createDeviceBinding, deviceGrantDependency, encodeApiKey, STEP_UP_HEADER, type StepUpAction } from '@gitspace/protocol/device-grant';
+import { passkeySignInOptionsRequestSchema, passkeySignInRequestSchema, type PasskeyOperation } from '@gitspace/protocol/passkey-access';
+import { PASSKEY_TABLES, PasskeyVault } from './passkeys.js';
 import { mcpAccessConnectionRequestSchema, mcpAccessCreateRequestSchema, mcpAccessStatusRequestSchema, type McpAccessOperation, type McpAccessResult, type McpAccessView } from '@gitspace/protocol/mcp-access';
 import { GitLfsObjectSchema, GitLfsProtectionSchema, GitLfsSnapshotSchema, projectStorageRoot } from '@gitspace/protocol-workspace';
 import {
@@ -628,6 +630,7 @@ export class CredentialVaultDO extends BudgetedDurableObject {
         );
         INSERT OR IGNORE INTO inference_migration(id, version, revision) VALUES (1, 0, 0);
       `);
+      this.ctx.storage.sql.exec(PASSKEY_TABLES);
       this.ctx.storage.sql.exec('INSERT OR IGNORE INTO credential_snapshot(id, generation) VALUES (1, ?)', Date.now());
       const columns = this.ctx.storage.sql.exec<{ name: string }>('PRAGMA table_info(credential_devices)').toArray();
       if (!columns.some((column) => column.name === 'grant_json')) this.ctx.storage.sql.exec('ALTER TABLE credential_devices ADD COLUMN grant_json TEXT');
@@ -1047,6 +1050,35 @@ export class CredentialVaultDO extends BudgetedDurableObject {
     this.deviceCredentialsChanged();
     return { status: 'ok', value: { machineId: input.machineId, generation } };
   }
+  /** Passkeys, step-up and passkey sign-in (`passkeys.ts`). */
+  private readonly passkeys = new PasskeyVault({
+    storage: this.ctx.storage,
+    accountUrl: this.env.ACCOUNT_URL,
+    config: () => this.config(),
+    deviceGrant: (deviceId) => this.deviceGrant(deviceId),
+    currentDevice: (deviceId) => this.currentDeviceGrant(deviceId),
+    authorizeBrowser: (input) => this.authorizeBrowserRequest(input),
+    admitDevice: (input) => this.admitDevice(input),
+  });
+
+  /** `POST /v1/passkeys/<operation>`: list, challenge, register and revoke, from a signed-in account-wide browser. */
+  passkeyRequest(input: { operation: PasskeyOperation; header: string | null; stepUp: string | null; target: string; body: Uint8Array; accountName: string }) {
+    return this.passkeys.request(input);
+  }
+
+  /** The step-up check for actions served outside this object (secure input; OAuth consent next). */
+  consumeStepUp(input: { deviceId: string; action: StepUpAction; proof: string | null }) {
+    return this.passkeys.consumeStepUp(input);
+  }
+
+  passkeySignInOptions(input: unknown) {
+    return this.passkeys.signInOptions(passkeySignInOptionsRequestSchema.parse(input));
+  }
+
+  passkeySignIn(input: unknown) {
+    return this.passkeys.signIn(passkeySignInRequestSchema.parse(input));
+  }
+
   rootPublicKey(): string | null {
     return this.config()?.root_public_key ?? null;
   }
@@ -1194,7 +1226,7 @@ export class CredentialVaultDO extends BudgetedDurableObject {
     return { key, device };
   }
 
-  browserInvitationRequest(input: { operation: string; header: string | null; target: string; body: Uint8Array }): CredentialVaultResult<BrowserInvitationValue> {
+  browserInvitationRequest(input: { operation: string; header: string | null; stepUp: string | null; target: string; body: Uint8Array }): CredentialVaultResult<BrowserInvitationValue> {
     const config = this.config();
     if (!config || input.body.byteLength > REQUEST_MAX_BYTES) return publicError('INVALID_BROWSER_INVITATION', 'Browser invitation request is invalid');
     const body = JSON.parse(new TextDecoder().decode(input.body));
@@ -1235,11 +1267,16 @@ export class CredentialVaultDO extends BudgetedDurableObject {
         || this.browserInvitation(invite.inviteId, now)) {
         return publicError('DEVICE_INVITE_EXISTS', 'Browser invitation was already registered or redeemed');
       }
-      this.ctx.storage.sql.exec(
-        "INSERT INTO browser_invitations(invite_id, creator_device_id, invite_payload, expires_at, status) VALUES (?, ?, ?, ?, 'pending')",
-        invite.inviteId, authorized.value.deviceId, credentialProtocolBase64.encode(deviceInvitePayload(invite)), invite.expiresAt,
-      );
-      return { status: 'ok', value: { inviteId: invite.inviteId, expiresAt: invite.expiresAt, status: 'pending', deviceId: null } };
+      // A stolen browser session alone cannot mint another full-access browser: registering the link takes a step-up.
+      return this.ctx.storage.transactionSync((): CredentialVaultResult<BrowserInvitationValue> => {
+        const stepped = this.passkeys.consumeStepUp({ deviceId: authorized.value.deviceId, action: { purpose: 'browser-invitation.create', targets: [invite.inviteId] }, proof: input.stepUp });
+        if (stepped.status === 'error') return stepped;
+        this.ctx.storage.sql.exec(
+          "INSERT INTO browser_invitations(invite_id, creator_device_id, invite_payload, expires_at, status) VALUES (?, ?, ?, ?, 'pending')",
+          invite.inviteId, authorized.value.deviceId, credentialProtocolBase64.encode(deviceInvitePayload(invite)), invite.expiresAt,
+        );
+        return { status: 'ok', value: { inviteId: invite.inviteId, expiresAt: invite.expiresAt, status: 'pending', deviceId: null } };
+      });
     }
     const invitation = this.browserInvitation(parsed.inviteId, now);
     if (!invitation) return publicError('BROWSER_INVITATION_UNAVAILABLE', 'Browser invitation is unavailable');
@@ -1322,7 +1359,9 @@ export class CredentialVaultDO extends BudgetedDurableObject {
       const issuer = this.deviceGrant(issuerId);
       if (!issuer || issuerChain.some((record) => record.binding.deviceId === issuerId)) return publicError('PAIRING_FORBIDDEN', 'Browser issuer chain is unavailable');
       issuerChain.push(issuer);
-      issuerId = issuer.invite.issuer.kind === 'device' ? issuer.invite.issuer.deviceId : null;
+      // A passkey-certified browser's proof needs the browser that enrolled its passkey; its expiry then also bounds the
+      // machine grant, which is stricter than verification requires.
+      issuerId = deviceGrantDependency(issuer);
     }
     if (issuerId) return publicError('PAIRING_FORBIDDEN', 'Browser issuer chain is too deep');
     const expiresAt = Math.min(row.expires_at + 365 * 24 * 60 * 60_000, ...issuerChain.map((record) => deviceGrantExpiresAt(record) ?? Infinity));
@@ -1383,11 +1422,18 @@ export class CredentialVaultDO extends BudgetedDurableObject {
 
   /**
    * Redeem a signed invite with a device binding. Delegated browser invites
-   * must also be pending in this vault. First bind wins; registering the
-   * device and consuming that invitation commit together. The vault never
-   * signs anything here; it records what the issuer and device signed.
+   * must also be pending in this vault. Passkey-signed invites enroll only
+   * through passkey sign-in (`passkeySignIn`), which checks the passkey is
+   * still enrolled and that this vault issued the invite.
    */
   enrollDevice(input: { invite: SignedDeviceInvite; binding: DeviceBinding }): CredentialVaultResult<{ deviceId: string; expiresAt: number | null }> {
+    if (input.invite.issuer.kind === 'passkey') return publicError('PASSKEY_SIGN_IN_REQUIRED', 'Passkey invites enroll through passkey sign-in');
+    return this.admitDevice(input);
+  }
+
+  /** Records a verified device grant. First bind wins; registering the device and consuming its browser invitation
+   * commit together. The vault never signs anything here; it records what the issuer and device signed. */
+  private admitDevice(input: { invite: SignedDeviceInvite; binding: DeviceBinding }): CredentialVaultResult<{ deviceId: string; expiresAt: number | null }> {
     const config = this.config();
     if (!config) return publicError('VAULT_UNCONFIGURED', 'Vault is not configured');
     const invite = input.invite.invite;
@@ -3671,7 +3717,7 @@ const worker = {
       const cors = {
         'access-control-allow-origin': '*',
         'access-control-allow-methods': 'POST, OPTIONS',
-        'access-control-allow-headers': `content-type, ${RPC_DEVICE_HEADER}, x-gitspace-user`,
+        'access-control-allow-headers': `content-type, ${RPC_DEVICE_HEADER}, x-gitspace-user, ${STEP_UP_HEADER}`,
         'cache-control': 'private, no-store',
       };
       if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
@@ -3692,11 +3738,40 @@ const worker = {
         const handle = accountHandleForHostname(url.hostname);
         if (handle && handle !== account.value.handle) return Response.json(publicError('ACCOUNT_HOST_MISMATCH', 'Request does not belong to this account hostname'), { status: 403, headers: cors });
         const result = await credentialVault(env, parsed.userId).browserInvitationRequest({
-          operation: browserInvitationRoute[1]!, header: request.headers.get(RPC_DEVICE_HEADER), target: `${url.pathname}${url.search}`, body,
+          operation: browserInvitationRoute[1]!, header: request.headers.get(RPC_DEVICE_HEADER), stepUp: request.headers.get(STEP_UP_HEADER), target: `${url.pathname}${url.search}`, body,
         });
         return Response.json(result, { status: result.status === 'ok' ? 200 : 403, headers: cors });
       } catch (error) {
         return Response.json(publicError('INVALID_BROWSER_INVITATION', error instanceof Error ? error.message : 'Invalid browser invitation request'), { status: 400, headers: cors });
+      }
+    }
+    // Passkeys run their WebAuthn ceremonies on the account's own origin, so these routes are same-origin only.
+    const passkeyRoute = /^\/v1\/passkeys\/(list|challenge|register|revoke)$/u.exec(url.pathname);
+    const passkeySignInRoute = /^\/v1\/passkeys\/sign-in\/(options|complete)$/u.exec(url.pathname);
+    if (passkeyRoute || passkeySignInRoute) {
+      const headers = { 'cache-control': 'private, no-store' };
+      if (request.method !== 'POST') return new Response('Method not allowed', { status: 405, headers });
+      try {
+        const body = new Uint8Array(await request.arrayBuffer());
+        if (body.byteLength > REQUEST_MAX_BYTES) throw new Error('Passkey request is too large');
+        const account = await activeAccount(env, env.ACCOUNT_ID);
+        if (account.status === 'error') return accountAccessResponse(account)!;
+        const handle = accountHandleForHostname(url.hostname);
+        if (handle && handle !== account.value.handle) return Response.json(publicError('ACCOUNT_HOST_MISMATCH', 'Request does not belong to this account hostname'), { status: 403, headers });
+        const vault = credentialVault(env, env.ACCOUNT_ID);
+        if (passkeyRoute) {
+          if (request.headers.get('x-gitspace-user') !== env.ACCOUNT_ID) throw new Error('Account identity is invalid');
+          const result = await vault.passkeyRequest({
+            operation: z.enum(['list', 'challenge', 'register', 'revoke']).parse(passkeyRoute[1]), header: request.headers.get(RPC_DEVICE_HEADER), stepUp: request.headers.get(STEP_UP_HEADER),
+            target: `${url.pathname}${url.search}`, body, accountName: url.hostname,
+          });
+          return Response.json(result, { status: result.status === 'ok' ? 200 : 403, headers });
+        }
+        const input: unknown = JSON.parse(new TextDecoder().decode(body));
+        const result = passkeySignInRoute?.[1] === 'options' ? await vault.passkeySignInOptions(input) : await vault.passkeySignIn(input);
+        return Response.json(result, { status: result.status === 'ok' ? 200 : 400, headers });
+      } catch (error) {
+        return Response.json(publicError('INVALID_PASSKEY_REQUEST', error instanceof Error ? error.message : 'Invalid passkey request'), { status: 400, headers });
       }
     }
     const pairingRoute = /^\/v1\/machine-pairings\/(create|inspect|approve|cancel|claim|poll)$/u.exec(url.pathname);

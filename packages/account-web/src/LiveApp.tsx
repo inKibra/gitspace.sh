@@ -28,7 +28,7 @@ import type { InspectorDrive } from './inspector/DriveSurface.js';
 import { ACCOUNT_DIRECTORY_CHANGED, AUTOMATIONS_PROJECT_PARAM, AUTOMATIONS_RUN_PARAM, PRODUCT_ROUTE_LABELS, automationsUrl, isGlobalView, navigateProductUrl, productRouteFromLocation, setProductRoute, type AppView, type ProductRoute } from './routes.js';
 import { AccountSidebarContext, AppSidebar, sidebarWorkspaceSummary, type AppSidebarProps, type SidebarArchive, type SidebarProject } from './AppSidebar.js';
 import type { StackRestack } from '@gitspace/protocol-workspace';
-import { accountHandleFromUrl, browserInvitationStatus, canConnectBrowser, cancelBrowserInvitation, createBrowserInvitation, enrollmentTokenForLocation, recoverAccountBrowser } from './browser-enrollment.js';
+import { accountHandleFromUrl, browserInvitationStatus, canConnectBrowser, cancelBrowserInvitation, createBrowserInvitation, enrollmentTokenForLocation, prepareBrowserInvitation, recoverAccountBrowser } from './browser-enrollment.js';
 import { AccountConnectPage } from './AccountConnectPage.js';
 import { ServiceAccessApproval } from './ServiceAccessApproval.js';
 import { SecureInputPage } from './SecureInputPage.js';
@@ -1145,7 +1145,8 @@ function GitSpaceProduct() {
     onMcpRotate={(expectedRevision, connectionId) => requestMcpAccess({ operation: 'rotate', expectedRevision, connectionId })}
     onMcpDisable={(expectedRevision, connectionId) => requestMcpAccess({ operation: 'disable', expectedRevision, connectionId })}
     canConnectBrowser={canConnectBrowser(browserDevice, currentBrowserView)}
-    onCreateBrowserInvitation={() => createBrowserInvitation(new URL(window.location.origin), currentBrowserView)}
+    onPrepareBrowserInvitation={() => prepareBrowserInvitation(new URL(window.location.origin), currentBrowserView)}
+    onCreateBrowserInvitation={(prepared, stepUpProof) => createBrowserInvitation(new URL(window.location.origin), prepared, stepUpProof)}
     onBrowserInvitationStatus={browserInvitationStatus}
     onCancelBrowserInvitation={cancelBrowserInvitation}
     onBrowserConnected={async () => { await devicesQuery.refetch(); }}
@@ -1211,6 +1212,20 @@ function DeviceGate({ children }: { children: ReactNode }) {
       enrolling.current = false;
     }
   };
+  const signedIn = async (device: BrowserDevice): Promise<void> => {
+    if (enrolling.current) return;
+    enrolling.current = true;
+    setState({ status: 'enrolling' });
+    try {
+      await openSavedCopies(device);
+      setCurrentDevice(device);
+      setState({ status: 'enrolled' });
+    } catch (error) {
+      setState({ status: 'unenrolled', error: error instanceof Error ? error.message : 'Passkey sign-in failed' });
+    } finally {
+      enrolling.current = false;
+    }
+  };
   const recover = async (handle: string, key: string): Promise<void> => {
     if (enrolling.current) return;
     enrolling.current = true;
@@ -1251,7 +1266,7 @@ function DeviceGate({ children }: { children: ReactNode }) {
   if (state.status === 'loading' || state.status === 'enrolling') {
     return <main className="flex h-dvh items-center justify-center bg-background"><EmptyState icon={<ThinkingIndicator />} title={state.status === 'enrolling' ? 'Connecting this browser…' : 'Checking this browser…'} description="This browser gets its own revocable key. No local machine is required." /></main>;
   }
-  return <AccountConnectPage error={state.error} onRecover={(handle, key) => { void recover(handle, key); }} onEnroll={value => { void redeem(value); }} />;
+  return <AccountConnectPage error={state.error} onRecover={(handle, key) => { void recover(handle, key); }} onEnroll={value => { void redeem(value); }} onPasskeySignIn={device => { void signedIn(device); }} />;
 }
 
 type ConfigurationView = 'skills' | 'plugins' | 'secrets';

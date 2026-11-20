@@ -3,6 +3,7 @@ export * from './server-clock.js';
 export * from './socket-auth.js';
 export * from './credential-vault.js';
 export * from './device-grant.js';
+export * from './passkey.js';
 export * from './machine-pairing.js';
 export * from './client.js';
 export * from './routed-transport.js';

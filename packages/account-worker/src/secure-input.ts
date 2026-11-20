@@ -1,4 +1,5 @@
-import { RuntimeSecureInputPageRequestSchema, signRuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserPlacement, type RuntimeSecureFillResult, type RuntimeSecureInputField, type RuntimeSecureInputOutcome, type RuntimeSecureInputQuestion, type RuntimeSecureInputView } from '@gitspace/protocol-runtime';
+import { RuntimeSecureInputPageRequestSchema, signRuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserPlacement, type RuntimeSecureFillResult, type RuntimeSecureInputField, type RuntimeSecureInputOutcome, type RuntimeSecureInputPageRequest, type RuntimeSecureInputQuestion, type RuntimeSecureInputView } from '@gitspace/protocol-runtime';
+import { STEP_UP_HEADER } from '@gitspace/protocol/device-grant';
 import { withDeviceAuthority, DEVICE_AUTHORITY_UNAVAILABLE } from './device-authority.js';
 import { runtimeBrowserSigning, type RuntimeBrowserKeyStorage, type RuntimeBrowserSigningEnvironment } from './runtime-browser.js';
 
@@ -6,9 +7,9 @@ import { runtimeBrowserSigning, type RuntimeBrowserKeyStorage, type RuntimeBrows
  * Secure input on the account's side (docs/APERTURE-DESIGN.md §10.1). The agent's ask_secure_input records a request in
  * the vault (`CredentialVaultDO.secureInputRecord`), bound to the workspace, conversation, question, tab, origin, field
  * and kind, until it expires; its link carries only the request's random id. The page (`serveSecureInput`) shows it to
- * a signed-in GitSpace browser, takes the value once, and has the workspace fill it into the tab (`secureFillTab`):
- * your Chrome through its extension, or the cloud browser through its session object, each only while the tab shows the
- * request's origin. The workspace's agent hears provided or declined, never the value.
+ * a signed-in GitSpace browser after a passkey step-up, takes the value once, and has the workspace fill it into the tab
+ * (`secureFillTab`): your Chrome through its extension, or the cloud browser through its session object, each only
+ * while the tab shows the request's origin. The workspace's agent hears provided or declined, never the value.
  */
 
 /** A request as the vault keeps it: its workspace, conversation and question, the request as its question shows it,
@@ -33,17 +34,30 @@ export function secureInputField(request: Pick<RuntimeSecureInputQuestion, 'sele
 
 /**
  * The one check a secure-input page passes before it reads or answers a request: the request is signed by a browser
- * device of this account, signed in to GitSpace in that browser, that may write. Nothing else is asked of the person;
- * a passkey step-up replaces this function. Answers the device, or the refusal to send.
+ * device of this account, signed in to GitSpace in that browser, that may write; and opening or answering it carries a
+ * passkey step-up (`x-gitspace-step-up`) naming the request, spent once (`CredentialVaultDO.consumeStepUp`). Declining
+ * needs no step-up: it reveals and provides nothing. Answers the device and the page's request, or the refusal to send.
  */
-export async function secureInputSignedIn(env: Env, request: Request, body: Uint8Array): Promise<{ deviceId: string } | Response> {
+export async function secureInputAuthorized(env: Env, request: Request, body: Uint8Array): Promise<{ deviceId: string; page: RuntimeSecureInputPageRequest } | Response> {
   const url = new URL(request.url);
   const auth = await withDeviceAuthority(env, (view, now) => view.authorizeRequest({
     header: request.headers.get('x-gitspace-device'), method: 'POST', target: `${url.pathname}${url.search}`, body,
     capabilities: ['rpc.write'], browserOnly: true, accountScope: true,
   }, now));
   if (auth.status === 'error') return Response.json(auth, { status: auth.error.code === 'RPC_FORBIDDEN' ? 403 : auth.error.code === DEVICE_AUTHORITY_UNAVAILABLE ? 503 : 401 });
-  return { deviceId: auth.value.device.deviceId };
+  const deviceId = auth.value.device.deviceId;
+  let raw: unknown = null;
+  try { raw = JSON.parse(new TextDecoder().decode(body)); } catch { /* answered below as invalid */ }
+  // The issues are not echoed: they could quote the value.
+  const parsed = RuntimeSecureInputPageRequestSchema.safeParse(raw);
+  if (!parsed.success) return failure(400, 'SECURE_INPUT_INVALID', 'Invalid secure-input request');
+  const page = parsed.data;
+  if (page.op === 'decline') return { deviceId, page };
+  const stepped = await env.CREDENTIALS.getByName(env.ACCOUNT_ID).consumeStepUp({
+    deviceId, action: { purpose: page.op === 'view' ? 'secure-input.open' : 'secure-input.answer', targets: [page.id] }, proof: request.headers.get(STEP_UP_HEADER),
+  });
+  if (stepped.status === 'error') return failure(403, stepped.error.code, stepped.error.message);
+  return { deviceId, page };
 }
 
 /** What `secureFillTab` reaches: the workspace's cloud browser session, and the relay to your Chromes. */
@@ -91,7 +105,8 @@ const REFUSED: Record<'unknown' | 'expired' | 'used' | 'closed', { status: numbe
 
 /**
  * `POST /api/secure-input` from the secure-input page (`RuntimeSecureInputPageRequestSchema`), signed by a signed-in
- * GitSpace browser of this account (`secureInputSignedIn`) on the account's origin. `view` shows the request; `submit`
+ * GitSpace browser of this account on the account's origin, with a passkey step-up to open or answer
+ * (`secureInputAuthorized`). `view` shows the request; `submit`
  * (a typed value, saved in the vault for the origin when `save`), `useSaved` (a value saved for that origin and kind)
  * and `decline` answer it, once: a used, expired or closed request takes no answer, and a leaked link alone reads
  * nothing. Every answer is audited; no answer, error or log carries the value.
@@ -102,14 +117,9 @@ export async function serveSecureInput(request: Request, env: Env): Promise<Resp
   if (!Number.isSafeInteger(declared) || declared > BODY_MAX_BYTES) return failure(413, 'REQUEST_TOO_LARGE', 'Secure-input request exceeds size limit');
   const body = new Uint8Array(await request.arrayBuffer());
   if (body.byteLength > BODY_MAX_BYTES) return failure(413, 'REQUEST_TOO_LARGE', 'Secure-input request exceeds size limit');
-  const signedIn = await secureInputSignedIn(env, request, body);
+  const signedIn = await secureInputAuthorized(env, request, body);
   if (signedIn instanceof Response) return signedIn;
-  let raw: unknown = null;
-  try { raw = JSON.parse(new TextDecoder().decode(body)); } catch { /* answered below as invalid */ }
-  // The issues are not echoed: they could quote the value.
-  const parsed = RuntimeSecureInputPageRequestSchema.safeParse(raw);
-  if (!parsed.success) return failure(400, 'SECURE_INPUT_INVALID', 'Invalid secure-input request');
-  const page = parsed.data;
+  const { page } = signedIn;
   const vault = env.CREDENTIALS.getByName(env.ACCOUNT_ID);
   const record = await vault.secureInputRequest(page.id);
   if (!record) return failure(REFUSED.unknown.status, REFUSED.unknown.code, REFUSED.unknown.message);

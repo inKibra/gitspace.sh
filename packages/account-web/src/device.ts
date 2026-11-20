@@ -17,6 +17,7 @@ import {
 } from '@gitspace/protocol/device-grant';
 import { createServerClock, sendSigned } from '@gitspace/protocol/server-clock';
 import { ed25519 } from '@noble/curves/ed25519.js';
+import { z } from 'zod';
 
 /** This page's view of the account's clock; every browser signature is stamped with it. */
 export const accountClock = createServerClock();
@@ -86,31 +87,43 @@ export class DeviceEnrollmentError extends Error {
   }
 }
 
+const enrollmentResultSchema = z.discriminatedUnion('status', [
+  z.object({ status: z.literal('ok') }),
+  z.object({ status: z.literal('error'), error: z.object({ code: z.string(), message: z.string() }) }),
+]);
+
+/** A new device identity: a non-extractable Ed25519 key pair and its public key, base64. */
+export async function generateDeviceKey(): Promise<{ keyPair: CryptoKeyPair; publicKey: string }> {
+  const keyPair = await crypto.subtle.generateKey({ name: 'Ed25519' }, false, ['sign', 'verify']);
+  return { keyPair, publicKey: deviceProtocolBase64.encode(new Uint8Array(await crypto.subtle.exportKey('raw', keyPair.publicKey))) };
+}
+
 /**
- * Redeem an enrollment token: generate the key pair, sign a binding to the
- * invite, and register it with the deployment named by the invite. The
- * private key never leaves WebCrypto.
+ * Signs a binding of `key` to `invite`, has `register` record it with the account, and keeps the enrolled device in
+ * this browser. The private key never leaves WebCrypto.
  */
+export async function bindDevice(key: { keyPair: CryptoKeyPair; publicKey: string }, invite: DeviceInvite, register: (binding: DeviceBinding) => Promise<Response>): Promise<BrowserDevice> {
+  const unsigned = { version: 1 as const, inviteId: invite.inviteId, deviceId: crypto.randomUUID(), signingPublicKey: key.publicKey, label: deviceLabel(), boundAt: Date.now() };
+  const signature = deviceProtocolBase64.encode(new Uint8Array(await crypto.subtle.sign('Ed25519', key.keyPair.privateKey, owned(deviceBindingPayload(unsigned)))));
+  const result = enrollmentResultSchema.safeParse(await (await register({ ...unsigned, signature })).json().catch(() => null));
+  if (!result.success) throw new DeviceEnrollmentError('ENROLLMENT_FAILED', 'GitSpace did not answer the enrollment');
+  if (result.data.status === 'error') throw new DeviceEnrollmentError(result.data.error.code, result.data.error.message);
+  const device: BrowserDevice = { deviceId: unsigned.deviceId, label: unsigned.label, publicKey: key.publicKey, keyPair: key.keyPair, enrolledAt: unsigned.boundAt, userId: invite.userId, enrollUrl: invite.enrollUrl, canDelegate: invite.canDelegate };
+  await withStore('readwrite', (store) => store.put(device, KEY));
+  return device;
+}
+
+/** Redeem an enrollment token: a new device key, bound to the invite and registered with the deployment it names. */
 export async function enrollDevice(token: string, accountOrigin?: string): Promise<BrowserDevice> {
   const invite = decodeDeviceInviteToken(token);
   if (!invite) throw new DeviceEnrollmentError('INVALID_TOKEN', 'The enrollment link is not valid');
   if (invite.invite.expiresAt <= Date.now()) throw new DeviceEnrollmentError('EXPIRED', 'The enrollment link has expired');
-  const keyPair = await crypto.subtle.generateKey({ name: 'Ed25519' }, false, ['sign', 'verify']) as CryptoKeyPair;
-  const publicKey = deviceProtocolBase64.encode(new Uint8Array(await crypto.subtle.exportKey('raw', keyPair.publicKey)));
-  const unsigned = { version: 1 as const, inviteId: invite.invite.inviteId, deviceId: crypto.randomUUID(), signingPublicKey: publicKey, label: deviceLabel(), boundAt: Date.now() };
-  const signature = deviceProtocolBase64.encode(new Uint8Array(await crypto.subtle.sign('Ed25519', keyPair.privateKey, owned(deviceBindingPayload(unsigned)))));
-  const binding: DeviceBinding = { ...unsigned, signature };
-  const response = await fetch(new URL('/v1/devices/enroll', accountOrigin ?? invite.invite.enrollUrl), {
+  return bindDevice(await generateDeviceKey(), invite.invite, (binding) => fetch(new URL('/v1/devices/enroll', accountOrigin ?? invite.invite.enrollUrl), {
     method: 'POST',
     redirect: 'error',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ invite, binding } satisfies { invite: SignedDeviceInvite; binding: DeviceBinding }),
-  });
-  const result = await response.json() as { status: 'ok' } | { status: 'error'; error: { code: string; message: string } };
-  if (result.status !== 'ok') throw new DeviceEnrollmentError(result.error.code, result.error.message);
-  const device: BrowserDevice = { deviceId: unsigned.deviceId, label: unsigned.label, publicKey, keyPair, enrolledAt: unsigned.boundAt, userId: invite.invite.userId, enrollUrl: invite.invite.enrollUrl, canDelegate: invite.invite.canDelegate };
-  await withStore('readwrite', (store) => store.put(device, KEY));
-  return device;
+  }));
 }
 
 export interface ApiClientDraft {

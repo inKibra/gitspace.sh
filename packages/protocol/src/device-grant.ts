@@ -1,6 +1,7 @@
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { z } from 'zod';
+import { base64UrlSchema, passkeyAlgorithmSchema, verifyWebAuthnAssertion, webAuthnAssertionSchema } from './passkey.js';
 import { createServerClock, sendSigned } from './server-clock.js';
 
 /**
@@ -10,6 +11,10 @@ import { createServerClock, sendSigned } from './server-clock.js';
  * Trust chain:
  *   root key  ──signs──▶  invite (one-time, capabilities + scope + TTL)
  *   device key ──signs──▶ binding (invite id + device public key)
+ *
+ * An invite's issuer is the root key, a delegating device, or a passkey. A passkey's registration is signed by the
+ * browser that enrolled it, and the passkey signs an invite with a WebAuthn assertion over the invite's hash; both
+ * travel inside the invite, so every verifier checks them offline (docs/PASSKEYS-DESIGN.md).
  *
  * The vault records the first binding per invite (first bind wins) and every
  * machine mirrors the records, so a request signed by the device key verifies
@@ -71,19 +76,62 @@ export const deviceInviteSchema = z.object({
   grantTtlMs: z.number().int().positive().nullable(),
   /** Deployment that records the binding; root-signed so an invite cannot be redirected. */
   enrollUrl: z.string().url().max(2_048),
+  /** The device key the invite certifies, when the issuer named it (passkey sign-in); the binding must carry it. */
+  deviceSigningPublicKey: keySchema.optional(),
 });
 export type DeviceInvite = z.infer<typeof deviceInviteSchema>;
 
-/** Who signed an invite: the root key, or a device whose grant allows delegation. */
+/** Grant a full-access browser holds: what browser invitations, recovery and passkey sign-in hand out. */
+export const BROWSER_GRANT_CAPABILITIES: readonly DeviceCapability[] = ['rpc.read', 'rpc.write', 'session.prompt', 'fleet.control', 'devices.manage', 'deployment.control'];
+
+/** A passkey enrolled on the account, as the enrolling browser signed it. */
+export const passkeyRegistrationSchema = z.object({
+  version: z.literal(1),
+  userId: idSchema,
+  credentialId: base64UrlSchema.min(16).max(1_366),
+  /** COSE_Key bytes, base64url. */
+  publicKey: base64UrlSchema.min(40).max(2_048),
+  algorithm: passkeyAlgorithmSchema,
+  label: z.string().min(1).max(160),
+  /** The account host the passkey is bound to, and the page origin its ceremonies run on. */
+  rpId: z.string().min(1).max(253),
+  origin: z.string().url().max(2_048),
+  /** Synced passkey (iCloud Keychain, Google Password Manager) rather than one bound to a single authenticator. */
+  backupEligible: z.boolean(),
+  /** How the browser reaches the authenticator (`internal`, `hybrid`, `usb`, `nfc`, `ble`), as it reported them. */
+  transports: z.array(z.string().min(1).max(32)).max(8),
+  createdAt: z.number().int().nonnegative(),
+});
+export type PasskeyRegistration = z.infer<typeof passkeyRegistrationSchema>;
+
+export const signedPasskeyRegistrationSchema = z.object({
+  registration: passkeyRegistrationSchema,
+  /** The full-access browser that enrolled the passkey; its device key signed `registration`. */
+  signer: z.object({ kind: z.literal('device'), deviceId: z.uuid() }),
+  signature: z.string().min(64).max(128),
+});
+export type SignedPasskeyRegistration = z.infer<typeof signedPasskeyRegistrationSchema>;
+
+/** Who signed an invite: the root key, a device whose grant allows delegation, or a registered passkey. A passkey's
+ * issuer carries its registration and the assertion's authenticator and client data; the invite's `signature` is the
+ * assertion signature, base64url. */
 export const deviceInviteIssuerSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('root') }),
   z.object({ kind: z.literal('device'), deviceId: z.uuid() }),
+  z.object({
+    kind: z.literal('passkey'),
+    credentialId: base64UrlSchema.min(16).max(1_366),
+    registration: signedPasskeyRegistrationSchema,
+    authenticatorData: webAuthnAssertionSchema.shape.authenticatorData,
+    clientDataJSON: webAuthnAssertionSchema.shape.clientDataJSON,
+  }),
 ]);
 export type DeviceInviteIssuer = z.infer<typeof deviceInviteIssuerSchema>;
 
 export const signedDeviceInviteSchema = z.object({
   invite: deviceInviteSchema,
-  signature: z.string().min(64).max(128),
+  /** Ed25519 (root, device) base64, or a passkey's WebAuthn signature base64url, up to RSA-4096. */
+  signature: z.string().min(64).max(1_024),
   issuer: deviceInviteIssuerSchema.default({ kind: 'root' }),
 });
 export type SignedDeviceInvite = z.infer<typeof signedDeviceInviteSchema>;
@@ -249,22 +297,37 @@ export type DeviceGrantResolver = (deviceId: string) => DeviceGrantRecord | null
 export function verifyDeviceGrantRecord(record: DeviceGrantRecord, rootSigningPublicKey: Uint8Array, now = Date.now(), resolveIssuer?: DeviceGrantResolver, depth = 0): VerifiedDevice | null {
   const parsed = deviceGrantRecordSchema.safeParse(record);
   if (!parsed.success || depth >= MAX_DELEGATION_DEPTH) return null;
-  let issuerKey = rootSigningPublicKey;
-  if (parsed.data.invite.issuer.kind === 'device') {
-    // A delegated grant is only as good as its issuer right now: revoking the
-    // browser that minted an API key invalidates the key on the next check.
-    const issuerRecord = resolveIssuer?.(parsed.data.invite.issuer.deviceId) ?? null;
-    const issuer = issuerRecord ? verifyDeviceGrantRecord(issuerRecord, rootSigningPublicKey, now, resolveIssuer, depth + 1) : null;
-    if (issuerRecord?.invite.invite.userId !== parsed.data.invite.invite.userId) return null;
-    if (!issuer || !issuer.canDelegate || issuer.deviceId !== parsed.data.invite.issuer.deviceId) return null;
-    if (!scopeContains(issuer.scope, parsed.data.invite.invite.scope)) return null;
-    if (!parsed.data.invite.invite.capabilities.every((capability) => deviceHasCapability(issuer, capability))) return null;
-    issuerKey = issuer.signingPublicKey;
+  const { issuer } = parsed.data.invite;
+  let invite: DeviceInvite | null;
+  if (issuer.kind === 'passkey') {
+    // The passkey signed this invite's hash. Its registration is judged as of its enrollment, so a passkey outlives the
+    // browser that enrolled it; and nothing here reads the passkey's revocation, so devices it certified outlive it.
+    // The vault refuses a revoked passkey's new certifications.
+    const candidate = parsed.data.invite.invite;
+    const registration = verifyPasskeyRegistration(issuer.registration, rootSigningPublicKey, resolveIssuer, depth + 1);
+    const asserted = registration !== null && registration.credentialId === issuer.credentialId && registration.userId === candidate.userId
+      && candidate.issuedAt >= registration.createdAt && candidate.deviceSigningPublicKey !== undefined
+      && verifyWebAuthnAssertion(registration, { authenticatorData: issuer.authenticatorData, clientDataJSON: issuer.clientDataJSON, signature: parsed.data.invite.signature }, sha256(deviceInvitePayload(candidate))) !== null;
+    invite = asserted ? candidate : null;
+  } else {
+    let issuerKey = rootSigningPublicKey;
+    if (issuer.kind === 'device') {
+      // A delegated grant is only as good as its issuer right now: revoking the
+      // browser that minted an API key invalidates the key on the next check.
+      const issuerRecord = resolveIssuer?.(issuer.deviceId) ?? null;
+      const verifiedIssuer = issuerRecord ? verifyDeviceGrantRecord(issuerRecord, rootSigningPublicKey, now, resolveIssuer, depth + 1) : null;
+      if (issuerRecord?.invite.invite.userId !== parsed.data.invite.invite.userId) return null;
+      if (!verifiedIssuer || !verifiedIssuer.canDelegate || verifiedIssuer.deviceId !== issuer.deviceId) return null;
+      if (!scopeContains(verifiedIssuer.scope, parsed.data.invite.invite.scope)) return null;
+      if (!parsed.data.invite.invite.capabilities.every((capability) => deviceHasCapability(verifiedIssuer, capability))) return null;
+      issuerKey = verifiedIssuer.signingPublicKey;
+    }
+    invite = verifyDeviceInvite(parsed.data.invite, issuerKey);
   }
-  const invite = verifyDeviceInvite(parsed.data.invite, issuerKey);
   if (!invite || !verifyDeviceBinding(parsed.data.binding)) return null;
   const { binding } = parsed.data;
   if (binding.inviteId !== invite.inviteId || binding.boundAt > invite.expiresAt) return null;
+  if (invite.deviceSigningPublicKey !== undefined && invite.deviceSigningPublicKey !== binding.signingPublicKey) return null;
   if (parsed.data.revokedAt !== null && parsed.data.revokedAt <= now) return null;
   const expiresAt = deviceGrantExpiresAt(parsed.data);
   if (expiresAt !== null && expiresAt <= now) return null;
@@ -280,6 +343,111 @@ export function verifyDeviceGrantRecord(record: DeviceGrantRecord, rootSigningPu
     boundAt: binding.boundAt,
     expiresAt,
   };
+}
+
+/** Bytes the enrolling browser signs over a passkey registration; exported so WebCrypto callers can sign them. */
+export function passkeyRegistrationPayload(registration: PasskeyRegistration): Uint8Array {
+  return payload(passkeyRegistrationSchema.parse(registration));
+}
+
+/**
+ * A passkey registration is trusted when its signer was a full-access, account-wide browser of the same account at the
+ * registration's `createdAt`, and that browser's key signed it. Later revocation of the signer leaves the passkey: it is
+ * how you get back in after losing that browser. Answers the registration, or null.
+ */
+export function verifyPasskeyRegistration(input: SignedPasskeyRegistration, rootSigningPublicKey: Uint8Array, resolveIssuer?: DeviceGrantResolver, depth = 0): PasskeyRegistration | null {
+  const parsed = signedPasskeyRegistrationSchema.safeParse(input);
+  if (!parsed.success) return null;
+  const { registration, signer, signature } = parsed.data;
+  const record = resolveIssuer?.(signer.deviceId) ?? null;
+  const device = record?.invite.invite.userId === registration.userId ? verifyDeviceGrantRecord(record, rootSigningPublicKey, registration.createdAt, resolveIssuer, depth) : null;
+  if (!device || device.deviceId !== signer.deviceId || device.kind !== 'browser' || device.scope.kind !== 'user'
+    || !device.canDelegate || !deviceHasCapability(device, 'devices.manage') || device.boundAt > registration.createdAt) return null;
+  try {
+    return ed25519.verify(fromBase64(signature), passkeyRegistrationPayload(registration), device.signingPublicKey) ? registration : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The other record a grant's verification reads: its delegating device, or the browser that enrolled its passkey. */
+export function deviceGrantDependency(record: DeviceGrantRecord): string | null {
+  const { issuer } = record.invite;
+  return issuer.kind === 'device' ? issuer.deviceId : issuer.kind === 'passkey' ? issuer.registration.signer.deviceId : null;
+}
+
+/**
+ * Step-up (docs/PASSKEYS-DESIGN.md): a passkey assertion over a one-time challenge the vault issues for one action,
+ * named by its purpose and target ids, for one signed-in browser, expiring two minutes after issue. The recovery
+ * (root) key may sign the same challenge instead. `passkey.register` names the challenge of a passkey registration
+ * itself, never a step-up.
+ */
+export const passkeyCeremonyPurposeSchema = z.enum([
+  'passkey.register',
+  /** Enroll another passkey; target: the registration challenge id. */
+  'passkey.enroll',
+  /** Revoke a passkey; target: its credential id. */
+  'passkey.revoke',
+  /** Register a browser invitation link; target: the invite id. */
+  'browser-invitation.create',
+  /** Read a secure-input request; target: the request id. */
+  'secure-input.open',
+  /** Answer a secure-input request with a typed or saved value; target: the request id. */
+  'secure-input.answer',
+]);
+export type PasskeyCeremonyPurpose = z.infer<typeof passkeyCeremonyPurposeSchema>;
+export type StepUpPurpose = Exclude<PasskeyCeremonyPurpose, 'passkey.register'>;
+
+export const STEP_UP_TTL_MS = 2 * 60_000;
+export const STEP_UP_HEADER = 'x-gitspace-step-up';
+
+export const stepUpActionSchema = z.object({
+  purpose: passkeyCeremonyPurposeSchema.exclude(['passkey.register']),
+  targets: z.array(z.string().min(1).max(1_400)).max(4),
+});
+export type StepUpAction = z.infer<typeof stepUpActionSchema>;
+
+/** What a ceremony's challenge commits to; the WebAuthn challenge is the SHA-256 of its canonical JSON. */
+export const passkeyChallengeSchema = z.object({
+  version: z.literal(1),
+  userId: idSchema,
+  challengeId: z.uuid(),
+  /** The signed-in browser the challenge was issued to; only its requests may spend it. */
+  deviceId: z.uuid(),
+  purpose: passkeyCeremonyPurposeSchema,
+  targets: stepUpActionSchema.shape.targets,
+  issuedAt: z.number().int().nonnegative(),
+  expiresAt: z.number().int().positive(),
+  nonce: base64UrlSchema.length(43),
+});
+export type PasskeyChallenge = z.infer<typeof passkeyChallengeSchema>;
+
+/** Bytes the recovery key signs for a step-up; their SHA-256 is the WebAuthn challenge. */
+export function passkeyChallengePayload(challenge: PasskeyChallenge): Uint8Array {
+  return payload(passkeyChallengeSchema.parse(challenge));
+}
+
+/** `x-gitspace-step-up`: the challenge spent and its proof, base64url JSON. */
+export const stepUpProofSchema = z.object({
+  challengeId: z.uuid(),
+  proof: z.discriminatedUnion('kind', [
+    webAuthnAssertionSchema.extend({ kind: z.literal('passkey'), credentialId: base64UrlSchema.min(16).max(1_366) }),
+    z.object({ kind: z.literal('root'), signature: z.string().min(64).max(128) }),
+  ]),
+});
+export type StepUpProof = z.infer<typeof stepUpProofSchema>;
+
+export function encodeStepUpProof(proof: StepUpProof): string {
+  return toBase64Url(new TextEncoder().encode(JSON.stringify(stepUpProofSchema.parse(proof))));
+}
+
+export function decodeStepUpProof(value: string): StepUpProof | null {
+  try {
+    const parsed = stepUpProofSchema.safeParse(JSON.parse(new TextDecoder().decode(fromBase64Url(value))));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
 }
 
 export type RpcSignatureInput = Pick<SignedRpcHeader, 'deviceId' | 'timestamp' | 'nonce' | 'bodySha256'> & {

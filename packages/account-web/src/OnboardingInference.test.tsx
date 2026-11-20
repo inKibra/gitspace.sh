@@ -37,7 +37,7 @@ function Onboarding({ providers, models, modelsReady, defaultModel }: Scenario) 
     onControlMachine={noop} onDestroyMachine={noop} devices={[]} onRevokeDevice={noop} onSignOut={noop} onCreateApiClient={async () => 'gsk_test'}
     composioSetup={null} onPutComposioSetup={noop} onDeleteComposioSetup={noop}
     canManageMcp={false} canCreateMcp={false} onMcpStatus={unused} onMcpCreate={unused} onMcpRotate={unused} onMcpDisable={unused}
-    canConnectBrowser={false} onCreateBrowserInvitation={unused} onBrowserInvitationStatus={unused} onCancelBrowserInvitation={unused} onBrowserConnected={noop}
+    canConnectBrowser={false} onPrepareBrowserInvitation={unused} onCreateBrowserInvitation={unused} onBrowserInvitationStatus={unused} onCancelBrowserInvitation={unused} onBrowserConnected={noop}
     projects={[]} onBack={() => undefined} onComplete={noop} runtimeSync={{ status: 'synced', message: null }} deployment={null} onBackToDefault={noop} onCheckCanonical={noop} saving={false} error={null}
     github={null} onStartGitHubApp={unused} onStartGitHubInstall={unused} onRotateGitHubKey={unused} onGitHubAction={unused}
   /></Toasts>;

@@ -1,23 +1,32 @@
 import { useEffect, useRef, useState } from 'react';
 import { Badge, Button, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, InputCopy } from '@gitspace/ui';
 import { QRCodeSVG } from 'qrcode.react';
-import type { BrowserInvitation, BrowserInvitationStatus } from './browser-enrollment.js';
+import type { BrowserInvitation, BrowserInvitationStatus, PreparedBrowserInvitation } from './browser-enrollment.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
+import { StepUpPrompt, stepUpErrorMessage, useRenewing } from './StepUpPrompt.js';
 
 export interface BrowserConnectionActions {
   canConnectBrowser: boolean;
-  onCreateBrowserInvitation: () => Promise<BrowserInvitation>;
+  /** Signs a new invitation and fetches the `browser-invitation.create` step-up registering it needs. */
+  onPrepareBrowserInvitation: () => Promise<PreparedBrowserInvitation>;
+  /** Registers a prepared invitation with its step-up proof (null when none is due). */
+  onCreateBrowserInvitation: (prepared: PreparedBrowserInvitation, stepUpProof: string | null) => Promise<BrowserInvitation>;
   onBrowserInvitationStatus: (inviteId: string, signal?: AbortSignal) => Promise<BrowserInvitationStatus>;
   onCancelBrowserInvitation: (inviteId: string) => Promise<BrowserInvitationStatus>;
   onBrowserConnected: () => Promise<void>;
 }
 
-export function ConnectBrowserDialog({ open, onOpenChange, canConnectBrowser, onCreateBrowserInvitation, onBrowserInvitationStatus, onCancelBrowserInvitation, onBrowserConnected }: BrowserConnectionActions & { open: boolean; onOpenChange: (open: boolean) => void }) {
+export function ConnectBrowserDialog({ open, onOpenChange, canConnectBrowser, onPrepareBrowserInvitation, onCreateBrowserInvitation, onBrowserInvitationStatus, onCancelBrowserInvitation, onBrowserConnected }: BrowserConnectionActions & { open: boolean; onOpenChange: (open: boolean) => void }) {
   const [invitation, setInvitation] = useState<BrowserInvitation | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(Date.now);
   const [statusError, setStatusError] = useState<string | null>(null);
+  // Each Create click is one attempt: it prepares an invitation (renewed before its step-up expires) until it is registered.
+  const [attempt, setAttempt] = useState(0);
+  const preparation = useRenewing(attempt > 0 ? String(attempt) : null, onPrepareBrowserInvitation, prepared => prepared.stepUp.expiresAt, 'Could not create an enrollment link.');
+  const confirmation = preparation.value?.stepUp.required ? preparation.value : null;
+  const preparing = attempt > 0 && preparation.value === null && preparation.error === null;
   const operation = useRef(false);
   const callbacks = useRef({ onBrowserInvitationStatus, onBrowserConnected });
   callbacks.current = { onBrowserInvitationStatus, onBrowserConnected };
@@ -58,19 +67,22 @@ export function ConnectBrowserDialog({ open, onOpenChange, canConnectBrowser, on
     void callbacks.current.onBrowserConnected().catch(cause => setError(rpcErrorMessage(cause, 'Refresh connected browsers')));
   }, [invitation?.status, invitation?.inviteId]);
 
-  const create = async () => {
+  const register = async (prepared: PreparedBrowserInvitation, proof: string | null) => {
     if (operation.current) return;
     operation.current = true;
     setBusy(true);
     setError(null);
     setStatusError(null);
     try {
-      setInvitation(await onCreateBrowserInvitation());
+      setInvitation(await onCreateBrowserInvitation(prepared, proof));
       setNow(Date.now());
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Could not create an enrollment link.');
-    } finally { operation.current = false; setBusy(false); }
+      setError(stepUpErrorMessage(cause, 'Could not create an enrollment link.'));
+    } finally { operation.current = false; setBusy(false); setAttempt(0); }
   };
+  useEffect(() => {
+    if (preparation.value && !preparation.value.stepUp.required) void register(preparation.value, null);
+  }, [preparation.value]);
   const cancel = async (closeAfter: boolean) => {
     if (operation.current) return;
     if (!invitation || invitation.status !== 'pending') { onOpenChange(false); return; }
@@ -108,11 +120,16 @@ export function ConnectBrowserDialog({ open, onOpenChange, canConnectBrowser, on
       {invitation?.status === 'redeemed' ? <p role="status" className="text-caption text-foreground">Connected. This link cannot be used again.</p> : null}
       {invitation?.status === 'cancelled' ? <p role="status" className="text-caption text-muted-foreground">Link cancelled. It can no longer connect a browser.</p> : null}
       {invitation?.status === 'expired' || (pending && expired) ? <p role="status" className="text-caption text-muted-foreground">Link expired. Create a new link to connect another browser.</p> : null}
+      {confirmation ? <div className="flex flex-col gap-3">
+        <p className="text-caption text-foreground">Confirm with your passkey to create the link.</p>
+        <StepUpPrompt stepUp={confirmation.stepUp} onProof={proof => register(confirmation, proof)} />
+      </div> : null}
+      {attempt > 0 && preparation.error ? <p role="alert" className="text-caption text-destructive">{preparation.error}</p> : null}
       {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}
       {statusError ? <p role="alert" className="text-caption text-destructive">{statusError}</p> : null}
       <DialogFooter>
         {pending && !expired ? <Button variant="secondary" loading={busy} disabled={busy} onClick={() => void cancel(false)}>Cancel link</Button> : <Button variant="secondary" disabled={busy} onClick={() => void cancel(true)}>Done</Button>}
-        {!invitation || invitation.status === 'cancelled' || invitation.status === 'expired' || (pending && expired) ? <Button variant="primary" loading={busy} disabled={busy || !canConnectBrowser} onClick={() => void create()}>{invitation ? 'Create new link' : 'Create enrollment link'}</Button> : null}
+        {!confirmation && (!invitation || invitation.status === 'cancelled' || invitation.status === 'expired' || (pending && expired)) ? <Button variant="primary" loading={busy || preparing} disabled={busy || preparing || !canConnectBrowser} onClick={() => { setError(null); setAttempt(current => current + 1); }}>{invitation ? 'Create new link' : 'Create enrollment link'}</Button> : null}
       </DialogFooter>
     </DialogContent>
   </Dialog>;

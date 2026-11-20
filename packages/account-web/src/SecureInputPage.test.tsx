@@ -3,6 +3,8 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { RuntimeSecureInputPageRequestSchema, SECURE_INPUT_API_PATH, type RuntimeSecureInputOutcome, type RuntimeSecureInputPageRequest, type RuntimeSecureInputView } from '@gitspace/protocol-runtime/secure-input';
+import { STEP_UP_HEADER, type StepUpAction } from '@gitspace/protocol/device-grant';
+import type { StepUp } from './passkeys.js';
 import { SecureInputPage } from './SecureInputPage.js';
 
 // The page's signed fetch, answered by each test: `view` for op view, `answer` for submit, useSaved and decline.
@@ -12,6 +14,17 @@ vi.mock('./device.js', () => ({
   loadDevice: async () => null,
   createDeviceSignedFetch: () => (input: RequestInfo | URL, init?: RequestInit) => api.handle(input, init),
 }));
+// Step-ups the page asks for: each proof names its purpose and how it was given.
+const stepUps = vi.hoisted(() => ({ passkeyAvailable: true, requested: new Array<StepUpAction>() }));
+vi.mock('./passkeys.js', () => ({
+  requestStepUp: async (action: StepUpAction): Promise<StepUp> => {
+    stepUps.requested.push(action);
+    return {
+      action, required: true, passkeyAvailable: stepUps.passkeyAvailable, expiresAt: Date.now() + 120_000,
+      withPasskey: async () => `${action.purpose}:passkey`, withRecoveryKey: async (key: string) => `${action.purpose}:${key}`,
+    };
+  },
+}));
 
 const id = 'B'.repeat(43);
 const secret = 'hunter2-correct-horse';
@@ -20,6 +33,7 @@ let view: RuntimeSecureInputView;
 let viewStatus: number;
 let answer: Promise<RuntimeSecureInputOutcome>;
 let requests: RuntimeSecureInputPageRequest[];
+let proofs: (string | null)[];
 let container: HTMLDivElement;
 let root: Root;
 beforeEach(() => {
@@ -28,10 +42,14 @@ beforeEach(() => {
   viewStatus = 200;
   answer = Promise.resolve({ outcome: 'provided', saved: false });
   requests = [];
+  proofs = [];
+  stepUps.passkeyAvailable = true;
+  stepUps.requested = [];
   api.handle = async (input, init) => {
     expect(String(input)).toBe(SECURE_INPUT_API_PATH);
     const sent = RuntimeSecureInputPageRequestSchema.parse(JSON.parse(String(init?.body)));
     requests.push(sent);
+    proofs.push(new Headers(init?.headers).get(STEP_UP_HEADER));
     if (sent.op !== 'view') return Response.json({ status: 'ok', value: await answer });
     return viewStatus === 200 ? Response.json({ status: 'ok', value: view }) : Response.json({ status: 'error', error: { code: 'SECURE_INPUT_NOT_FOUND', message: 'No such request on this account' } }, { status: viewStatus });
   };
@@ -39,7 +57,13 @@ beforeEach(() => {
 });
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); vi.unstubAllGlobals(); });
 async function settle() { await act(async () => { const tick = Promise.withResolvers<void>(); setTimeout(tick.resolve, 0); await tick.promise; }); }
-async function render() { await act(async () => root.render(<SecureInputPage id={id} />)); await settle(); }
+/** Renders the page and opens the request with a passkey. */
+async function render() {
+  await act(async () => root.render(<SecureInputPage id={id} />));
+  await settle();
+  await click('Confirm with passkey');
+  await settle();
+}
 function field(): HTMLInputElement | null { return container.querySelector('input'); }
 async function type(value: string) {
   const input = field()!;
@@ -144,4 +168,70 @@ it('a request the account refuses shows the account\'s message and no input', as
   await render();
   expect(container.querySelector('[role="alert"]')?.textContent).toBe('No such request on this account');
   expect(field()).toBeNull();
+});
+
+it('opening asks for a secure-input.open step-up and sends its proof with view', async () => {
+  await act(async () => root.render(<SecureInputPage id={id} />));
+  await settle();
+  expect(container.textContent).toContain('Confirm with your passkey to open this request.');
+  expect(requests).toEqual([]);
+  expect(stepUps.requested).toEqual([{ purpose: 'secure-input.open', targets: [id] }]);
+  await click('Confirm with passkey');
+  await settle();
+  expect(requests).toEqual([{ op: 'view', id }]);
+  expect(proofs).toEqual(['secure-input.open:passkey']);
+  expect(stepUps.requested.at(-1)).toEqual({ purpose: 'secure-input.answer', targets: [id] });
+});
+
+it('Submit and Use saved value send the secure-input.answer proof; Decline sends none', async () => {
+  view = { ...view, saved: [{ credentialId, savedAt: '2026-11-02T09:30:00.000Z' }] };
+  answer = new Promise(() => undefined);
+  await render();
+  await type(secret);
+  await click('Submit');
+  expect(requests.at(-1)).toEqual({ op: 'submit', id, value: secret, save: false });
+  expect(proofs.at(-1)).toBe('secure-input.answer:passkey');
+
+  await act(async () => root.unmount());
+  root = createRoot(container);
+  await render();
+  await click('Use saved value (saved ');
+  expect(requests.at(-1)).toEqual({ op: 'useSaved', id, credentialId });
+  expect(proofs.at(-1)).toBe('secure-input.answer:passkey');
+
+  await act(async () => root.unmount());
+  root = createRoot(container);
+  await render();
+  await click('Decline');
+  expect(requests.at(-1)).toEqual({ op: 'decline', id });
+  expect(proofs.at(-1)).toBeNull();
+});
+
+it('without an enrolled passkey it says so, opens with the recovery key, and answers with a recovery-key proof', async () => {
+  stepUps.passkeyAvailable = false;
+  await act(async () => root.render(<SecureInputPage id={id} />));
+  await settle();
+  expect(container.textContent).toContain('No passkey is enrolled on this account yet. Enroll one under Settings → Connections → Passkeys');
+  await type('gsr_open');
+  await click('Confirm with recovery key');
+  await settle();
+  expect(proofs).toEqual(['secure-input.open:gsr_open']);
+  const submit = [...container.querySelectorAll('button')].find(button => button.textContent === 'Submit');
+  await type(secret);
+  expect(submit?.disabled).toBe(true);
+  const recovery = container.querySelector<HTMLInputElement>('input[placeholder="gsr_…"]')!;
+  await act(() => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(recovery, 'gsr_answer'); recovery.dispatchEvent(new Event('input', { bubbles: true })); });
+  await click('Confirm with recovery key');
+  expect(container.textContent).toContain('Recovery key accepted.');
+  await click('Submit');
+  expect(requests.at(-1)).toEqual({ op: 'submit', id, value: secret, save: false });
+  expect(proofs.at(-1)).toBe('secure-input.answer:gsr_answer');
+});
+
+it('a step-up the account refuses on open says why and fetches a fresh challenge', async () => {
+  api.handle = async () => Response.json({ status: 'error', error: { code: 'STEP_UP_ENROLL_REQUIRED', message: 'Enroll a passkey first' } }, { status: 403 });
+  await render();
+  expect(container.querySelector('[role="alert"]')?.textContent).toBe('This account has no passkey yet. Enroll one under Settings → Connections → Passkeys first, or confirm with your recovery key.');
+  expect(stepUps.requested).toEqual([{ purpose: 'secure-input.open', targets: [id] }, { purpose: 'secure-input.open', targets: [id] }]);
+  expect(field()).not.toBeNull();
 });

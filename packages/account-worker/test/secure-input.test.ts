@@ -1,5 +1,5 @@
 import { ed25519 } from '@noble/curves/ed25519.js';
-import { createDeviceBinding, credentialProtocolBase64, signDeviceInvite, signRpcRequest } from '@gitspace/protocol';
+import { createDeviceBinding, credentialProtocolBase64, signDeviceInvite, signRpcRequest, STEP_UP_HEADER } from '@gitspace/protocol';
 import { env, exports } from 'cloudflare:workers';
 import { runInDurableObject } from 'cloudflare:test';
 import { afterEach, expect, test, vi } from 'vitest';
@@ -12,6 +12,8 @@ import { SpaceAuthorityDO } from '../src/space-authority.js';
 import { BROWSER_GROUP_ROWS, createRuntimeBrowserAuthority, type RuntimeBrowserAuthorityOptions } from '../src/runtime-browser.js';
 import type { SecureInputRecord } from '../src/secure-input.js';
 import { hostedBrowserRelay } from './fixtures/hosted-browser-relay.js';
+import { browser, enrollPasskey, passkeyProof, type TestBrowser } from './fixtures/passkeys.js';
+import { softwareAuthenticator } from '../../protocol/test/software-authenticator.js';
 import type { CredentialVaultDO } from '../src/application.js';
 import { tenantRootPrivateKey } from './setup.js';
 
@@ -77,9 +79,11 @@ test('a tab elsewhere than the origin, a site the workspace has not approved, or
   expect(f.recorded).toEqual([]);
 });
 
-// ── The page: a signed-in GitSpace browser answers a request once ──
+// ── The page: a signed-in GitSpace browser answers a request once, after a passkey step-up ──
 
-/** A browser device of this account, enrolled as GitSpace's sign-in does; `post` signs the page's requests with it. */
+/** A browser device of this account, enrolled as GitSpace's sign-in does, and the account's passkey (enrolled from a
+ * full-access browser). `post` signs the page's requests with the device and confirms opening and answering with the
+ * passkey; `bare` sends them with only the step-up given. */
 async function signedIn() {
   const signingPrivateKey = crypto.getRandomValues(new Uint8Array(32));
   const vault = env.CREDENTIALS.getByName(env.ACCOUNT_ID);
@@ -88,13 +92,22 @@ async function signedIn() {
   const binding = createDeviceBinding({ inviteId: invite.invite.inviteId, deviceId: crypto.randomUUID(), signingPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(signingPrivateKey)), label: 'Phone', boundAt: Date.now(), signingPrivateKey });
   const enrolled = await vault.enrollDevice({ invite, binding });
   if (enrolled.status !== 'ok') throw new Error(enrolled.error.message);
-  return { vault, deviceId: binding.deviceId, post: (body: object, key = signingPrivateKey, deviceId = binding.deviceId) => page(body, { deviceId, key }) };
+  const phone: TestBrowser = { deviceId: binding.deviceId, key: signingPrivateKey };
+  const passkey = await softwareAuthenticator();
+  expect((await enrollPasskey(await browser(), passkey)).status).toBe(200);
+  return {
+    vault, deviceId: binding.deviceId, phone, passkey,
+    post: async (body: PageBody) => page(body, phone, body.op === 'decline' ? null : await passkeyProof(phone, passkey, { purpose: body.op === 'view' ? 'secure-input.open' : 'secure-input.answer', targets: [body.id] })),
+    bare: (body: PageBody, stepUp: string | null) => page(body, phone, stepUp),
+  };
 }
+type PageBody = Record<string, unknown> & { op: string; id: string };
 /** One request from the secure-input page: its status and JSON answer, and the answer's text. */
-async function page(body: object, signer: { deviceId: string; key: Uint8Array } | null) {
+async function page(body: object, signer: TestBrowser | null, stepUp: string | null = null) {
   const bytes = new TextEncoder().encode(JSON.stringify(body));
   const headers: Record<string, string> = { origin: new URL(env.ACCOUNT_URL).origin, 'content-type': 'application/json' };
   if (signer) headers['x-gitspace-device'] = signRpcRequest({ deviceId: signer.deviceId, signingPrivateKey: signer.key, method: 'POST', path: SECURE_INPUT_API_PATH, body: bytes });
+  if (stepUp) headers[STEP_UP_HEADER] = stepUp;
   const response = await exports.default.fetch(new Request(new URL(SECURE_INPUT_API_PATH, env.ACCOUNT_URL), { method: 'POST', body: bytes, headers }));
   const text = await response.text();
   return { status: response.status, text, json: z.looseObject({}).parse(JSON.parse(text)) };
@@ -130,6 +143,24 @@ test('the page needs a signed-in GitSpace browser of this account: unsigned or u
   expect(viewed.status).toBe(200);
   expect(viewed.json).toEqual({ status: 'ok', value: { id: asked.id, state: 'open', workspace: 'Workspace', purpose: 'Log in as octocat', origin: 'https://accounts.example.com', kind: 'password', source: 'cloud', browser: 'Cloud browser', title: 'Log in', expiresAt: asked.request.expiresAt, saved: [] } });
   expect((await person.post({ op: 'view', id: 'x'.repeat(43) })).status).toBe(404);
+});
+
+test('opening or answering a request takes a passkey step-up naming that request and action, once; declining takes none', async () => {
+  const person = await signedIn();
+  const asked = await request(person.vault);
+  const other = await request(person.vault);
+  const spaces = workspace();
+  expect(await person.bare({ op: 'view', id: asked.id }, null)).toMatchObject({ status: 403, json: { error: { code: 'STEP_UP_REQUIRED' } } });
+  expect(await person.bare({ op: 'submit', id: asked.id, value: TYPED, save: false }, null)).toMatchObject({ status: 403, json: { error: { code: 'STEP_UP_REQUIRED' } } });
+  // A step-up for another request, or for opening when answering, confirms nothing.
+  const openOther = await passkeyProof(person.phone, person.passkey, { purpose: 'secure-input.open', targets: [other.id] });
+  expect(await person.bare({ op: 'view', id: asked.id }, openOther)).toMatchObject({ status: 403, json: { error: { code: 'STEP_UP_INVALID' } } });
+  const open = await passkeyProof(person.phone, person.passkey, { purpose: 'secure-input.open', targets: [asked.id] });
+  expect(await person.bare({ op: 'submit', id: asked.id, value: TYPED, save: false }, open)).toMatchObject({ status: 403, json: { error: { code: 'STEP_UP_INVALID' } } });
+  expect(await person.bare({ op: 'view', id: asked.id }, open)).toMatchObject({ status: 200, json: { value: { state: 'open' } } });
+  expect(await person.bare({ op: 'view', id: asked.id }, open)).toMatchObject({ status: 403, json: { error: { code: 'STEP_UP_USED' } } });
+  expect(spaces.fill).not.toHaveBeenCalled();
+  expect(await person.bare({ op: 'decline', id: asked.id }, null)).toMatchObject({ status: 200, json: { value: { outcome: 'declined' } } });
 });
 
 test('a submit fills once: a second answer, an expired request and a closed question are refused, and nothing the account keeps or answers holds the value', async () => {

@@ -59,6 +59,9 @@ import { AddMachinePanel } from './AddMachinePanel.js';
 import { navigateProductUrl } from './routes.js';
 import { ConnectBrowserDialog, type BrowserConnectionActions } from './ConnectBrowserDialog.js';
 import { SpeechServicePicker, VoiceSetup } from './SpeechSettings.js';
+import type { PasskeyListView, PasskeyView } from '@gitspace/protocol/passkey-access';
+import { listPasskeys, PasskeyError, passkeysSupported, preparePasskeyEnrollment, revokePasskey, type PasskeyEnrollment } from './passkeys.js';
+import { StepUpPrompt, stepUpErrorMessage, TAP, useRenewing, useStepUp } from './StepUpPrompt.js';
 
 // Onboarding embeds the same Default profile surface used by Inference.
 type Section = 'profile' | 'runtime' | 'runtime-providers' | 'voice' | 'git' | 'github' | 'machines' | 'connections' | 'hostnames' | 'source' | 'defaults';
@@ -703,11 +706,130 @@ export function McpAccessSettings({ projects, canManageMcp, canCreateMcp, onMcpS
   </Group>;
 }
 
+const SECURITY_KEY_TRANSPORTS: Readonly<Record<string, true>> = { usb: true, nfc: true, ble: true };
+/** Enrollment failures the authenticator raised before GitSpace saw anything: the challenge and step-up proof stay usable. */
+const UNSPENT_ENROLLMENT_FAILURES: Readonly<Record<string, true>> = { PASSKEY_CANCELLED: true, PASSKEY_EXISTS: true, PASSKEY_ORIGIN: true };
+
+function passkeyKind(passkey: PasskeyView): string {
+  if (passkey.backupEligible) return 'Synced passkey';
+  return passkey.transports.some(transport => SECURITY_KEY_TRANSPORTS[transport] === true) ? 'Security key' : 'Device passkey';
+}
+
+function EnrollPasskeyDialog({ activeCount, onClose, onEnrolled }: { activeCount: number; onClose: () => void; onEnrolled: () => Promise<void> }) {
+  const enrollment = useRenewing('enroll', preparePasskeyEnrollment, prepared => Math.min(prepared.expiresAt, prepared.stepUp?.expiresAt ?? prepared.expiresAt), 'Could not start passkey enrollment.');
+  // A step-up proof answers one registration challenge: a renewed enrollment needs a new one.
+  const [confirmed, setConfirmed] = useState<{ enrollment: PasskeyEnrollment; proof: string | null } | null>(null);
+  const [label, setLabel] = useState(activeCount === 0 ? 'Passkey' : `Passkey ${activeCount + 1}`);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const current = enrollment.value;
+  const ready = current !== null && (current.stepUp === null || confirmed?.enrollment === current);
+  const create = () => {
+    if (!current || !ready || busy || !label.trim()) return;
+    const pending = current.create(label, confirmed?.enrollment === current ? confirmed.proof : null);
+    setBusy(true);
+    setError(null);
+    pending.then(async () => { await onEnrolled(); onClose(); }, (cause: unknown) => {
+      setError(stepUpErrorMessage(cause, 'Could not enroll the passkey.'));
+      if (!(cause instanceof PasskeyError && UNSPENT_ENROLLMENT_FAILURES[cause.code])) enrollment.renew();
+    }).finally(() => setBusy(false));
+  };
+  return <Dialog open onOpenChange={next => { if (!next) onClose(); }}>
+    <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto">
+      <DialogHeader>
+        <DialogTitle>{activeCount === 0 ? 'Enroll this device' : 'Add a passkey'}</DialogTitle>
+        <DialogDescription>A passkey signs this account in on new browsers and confirms sensitive actions. Your device, password manager or security key keeps it; GitSpace stores only its public key.</DialogDescription>
+      </DialogHeader>
+      {enrollment.error ? <p role="alert" className="text-caption text-destructive">{enrollment.error}</p> : null}
+      {current === null
+        ? enrollment.error ? null : <p role="status" className="text-caption text-muted-foreground">Preparing…</p>
+        : !ready && current.stepUp
+          ? <div className="flex flex-col gap-3">
+            <p className="text-caption text-foreground">Confirm with an existing passkey, or your recovery key, before adding another.</p>
+            <StepUpPrompt stepUp={current.stepUp} onProof={proof => setConfirmed({ enrollment: current, proof })} />
+          </div>
+          : <InputGroup className="w-full"><InputField index={0} label="Passkey name" value={label} onChange={setLabel} placeholder="Laptop, phone, security key" autoComplete="off" disabled={busy} required /></InputGroup>}
+      {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}
+      <DialogFooter>
+        <Button variant="secondary" className={TAP} disabled={busy} onClick={onClose}>Cancel</Button>
+        {ready ? <Button variant="primary" className={TAP} loading={busy} disabled={busy || !label.trim()} onClick={create}>Create passkey</Button> : null}
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>;
+}
+
+function RevokePasskeyDialog({ passkey, onClose, onRevoked }: { passkey: PasskeyView; onClose: () => void; onRevoked: () => Promise<void> }) {
+  const stepUp = useStepUp({ purpose: 'passkey.revoke', targets: [passkey.credentialId] });
+  const [error, setError] = useState<string | null>(null);
+  const revoke = async (proof: string | null) => {
+    setError(null);
+    try {
+      await revokePasskey(passkey.credentialId, proof);
+    } catch (cause) {
+      setError(stepUpErrorMessage(cause, 'Could not revoke the passkey.'));
+      stepUp.renew();
+      return;
+    }
+    await onRevoked();
+    onClose();
+  };
+  return <Dialog open onOpenChange={next => { if (!next) onClose(); }}>
+    <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto">
+      <DialogHeader>
+        <DialogTitle>Revoke {passkey.label || 'this passkey'}?</DialogTitle>
+        <DialogDescription>Revoking stops this passkey from signing in, confirming actions and connecting browsers. Browsers it already connected keep working until you revoke them under Browsers.</DialogDescription>
+      </DialogHeader>
+      {stepUp.error ? <p role="alert" className="text-caption text-destructive">{stepUp.error}</p> : null}
+      <StepUpPrompt stepUp={stepUp.value} onProof={revoke} />
+      {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}
+      <DialogFooter><Button variant="secondary" className={TAP} onClick={onClose}>Cancel</Button></DialogFooter>
+    </DialogContent>
+  </Dialog>;
+}
+
+/** The account's passkeys, their recovery state, and enrolling or revoking one; each change asks for a step-up. */
+export function PasskeySettings({ devices }: Pick<SettingsPageProps, 'devices'>) {
+  const [list, setList] = useState<PasskeyListView | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [enrolling, setEnrolling] = useState(false);
+  const [revoking, setRevoking] = useState<PasskeyView | null>(null);
+  const [supported] = useState(passkeysSupported);
+  const refresh = async (): Promise<void> => {
+    try { setList(await listPasskeys()); setError(null); }
+    catch (cause) { setError(stepUpErrorMessage(cause, 'Could not list passkeys.')); }
+  };
+  useEffect(() => { void refresh(); }, []);
+  const active = list?.passkeys.filter(passkey => passkey.revokedAt === null).length ?? 0;
+  return <Group title="Passkeys">
+    <p className="text-caption text-muted-foreground [text-wrap:pretty]">Passkeys sign this account in on new browsers and confirm sensitive actions: connecting a browser, changing passkeys, and answering secure-input requests.</p>
+    {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}
+    {list === null
+      ? error ? null : <EmptyState icon={icon(Key01)} title="Loading passkeys…" />
+      : list.passkeys.length === 0
+        ? <EmptyState icon={icon(Key01, 20)} title="No passkeys enrolled" description="Enroll a passkey from this device, a password manager or a security key." />
+        : <SettingRows>{list.passkeys.map(passkey => <SettingRow key={passkey.credentialId}
+          title={<span className="flex flex-wrap items-center gap-2"><span className="[overflow-wrap:anywhere]">{passkey.label || 'Passkey'}</span><Badge color="gray">{passkeyKind(passkey)}</Badge>{passkey.revokedAt === null ? null : <Badge color="red">Revoked</Badge>}</span>}
+          description={<>Enrolled {new Date(passkey.createdAt).toLocaleDateString()} by {devices?.find(device => device.deviceId === passkey.enrolledBy)?.label ?? 'a browser no longer listed'} · {passkey.lastUsedAt === null ? 'never used' : `last used ${formatRelativeTime(new Date(passkey.lastUsedAt))}`}{passkey.revokedAt === null ? '' : ` · revoked ${new Date(passkey.revokedAt).toLocaleString()}`}</>}>
+          {passkey.revokedAt === null ? <Button variant="ghost" size="compact" onClick={() => setRevoking(passkey)}>Revoke</Button> : null}
+        </SettingRow>)}</SettingRows>}
+    {list !== null && active === 0 ? <p role="note" className="text-caption text-foreground [text-wrap:pretty]">Enroll a passkey. Secure input needs one, and it signs you in on new browsers without a link.</p> : null}
+    {list !== null && active === 1 ? <p role="note" className="text-caption text-foreground [text-wrap:pretty]">Add a second passkey, preferably from a different provider (a security key such as a YubiKey, or another platform’s passkey), or make sure you kept the recovery key. Losing every passkey and browser leaves no way back in.</p> : null}
+    <SettingRows>
+      <SettingRow title="Active passkeys" description="Each one can sign in on a new browser and confirm sensitive actions."><Badge color={active > 1 ? 'green' : 'amber'}><span className="tabular-nums">{list === null ? '…' : active}</span></Badge></SettingRow>
+      <SettingRow title="Recovery key" description="A recovery key (gsr_…) exists for this account. GitSpace never stores it and cannot tell whether you kept it."><Badge color="gray">Not stored</Badge></SettingRow>
+    </SettingRows>
+    <div className="pt-3"><Button variant="secondary" size="compact" className="w-full sm:w-auto" disabled={!supported || list === null} onClick={() => setEnrolling(true)} leadingIcon={glyph(Key01)}>{active === 0 ? 'Enroll this device' : 'Add a passkey'}</Button></div>
+    {supported ? null : <p className="text-caption text-muted-foreground">This browser cannot create passkeys. Open GitSpace in a browser with passkey support to enroll one.</p>}
+    {enrolling ? <EnrollPasskeyDialog activeCount={active} onClose={() => setEnrolling(false)} onEnrolled={refresh} /> : null}
+    {revoking ? <RevokePasskeyDialog passkey={revoking} onClose={() => setRevoking(null)} onRevoked={refresh} /> : null}
+  </Group>;
+}
+
 function ConnectionsSettings({
   devices, onRevokeDevice, onSignOut, onCreateApiClient, projects,
   canManageMcp, canCreateMcp, onMcpStatus, onMcpCreate, onMcpRotate, onMcpDisable,
   composioSetup, onPutComposioSetup, onDeleteComposioSetup,
-  canConnectBrowser, onCreateBrowserInvitation, onBrowserInvitationStatus, onCancelBrowserInvitation, onBrowserConnected,
+  canConnectBrowser, onPrepareBrowserInvitation, onCreateBrowserInvitation, onBrowserInvitationStatus, onCancelBrowserInvitation, onBrowserConnected,
 }: Pick<SettingsPageProps, 'devices' | 'onRevokeDevice' | 'onSignOut' | 'onCreateApiClient' | 'projects' | 'composioSetup' | 'onPutComposioSetup' | 'onDeleteComposioSetup'> & BrowserConnectionActions & McpAccessActions) {
   const [apiClientOpen, setApiClientOpen] = useState(false);
   const [browserOpen, setBrowserOpen] = useState(false);
@@ -723,11 +845,12 @@ function ConnectionsSettings({
       </SettingRows>
       <ComposioSetupDialog open={composioOpen} onOpenChange={setComposioOpen} setup={composioSetup} onPut={onPutComposioSetup} onDelete={onDeleteComposioSetup} />
     </Group>
+    <PasskeySettings devices={devices} />
     <Group title="Browsers">
       <DeviceRows devices={devices} kind="browser" onRevokeDevice={onRevokeDevice} onSignOut={onSignOut} />
       <div className="pt-3"><Button variant="secondary" size="compact" disabled={!canConnectBrowser} onClick={() => setBrowserOpen(true)} leadingIcon={glyph(Monitor01)}>Connect another browser</Button></div>
       {!canConnectBrowser && devices !== null ? <p className="text-caption text-muted-foreground">This browser cannot grant full account access. Use your recovery key on the other browser instead.</p> : null}
-      {browserOpen ? <ConnectBrowserDialog open={browserOpen} onOpenChange={setBrowserOpen} canConnectBrowser={canConnectBrowser} onCreateBrowserInvitation={onCreateBrowserInvitation} onBrowserInvitationStatus={onBrowserInvitationStatus} onCancelBrowserInvitation={onCancelBrowserInvitation} onBrowserConnected={onBrowserConnected} /> : null}
+      {browserOpen ? <ConnectBrowserDialog open={browserOpen} onOpenChange={setBrowserOpen} canConnectBrowser={canConnectBrowser} onPrepareBrowserInvitation={onPrepareBrowserInvitation} onCreateBrowserInvitation={onCreateBrowserInvitation} onBrowserInvitationStatus={onBrowserInvitationStatus} onCancelBrowserInvitation={onCancelBrowserInvitation} onBrowserConnected={onBrowserConnected} /> : null}
     </Group>
     <Group title="API clients">
       <DeviceRows devices={devices} kind="client" onRevokeDevice={onRevokeDevice} onSignOut={onSignOut} />
@@ -1378,7 +1501,7 @@ const sectionInfo: Array<{ id: Section; label: string; icon: (typeof ICONS)[keyo
   { id: 'git', label: 'Git', icon: ICONS.git, kicker: 'Git', title: 'Shared Git identity', description: 'One GitSpace SSH identity and commit attribution shared by your enrolled machines.' },
   { id: 'github', label: 'GitHub', icon: ICONS.github, kicker: 'GitHub', title: 'Your GitHub App', description: 'An App of your own that GitHub installs on your repositories; it links your projects and sends their webhooks here.' },
   { id: 'machines', label: 'Machines', icon: ICONS.server, kicker: 'Machines', title: 'Machines', description: 'Live fleet state and placement notes from GitSpace Cloud.' },
-  { id: 'connections', label: 'Connections', icon: ICONS.key, kicker: 'Connections', title: 'Connections', description: 'Plugin providers, browser control, and enrolled devices for this account and machine.' },
+  { id: 'connections', label: 'Connections', icon: ICONS.key, kicker: 'Connections', title: 'Connections', description: 'Plugin providers, passkeys, browser control, and enrolled devices for this account and machine.' },
   { id: 'hostnames', label: 'Domains', icon: ICONS.globe, kicker: 'Domains', title: 'Hostname', description: 'Your globally reserved GitSpace namespace.' },
   { id: 'source', label: 'Source', icon: ICONS.rocket, kicker: 'Source', title: 'What GitSpace runs', description: 'The account-owned worker, machine runtime, and frontend. Launch any target independently from the GitSpace project; return to stable here.' },
   { id: 'defaults', label: 'Defaults', icon: ICONS.settings, kicker: 'Defaults', title: 'Workspace defaults', description: 'Cloud-owned defaults for new work.' },

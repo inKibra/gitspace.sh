@@ -13,6 +13,8 @@
     "./release-channel": "./src/release-channel.ts",
     "./inference": "./src/inference.ts",
     "./device-grant": "./src/device-grant.ts",
+    "./passkey": "./src/passkey.ts",
+    "./passkey-access": "./src/passkey-access.ts",
     "./machine-pairing": "./src/machine-pairing.ts",
     "./machine-discard": "./src/machine-discard.ts",
     "./client": "./src/client.ts",

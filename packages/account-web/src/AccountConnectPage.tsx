@@ -1,9 +1,38 @@
 import { useState } from 'react';
 import { Button, Card, CardContent, CardDescription, CardHeader, CardTitle, InputField, InputGroup } from '@gitspace/ui';
 import { accountHandleFromUrl } from './browser-enrollment.js';
+import type { BrowserDevice } from './device.js';
+import { passkeysSupported, preparePasskeySignIn } from './passkeys.js';
+import { stepUpErrorMessage, TAP, useRenewing } from './StepUpPrompt.js';
 
-export function AccountConnectPage({ error, onRecover, onEnroll }: { error: string | null; onRecover: (handle: string, key: string) => void; onEnroll: (value: string) => void }) {
+/** Signs this browser in with a passkey: the sign-in is prepared ahead (and renewed before it expires) so the click runs
+ * WebAuthn straight away, as Safari requires. */
+function PasskeySignInCard({ onSignIn }: { onSignIn: (device: BrowserDevice) => void }) {
+  const prepared = useRenewing('sign-in', () => preparePasskeySignIn(window.location.origin), signIn => signIn.expiresAt, 'GitSpace could not start passkey sign-in. Reload this page to try again.');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const signIn = () => {
+    if (!prepared.value || busy) return;
+    const pending = prepared.value.signIn();
+    setBusy(true);
+    setError(null);
+    pending.then(onSignIn, (cause: unknown) => {
+      setError(stepUpErrorMessage(cause, 'Passkey sign-in failed. Try again.'));
+      prepared.renew();
+    }).finally(() => setBusy(false));
+  };
+  return <Card>
+    <CardHeader><CardTitle>Sign in with a passkey</CardTitle><CardDescription>Use a passkey you enrolled for this account. This browser gets its own revocable key.</CardDescription></CardHeader>
+    <CardContent className="flex flex-col gap-3">
+      <Button variant="primary" className={TAP} loading={busy} disabled={busy || !prepared.value} onClick={signIn}>Sign in with a passkey</Button>
+      {prepared.error ?? error ? <p role="alert" className="text-caption text-destructive [overflow-wrap:anywhere]">{prepared.error ?? error}</p> : null}
+    </CardContent>
+  </Card>;
+}
+
+export function AccountConnectPage({ error, onRecover, onEnroll, onPasskeySignIn }: { error: string | null; onRecover: (handle: string, key: string) => void; onEnroll: (value: string) => void; onPasskeySignIn: (device: BrowserDevice) => void }) {
   const [inferredHandle] = useState(() => accountHandleFromUrl(new URL(window.location.href)));
+  const [passkeys] = useState(() => inferredHandle !== null && passkeysSupported());
   const [handle, setHandle] = useState(inferredHandle ?? '');
   const [recoveryKey, setRecoveryKey] = useState('');
   const [pasted, setPasted] = useState('');
@@ -12,9 +41,10 @@ export function AccountConnectPage({ error, onRecover, onEnroll }: { error: stri
       <header className="flex flex-col gap-2">
         <p className="text-caption font-medium text-muted-foreground">{inferredHandle ? `${inferredHandle}.gitspace.sh` : 'GitSpace account'}</p>
         <h1 className="text-title font-semibold [text-wrap:balance]">Connect this browser{inferredHandle ? ` to ${inferredHandle}` : ''}</h1>
-        <p className="text-caption text-muted-foreground [text-wrap:pretty]">Use your saved recovery key here, or open a single-use link from Account → Connections → Browsers in a connected browser.</p>
+        <p className="text-caption text-muted-foreground [text-wrap:pretty]">{passkeys ? 'Sign in with a passkey you enrolled, use' : 'Use'} your saved recovery key here, or open a single-use link from Account → Connections → Browsers in a connected browser.</p>
       </header>
       {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}
+      {passkeys ? <PasskeySignInCard onSignIn={onPasskeySignIn} /> : null}
       <Card>
         <CardHeader><CardTitle>Use your recovery key</CardTitle><CardDescription>This browser gets its own revocable key. Your recovery key stays in this browser during recovery and is never saved or sent to the server.</CardDescription></CardHeader>
         <CardContent>
