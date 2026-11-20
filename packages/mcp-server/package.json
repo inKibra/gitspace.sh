@@ -10,8 +10,13 @@
   },
   "dependencies": {
     "@gitspace/protocol": "workspace:*",
-    "@modelcontextprotocol/sdk": "1.32.1",
+    "@gitspace/protocol-runtime": "workspace:*",
+    "@modelcontextprotocol/server": "2.4.0",
     "@cfworker/json-schema": "^4.1.1",
-    "result-rpc": "0.5.0"
+    "result-rpc": "0.5.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "2.4.0"
   }
 }

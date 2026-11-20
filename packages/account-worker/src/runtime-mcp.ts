@@ -1,14 +1,11 @@
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
-import { CfWorkerJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/cfworker-provider.js';
+import { SdkErrorCode, SdkHttpError, UnauthorizedError, type Client } from '@modelcontextprotocol/client';
 import { z } from 'zod';
 import { RuntimeMcpDiscoverArgumentsSchema, RuntimeMcpInvokeArgumentsSchema, RuntimeJsonSchema, discoveredMcpTools } from '@gitspace/protocol-runtime';
 import type { UserMcpConnectionsDO } from './local-mcp.js';
 import type { ProjectSecretsDO } from './project-secrets.js';
 import type { CredentialVaultDO } from './application.js';
 import { ComposioPluginGateway } from './composio-plugins.js';
+import { connectMcp, mcpServerIdentity } from './mcp-client.js';
 import { mcpBackgroundAuth } from './mcp-oauth.js';
 import type { RuntimeIdentity } from './runtime-services.js';
 type RuntimeJson = z.infer<typeof RuntimeJsonSchema>;
@@ -62,32 +59,24 @@ export function createCloudRuntimeMcp(env: Env, identity: RuntimeIdentity) {
       ({ url, type } = transport);
     }
     const secrets = Object.values(headers);
-    const client = new Client({ name: 'gitspace-cloud', version: '1.0.0' }, { capabilities: {}, jsonSchemaValidator: new CfWorkerJsonSchemaValidator() });
     // Composio materializes its own credential; custom servers may answer with an OAuth challenge.
-    const oauth = connection.transport.type === 'composio' ? {} : { authProvider: await mcpBackgroundAuth(env, connection.id) };
-    const transport = type === 'http'
-      ? new StreamableHTTPClientTransport(new URL(url), { redirectPolicy: 'same-origin', requestInit: { headers }, ...oauth })
-      : new SSEClientTransport(new URL(url), {
-          redirectPolicy: 'same-origin',
-          requestInit: { headers },
-          eventSourceInit: { fetch: (input, init) => fetch(input, { ...init, headers: { ...Object.fromEntries(new Headers(init?.headers)), ...headers } }) },
-          ...oauth,
-        });
+    const authProvider = connection.transport.type === 'composio' ? undefined : await mcpBackgroundAuth(env, connection.id);
     const audit = async (outcome: 'started' | 'succeeded' | 'failed' | 'canceled') => {
       await connections().appendAudit({ principalId: env.ACCOUNT_ID, projectId: identity.projectId, connectionId: connection.id, machineId: null, type: 'tool-invocation', toolName: invocation?.name ?? null, outcome, message: null });
     };
     let observedRevision = connection.revision;
-    const observe = async (status: 'ready' | 'failed' | 'sign-in-required', message: string | null) => {
+    const observe = async (status: 'ready' | 'failed' | 'sign-in-required', message: string | null, serverVersion: string | null = null) => {
       try {
-        const updated = await connections().recordStatus({ principalId: env.ACCOUNT_ID, connectionId: connection.id, observedRevision, status, message });
+        const updated = await connections().recordStatus({ principalId: env.ACCOUNT_ID, connectionId: connection.id, observedRevision, status, message, serverVersion });
         observedRevision = updated.revision;
       } catch {
         // A concurrent configuration revision wins over this transport observation.
       }
     };
+    let client: Client | undefined;
     try {
       signal?.throwIfAborted();
-      await client.connect(transport, { timeout, signal });
+      client = await connectMcp({ type, url, headers, ...(authProvider ? { authProvider } : {}), timeout, ...(signal ? { signal } : {}) });
       const tools = [];
       let cursor: string | undefined;
       do {
@@ -95,25 +84,26 @@ export function createCloudRuntimeMcp(env: Env, identity: RuntimeIdentity) {
         tools.push(...page.tools);
         cursor = page.nextCursor;
       } while (cursor);
-      await observe('ready', null);
+      await observe('ready', null, mcpServerIdentity(client));
       if (invocation === null) return redacted(discoveredMcpTools(tools.map(tool => ({ ...tool, connectionId: connection.id, connectionLabel: connection.label })), args.name), secrets);
       if (!tools.some(tool => tool.name === invocation.name)) throw new Error('MCP tool is not exposed by the granted connection');
       const latest = await admitted(connection.id);
       if (JSON.stringify(latest.connection.transport) !== JSON.stringify(connection.transport)) throw new Error('MCP configuration changed before invocation');
       await audit('started');
-      const result = await client.callTool({ name: invocation.name, arguments: invocation.arguments ?? {} }, undefined, { timeout, signal });
+      const result = await client.callTool({ name: invocation.name, arguments: invocation.arguments ?? {} }, { timeout, signal });
       await audit(result.isError ? 'failed' : 'succeeded');
       return redacted(result, secrets);
     } catch (error) {
       if (invoke) await audit(signal?.aborted ? 'canceled' : 'failed');
-      if (error instanceof UnauthorizedError) {
+      // The SSE transport reports a 401 that survived re-authorization as an HTTP authentication error.
+      if (error instanceof UnauthorizedError || (error instanceof SdkHttpError && error.code === SdkErrorCode.ClientHttpAuthentication)) {
         await observe('sign-in-required', 'Sign in to connect');
         throw new Error(`MCP connection "${connection.label}" needs a person to sign in: Plugins → Custom plugins → Sign in`);
       }
       const message = String(redacted(error instanceof Error ? error.message : String(error), secrets));
       await observe('failed', message.slice(0, 1024));
       throw new Error(message);
-    } finally { await client.close(); }
+    } finally { await client?.close(); }
   }
   return {
     async isStdio(raw: RuntimeJson): Promise<boolean> { return (await admitted(request.parse(raw).connectionId)).connection.transport.type === 'stdio'; },

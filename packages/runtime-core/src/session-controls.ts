@@ -20,6 +20,7 @@ import { modelRoleThinkingSchema, parseModelRoleSelector } from '@gitspace/proto
 import { answersMessage, commentsMessage } from '@gitspace/protocol-runtime/comments';
 import { commentLookup, editStagedComment, stageAnswer, stageComment, stagedComments, unstageAnswer, unstageComments } from './comments.js';
 import type { PlanDecision } from './plan.js';
+import { runOf } from './runs.js';
 
 const ThinkingSchema = modelRoleThinkingSchema.unwrap();
 const ThinkingSelectionSchema = z.discriminatedUnion('source', [z.object({ source: z.literal('profile') }), z.object({ source: z.literal('conversation'), thinking: modelRoleThinkingSchema })]);
@@ -122,7 +123,7 @@ export type SessionControlServices = Pick<RuntimeHarnessOptions, 'admitInference
 };
 /** How the answer `answers` from a question's card closes `question`. An ask_takeover card is answered only by Not now:
  * Take over is browserTakeOver, and a held tab's card ends at its handback. */
-function askClosure(question: Question, answers: Extract<RuntimeSessionCommand, { type: 'answerAsk' }>['answers']): QuestionClosure {
+function askClosure(question: Question, answers: Extract<RuntimeSessionCommand, { type: 'answerAsk' }>['answers']): Exclude<QuestionClosure, { dismissed: true }> {
   if (question.kind === 'takeover') {
     if (answers[0]?.selectedOptions[0] !== TAKEOVER_CHOICES.notNow) throw new Error('A take-over request is answered only by Not now');
     if (question.takeover?.holder === 'you') throw new Error('You hold this tab: hand it back with Resume agent');
@@ -322,7 +323,7 @@ export function createSessionControls(services: SessionControlServices) {
       }
       case 'prompt': {
         await services.lifecycle.userInput(String(target.id), async () => {
-          const requestId = crypto.randomUUID();
+          const requestId = command.requestId ?? crypto.randomUUID();
           await applyInferenceThinking(target, await admitted(requestId));
           const comments = command.comments?.length ? await stagedComments(harness, command.comments) : [];
           const answered = command.answers?.map(answer => answer.questionId) ?? [];
@@ -334,7 +335,9 @@ export function createSessionControls(services: SessionControlServices) {
           // takes it; a prompt with no device (an inspector's, a machine's) closes none. The staged answers it carries
           // answer their questions in that commit, and go as its lines and data after its text; the staged comments it
           // carries go after them, and leave the staged comments once it is in.
-          await target.commit(async tx => {
+          // A prompt sent again with a request id the conversation already took finds it there and adds nothing.
+          const submitted = await target.commit(async tx => {
+            if (command.requestId !== undefined && await tx.submissionByRequest(target.id, command.requestId)) return false;
             if (deviceId !== undefined) await closeRepliedQuestions(tx, target.id, answered);
             const taken = command.answers?.length ? await answerFromMessage(tx, target.id, command.answers, canApprove) : { answers: [], decisions: [], approved: false };
             decisions = taken.decisions;
@@ -343,7 +346,9 @@ export function createSessionControls(services: SessionControlServices) {
             if (deviceId !== undefined && command.decisions?.length) services.holdDecisions?.(String(target.id), requestId, { deviceId, text: content, decisions: command.decisions });
             if (Object.keys(pins).length) (await tx.doc(MediaPinsDoc, target.id)).inputs[requestId] = pins;
             await target.submit(tx, { type: 'input', requestId, content, whenBusy: command.streamingBehavior ?? 'followUp' });
+            return true;
           }, ctx);
+          if (!submitted) return;
           if (command.comments?.length) await unstageComments(harness, command.comments);
           if (approved) await services.setWorkspacePhase?.('code');
           if (deviceId !== undefined) for (const decision of decisions) await services.recordDecision?.({ ...decision, deviceId });
@@ -414,6 +419,7 @@ export function createSessionControls(services: SessionControlServices) {
       case 'answerAsk': await services.lifecycle.closeQuestion(command.id, async (question, tx, conversationId) => {
         if (question.conversationId !== String(target.id)) throw new Error(`Question ${command.id} belongs to another conversation`);
         const closure = askClosure(question, command.answers);
+        if (command.answeredBy === 'mcp-client') closure.answeredBy = { by: 'mcp-client', at: new Date().toISOString() };
         // A person's answer (one sent from a device) also replies to the conversation's other open questions.
         if (deviceId !== undefined) await closeRepliedQuestions(tx, conversationId, [question.id]);
         return { closure, value: undefined };
@@ -456,7 +462,7 @@ export function createSessionControls(services: SessionControlServices) {
         });
         break;
       case 'persist': case 'handoff': await mutate(draft => { draft.revision++; }); break;
-      case 'control': case 'agentSetup': case 'historyAnchorId': case 'historyPage': case 'transcriptPage': case 'transcriptContent': case 'usage': case 'commentLookup': break;
+      case 'control': case 'agentSetup': case 'historyAnchorId': case 'historyPage': case 'transcriptPage': case 'transcriptContent': case 'usage': case 'commentLookup': case 'run': break;
     }
     const result: RuntimeSessionResult = { control: await control(target) };
     if (command.type === 'agentSetup' || command.type === 'saveAgentDefinition') {
@@ -468,6 +474,7 @@ export function createSessionControls(services: SessionControlServices) {
     if (command.type === 'transcriptContent') result.transcriptContent = await services.history.transcriptContent(target.id, command.request);
     if (command.type === 'usage') result.usage = await services.history.usage(target.id, harness);
     if (command.type === 'commentLookup') result.commentLookup = await commentLookup(harness, command.turnIds, command.documents, command.drivePaths);
+    if (command.type === 'run') result.run = await runOf(harness, services.storage, target, command.requestId, ctx);
     return result;
   }
   return { execute, control, conversation, loadDefinitions };

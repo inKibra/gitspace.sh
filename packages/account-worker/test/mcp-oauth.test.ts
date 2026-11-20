@@ -8,8 +8,8 @@ import { z } from 'zod';
 import { network } from './network.js';
 import { tenantRootPrivateKey } from './setup.js';
 
-const MCP = 'https://landscaping.test/mcp';
-const METADATA = 'https://landscaping.test/.well-known/access-protected-resource/mcp';
+const MCP = 'https://orchard.test/mcp';
+const METADATA = 'https://orchard.test/.well-known/access-protected-resource/mcp';
 const ISSUER = 'https://team.access.test';
 
 async function signedRpc() {
@@ -42,10 +42,12 @@ function protectedServer() {
         return new HttpResponse(null, { status: 401, headers: { 'www-authenticate': `Bearer realm="OAuth", error="invalid_token", resource_metadata="${METADATA}"` } });
       }
       seen.bearer.push(authorization);
-      const message = z.object({ id: z.number().optional(), method: z.string() }).parse(await request.json());
+      const message = z.object({ id: z.union([z.number(), z.string()]).optional(), method: z.string() }).parse(await request.json());
       if (message.id === undefined) return new HttpResponse(null, { status: 202 });
+      // A 2025-era server: the 2026-07-28 `server/discover` probe is a method it does not know.
+      if (message.method === 'server/discover') return HttpResponse.json({ jsonrpc: '2.0', id: message.id, error: { code: -32601, message: 'Method not found' } });
       const result = message.method === 'initialize'
-        ? { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'landscaping', version: '1.0.0' } }
+        ? { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'orchard', version: '1.0.0' } }
         : { tools: [{ name: 'list_jobs', inputSchema: { type: 'object' } }] };
       return HttpResponse.json({ jsonrpc: '2.0', id: message.id, result });
     }),
@@ -67,16 +69,16 @@ function protectedServer() {
   return seen;
 }
 
-const connectionView = z.object({ status: z.literal('ok'), value: z.object({ status: z.string(), statusMessage: z.string().nullable(), revision: z.number() }) });
+const connectionView = z.object({ status: z.literal('ok'), value: z.object({ status: z.string(), statusMessage: z.string().nullable(), serverVersion: z.string().nullable(), revision: z.number() }) });
 
 describe('MCP sign-in for custom plugins', () => {
   it('signs in once through the browser and connects with the issued token', async () => {
     const rpc = await signedRpc();
     const seen = protectedServer();
-    const created = connectionView.parse(await rpc('mcp.connections.create', { connection: { id: 'landscaping', label: 'Landscaping', enabled: true, target: { kind: 'workspace' }, transport: { type: 'http', url: MCP, headers: [] }, timeoutMs: 5_000 } }));
+    const created = connectionView.parse(await rpc('mcp.connections.create', { connection: { id: 'orchard', label: 'Orchard', enabled: true, target: { kind: 'workspace' }, transport: { type: 'http', url: MCP, headers: [] }, timeoutMs: 5_000 } }));
     expect(created.value).toMatchObject({ status: 'sign-in-required', statusMessage: 'Sign in to connect' });
 
-    const started = z.object({ status: z.literal('ok'), value: z.object({ authorizationUrl: z.string() }) }).parse(await rpc('mcp.connections.signIn', { connectionId: 'landscaping' }));
+    const started = z.object({ status: z.literal('ok'), value: z.object({ authorizationUrl: z.string() }) }).parse(await rpc('mcp.connections.signIn', { connectionId: 'orchard' }));
     const authorization = new URL(started.value.authorizationUrl);
     expect(authorization.origin + authorization.pathname).toBe(`${ISSUER}/authorize`);
     expect(authorization.searchParams.get('client_id')).toBe('client-1');
@@ -92,7 +94,8 @@ describe('MCP sign-in for custom plugins', () => {
     expect(landed.status).toBe(200);
     expect(await landed.text()).toContain('Plugin signed in');
     expect(seen.bearer.length).toBeGreaterThan(0);
-    expect(connectionView.parse(await rpc('mcp.connections.status', { connectionId: 'landscaping' })).value).toMatchObject({ status: 'ready', statusMessage: null });
+    // The status names the server and the era the connection fell back to: this server knows no `server/discover`.
+    expect(connectionView.parse(await rpc('mcp.connections.status', { connectionId: 'orchard' })).value).toMatchObject({ status: 'ready', statusMessage: null, serverVersion: 'orchard 1.0.0 · MCP 2025-06-18 (legacy era)' });
 
     // The state was spent: a replayed callback cannot exchange another code.
     const replayed = await SELF.fetch(callback);

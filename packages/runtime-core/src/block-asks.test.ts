@@ -110,6 +110,25 @@ test('a required block ask in a stored reply posts one open question under its m
   } finally { await f.harness.close(context); }
 });
 
+test('a run waits on the question its turn asked, and an MCP client\'s answer carries it to the reply of the turn the answer starts', async () => {
+  const f = await open(choiceBlock(true));
+  try {
+    const conversationId = String(f.root.id);
+    expect((await f.controls.execute(conversationId, { type: 'run', requestId: 'unknown' })).run).toMatchObject({ state: 'missing' });
+    await f.turn();
+    const [question] = await f.posted();
+    const id = question?.id ?? '';
+    expect((await f.controls.execute(conversationId, { type: 'run', requestId: 'cache' })).run).toMatchObject({ conversationId, requestId: 'cache', state: 'waiting', text: expect.stringContaining('Pick one:'), question: { id, prompt: 'Which cache?' } });
+    await f.controls.execute(conversationId, { type: 'answerAsk', id, answers: [{ id, selectedOptions: ['Durable Object'], customInput: null }], answeredBy: 'mcp-client' });
+    const [, next] = await f.received(2);
+    expect(next).toContain(`The user answered your question (question ${id}) through an MCP client.`);
+    await f.root.waitForIdle(context);
+    expect((await f.controls.execute(conversationId, { type: 'run', requestId: 'cache' })).run).toEqual({ conversationId, requestId: `question-closed:${id}`, state: 'finished', text: 'Done.', question: null });
+    expect((await f.questions()).find(item => item.id === id)?.answeredBy).toMatchObject({ by: 'mcp-client', at: expect.any(String) });
+    expect(f.reports).toEqual([]);
+  } finally { await f.harness.close(context); }
+});
+
 test('an optional block ask posts no question', async () => {
   const f = await open(choiceBlock(false));
   try {

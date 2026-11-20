@@ -1,16 +1,9 @@
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { auth, extractWWWAuthenticateParams, type OAuthClientProvider, type OAuthDiscoveryState } from '@modelcontextprotocol/sdk/client/auth.js';
-import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import {
-  OAuthClientInformationFullSchema, OAuthMetadataSchema, OAuthProtectedResourceMetadataSchema, OAuthTokensSchema,
-  OpenIdProviderDiscoveryMetadataSchema, type OAuthClientInformationMixed, type OAuthClientMetadata, type OAuthTokens,
-} from '@modelcontextprotocol/sdk/shared/auth.js';
-import { LATEST_PROTOCOL_VERSION } from '@modelcontextprotocol/sdk/types.js';
-import { CfWorkerJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/cfworker-provider.js';
+import { auth, extractWWWAuthenticateParams, LATEST_PROTOCOL_VERSION, type Client, type OAuthClientInformationMixed, type OAuthClientMetadata, type OAuthClientProvider, type OAuthDiscoveryState, type OAuthTokens } from '@modelcontextprotocol/client';
+import { OAuthClientInformationFullSchema, OAuthMetadataSchema, OAuthProtectedResourceMetadataSchema, OAuthTokensSchema, OpenIdProviderDiscoveryMetadataSchema } from '@modelcontextprotocol/core';
 import type { McpConnection, McpConnectionStatus } from '@gitspace/protocol';
 import { z } from 'zod';
 import type { CredentialVaultDO } from './application.js';
+import { connectMcp, mcpServerIdentity } from './mcp-client.js';
 
 export const MCP_OAUTH_CALLBACK_PATH = '/v1/mcp/oauth/callback';
 const SIGN_IN_SECONDS = 600;
@@ -132,26 +125,25 @@ export async function startMcpSignIn(env: Env, connectionId: string, url: string
   return signIn.authorizationUrl.href;
 }
 
-/** Exchanges the callback's code for tokens, then connects once to report the result. A connection that also binds
- * header secrets needs a project to read them from, so it is checked on its first agent call instead. */
-export async function completeMcpSignIn(env: Env, connection: McpConnection, code: string): Promise<{ status: Extract<McpConnectionStatus, 'ready' | 'offline' | 'failed'>; message: string | null }> {
+/** Exchanges the callback's code for tokens, then connects once to report the result and the server's identity. A
+ * connection that also binds header secrets needs a project to read them from, so it is checked on its first agent call
+ * instead. */
+export async function completeMcpSignIn(env: Env, connection: McpConnection, code: string): Promise<{ status: Extract<McpConnectionStatus, 'ready' | 'offline' | 'failed'>; message: string | null; serverVersion: string | null }> {
   const { transport } = connection;
   if (transport.type !== 'http' && transport.type !== 'sse') throw new Error('Only Streamable HTTP and SSE plugins sign in');
   const signIn = await provider(env, connection.id, 'interactive');
   const resourceMetadataUrl = signIn.discoveryState()?.resourceMetadataUrl;
   const result = await auth(signIn, { serverUrl: transport.url, authorizationCode: code, ...(resourceMetadataUrl ? { resourceMetadataUrl: new URL(resourceMetadataUrl) } : {}) });
   if (result !== 'AUTHORIZED') throw new Error('The authorization server did not issue a token');
-  if (transport.headers.length > 0) return { status: 'offline', message: 'Signed in. It connects when an agent first uses it.' };
-  const client = new Client({ name: 'gitspace-cloud', version: '1.0.0' }, { capabilities: {}, jsonSchemaValidator: new CfWorkerJsonSchemaValidator() });
+  if (transport.headers.length > 0) return { status: 'offline', message: 'Signed in. It connects when an agent first uses it.', serverVersion: null };
+  let client: Client | undefined;
   try {
-    await client.connect(transport.type === 'http'
-      ? new StreamableHTTPClientTransport(new URL(transport.url), { redirectPolicy: 'same-origin', authProvider: signIn })
-      : new SSEClientTransport(new URL(transport.url), { redirectPolicy: 'same-origin', authProvider: signIn }), { timeout: connection.timeoutMs });
+    client = await connectMcp({ type: transport.type, url: transport.url, authProvider: signIn, timeout: connection.timeoutMs });
     await client.listTools({}, { timeout: connection.timeoutMs });
-    return { status: 'ready', message: null };
+    return { status: 'ready', message: null, serverVersion: mcpServerIdentity(client) };
   } catch (error) {
-    return { status: 'failed', message: (error instanceof Error ? error.message : String(error)).slice(0, 1024) };
-  } finally { await client.close(); }
+    return { status: 'failed', message: (error instanceof Error ? error.message : String(error)).slice(0, 1024), serverVersion: null };
+  } finally { await client?.close(); }
 }
 
 /** The page the sign-in window lands on: it tells the Plugins page to refresh, then closes itself. */

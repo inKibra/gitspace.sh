@@ -1,8 +1,7 @@
 import { env, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 import { ed25519 } from '@noble/curves/ed25519.js';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { createDeviceBinding, deviceProtocolBase64, RPC_DEVICE_HEADER, signDeviceInvite, signRpcRequest, type DeviceCapability, type DeviceInvite } from '@gitspace/protocol';
 import { mcpAccessResultSchema, type McpAccessOperation } from '@gitspace/protocol/mcp-access';
 import worker from '../src/index.js';

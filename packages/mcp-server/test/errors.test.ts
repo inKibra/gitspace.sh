@@ -1,6 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { deviceProtocolBase64, encodeApiKey } from '@gitspace/protocol/device-grant';
 import { createGitSpaceMcpHandler } from '../src/index.js';
 import { deserialize } from 'result-rpc';

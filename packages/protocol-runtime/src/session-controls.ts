@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { RuntimeIdentitySchema, RuntimeJsonSchema, RuntimePlanStepSchema } from './base.js';
+import { RuntimeIdentitySchema, RuntimeJsonSchema, RuntimePlanStepSchema, RuntimeQuestionSchema } from './base.js';
 import type { AgentFailure, SessionActivity } from '@gitspace/protocol-agent';
 import { SessionHistoryPageSchema, SessionHistoryPageRequestSchema } from '@gitspace/protocol-agent';
 import { transcriptPageRequestSchema, transcriptContentRequestSchema, transcriptPageSchema, transcriptContentPageSchema } from '@gitspace/blocks';
@@ -59,6 +59,26 @@ export type RuntimeMessageDecision = z.infer<typeof RuntimeMessageDecisionSchema
  * "Review batch: …", "Message: …", "Comment on …" or "Answer to …" line. The agent reads it; anything shown to people
  * replaces each match with `$1`, the line alone. */
 export const STAGED_CHOICE_DATA = /^((?:(?:Decided|Answered|Review batch|Message): |Comment on |Answer to )[^\n]*)\n~~~json\n[\s\S]*?\n~~~$/gmu;
+/**
+ * What became of an input a caller submitted with a request id, followed through the turns its questions' answers start
+ * (an answered or dismissed question's event is its conversation's next input, `question-closed:<question id>`).
+ * `requestId`: the input the run is at now. `state`:
+ * - `missing`: the conversation took no input with that request id;
+ * - `queued`: waiting for the conversation's turn before it to end, or for the event of an answer to be taken;
+ * - `running`: its turn runs;
+ * - `waiting`: its turn ended asking `question`, which is open (`text` is the reply that asked);
+ * - `finished`: its turn ended with nothing open (`text` is the reply);
+ * - `failed`: its turn ended without a reply (`text` says why);
+ * - `stopped`: a person stopped it before it finished, or took it back before it ran.
+ */
+export const RuntimeRunSchema = z.object({
+  conversationId: z.string(),
+  requestId: z.string(),
+  state: z.enum(['missing', 'queued', 'running', 'waiting', 'finished', 'failed', 'stopped']),
+  text: z.string().nullable(),
+  question: RuntimeQuestionSchema.nullable(),
+});
+export type RuntimeRun = z.infer<typeof RuntimeRunSchema>;
 export const RuntimeSessionCommandSchema = z.union([
   z.object({ type: z.literal('browserStatus'), machineId: z.string().optional() }),
   z.object({ type: z.literal('browserRevoke'), machineId: z.string().optional(), groupId: z.string().uuid() }),
@@ -109,8 +129,13 @@ export const RuntimeSessionCommandSchema = z.union([
   z.object({ type: z.enum(simple) }),
   /** `comments`: the staged comments (`stageComment`) the message carries; they leave the staged comments once it is in
    * the conversation's inbox. `answers`: the person's staged answers (`stageAnswer`) it carries; the commit that takes it
-   * answers each question, and they leave the staged answers. A message with answers may have no text. */
-  z.object({ type: z.literal('prompt'), text: z.string(), draftRevision: z.number().int().nonnegative().optional(), draftText: z.string().optional(), streamingBehavior: z.enum(['steer', 'followUp']).optional(), decisions: z.array(RuntimeMessageDecisionSchema).max(32).optional(), comments: z.array(CommentIdSchema).max(STAGED_COMMENTS_MAX).optional(), answers: z.array(SentAnswerSchema).max(STAGED_ANSWERS_MAX).optional() }),
+   * answers each question, and they leave the staged answers. A message with answers may have no text. `requestId`: the
+   * caller's key for the input, scoped to the conversation: a prompt sent again with a key the conversation already has
+   * adds nothing, and `run` reads what became of it. */
+  z.object({ type: z.literal('prompt'), text: z.string(), requestId: z.string().min(1).max(512).optional(), draftRevision: z.number().int().nonnegative().optional(), draftText: z.string().optional(), streamingBehavior: z.enum(['steer', 'followUp']).optional(), decisions: z.array(RuntimeMessageDecisionSchema).max(32).optional(), comments: z.array(CommentIdSchema).max(STAGED_COMMENTS_MAX).optional(), answers: z.array(SentAnswerSchema).max(STAGED_ANSWERS_MAX).optional() }),
+  /** What became of the input the conversation took with `requestId` (a `prompt`'s, or `runtime.submit`'s), followed
+   * through the turns its questions' answers start (`RuntimeRun`). */
+  z.object({ type: z.literal('run'), requestId: z.string().min(1).max(512) }),
   /** Comments (comments.ts): stage one on what the agent wrote, change a staged one's note, or take one back; the
    * lookup's sent comments on some turns and on every revision of the `documents` named (the Goal, the Change Guide,
    * drive docs: those of the files `drivePaths` names when it is given), and the replies to them. */
@@ -133,7 +158,9 @@ export const RuntimeSessionCommandSchema = z.union([
   z.object({ type: z.literal('compact'), instructions: z.string().optional() }),
   z.object({ type: z.literal('removeQueuedMessage'), kind: z.enum(['steering', 'followUp']), index: z.number().int().nonnegative() }),
   z.object({ type: z.literal('promoteQueuedMessage'), index: z.number().int().nonnegative() }),
-  z.object({ type: z.literal('answerAsk'), id: z.string(), answers: z.array(PendingAskAnswerSchema).readonly() }),
+  /** `answeredBy: 'mcp-client'`: an API client answers through the person's MCP access (MCP Tasks `tasks/update`); the
+   * question records that answerer instead of the person. Refused from a person's browser. */
+  z.object({ type: z.literal('answerAsk'), id: z.string(), answers: z.array(PendingAskAnswerSchema).readonly(), answeredBy: z.literal('mcp-client').optional() }),
   /** Closes one of the conversation's open questions unanswered; the agent hears that it was dismissed. */
   z.object({ type: z.literal('dismissQuestion'), id: z.string() }),
   z.object({ type: z.literal('navigateTree'), entryId: z.string() }),
@@ -147,7 +174,7 @@ export const RuntimeSessionResultSchema = z.object({ control: SessionControlSche
   browserShares: z.array(RuntimeBrowserShareSchema).max(100).optional(), browserShare: RuntimeBrowserShareSchema.optional(), browserConnectedTab: RuntimeBrowserConnectedTabSchema.optional(),
   browserComments: z.array(RuntimeBrowserCommentThreadViewSchema).max(500).optional(), browserComment: RuntimeBrowserCommentThreadSchema.optional(),
   browserCaptureShares: z.array(RuntimeBrowserCaptureShareSchema).max(100).optional(), browserCaptureShare: RuntimeBrowserCaptureShareSchema.optional(), browserGroupId: z.string().uuid().optional(),
-  setup: AgentSetupSchema.optional(), historyPage: SessionHistoryPageSchema.optional(), transcriptPage: transcriptPageSchema.optional(), transcriptContent: transcriptContentPageSchema.optional(), usage: SessionUsageReportSchema.optional(), commentLookup: CommentLookupSchema.optional() });
+  setup: AgentSetupSchema.optional(), historyPage: SessionHistoryPageSchema.optional(), transcriptPage: transcriptPageSchema.optional(), transcriptContent: transcriptContentPageSchema.optional(), usage: SessionUsageReportSchema.optional(), commentLookup: CommentLookupSchema.optional(), run: RuntimeRunSchema.optional() });
 export type RuntimeSessionCommand = z.infer<typeof RuntimeSessionCommandSchema>;
 export type RuntimeSessionInput = z.infer<typeof RuntimeSessionInputSchema>;
 export type RuntimeSessionResult = z.infer<typeof RuntimeSessionResultSchema>;

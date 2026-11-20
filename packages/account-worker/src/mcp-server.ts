@@ -1,4 +1,3 @@
-import { createGitSpaceMcpHandler } from '@gitspace/mcp-server';
 import { accountAccessResponse, activeAccount } from './account-access.js';
 import type { CredentialVaultDO } from './application.js';
 
@@ -76,6 +75,8 @@ export async function handleMcpRequest(
       if (target.origin === expectedOrigin && target.pathname === '/rpc') return dispatch(outgoing);
       return reject(500, 'MCP_RPC_TARGET_INVALID', `MCP dispatches RPC only to ${expectedOrigin}/rpc, not ${target.origin}${target.pathname}`);
     };
+    // Loaded on the first `/mcp` request: the Worker's startup stays free of the MCP SDK and the tool catalog.
+    const { createGitSpaceMcpHandler } = await import('@gitspace/mcp-server');
     const handler = createGitSpaceMcpHandler({
       key: access.key,
       fetch: signedFetch,

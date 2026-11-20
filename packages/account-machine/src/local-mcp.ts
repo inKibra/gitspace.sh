@@ -57,11 +57,11 @@ export class MachineMcpCoordinator {
     const event = { projectId: input.projectId, connectionId: connection.id, type: 'tool-invocation' as const, toolName: args.name ?? null, message: null };
     try {
       if (input.operation === 'invoke') await this.appendAudit({ ...event, outcome: 'started' });
-      const result = await executeMcpStdio({ command: transport.command, args: transport.args, cwd, env, timeoutMs: connection.timeoutMs, operation: input.operation, name: args.name, arguments: args.arguments, signal: input.signal, authorize: async () => {
+      const { value: result, serverVersion } = await executeMcpStdio({ command: transport.command, args: transport.args, cwd, env, timeoutMs: connection.timeoutMs, operation: input.operation, name: args.name, arguments: args.arguments, signal: input.signal, authorize: async () => {
         const current = await authorize();
         if (JSON.stringify(current.transport) !== JSON.stringify(transport)) throw new Error('MCP configuration changed before invocation');
       } });
-      this.queueStatus(connection, 'ready', null);
+      this.queueStatus(connection, 'ready', null, null, serverVersion);
       if (input.operation === 'invoke') await this.appendAudit({ ...event, outcome: result && typeof result === 'object' && 'isError' in result && result.isError ? 'failed' : 'succeeded' });
       return redact(result);
     } catch (error) {

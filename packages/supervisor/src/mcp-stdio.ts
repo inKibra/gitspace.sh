@@ -1,9 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
-import { ReadBuffer, serializeMessage } from '@modelcontextprotocol/sdk/shared/stdio.js';
-import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
+import { Client, ReadBuffer, serializeMessage, type JSONRPCMessage, type Transport } from '@modelcontextprotocol/client';
 import { descendants, sameProcess, signalIdentity } from './process-identity.js';
 import type { ProcessIdentity } from './protocol.js';
 
@@ -85,15 +82,24 @@ class McpPipe implements Transport {
   }
 }
 
-export async function executeMcpStdio(options: McpStdioOperation): Promise<unknown> {
+/** What one stdio run answered: the tool list or the tool's result, and the server's identity and protocol version as
+ * the connection status records them. */
+export interface McpStdioResult { value: unknown; serverVersion: string }
+
+export async function executeMcpStdio(options: McpStdioOperation): Promise<McpStdioResult> {
   options.signal?.throwIfAborted();
   await options.authorize();
   options.signal?.throwIfAborted();
   const signal = options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(options.timeoutMs)]) : AbortSignal.timeout(options.timeoutMs);
   const transport = new McpPipe(options);
+  // The 2025 `initialize` handshake, without a `server/discover` probe: every operation spawns its own server process,
+  // and the SDK's sibling-process probe is only for its own `StdioClientTransport`. Probing in place here would spend the
+  // one child on a request some servers (rmcp's) exit on, and stall servers that never answer it for the probe timeout.
   const client = new Client({ name: 'gitspace-machine', version: '1.0.0' }, { capabilities: {} });
   try {
     await client.connect(transport, { timeout: options.timeoutMs, signal });
+    const server = client.getServerVersion();
+    const serverVersion = `${server ? `${server.name} ${server.version}` : 'unnamed server'} · MCP ${client.getNegotiatedProtocolVersion() ?? 'unknown'} (legacy era)`;
     const tools = [];
     let cursor: string | undefined;
     do {
@@ -101,11 +107,11 @@ export async function executeMcpStdio(options: McpStdioOperation): Promise<unkno
       tools.push(...page.tools);
       cursor = page.nextCursor;
     } while (cursor);
-    if (options.operation === 'discover') return tools;
+    if (options.operation === 'discover') return { value: tools, serverVersion };
     if (!options.name || !tools.some(tool => tool.name === options.name)) throw new Error('MCP tool is unavailable');
     await options.authorize();
     signal.throwIfAborted();
-    return await client.callTool({ name: options.name, arguments: options.arguments ?? {} }, undefined, { signal, timeout: options.timeoutMs });
+    return { value: await client.callTool({ name: options.name, arguments: options.arguments ?? {} }, { signal, timeout: options.timeoutMs }), serverVersion };
   } finally {
     try { await client.close(); } finally { await transport.close(); }
   }

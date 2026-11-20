@@ -422,9 +422,50 @@ Ordinary `rpc.write` remains broad: it includes terminal execution, integrations
 - Finite transcript, subagent, repository-tree, artifact, and retained-resource subscriptions use native page queries. Preserve generation and cursor fields. Inspector snapshot pages contain at most 16 frames and 900 KiB of frame JSON. They hash the current source and identity; changed snapshots reject continuation rather than splice different versions together. Existing readers still materialize the source on each call.
 - Resource templates cover files, artifacts, retained resources, goals, transcripts, transcript content, session history, and subagent transcripts. Their path parameter is percent-encoded JSON matching the corresponding tool input.
 - Enabled built-in skills are actual shared skill source at `gitspace://skills/{id}`. These are the instructions installed for GitSpace agents; their injected `space` code-mode namespace is not an MCP client API. MCP callers use named tools instead.
-- The installed official SDK is `@modelcontextprotocol/sdk` 1.30.1. This server advertises tools and resources, not a native Skills or Tasks extension. Long-running work returns GitSpace's existing operation handles.
+- The server and clients use the official SDK v2 packages, `@modelcontextprotocol/server`, `/client` and `/core` 2.4.0. The `/mcp` server advertises tools and resources; on 2026-07-28 requests it also advertises and serves the Tasks extension (below). Long-running work without Tasks returns GitSpace's existing operation handles.
 - JSON-native values remain ordinary JSON. Non-JSON values use explicit `$gitspace` tags; binary values, cycles, shared references, and tag collisions use the existing result-rpc serialization envelope. The published schemas describe the representation, and decoding still runs the original codec validation. Declared errors retain safe tagged data; undeclared failures are generic. Mutations are never automatically retried.
 - Authentication/protocol errors remain distinct from tool failures. The endpoint rejects missing configuration, invalid bearer keys, wrong tenant/origin, expired or revoked signing grants, and request bodies above 1 MiB. GET event streams are not supported.
+
+## Protocol versions and interoperability
+
+`/mcp` serves both protocol eras from one endpoint. A request whose `_meta` envelope claims 2026-07-28 goes to the SDK's `createMcpHandler` (`legacy: 'reject'`), which answers `server/discover` and serves the request per request. Every other request is 2025-era (2024-10-07 … 2025-11-25) and keeps today's stateless JSON serving byte for byte; `createMcpHandler`'s own legacy fallback would answer over SSE instead, so it is routed in front with `isLegacyRequest`. The server SDK loads only when `/mcp` is hit (a dynamic import in `account-worker/src/mcp-server.ts`).
+
+On 2026-07-28, `tools/list` and `resources/templates/list` carry `ttlMs: 300000` and `resources/list` `ttlMs: 60000`, all `cacheScope: private`: each depends on the caller's grant, and every call is authorized again.
+
+| Peers | Era | What happens |
+| --- | --- | --- |
+| 2025 client → GitSpace server | 2025 `initialize` | Unchanged: stateless JSON responses, same capabilities, tools, resources and errors. No Tasks. |
+| 2026 client → GitSpace server | 2026-07-28 (`server/discover`) | Same tools and resources; Tasks advertised in `capabilities.extensions`. A client declaring `io.modelcontextprotocol/tasks` on a request gets a task for a run-starting call; others get the ordinary result. |
+| GitSpace cloud client → 2025 server | 2025 `initialize` after the `server/discover` probe fails | Streamable HTTP probes (`versionNegotiation: { mode: 'auto' }`) and falls back. HTTP+SSE connections always open with `initialize` (the transport predates 2026-07-28). |
+| GitSpace cloud client → 2026 server | 2026-07-28 | Negotiated by the probe. |
+| GitSpace machine (stdio) → any server | 2025 `initialize` | Each operation spawns its own server through a process-tracking pipe, not the SDK's `StdioClientTransport`, so the SDK's sibling-process probe does not apply; probing in place would spend the one child on a request some servers (rmcp) exit on. |
+
+Redirects are followed only within the server's origin (the transports' default `same-origin` policy). A connection status's `serverVersion` records the server's name, version, negotiated revision and era, e.g. `orchard 1.0.0 · MCP 2025-06-18 (legacy era)`.
+
+## MCP Tasks
+
+GitSpace implements the released extension `io.modelcontextprotocol/tasks` ([2026-07-28 spec](https://tasks.extensions.modelcontextprotocol.io/specification/2026-07-28/tasks)) on 2026-07-28 requests only (`packages/mcp-server/src/tasks.ts`; the SDK ships no Tasks implementation).
+
+- **Which calls:** `gitspace_runtime_session` with command `prompt`, and `gitspace_runtime_submit`, from a client that declares the extension in that request's `_meta` client capabilities. Any other call, or any client that does not declare it, gets the ordinary result.
+- **Handle:** the task id is a signed handle (HMAC-SHA256 under the caller's MCP access key) naming account, device, workspace, conversation and the input's request id, with its creation time. The workspace's submissions stay the record of the run; `runtime.session` command `run` reads it. A prompt without a `requestId` gets `mcp-task:<uuid>`.
+- **Ownership:** only the caller that created a task verifies its handle; any other caller's `tasks/get`, `tasks/update` or `tasks/cancel` answers `-32602` *Task not found*. `tasks/*` from a client that does not declare the extension answers `-32021`.
+- **Durability:** a task is read from the workspace on every `tasks/get`, so disconnects and client restarts lose nothing; the same id works from a new connection. `ttlMs` is 7 days; after it the handle answers *Task has expired*. `pollIntervalMs` is 5 s while the agent works, 15 s while it waits on a person.
+- **Idempotency:** a `runtime.submit` or a prompt sent again with a `requestId` the conversation already took adds nothing; both tasks follow the same run.
+
+| GitSpace run (`RuntimeRun.state`) | Task status | Payload |
+| --- | --- | --- |
+| `queued`, `running` | `working` | `statusMessage`: queued, or the in-progress todo |
+| `waiting` on a plain question (`kind: ask`), grant has `operator.decide`, client declared form elicitation | `input_required` | `inputRequests[<question id>]`: a form elicitation with the question's choices (`choice`) and a written `answer` |
+| `waiting` otherwise | `working` | `statusMessage` names the question and why it waits in GitSpace |
+| `finished` | `completed` | `result`: the final reply as text, the tool's own structured result, `_meta['sh.gitspace/run']` with the run reference |
+| `failed` (the turn ended without a reply) | `completed` | `result` with `isError: true` and the reason; `failed` is reserved for JSON-RPC errors, which do not occur after a task is created |
+| `stopped` (a person's Stop, `tasks/cancel`) | `cancelled` | `statusMessage` says why |
+
+A run follows the turns its questions' answers start (`question-closed:<id>` inputs, `runtime-core/src/runs.ts`). `tasks/update` answers only the question the task waits on, through `answerAsk` with `answeredBy: 'mcp-client'` (the question records *answered by an MCP client*, and its card and Needs you close as for any answer); responses to other keys, declines and cancels are ignored. `tasks/cancel` calls `runtime.cancel` (Stop) while the run is queued, running or waiting, and does nothing once it ended, since Stop would stop whatever the conversation runs next.
+
+**Legacy fallback.** Clients without Tasks keep today's start-and-poll path: start with `gitspace_runtime_submit` and a `requestId` (or a prompt with a `requestId`), then poll `gitspace_runtime_session` with command `{ type: 'run', requestId }`; its `run.state` is the table's left column, `run.question` the open question (answer it with `answerAsk`), `run.text` the final reply.
+
+Not yet: secret or secure input through Tasks, and elicitations from people's MCP servers to GitSpace's client (#155).
 
 ## Verification
 

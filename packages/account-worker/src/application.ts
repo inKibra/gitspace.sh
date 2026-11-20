@@ -3976,9 +3976,9 @@ const worker = {
       const connections = userMcpConnections(env, env.ACCOUNT_ID);
       const connection = connectionId ? await connections.get(env.ACCOUNT_ID, connectionId) : null;
       if (!connection) return mcpSignInPage('Sign-in expired', 'This sign-in expired or was already used. Start it again from Plugins.', 400);
-      const record = async (status: McpConnectionStatus, message: string | null) => {
+      const record = async (status: McpConnectionStatus, message: string | null, serverVersion: string | null = null) => {
         const latest = await connections.get(env.ACCOUNT_ID, connection.id);
-        if (latest) await connections.recordStatus({ principalId: env.ACCOUNT_ID, connectionId: connection.id, observedRevision: latest.revision, status, message }).catch(() => undefined);
+        if (latest) await connections.recordStatus({ principalId: env.ACCOUNT_ID, connectionId: connection.id, observedRevision: latest.revision, status, message, serverVersion }).catch(() => undefined);
       };
       try {
         const refused = url.searchParams.get('error');
@@ -3986,7 +3986,7 @@ const worker = {
         const code = url.searchParams.get('code');
         if (!code) throw new Error('The authorization server returned no code');
         const outcome = await completeMcpSignIn(env, connection, code);
-        await record(outcome.status, outcome.message);
+        await record(outcome.status, outcome.message, outcome.serverVersion);
         return outcome.status === 'failed'
           ? mcpSignInPage('Signed in, but the plugin did not connect', outcome.message ?? 'Connection failed', 502)
           : mcpSignInPage('Plugin signed in', `${connection.label} is connected. You can close this window.`, 200);

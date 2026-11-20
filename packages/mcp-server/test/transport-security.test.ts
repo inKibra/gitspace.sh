@@ -1,6 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { SSEClientTransport, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 
 const origin = new URL('https://mcp.example/connect');
 const redirectTarget = new URL('https://redirected.example/collect');

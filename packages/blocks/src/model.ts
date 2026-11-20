@@ -72,15 +72,18 @@ const stackHeadSource = z.object({ by: z.literal('stack-head'), workspaceId: z.s
 export const askAnswerSourceSchema = z.discriminatedUnion('by', [projectAgentSource, stackHeadSource]);
 export type AskAnswerSource = z.infer<typeof askAnswerSourceSchema>;
 
-/** Who answered a question in a person's place (`AskAnswerSource`), when (ISO), and for whom: the person who approved its
- * answer (absent on answers from before a person approved them). A question without one was answered by a person. */
+/** Who answered a question in a person's place (`AskAnswerSource`), or the MCP client the person's MCP access answered it
+ * through (an MCP Tasks `tasks/update`, packages/mcp-server); when (ISO), and for whom: the person who approved its answer
+ * (absent on answers from before a person approved them, and on MCP client answers). A question without one was
+ * answered by a person in GitSpace. */
 const answeredWhen = { at: z.string(), for: z.string().optional() };
-export const askAnswererSchema = z.discriminatedUnion('by', [projectAgentSource.extend(answeredWhen), stackHeadSource.extend(answeredWhen)]);
+const mcpClientAnswerer = z.object({ by: z.literal('mcp-client'), ...answeredWhen });
+export const askAnswererSchema = z.discriminatedUnion('by', [projectAgentSource.extend(answeredWhen), stackHeadSource.extend(answeredWhen), mcpClientAnswerer]);
 export type AskAnswerer = z.infer<typeof askAnswererSchema>;
 
-/** How a card or a message names who answered: "the project agent", or "Billing export (stack head)". */
-export function askAnswererName(source: AskAnswerSource): string {
-  return source.by === 'project-agent' ? 'the project agent' : `${source.name} (stack head)`;
+/** How a card or a message names who answered: "the project agent", "Billing export (stack head)", or "an MCP client". */
+export function askAnswererName(source: AskAnswerSource | AskAnswerer): string {
+  return source.by === 'project-agent' ? 'the project agent' : source.by === 'mcp-client' ? 'an MCP client' : `${source.name} (stack head)`;
 }
 
 /** `kind: 'plan'` is a `propose_plan` call (`planQuestions`), with the `steps` it proposes. A question with

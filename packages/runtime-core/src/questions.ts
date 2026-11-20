@@ -149,7 +149,9 @@ function answerText(question: Question, answer: JsonValue, answeredBy: AskAnswer
   if (question.kind === 'ask') {
     const parts = askAnswerParts(answer).map(part => [...part.selectedOptions, ...part.customInput?.trim() ? [part.customInput.trim()] : []].join('; ')).filter(Boolean);
     const by = answeredBy?.by === 'stack-head' ? `${answeredBy.name}, the head of your stack,` : 'The project agent';
-    const who = answeredBy ? `${by} answered your question (question ${question.id}) for ${answeredBy.for ?? 'the user'}, who approved its answer; the user did not write it themself.` : `The user answered your question (question ${question.id}).`;
+    const who = !answeredBy ? `The user answered your question (question ${question.id}).`
+      : answeredBy.by === 'mcp-client' ? `The user answered your question (question ${question.id}) through an MCP client.`
+      : `${by} answered your question (question ${question.id}) for ${answeredBy.for ?? 'the user'}, who approved its answer; the user did not write it themself.`;
     return `${who}\n${asked}\nAnswer: ${parts.length > 0 ? parts.join('\n') : JSON.stringify(answer)}`;
   }
   if (question.kind === 'lifecycle-approval') {
@@ -199,6 +201,7 @@ export async function settleQuestion(tx: Tx, conversationId: ConversationId, que
   const answerer = question.answeredBy;
   const sender = !answerer ? { id: 'user', name: 'The user' }
     : answerer.by === 'project-agent' ? { id: 'project-agent', name: `Project agent for ${answerer.for ?? 'the user'}` }
+    : answerer.by === 'mcp-client' ? { id: 'user', name: 'The user (through an MCP client)' }
     : { id: answerer.workspaceId, name: `${askAnswererName(answerer)} for ${answerer.for ?? 'the user'}` };
   return { conversationId: question.conversationId, requestId: `question-closed:${question.id}`, kind: 'question', sender, text,
     payload: { questionId: question.id, kind: question.kind, state: questionState(question), answer: question.answer, ...(question.answeredBy ? { answeredBy: question.answeredBy } : {}), ...(question.closed ? { closed: question.closed } : {}) } };

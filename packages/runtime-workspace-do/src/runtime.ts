@@ -15,7 +15,7 @@ import { applyInferenceThinking, createSessionControls, SessionControlsDoc, type
 import type { PendingAskAnswer, RuntimeSessionCommand, RuntimeSessionResult } from '@gitspace/protocol-runtime/session-controls';
 import { RuntimeQaDocumentSchema, RuntimeSnapshotCommitInputSchema, type RuntimeBrowsersDocument, type RuntimeProcessExitedInput, type RuntimeQaActionInput, type RuntimeSnapshotCommitInput, type RuntimeSnapshotCommitResult } from '@gitspace/protocol-runtime';
 import type { z } from 'zod';
-import { createAutomationRequests, type RuntimeAutomationInput, type RuntimeRequestStatus } from '@gitspace/runtime-core';
+import { createAutomationRequests, UNANSWERED_INPUT, type RuntimeAutomationInput, type RuntimeRequestStatus } from '@gitspace/runtime-core';
 import type { JsonValue } from '@earendil-works/chord/json';
 import { createSessionHistory } from './session-history.js';
 import { createReplicaStore, replicaEvents } from './replica-store.js';
@@ -153,8 +153,6 @@ const REPORT_CHARACTERS = 280;
 /** Each message `turnItems` returns. */
 const TURN_ITEM_CHARACTERS = 400;
 const REPORT_VERB: Record<WorkspaceTurnReport['outcome'], string> = { finished: 'finished', failed: 'failed', asked: 'asked', approval: 'needs approval' };
-/** Why an unanswered input's turn ended, when pi recorded no detail. */
-const UNANSWERED: Record<string, string> = { aborted: 'it was stopped before it finished', reset: 'its context was reset before it answered', no_model: 'no model was available', withdrawn: 'it was withdrawn before it started' };
 /** Why the newest run ended without an answer, as the chat says it, from pi's `runFailure`; null for an ending the person
  * caused (Stop, a reset) or that needs no notice (nothing to answer). `detail` is pi's: a provider error, the missing
  * model, what was cut off and how often, or the tool rounds taken. */
@@ -654,7 +652,7 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
       const text = (asked ?? reply).slice(0, REPORT_CHARACTERS) || null;
       return { state: 'ended', outcome: asked === null ? 'finished' : 'asked', text, source: reply && first ? { conversationId: String(runtime.root.id), ordinal: Number(record.answer) * 1024 + first.index, characters: reply.length } : null };
     }
-    const why = typeof record.detail === 'string' ? providerErrorText(record.detail) : UNANSWERED[record.reason] ?? record.reason;
+    const why = typeof record.detail === 'string' ? providerErrorText(record.detail) : UNANSWERED_INPUT[record.reason] ?? record.reason;
     return { state: 'ended', outcome: record.reason === 'withdrawn' ? 'withdrawn' : 'failed', text: why.slice(0, REPORT_CHARACTERS), source: null };
   }
   /** pi settles a run's inputs as the run ends, so a submission names exactly the turn it started. */
