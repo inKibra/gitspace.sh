@@ -2391,6 +2391,9 @@ export const ReleaseRecordWireCodec = wire.object({
   error: wire.nullable(wire.string),
   machineErrors: wire.optional(wire.record(wire.string)),
   machineLaunchedAt: wire.optional(wire.string),
+  /** Worker startup Cloudflare measured at the release's last upload; `startupWarning` is set from 700 ms. */
+  startupTimeMs: wire.optional(wire.nullable(wire.number)),
+  startupWarning: wire.optional(wire.nullable(wire.string)),
 });
 /** The account's latest launch, as the building machine (or, for a release it holds, the account) reported it; phases
  * also arrive as `deployment` fact events. */

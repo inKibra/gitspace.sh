@@ -159,8 +159,10 @@ deploys as before. From 700 ms (`WORKER_STARTUP_WARNING_MS` in `protocol/src/dep
 
 In `deployment.status` (`gitspace_deployment_status`) each release record carries `startupTimeMs` and, from 700 ms,
 `startupWarning`. The account records them from the `/deploy` answer, and from `/state` when the swap replaced the
-Worker before that answer arrived. A record from before this has neither. There is no alert path from the platform to
-an account's Needs you; the status field and the warn log are the warning.
+Worker before that answer arrived. A record from before this has neither. The RPC view (`deploymentView` in
+`account-worker/src/account-cloud-rpc.ts`, `ReleaseRecordWireCodec` in `protocol/src/rpc-contract.ts`) names each field
+it passes, so both are listed there too. There is no alert path from the platform to an account's Needs you; the status
+field and the warn log are the warning.
 
 ## What leaves the platform
 

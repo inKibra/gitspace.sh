@@ -1058,6 +1058,18 @@ describe('cloud projects and workspace relations with no machines', () => {
     }, 'builder');
     expect(await inspectorClient(fixture).deployment.status({})).toMatchObject({ status: 'ok', value: { releases: [{ sha: 'portable-view', artifacts: { portable } }] } });
   });
+
+  it('reports each Worker release\'s startup and its warning to the deployment status view', async () => {
+    const fixture = await account(['rpc.read', 'rpc.write']);
+    network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/state`, () => HttpResponse.json({ control: { status: 'active' }, deployment: { active: 'startup-view', startupTimeMs: 720 } })));
+    await env.TENANT_RELEASES.getByName(fixture.userId).stage({
+      sha: 'startup-view', label: 'startup view', source: null, worker: null,
+      artifacts: { worker: null, machine: { key: 'releases/startup-view/machine.manifest.json', hash: `sha256:${'f'.repeat(64)}`, size: 1 }, frontend: null },
+    }, 'builder');
+    expect(await inspectorClient(fixture).deployment.status({})).toMatchObject({ status: 'ok', value: {
+      releases: [{ sha: 'startup-view', startupTimeMs: 720, startupWarning: expect.stringContaining('720 ms') }],
+    } });
+  });
 });
 
 async function inspectorWorkspace(userId: string, repositoryReference: string | null = null) {
