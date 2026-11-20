@@ -128,9 +128,17 @@ the file as it is now.
 
 `space_guide.put` takes an optional `walkthrough`: a `Sequence` whose frames are the guide at a glance (`overview`) and
 the sections, their diagrams and exhibits by reference, each with a spoken line. The `review-guide-narrator` skill
-writes it with every Guide. A Guide without one (older revisions) plays a walkthrough built from it: the overview, then
-each section's diagram, else its first exhibit, else the section, each saying the section's title and the first
-sentence of its summary. The player makes the next frames' clips while one plays, and a frame whose clip fails, is
+writes it with every Guide, and gives every section a diagram chosen by what changed (CallDiff, StateFlow or FlowMap,
+a numbered StateFlow or Sequence, MetricDelta or Stats, ChangeSet, SchemaDiff); only a section that is purely a list of
+decisions goes without one. A put is never refused for lacking them: its result leads with `toAdd`, one line per gap
+(the sections without a diagram, a missing walkthrough) saying what to add, so the writer adds them in the same turn
+(`guideVisualGaps`). A Guide without one (older revisions, or a writer that ignored the rule) plays a walkthrough built
+from it (`builtWalkthrough`): the overview, drawn as the sections in lanes by kind with their files and lines; then
+each section's diagram; else, with several exhibits, the section's card (its files, the lines they add and remove or
+its slow reads, its callouts) and its key exhibit (the first with ranges, else the first slow read, else the first),
+saying the exhibit's note; with one exhibit, that exhibit; with none, the section's card of its callouts or why. An
+exhibit frame shows its note and, without ranges, its first 16 lines of changes. A StateFlow in a frame plays its steps
+while the frame plays. The player makes the next frames' clips while one plays, and a frame whose clip fails, is
 refused or is late shows its line on its reading time with a note that the voice is off. Shares carry the
 walkthrough; they still carry no comments.
 

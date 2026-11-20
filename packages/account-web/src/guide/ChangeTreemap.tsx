@@ -30,7 +30,8 @@ function tileKey(tile: TreemapTile): string {
   return tile.files.map((file) => file.path).join('\n');
 }
 
-function Counts({ change }: { change: FileChange }) {
+/** The lines a change adds and removes, green and red. */
+export function Counts({ change }: { change: FileChange }) {
   return <span className="tabular-nums"><span style={{ color: badgeColors.green }}>+{change.additions}</span> <span style={{ color: badgeColors.red }}>−{change.deletions}</span></span>;
 }
 

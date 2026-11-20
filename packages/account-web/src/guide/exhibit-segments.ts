@@ -91,6 +91,21 @@ export function narrowExhibit(patch: string, ranges: readonly ExhibitRange[]): N
   return { segments, otherChanges };
 }
 
+/** The start of a file's patch, for a glance at it: its hunks in order up to `limit` lines in all, the last one cut
+ * where the limit falls, and how many changed lines it leaves out. */
+export function firstChanges(patch: string, limit: number): { patch: string; otherChanges: number } {
+  const { header, hunks } = parsePatch(patch);
+  const runs: DiffLine[][] = [];
+  let left = limit;
+  for (const hunk of hunks) {
+    if (left <= 0) break;
+    runs.push(hunk.slice(0, left));
+    left -= hunk.length;
+  }
+  const shown = runs.flat().filter((line) => line.kind !== ' ').length;
+  return { patch: [...header, ...runs.map(hunkText)].join('\n') + '\n', otherChanges: hunks.flat().filter((line) => line.kind !== ' ').length - shown };
+}
+
 /** The text of lines `start`–`end` of one side of a file's patch (`base`, the old file; `head`, the new), as far as the
  * patch shows them, one per line. */
 export function patchLines(patch: string, side: 'base' | 'head', start: number, end: number): string {

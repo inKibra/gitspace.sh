@@ -4,7 +4,7 @@ import { cloudProjectSummarySchema, cloudWorkspaceDefinitionSchema } from './pro
 import { WorkspacePhaseSchema } from '@gitspace/protocol-workspace';
 import { RuntimeDispatchSelectionSchema } from '@gitspace/protocol-runtime';
 import { AutomationDraftSchema, AutomationSubjectRefSchema } from './automations-contract.js';
-import { guideWalkthroughSchema, walkthroughIssues } from './guide-walkthrough.js';
+import { GUIDE_DIAGRAM_CHOICE, guideWalkthroughSchema, walkthroughIssues } from './guide-walkthrough.js';
 
 export const INSPECTOR_EVIDENCE_HISTORY_LIMIT = 20 as const;
 
@@ -383,7 +383,7 @@ export const changeGuideSectionSchema = z.object({
   summary: z.string().trim().max(4_096).optional().describe('The section in a sentence or two.'),
   readersGuide: z.string().trim().max(8_192).optional().describe('How to read the section\'s exhibits.'),
   /** Markdown holding one block fence. */
-  diagram: z.string().trim().max(65_536).optional().describe('Markdown holding one diagram block: mermaid, svg or gitspace-ui.'),
+  diagram: z.string().trim().max(65_536).optional().describe(`The block that shows the section's change, as Markdown holding one block fence, chosen by what changed (${GUIDE_DIAGRAM_CHOICE}). Only a section that is purely a list of decisions goes without one, and says why in its readersGuide.`),
   evidence: z.array(evidenceReferenceSchema).max(64).optional().describe('Evidence for the section: runs, captures, files.'),
 }).strict();
 export type ChangeGuideSection = z.infer<typeof changeGuideSectionSchema>;
@@ -441,7 +441,7 @@ const changeGuideNarrativeFields = {
   intro: z.string().trim().max(16_384).optional().describe('The guide\'s opening, in Markdown.'),
   captures: z.array(evidenceReferenceSchema).max(64).optional().describe('Screenshots, videos or browser captures shown with the intro.'),
   map: changeMapSchema.optional().describe('The change as areas of the codebase and the paths between them.'),
-  walkthrough: guideWalkthroughSchema.optional().describe('The guide played as a walkthrough: a gitspace-ui spec { "root", "elements" } whose root is a Sequence of 2–30 frames in reading order, each { "content": …, "say": "one or two spoken sentences" }. A frame\'s content is { "ref": "overview" } (the guide at a glance: its title and its sections with their kinds), { "ref": "section:<id>" } (a section\'s title, summary and diagram), { "ref": "diagram:<id>" } (its diagram), { "ref": "exhibit:<sectionId>:<path>" } (an exhibit\'s lines), { "ref": "<block id>" } of a block element in the guide\'s Markdown, or one element. Without one the guide plays one built from its sections.'),
+  walkthrough: guideWalkthroughSchema.optional().describe('The guide played as a walkthrough; write one with every guide. A gitspace-ui spec { "root", "elements" } whose root is a Sequence of 2–30 frames in reading order, each { "content": …, "say": "one or two spoken sentences" }, the frames mostly diagrams and exhibits rather than prose. A frame\'s content is { "ref": "overview" } (the guide at a glance: its sections by kind with their files), { "ref": "section:<id>" } (a section\'s title, summary and diagram), { "ref": "diagram:<id>" } (its diagram), { "ref": "exhibit:<sectionId>:<path>" } (an exhibit\'s lines), { "ref": "<block id>" } of a block element in the guide\'s Markdown, or one element. A guide put without one names it in the result\'s toAdd.'),
 };
 
 /** What an intro capture shows. */

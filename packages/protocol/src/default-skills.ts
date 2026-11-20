@@ -1,13 +1,39 @@
 import { UI_SKILL_DESCRIPTION, uiBlockPrompt } from './gitspace-ui.js';
 
-const REVIEW_GUIDE_NARRATOR = `---
+/** The review-guide-narrator skill's worked example, about a fictional app: one section whose diagram is a CallDiff,
+ * and the walkthrough of its guide in five frames. A guide of that section and walkthrough puts with nothing to add
+ * (tested). */
+export const NARRATOR_EXAMPLE = {
+  title: 'One overdue email per loan',
+  section: {
+    id: 'claim', kind: 'behavior', title: 'Each loan is claimed before its reminder', requirementIds: [],
+    summary: 'A retried run skips the loans it already emailed.',
+    explanation: '`loans.claimReminder` sets `reminded_at` only where it is still empty, so one run claims each loan, and `mail.send` runs only after a claim.',
+    why: 'Retries sent borrowers the same overdue email twice; the journal decision "claim before send" chose a claim over a log of sent mail.',
+    readersGuide: 'Check that nothing sends before the claim.',
+    exhibits: [{ path: 'apps/api/src/reminders.ts', blobId: '4b825dc642cb6eb9a060e54bf8d69288fbee4904', note: 'The claim guards the send.', slowRead: true, ranges: [{ start: 18, end: 26, note: 'Claim, then send.' }] }],
+    diagram: '```gitspace-ui CallDiff\n{"title":"sendReminders, before and after","lines":[{"depth":0,"code":"for (const loan of overdue)","change":"same","path":"apps/api/src/reminders.ts"},{"depth":1,"code":"await mail.send(loan.borrower, email)","change":"removed","note":"sent again on every retry"},{"depth":1,"code":"if (!(await loans.claimReminder(loan.id))) continue","change":"added","note":"one run wins each loan"},{"depth":1,"code":"await mail.send(loan.borrower, email)","change":"added"}]}\n```',
+  },
+  frames: [
+    { content: { ref: 'overview' }, say: 'Borrowers now get one overdue email per loan, even when the nightly run retries.' },
+    { content: { ref: 'diagram:claim' }, say: 'Each loan is claimed before its email goes out. A retry finds it claimed and skips it.' },
+    { content: { ref: 'exhibit:claim:apps/api/src/reminders.ts' }, say: 'Here the claim guards the send.' },
+    { content: { type: 'MetricDelta', props: { metrics: [{ label: 'Emails per night', before: 412, after: 206, unit: 'count', better: 'lower' }, { label: 'Borrowers emailed twice', before: 198, after: 0, unit: 'count', better: 'lower' }] }, children: [] }, say: 'On last Tuesday\'s loans, emails halved and nobody got two.' },
+    { content: { type: 'Markdown', props: { content: '**Read closely:** the retry test runs the job twice over one night.' }, children: [] }, say: 'The retry test runs the job twice over one night and expects one email per loan.' },
+  ],
+} as const;
+
+/** The review-guide-narrator skill: built on first read, as it prints its example's JSON. */
+function reviewGuideNarrator(): string {
+  const frames = NARRATOR_EXAMPLE.frames.map((frame) => `  ${JSON.stringify(frame)}`).join(',\n');
+  return `---
 name: review-guide-narrator
-description: Write a reviewable Change Guide grounded in the Goal, the Journal and the current Git diff. Use when asked to generate or refresh the Change Guide.
+description: Write a reviewable Change Guide grounded in the Goal, the Journal and the current Git diff, with a diagram per section and a narrated walkthrough. Use whenever you write or update a Change Guide (space_guide put), including when told to write one with a pull request.
 ---
 
 # Review Guide Narrator
 
-Turn the diff into the PR as a build-order story a reviewer reads top to bottom, not a file inventory.
+Turn the diff into the PR as a build-order story a reviewer reads top to bottom, not a file inventory. Show the change: every section carries a diagram, and every guide a walkthrough made of diagrams and exhibits.
 
 ## Gather
 
@@ -28,32 +54,60 @@ The space_* tools are called from a codemode script, as \`tools.<name>(args)\`; 
   - \`readersGuide\`: what to look at in the code and what to check;
   - \`exhibits\`: path, blob, note, and \`ranges\` with a note on the lines that matter;
   - \`requirementIds\` the section proves, and \`evidence\` (the command, test or bench run, or commit that proves it);
-  - \`diagram\` only when a picture explains more than the prose: one block, as the drawing brief in your instructions shows (the short form for one component; skill://gitspace-ui for the rest).
+  - \`diagram\`: one block that shows what the section changed (below).
 
-Read the arguments with \`await tools.describe('space_guide', 'put')\`, then \`put\` with the revision from \`get\` (0 creates); the host records who wrote it. Every Markdown field and diagram is validated; an error names the field and the path inside the block. Fix and resubmit until accepted.
+## Diagrams
+
+Every section's \`diagram\` holds one block, in the short form of the drawing brief in your instructions (skill://gitspace-ui for every prop), chosen by what changed:
+
+- a call path: CallDiff, the calls one request makes before and after;
+- a request or data path across parts: StateFlow (the state each service holds as a call moves) or FlowMap (areas and the paths between them);
+- a multi-step process: a StateFlow whose step captions are numbered, or a Sequence;
+- counts or before/after numbers: MetricDelta (before → after) or Stats (headline numbers);
+- many files by kind: a ChangeSet; take \`props\` from \`tools.blocks({ op: 'changeSet' })\`, keep the section's files, and group them by kind (tests deleted, tests rewritten, production code);
+- a schema: SchemaDiff.
+
+Only a section that is purely a list of decisions may go without one, and its \`readersGuide\` then says why. Draw from the diff's real calls, files and numbers, never invented ones.
 
 ## Walkthrough
 
-Every guide you write carries a \`walkthrough\`: a gitspace-ui spec whose root is a Sequence of 2 to 30 frames in reading order. Each frame shows one part of the guide by ref, with one or two spoken sentences as its \`say\`:
+Every guide you put carries a \`walkthrough\`, a revision that only updates blobs or a note included: carry it forward from \`get\`, fixing refs to anything you removed. It is a gitspace-ui spec whose root is a Sequence of 2 to 30 frames in reading order. Each frame shows one thing, mostly a diagram or an exhibit rather than prose, and says one or two plain sentences (\`say\`) about what to look at:
 
-- \`{ "ref": "overview" }\`: the guide at a glance, its title and its sections with their kinds, to open the tour;
-- \`{ "ref": "section:<section id>" }\`: the section's title, summary and diagram;
-- \`{ "ref": "diagram:<section id>" }\`: the section's diagram alone;
-- \`{ "ref": "exhibit:<section id>:<path>" }\`: an exhibit's lines, by its repository path;
-- \`{ "ref": "<block id>" }\`: a block element with that \`id\` in the guide's Markdown;
-- or one element of its own, such as a Markdown frame that opens or closes the tour.
+- \`{ "ref": "overview" }\` opens it: the sections by kind with their files;
+- then for each section \`{ "ref": "diagram:<section id>" }\`, and \`{ "ref": "exhibit:<section id>:<path>" }\` for the exhibit that carries it, best one with \`ranges\`;
+- \`{ "ref": "section:<section id>" }\` (title, summary and diagram), \`{ "ref": "<block id>" }\` (a block with that \`id\` in the guide's Markdown) or one element of its own (a MetricDelta of results, a Markdown frame that closes the tour) where they say more.
 
-\`{ "root": "tour", "elements": { "tour": { "type": "Sequence", "props": { "title": "<guide title>", "frames": [{ "content": { "ref": "section:store" }, "say": "Reads now go through the cache." }, { "content": { "ref": "exhibit:store:src/store.ts" }, "say": "Here the store checks the cache first." }] }, "children": [] } } }\`
+A StateFlow plays its steps while its frame plays, about 2 seconds a step: give its frame a \`hold\` that long. A ref that names nothing in the guide is refused with its path.
 
-Open with the overview, then follow the sections' order: a section, then its diagram or the exhibit that carries it. A ref that names nothing in the guide is refused with its path.
+## Example
+
+A section of a fictional guide for Shelf, a library's lending app; its diagram is a CallDiff:
+
+\`\`\`json
+${JSON.stringify(NARRATOR_EXAMPLE.section)}
+\`\`\`
+
+Its guide's walkthrough, five frames:
+
+\`\`\`json
+{ "root": "tour", "elements": { "tour": { "type": "Sequence", "children": [], "props": { "title": ${JSON.stringify(NARRATOR_EXAMPLE.title)}, "frames": [
+${frames}
+] } } } }
+\`\`\`
+
+## Put
+
+Read the arguments with \`await tools.describe('space_guide', 'put')\`, then \`put\` with the revision from \`get\` (0 creates); the host records who wrote it. Every Markdown field and diagram is validated; an error names the field and the path inside the block. Fix and resubmit until accepted. The result leads with \`toAdd\` when a section has no diagram or the guide no walkthrough: add what each line asks and put again in the same turn.
 
 ## Hard rules
 
 - HEAD and \`baseCommit\` are the checkout's; the guide's diffs compare against \`baseCommit\`.
 - Every changed file appears in some section's exhibits; leftovers go in one mechanical section.
 - Reader order is authoritative.
+- A revision is the whole guide: carry every field you are not changing forward from \`get\`.
 - Only a person approves a guide or accepts a requirement; never claim either.
 `;
+}
 
 function gitSpaceSkill(name: string, description: string, body: string): string {
   return `---\nname: ${name}\ndescription: ${description}\n---\n\n# ${name}\n\n${body.trim()}\n`;
@@ -201,6 +255,7 @@ Search before guessing names. Describe unfamiliar tools before calling them. Com
 /** The `gitspace-ui` skill, built on first read: `uiBlockPrompt` renders every block component's JSON Schema, about
  * 8 ms of the account worker's startup when built at module load. */
 let gitspaceUiSkill: string | undefined;
+let narratorSkill: string | undefined;
 
 export const DEFAULT_SKILLS: Readonly<Record<string, string>> = {
   'space-goal': SPACE_GOAL,
@@ -208,7 +263,7 @@ export const DEFAULT_SKILLS: Readonly<Record<string, string>> = {
   'space-review': SPACE_REVIEW,
   'space-artifacts': SPACE_ARTIFACTS,
   'phase-journal': PHASE_JOURNAL,
-  'review-guide-narrator': REVIEW_GUIDE_NARRATOR,
+  get 'review-guide-narrator'() { return narratorSkill ??= reviewGuideNarrator(); },
   'workspace-services': WORKSPACE_SERVICES,
   'workspace-lifecycle': WORKSPACE_LIFECYCLE,
   'integration-code-mode': INTEGRATION_CODE_MODE,

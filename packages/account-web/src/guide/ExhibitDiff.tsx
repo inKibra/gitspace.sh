@@ -1,8 +1,9 @@
 // One exhibit of a Change Guide section at the full width: its diff between the guide's base and head, loaded as it
 // nears the reader. An exhibit with ranges shows only their lines, each range's note above them; the whole file is a
-// click away. Compared with an earlier revision, a changed section's exhibit also shows its code since that revision's
-// head. In the workspace, selecting line numbers comments on those lines (a `lines` anchor on the exhibit); review
-// threads written before comments replaced them show on their lines, read-only. A shared guide's diffs are read-only.
+// click away. At a glance (the walkthrough), an exhibit without ranges shows its first GLANCE_LINES lines of changes.
+// Compared with an earlier revision, a changed section's exhibit also shows its code since that revision's head. In the
+// workspace, selecting line numbers comments on those lines (a `lines` anchor on the exhibit); review threads written
+// before comments replaced them show on their lines, read-only. A shared guide's diffs are read-only.
 import type { ChangeGuideSection, RepositoryDiffView, ReviewThreadView } from '@gitspace/protocol';
 import { Badge, Button, ThinkingIndicator, Tooltip, badgeColors, useShape } from '@gitspace/ui';
 import { FileCode02 } from '@untitledui/icons';
@@ -13,9 +14,12 @@ import { PierreViewer } from '../inspector/FilesSurface.js';
 import { diffIdentities, ic, openWorkspaceFirst, Placeholder, RuntimeAvailability, type ThreadSelection } from '../inspector/inspector-shared.js';
 import { rpcErrorMessage } from '../rpc-error-message.js';
 import { Source } from './Authorship.js';
-import { narrowExhibit, patchLines } from './exhibit-segments.js';
+import { firstChanges, narrowExhibit, patchLines } from './exhibit-segments.js';
 
 const LARGE_DIFF_BYTES = 60_000;
+/** Lines of changes an exhibit without ranges shows at a glance: what the walkthrough's stage holds under its heading
+ * and note at a 900px-high window. */
+const GLANCE_LINES = 16;
 
 /** A workspace reviewer's actions on a guide's exhibits: opening a file, and the older review threads, read-only. A
  * shared guide's reader has none. */
@@ -35,11 +39,25 @@ function Diff({ path, diff, patch, threads, review, onSelectLines }: { path: str
   return <PierreViewer path={path} identities={diffIdentities(diff, path)} patch={patch} threads={threads} onSelectThread={(thread) => review?.onSelectThread(thread)} onSelectRange={onSelectLines ?? undefined} />;
 }
 
-function Body({ exhibit, diff, whole, review, onSelectLines, onWhole }: { exhibit: Exhibit; diff: RepositoryDiffView; whole: boolean; review: GuideReview | null; onSelectLines: ((selection: ThreadSelection) => void) | null; onWhole(): void }) {
+/** The file's changed lines a narrowed diff leaves out, and the button that shows the whole file. */
+function OtherChanges({ count, onWhole }: { count: number; onWhole(): void }) {
+  return <button type="button" onClick={onWhole} className="flex min-h-8 w-full items-center gap-1.5 border-t border-border px-3 text-left text-caption text-muted-foreground hover:text-foreground">
+    {count} other changed line{count === 1 ? '' : 's'} in this file · Show the whole file
+  </button>;
+}
+
+function Body({ exhibit, diff, whole, glance, review, onSelectLines, onWhole }: { exhibit: Exhibit; diff: RepositoryDiffView; whole: boolean; glance: boolean; review: GuideReview | null; onSelectLines: ((selection: ThreadSelection) => void) | null; onWhole(): void }) {
   const [gateOpen, setGateOpen] = useState(false);
   const ranges = exhibit.ranges ?? [];
   const narrowed = useMemo(() => ranges.length ? narrowExhibit(diff.patch, ranges) : null, [diff.patch, ranges]);
+  const glanced = useMemo(() => glance && !ranges.length ? firstChanges(diff.patch, GLANCE_LINES) : null, [glance, diff.patch, ranges.length]);
   const threads = review?.threads ?? [];
+  if (glanced && !whole) {
+    return <div data-glance-lines="" className="flex flex-col">
+      <Diff path={exhibit.path} diff={diff} patch={glanced.patch} threads={threads} review={review} onSelectLines={onSelectLines} />
+      {glanced.otherChanges ? <OtherChanges count={glanced.otherChanges} onWhole={onWhole} /> : null}
+    </div>;
+  }
   if (!narrowed || whole) {
     const bytes = new TextEncoder().encode(diff.patch).byteLength;
     if (bytes > LARGE_DIFF_BYTES && !gateOpen) return <Placeholder><Button variant="secondary" size="compact" type="button" onClick={() => setGateOpen(true)}>Large diff · {(bytes / 1024).toFixed(0)} KB · Click to render</Button></Placeholder>;
@@ -55,13 +73,11 @@ function Body({ exhibit, diff, whole, review, onSelectLines, onWhole }: { exhibi
         threads={threads.filter((thread) => thread.anchor.kind === 'line' && thread.anchor.path === exhibit.path && lines[thread.anchor.side].has(thread.anchor.startLine))} review={review} onSelectLines={onSelectLines} /></div>
         : <p className="px-3 py-2 text-caption text-muted-foreground">Lines {range.start}–{range.end} are not changed in this diff.</p>}
     </div>)}
-    {narrowed.otherChanges ? <button type="button" onClick={onWhole} className="flex min-h-8 w-full items-center gap-1.5 border-t border-border px-3 text-left text-caption text-muted-foreground hover:text-foreground">
-      {narrowed.otherChanges} other changed line{narrowed.otherChanges === 1 ? '' : 's'} in this file · Show the whole file
-    </button> : null}
+    {narrowed.otherChanges ? <OtherChanges count={narrowed.otherChanges} onWhole={onWhole} /> : null}
   </>;
 }
 
-export function ExhibitDiff({ exhibit, entity = null, onLoadDiff, review, since }: {
+export function ExhibitDiff({ exhibit, entity = null, onLoadDiff, review, since, glance = false }: {
   exhibit: Exhibit;
   /** The exhibit's anchor (`exhibit:<section id>:<path>`): its lines take comments where its document does. */
   entity?: string | null;
@@ -69,6 +85,8 @@ export function ExhibitDiff({ exhibit, entity = null, onLoadDiff, review, since 
   review: GuideReview | null;
   /** An earlier revision to show this file's diff since: between its head commit and this revision's. */
   since?: { revision: number; onLoad(path: string): Promise<RepositoryDiffView> } | null;
+  /** Shown at a glance: without ranges, only the first lines of changes. */
+  glance?: boolean;
 }) {
   const scope = useContext(CommentScope);
   const [selected, setSelected] = useState<ThreadSelection | null>(null);
@@ -118,7 +136,7 @@ export function ExhibitDiff({ exhibit, entity = null, onLoadDiff, review, since 
       : !requested ? <Placeholder>The diff loads as it nears the reading position.</Placeholder>
         : error ? <Placeholder><span className="text-destructive">{error}</span></Placeholder>
           : !diff ? <div className="flex min-h-28 items-center justify-center"><ThinkingIndicator aria-label="Loading diff…" /></div>
-            : <Body exhibit={exhibit} diff={diff} whole={whole || fromSince} review={fromSince ? null : review} onWhole={() => setWhole(true)}
+            : <Body exhibit={exhibit} diff={diff} whole={whole || fromSince} glance={glance} review={fromSince ? null : review} onWhole={() => setWhole(true)}
               onSelectLines={entity !== null && scope?.editable && scope.document && !fromSince ? setSelected : null} />}
     {selected && diff && entity !== null && hostRef.current ? <TargetCommentEditor around={hostRef.current} onClose={() => setSelected(null)}
       label={`${exhibit.path} · ${selected.startLine === selected.endLine ? `line ${selected.startLine}` : `lines ${selected.startLine}–${selected.endLine}`}`}

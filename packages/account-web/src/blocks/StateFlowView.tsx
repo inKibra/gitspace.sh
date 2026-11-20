@@ -1,11 +1,13 @@
 // A StateFlow block: services and the state each holds, played one step at a time. Each step's call travels as a token
 // from one service to the other and the state it sets updates there; removed services and calls are struck, added green.
+// In a Sequence frame, its steps play while the frame plays and pause with it.
 import type { gitspaceUiCatalog } from '@gitspace/protocol/gitspace-ui';
 import { badgeColors } from '@gitspace/ui';
 import { ChevronLeft, ChevronRight, PauseCircle, PlayCircle, RefreshCcw01 } from '@untitledui/icons';
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import type { z } from 'zod';
 import { ItemComment, commentItem } from '../comments/CommentLayer.js';
+import { SequenceFrame } from './BlockDocument.js';
 
 type StateFlowProps = z.output<typeof gitspaceUiCatalog.components.StateFlow.props>;
 type Service = StateFlowProps['services'][number];
@@ -36,6 +38,11 @@ export function StateFlowView(props: StateFlowProps) {
   const boxes = useRef(new Map<string, HTMLDivElement>());
   const [points, setPoints] = useState<{ from: { x: number; y: number }; to: { x: number; y: number } } | null>(null);
   const current = step >= 0 ? steps[step] : undefined;
+  const framePlaying = useContext(SequenceFrame)?.playing ?? null;
+
+  useEffect(() => {
+    if (framePlaying !== null) setPlaying(framePlaying);
+  }, [framePlaying]);
 
   useEffect(() => {
     if (!playing) return;

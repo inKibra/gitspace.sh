@@ -125,7 +125,7 @@ export function GuideDocument({ guide, kicker, actions, onLoadDiff, workspace, c
         <span>· {guide.sections.length} section{guide.sections.length === 1 ? '' : 's'} · {files} file{files === 1 ? '' : 's'}</span>
         <Source by="gitspace" what="the base and head commits the guide's diffs compare" />
       </p>
-      <div className="flex flex-wrap items-center gap-1"><GuideWalkthroughButton guide={guide} onLoadDiff={loadDiff} />{actions}</div>
+      <div className="flex flex-wrap items-center gap-1"><GuideWalkthroughButton guide={guide} changes={changes} onLoadDiff={loadDiff} />{actions}</div>
       {comparison ? <ComparisonSummary comparison={comparison} /> : null}
       {workspace ? <div className="flex flex-col gap-1.5">
         <div className="flex gap-1" aria-hidden>{guide.sections.map((section) => <span key={section.id} className="h-1 flex-1 rounded-full" style={{ background: workspace.readIds.has(section.id) ? badgeColors.green : 'var(--border)' }} />)}</div>

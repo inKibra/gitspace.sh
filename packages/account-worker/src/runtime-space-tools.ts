@@ -5,6 +5,7 @@ import {
   putChangeGuideInputSchema, putGoalInputSchema, putRubricInputSchema, putWorkflowInputSchema,
   reviewAnchorContextSchema, rubricAgentDraftSchema, startJournalPhaseInputSchema, workflowAgentDraftSchema,
 } from '@gitspace/protocol';
+import { guideVisualGaps } from '@gitspace/protocol/guide-walkthrough';
 import { RuntimeIdentitySchema, RuntimeJsonSchema } from '@gitspace/protocol-runtime';
 
 export const runtimeSpaceToolNames: readonly string[] = ['space_goal', 'space_workflow', 'space_rubric', 'space_journal', 'space_guide', 'space_review'];
@@ -57,7 +58,13 @@ export async function invokeRuntimeSpaceTool(env: Env, identity: z.infer<typeof 
     case 'space_journal.endPhase': return publish('journal', await context.endJournalPhase(endJournalPhaseInputSchema.parse({ ...args, entryId: `end:${input.attemptId}`, createdBy: actorId, repository: await repository() })));
     case 'space_journal.append': return publish('journal', await context.appendJournalEntry(appendJournalEntryInputSchema.parse({ ...args, id: `entry:${input.attemptId}`, createdBy: actorId })), 'append');
     case 'space_guide.get': return context.getChangeGuide(owned);
-    case 'space_guide.put': return publish('change-guide', await context.putChangeGuide(putChangeGuideInputSchema.parse({ ...args, guide: { ...changeGuideAgentDraftSchema.parse(payload.guide), createdBy: actorId } })));
+    case 'space_guide.put': {
+      // What the revision lacks to show its change leads the result, so the writer adds it in the same turn.
+      const guide = changeGuideAgentDraftSchema.parse(payload.guide);
+      const stored = await publish('change-guide', await context.putChangeGuide(putChangeGuideInputSchema.parse({ ...args, guide: { ...guide, createdBy: actorId } })));
+      const toAdd = guideVisualGaps(guide);
+      return toAdd.length > 0 ? { toAdd, ...stored } : stored;
+    }
     case 'space_guide.markRead': return publish('change-guide', await context.markGuideSectionRead(markGuideSectionReadInputSchema.parse({ ...args, reviewerId: actorId })));
     case 'space_review.list': return context.listReviewThreads(owned, reviewContext);
     default: throw new Error('Unknown workspace authority operation');

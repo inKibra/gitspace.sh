@@ -1,9 +1,11 @@
 // A Change Guide's walkthrough (docs/BLOCK-DOCUMENTS-DESIGN.md §6): a gitspace-ui spec whose root is a Sequence, stored
 // with its revision. Besides what any Sequence frame shows, a walkthrough frame shows a part of its guide by ref:
-// `overview` (the guide at a glance: its title and its sections with their kinds), `section:<id>` (the section's title,
-// summary and diagram), `diagram:<id>` (the section's diagram) or `exhibit:<section id>:<path>` (an exhibit's lines); a
+// `overview` (the guide at a glance: its sections by kind with their files), `section:<id>` (the section's title,
+// summary and diagram; without a diagram, a card of its files and its callouts or why), `diagram:<id>` (the section's
+// diagram) or `exhibit:<section id>:<path>` (an exhibit's note and lines); a
 // frame { ref: "<id>" } names a block element of the guide's Markdown. A guide written without a walkthrough plays one
-// built from its sections: the overview, then each section's diagram, else its first exhibit, else the section.
+// built from its sections (`builtWalkthrough`), and `guideVisualGaps` tells the writer what a guide lacks to show its
+// change: a diagram per section and a walkthrough.
 import { z } from 'zod';
 import { extractBlocks, fenceSpec, isRecord, parseBlockRef, validateUiSpec, type UiBlockIssue } from './gitspace-ui.js';
 import type { ChangeGuideSection } from './inspector-contract.js';
@@ -165,23 +167,55 @@ export function firstSentence(markdown: string | undefined): string | null {
   return sentence && sentence.length <= MAX_SENTENCE && !sentence.endsWith(':') ? asSentence(sentence) : null;
 }
 
-/** The walkthrough of a guide written without one: the guide at a glance (`overview`), saying its title and the first
- * sentence of its introduction; then for each section its diagram, else its first exhibit, else the section itself,
- * saying its title and the first sentence of its summary (or explanation). A line is one or two whole sentences. */
+/**
+ * The walkthrough of a guide written without one, drawn from the guide's own data. It opens on the overview (the
+ * sections by kind with their files), saying the guide's title and the first sentence of its introduction. Then each
+ * section:
+ * - with a diagram: the diagram;
+ * - with exhibits: its key exhibit (the first with line ranges, else the first marked for a slow read, else the
+ *   first); with several exhibits, first the section (its card: files, lines and callouts), then the key exhibit,
+ *   saying the exhibit's note;
+ * - with neither: the section, its card of callouts or why.
+ * A section's first frame says its title and the first sentence of its summary (or explanation); every line is one or
+ * two whole sentences. A section with several exhibits shows its key exhibit alone, from the last section on, when
+ * the frames would pass 30.
+ */
 export function builtWalkthrough(guide: GuideParts): GuideWalkthrough {
   const count = guide.sections.length;
   const named = plainText(guide.title);
   const title = named && named.length <= MAX_SENTENCE ? asSentence(named) : 'The change.';
   const opening = { content: { ref: 'overview' }, say: `${title} ${firstSentence(guide.intro) ?? `It has ${count} section${count === 1 ? '' : 's'}.`}` };
-  const frames = guide.sections.slice(0, MAX_FRAMES - 1).map((section, index) => {
-    const [exhibit] = section.exhibits;
+  const shown = guide.sections.slice(0, MAX_FRAMES - 1);
+  /** Frames left for section cards once every section has its frame. */
+  let spare = MAX_FRAMES - 1 - shown.length;
+  const frames = shown.flatMap((section, index) => {
     const sectionTitle = plainText(section.title);
     const heading = sectionTitle && sectionTitle.length <= MAX_SENTENCE ? `Section ${index + 1}: ${asSentence(sectionTitle)}` : `Section ${index + 1}.`;
     const summary = firstSentence(section.summary) ?? firstSentence(section.explanation);
-    return {
-      content: { ref: section.diagram ? `diagram:${section.id}` : exhibit ? `exhibit:${section.id}:${exhibit.path}` : `section:${section.id}` },
-      say: summary && heading.length + summary.length < MAX_SAY ? `${heading} ${summary}` : heading,
-    };
+    const say = summary && heading.length + summary.length < MAX_SAY ? `${heading} ${summary}` : heading;
+    if (section.diagram) return [{ content: { ref: `diagram:${section.id}` }, say }];
+    const card = { content: { ref: `section:${section.id}` }, say };
+    const exhibit = section.exhibits.find((candidate) => candidate.ranges?.length) ?? section.exhibits.find((candidate) => candidate.slowRead) ?? section.exhibits[0];
+    if (!exhibit) return [card];
+    const diff = { ref: `exhibit:${section.id}:${exhibit.path}` };
+    if (section.exhibits.length < 2 || spare === 0) return [{ content: diff, say }];
+    spare -= 1;
+    return [card, { content: diff, say: firstSentence(exhibit.note) ?? 'Here are its key lines.' }];
   });
   return { root: 'walkthrough', elements: { walkthrough: { type: 'Sequence', props: { title: guide.title.slice(0, 120), frames: [opening, ...frames] }, children: [] } }, state: {} };
+}
+
+/** The blocks that show a section's change, by what changed: the guide's `diagram` field says so, and `put` repeats it
+ * for each section without one. */
+export const GUIDE_DIAGRAM_CHOICE = 'a call path: CallDiff; a request or data path across parts: StateFlow or FlowMap; a multi-step process: numbered StateFlow or Sequence; counts or before/after numbers: MetricDelta or Stats; many files by kind: ChangeSet from tools.blocks changeSet; a schema: SchemaDiff';
+
+/** What a written guide lacks to show its change rather than tell it, one line per gap saying what to add: its sections
+ * without a diagram (a decision section without exhibits, purely a list of decisions, may go without one), and a
+ * missing walkthrough. Empty when it lacks neither. */
+export function guideVisualGaps(guide: GuideParts & { walkthrough?: unknown }): string[] {
+  const bare = guide.sections.filter((section) => !section.diagram && !(section.kind === 'decision' && section.exhibits.length === 0)).map((section) => section.id);
+  return [
+    ...bare.length ? [`Sections without a diagram: ${bare.join(', ')}. Give each one diagram chosen by what it changed (${GUIDE_DIAGRAM_CHOICE}).`] : [],
+    ...guide.walkthrough === undefined ? ['No walkthrough: add one that opens on the overview, then shows each section\'s diagram and key exhibit, each frame saying one or two sentences.'] : [],
+  ];
 }

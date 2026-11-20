@@ -31,6 +31,12 @@ export const SECTION_KIND: Record<ChangeGuideSection['kind'], { label: string; c
   mechanical: { label: 'Mechanical', color: badgeColors.gray },
 };
 const CALLOUT: Record<NonNullable<ChangeGuideSection['callouts']>[number]['tone'], string> = { risk: 'Risk.', mechanical: 'Mechanical.', decision: 'Decision.' };
+
+/** A note the reviewer must not miss, marked by its tone. */
+export function Callout({ callout }: { callout: NonNullable<ChangeGuideSection['callouts']>[number] }) {
+  return <div className="border-l-2 pl-3 text-body leading-relaxed" style={{ borderColor: callout.tone === 'risk' ? badgeColors.amber : callout.tone === 'decision' ? badgeColors.violet : badgeColors.gray }}><GitSpaceMarkdown>{`**${CALLOUT[callout.tone]}** ${callout.text}`}</GitSpaceMarkdown></div>;
+}
+
 /** Prose keeps a reading measure; code and pictures take the whole width. */
 export const MEASURE = 'mx-auto w-full max-w-[46rem]';
 
@@ -208,7 +214,7 @@ export function GuideSection({ section, index, map, open, onMapNow, onToggle, on
         {section.summary ? <div className="text-body font-medium leading-relaxed text-foreground"><GitSpaceMarkdown>{section.summary}</GitSpaceMarkdown></div> : null}
         <div className="text-body leading-relaxed"><GitSpaceMarkdown>{section.explanation}</GitSpaceMarkdown></div>
         {section.why ? <div className="text-body leading-relaxed text-muted-foreground"><GitSpaceMarkdown>{`**Why.** ${section.why}`}</GitSpaceMarkdown></div> : null}
-        {section.callouts?.map((callout, calloutIndex) => <div key={calloutIndex} className="border-l-2 pl-3 text-body leading-relaxed" style={{ borderColor: callout.tone === 'risk' ? badgeColors.amber : callout.tone === 'decision' ? badgeColors.violet : badgeColors.gray }}><GitSpaceMarkdown>{`**${CALLOUT[callout.tone]}** ${callout.text}`}</GitSpaceMarkdown></div>)}
+        {section.callouts?.map((callout, calloutIndex) => <Callout key={calloutIndex} callout={callout} />)}
         <SectionDiagram section={section} map={map} />
       </div>
       {section.exhibits.length ? <div className="flex flex-col gap-4">

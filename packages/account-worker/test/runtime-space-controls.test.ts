@@ -70,6 +70,20 @@ describe('Cloud workspace authority controls', () => {
     const phaseRunId = z.object({ phaseRunId: z.string() }).parse(started).phaseRunId;
     expect(await call('space_journal', { method: 'endPhase', phaseRunId, outcome: 'Parser built.', decisions: [], surprises: [], revert: null })).toMatchObject({ kind: 'phase-end', phaseRunId, createdBy: 'conversation:agent-a' });
   });
+  it('leads a guide put\'s result with what the revision lacks to show its change, and leaves it out once nothing is missing', async () => {
+    const { call, context, owned } = await fixture();
+    const section = { id: 'parse', title: 'Parse v2 headers', kind: 'behavior', explanation: 'Reads the version first.', why: '', requirementIds: [], exhibits: [] };
+    const draft = { headCommit: 'a'.repeat(40), baseRef: 'main', baseCommit: 'b'.repeat(40), title: 'Parser v2', sections: [section] };
+    const bare = z.record(z.string(), z.unknown()).parse(await call('space_guide', { method: 'put', expectedRevision: 0, guide: draft }));
+    expect(Object.keys(bare)[0]).toBe('toAdd');
+    expect(bare).toMatchObject({ revision: 1, toAdd: [expect.stringContaining('Sections without a diagram: parse.'), expect.stringContaining('No walkthrough')] });
+    expect(await context.getChangeGuide(owned)).not.toHaveProperty('toAdd');
+    const diagram = '```mermaid\ngraph LR\n  read --> parse\n```';
+    const walkthrough = { root: 'tour', elements: { tour: { type: 'Sequence', props: { title: 'Parser v2', frames: [{ content: { ref: 'overview' }, say: 'The parser reads v2.' }, { content: { ref: 'diagram:parse' }, say: 'It reads the version first.' }] }, children: [] } } };
+    const drawn = await call('space_guide', { method: 'put', expectedRevision: 1, guide: { ...draft, sections: [{ ...section, diagram }], walkthrough } });
+    expect(drawn).toMatchObject({ revision: 2 });
+    expect(drawn).not.toHaveProperty('toAdd');
+  });
   it('lists older review threads and refuses opening, replying to or resolving one', async () => {
     const { call } = await fixture();
     expect(await call('space_review', { method: 'list' })).toEqual([]);

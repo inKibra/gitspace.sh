@@ -8,7 +8,7 @@ import { ChangeGuideSurface } from '../inspector/ChangeGuideSurface.js';
 import { SharedGuide } from '../SharedGuide.js';
 import { ChangeMapView, READABLE_TEXT } from './ChangeMap.js';
 import { tileTint } from './ChangeTreemap.js';
-import { narrowExhibit } from './exhibit-segments.js';
+import { firstChanges, narrowExhibit } from './exhibit-segments.js';
 import { SECTION_KIND } from './GuideSection.js';
 import { ISO_LABEL, placeIsoLabels, projectIsoMap, type FileChange } from './iso-layout.js';
 import { AREA_HEIGHT, AREA_WIDTH, layoutChangeMap } from './map-layout.js';
@@ -377,28 +377,32 @@ describe('Change Guide tab', () => {
     expect(loadDiff.mock.calls.filter(([path]) => path === 'ui/panel.tsx')).toHaveLength(1);
   });
 
-  it('plays a guide written without a walkthrough as its overview, then each section\'s diagram or else its first exhibit', async () => {
+  /** The open walkthrough's dialog, and a press on its frame `number`. */
+  const dialog = (): Element => {
+    const found = document.querySelector('[role="dialog"]');
+    if (!found) throw new Error('no walkthrough dialog');
+    return found;
+  };
+  const frame = async (number: number): Promise<void> => {
+    const target = [...dialog().querySelectorAll<HTMLButtonElement>('button[aria-label]')].find((node) => node.getAttribute('aria-label')?.startsWith(`Frame ${number}:`));
+    await act(async () => target?.click());
+  };
+
+  it('plays a guide written without a walkthrough as its sections in lanes by kind, then each section\'s diagram or else its key exhibit', async () => {
     const stats = JSON.stringify({ root: 'stats', elements: { stats: { type: 'Stats', props: { tiles: [{ label: 'Brews queued', value: 3 }] }, children: [] } }, state: {} });
     const [schedule, heat] = sections as [ChangeGuideSection, ChangeGuideSection];
-    // The second section's summary is only a list: its card shows no Markdown.
-    const drawn: ChangeGuideView = { ...guide, sections: [schedule, { ...heat, summary: '- `firmware/heater.c` call site moved', diagram: `\`\`\`gitspace-ui\n${stats}\n\`\`\`` }] };
+    const drawn: ChangeGuideView = { ...guide, sections: [schedule, { ...heat, diagram: `\`\`\`gitspace-ui\n${stats}\n\`\`\`` }] };
     await surface({ guide: drawn });
+    // Once the guide has measured its files, the overview counts each section's lines.
+    await vi.waitFor(() => expect(container.querySelector('svg [data-area="heater"]')?.getAttribute('data-lines')).toBe('2'));
     expect(button('Play the walkthrough').dataset.walkthrough).toBe('built');
     await act(async () => button('Play the walkthrough').click());
-    const dialog = (): Element => {
-      const found = document.querySelector('[role="dialog"]');
-      if (!found) throw new Error('no walkthrough dialog');
-      return found;
-    };
-    const frame = async (number: number): Promise<void> => {
-      const target = [...dialog().querySelectorAll<HTMLButtonElement>('button[aria-label]')].find((node) => node.getAttribute('aria-label')?.startsWith(`Frame ${number}:`));
-      await act(async () => target?.click());
-    };
     const overview = dialog().querySelector('[data-walkthrough-overview]');
+    expect([...overview?.querySelectorAll('[data-walkthrough-lane]') ?? []].map((lane) => lane.getAttribute('data-walkthrough-lane'))).toEqual(['behavior', 'decision']);
     expect([...overview?.querySelectorAll('[data-walkthrough-card]') ?? []].map((card) => card.textContent)).toEqual([
-      '§1 · BehaviorPressing brew schedules itBrews are scheduled, not started.', '§2 · DecisionThe heater follows the schedule',
+      '§1 · 1 filePressing brew schedules it+1 −1', '§2 · 1 fileThe heater follows the schedule+1 −1',
     ]);
-    // The section without a diagram shows its first exhibit's diff, loaded in the dialog, outside the guide's scroll box.
+    // The section without a diagram shows its exhibit's diff, loaded in the dialog, outside the guide's scroll box.
     await frame(2);
     const exhibit = dialog().querySelector('[data-walkthrough-exhibit="schedule:ui/panel.tsx"]');
     expect(exhibit?.textContent).toContain('Pressing brew schedules it');
@@ -407,6 +411,48 @@ describe('Change Guide tab', () => {
     // The section with a diagram shows it.
     await frame(3);
     expect(dialog().querySelector('[data-walkthrough-diagram="heat"]')?.textContent).toContain('Brews queued');
+  });
+
+  it('plays a section with several exhibits as its numbers, then the start of its key exhibit with its note, and a section without exhibits as a card of its callouts', async () => {
+    const longPatch = ['diff --git a/core/queue.ts b/core/queue.ts', '--- a/core/queue.ts', '+++ b/core/queue.ts', '@@ -0,0 +1,40 @@', ...Array.from({ length: 40 }, (_, index) => `+queued(${index})`), ''].join('\n');
+    const loadDiff = vi.fn(async (path: string): Promise<RepositoryDiffView> => path === 'core/queue.ts'
+      ? { ...diffFor(path), patch: longPatch, files: [{ ...diffFor(path).files[0]!, additions: 40, deletions: 0 }] }
+      : diffFor(path));
+    const queue: ChangeGuideSection = { id: 'queue', title: 'Brews wait in a queue', kind: 'behavior', explanation: 'A queue holds brews.', why: '', requirementIds: [], summary: 'Brews wait their turn.',
+      exhibits: [{ path: 'ui/timer.tsx', blobId: null, note: 'The countdown goes.', slowRead: false }, { path: 'core/queue.ts', blobId: null, note: 'The queue, from its first line.', slowRead: true }] };
+    const night: ChangeGuideSection = { id: 'night', title: 'Night brews stay quiet', kind: 'risk', explanation: 'The fan waits.', why: 'People sleep.', requirementIds: [], exhibits: [],
+      callouts: [{ tone: 'risk', text: 'The fan may run hot.' }] };
+    await surface({ guide: { ...guide, map: undefined, sections: [queue, night] }, onLoadDiff: loadDiff });
+    await vi.waitFor(() => expect(loadDiff).toHaveBeenCalledTimes(2));
+    await act(async () => {});
+    await act(async () => button('Play the walkthrough').click());
+    await frame(2);
+    expect(dialog().textContent).toContain('§1 · Behavior');
+    for (const shown of ['Files', 'Lines added', '+41', 'Lines removed', '−1']) expect(dialog().textContent).toContain(shown);
+    await frame(3);
+    const exhibit = dialog().querySelector('[data-walkthrough-exhibit="queue:core/queue.ts"]');
+    expect(exhibit?.textContent).toContain('The queue, from its first line.');
+    await vi.waitFor(() => expect(exhibit?.querySelector('[data-glance-lines]')?.textContent).toContain('24 other changed lines in this file · Show the whole file'));
+    await frame(4);
+    expect(dialog().textContent).toContain('Night brews stay quiet');
+    expect(dialog().textContent).toContain('Risk. The fan may run hot.');
+  });
+
+  it('counts a section\'s slow reads in its card until every one of its files is measured, and shows its why without callouts', async () => {
+    const loadDiff = vi.fn(async (path: string): Promise<RepositoryDiffView> => {
+      if (path === 'core/queue.ts') throw new Error('No diff');
+      return diffFor(path);
+    });
+    const queue: ChangeGuideSection = { id: 'queue', title: 'Brews wait in a queue', kind: 'behavior', explanation: 'A queue holds brews.', why: 'Two presses used to heat twice.', requirementIds: [],
+      exhibits: [{ path: 'ui/timer.tsx', blobId: null, note: 'The countdown goes.', slowRead: true }, { path: 'core/queue.ts', blobId: null, note: 'The queue.', slowRead: true }] };
+    await surface({ guide: { ...guide, map: undefined, sections: [queue] }, onLoadDiff: loadDiff });
+    await vi.waitFor(() => expect(loadDiff.mock.calls.length).toBeGreaterThanOrEqual(2));
+    await act(async () => {});
+    await act(async () => button('Play the walkthrough').click());
+    await frame(2);
+    const card = dialog().querySelector('[data-walkthrough-section="queue"]');
+    expect(card?.querySelector('[data-walkthrough-numbers]')?.textContent).toBe('Files2Slow reads2read line by line');
+    expect(card?.textContent).toContain('Why. Two presses used to heat twice.');
   });
 });
 
@@ -497,6 +543,17 @@ describe('narrowExhibit', () => {
     expect(segments[1]!.lines.head.has(12)).toBe(true);
     expect([...segments[0]!.lines.head].some((line) => segments[1]!.lines.head.has(line))).toBe(false);
     expect(otherChanges).toBe(0);
+  });
+});
+
+describe('firstChanges', () => {
+  it('keeps the patch\'s first lines across hunks, cuts the hunk the limit falls in, and counts the changed lines it leaves out', () => {
+    const glance = firstChanges(panelPatch, 10);
+    expect(glance.patch.split('\n').filter((line) => line.startsWith('@@'))).toEqual(['@@ -1,9 +1,9 @@']);
+    expect(glance.patch).toContain('+brewButton()');
+    expect(glance.patch).not.toContain('+brewLabel');
+    expect(glance.otherChanges).toBe(3);
+    expect(firstChanges(panelPatch, 100)).toEqual({ patch: expect.stringContaining('+brewHint'), otherChanges: 0 });
   });
 });
 

@@ -90,6 +90,30 @@ describe('Sequence player', () => {
     expect(player().textContent).not.toContain('could not be drawn');
   });
 
+  it('plays a StateFlow frame\'s steps while the frame plays, and holds its step when paused', async () => {
+    const flow = { type: 'StateFlow', props: { services: [{ id: 'w', name: 'Worker' }, { id: 'c', name: 'Cache' }], steps: [{ from: 'w', to: 'c', label: 'get(key)', caption: '1. The worker asks the cache.' }, { from: 'c', to: 'w', label: 'hit', caption: '2. The cache answers.' }] }, children: [] };
+    await act(async () => root.render(<UiBlock spec={walkthrough([{ content: flow, say: 'Reads go to the cache.', hold: 8 }, { content: text('Done'), say: 'Done.' }])} />));
+    // A still frame waits for its play.
+    await advance(3_000);
+    expect(player().textContent).toContain('Press play to walk through it.');
+    await press('Play The walk');
+    await advance(300);
+    expect(player().textContent).toContain('1. The worker asks the cache.');
+    // The player's own Pause and Play, after the StateFlow's in the page.
+    const control = (label: string): HTMLButtonElement => {
+      const found = [...player().querySelectorAll<HTMLButtonElement>(`button[aria-label="${label}"]`)].at(-1);
+      if (!found) throw new Error(`no button "${label}"`);
+      return found;
+    };
+    await act(async () => control('Pause').click());
+    expect(player().dataset.sequencePlaying).toBe('false');
+    await advance(3_000);
+    expect(player().textContent).toContain('1. The worker asks the cache.');
+    await act(async () => control('Play').click());
+    await advance(2_300);
+    expect(player().textContent).toContain('2. The cache answers.');
+  });
+
   it('draws a frame { ref } as the element of the document with that id', async () => {
     const spec = { root: 'page', elements: { page: { type: 'Stack', props: {}, children: ['note', 'walk'] }, note: { ...text('The shared note'), id: 'note' }, walk: { type: 'Sequence', props: { title: 'The walk', frames: [{ content: text('Start') }, { content: { ref: 'note' } }] }, children: [] } }, state: {} };
     await act(async () => root.render(<UiBlock spec={spec} />));
