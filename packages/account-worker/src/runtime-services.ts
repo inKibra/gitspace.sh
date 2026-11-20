@@ -1009,7 +1009,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
   }
   return {
     browser: browser.manage,
-    tools: { invoke, prepareBrowser: browser.prepare, takeoverTab: browser.takeoverTab, images: options.images,
+    tools: { invoke, prepareBrowser: browser.prepare, takeoverTab: browser.takeoverTab, secureInput: browser.secureInput, images: options.images,
       // The project agent's turns carry the workspace board; a workspace agent's carry its stack board while it heads a
       // stack, and start with a Base line when its base changed, read from the cloud whether its checkout is there or on
       // a machine.

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { browserPairingCode, browserUnbase64, RuntimeBrowserTrustSchema, RuntimeAccountBrowserPairingSchema, RuntimeAccountBrowserPairingCodeSchema, RuntimeAccountBrowserRelayStatusSchema, RuntimeAccountBrowserGrantSchema, RuntimeBrowserCaptureSchema, verifyRuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserPairing, type RuntimeAccountBrowserSignedGrant, type RuntimeBrowserCapture, type RuntimeBrowserConnectedTab, type RuntimeBrowserShare, type RuntimeBrowserTrust } from '@gitspace/protocol-runtime';
+import { browserPairingCode, browserUnbase64, RuntimeBrowserTrustSchema, RuntimeAccountBrowserPairingSchema, RuntimeAccountBrowserPairingCodeSchema, RuntimeAccountBrowserRelayStatusSchema, RuntimeAccountBrowserGrantSchema, RuntimeBrowserCaptureSchema, RuntimeSecureFillResultSchema, verifyRuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserAuthorization, type RuntimeAccountBrowserPairing, type RuntimeAccountBrowserSignedGrant, type RuntimeBrowserCapture, type RuntimeBrowserConnectedTab, type RuntimeBrowserShare, type RuntimeBrowserTrust, type RuntimeSecureFillResult } from '@gitspace/protocol-runtime';
 // Comments (`browser-comments.ts`): your Chrome's in-page comment tool, and threads changed in a workspace.
 import { BROWSER_COMMENT_CROP_BYTES, RuntimeBrowserCommentChromeRequestSchema, type RuntimeBrowserCommentAuthor, type RuntimeBrowserCommentFilter, type RuntimeBrowserCommentThread, type RuntimeBrowserCommentWrite } from '@gitspace/protocol-runtime';
 import { COMMENT_CROPS, type CommentScope } from './browser-comments.js';
@@ -72,6 +72,8 @@ const Reply = z.object({ id: z.number().optional(), result: z.unknown().optional
   stepEnded: z.boolean().optional(),
   /** A hello saying the extension's popup adds tabs to workspaces (`BROWSER_WORKSPACES_PATH`, 5.12 and later). */
   addTab: z.boolean().optional(),
+  /** A hello saying the extension takes `secureFill` (`secure-input.ts`, 5.14 and later). */
+  secureInput: z.boolean().optional(),
   /** Replay steps on the extension's saved-capture card: the capture, and the workspace group its tab is in. */
   captureReplay: z.object({ captureId: z.string().uuid(), groupId: z.string().uuid() }).optional(),
   /** A name you gave a saved capture on the extension's saved-capture card, with the workspace group its tab is in. */
@@ -119,8 +121,8 @@ const CONTROL_OPERATION: Record<string, 'stopGroup' | 'closeTab' | 'focusTab' | 
  * until one does. `comments`: its hello said its in-page comment tool takes `comments` notices (from 5.11). `powers`:
  * its hello said it enforces a grant's `powers` and `everything` (from 5.11); an older one never gets a grant with either.
  * `stepEnded`: its hello said it takes `stepEnded` notices (from 5.11.1). `addTab`: its hello said its popup adds tabs
- * to workspaces (from 5.12). */
-type Connection = { socket: WebSocket; product: string; sequence: number; pending: Map<number, { resolve(value: unknown): void; reject(error: Error): void; cancelTimer(): void }>; listeners: Map<string, Set<Parameters<BrowserChannel['subscribe']>[0]>>; authorized: Set<string>; informed: Set<string> | null; controls: boolean; siteLevels: boolean; takeover: boolean; comments: boolean; powers: boolean; stepEnded: boolean; addTab: boolean; agents: Map<string, number> | null };
+ * to workspaces (from 5.12). `secureInput`: its hello said it takes `secureFill` (from 5.14). */
+type Connection = { socket: WebSocket; product: string; sequence: number; pending: Map<number, { resolve(value: unknown): void; reject(error: Error): void; cancelTimer(): void }>; listeners: Map<string, Set<Parameters<BrowserChannel['subscribe']>[0]>>; authorized: Set<string>; informed: Set<string> | null; controls: boolean; siteLevels: boolean; takeover: boolean; comments: boolean; powers: boolean; stepEnded: boolean; addTab: boolean; secureInput: boolean; agents: Map<string, number> | null };
 /** Why a grant with sites approved read-only is not sent to an extension before 5.9: it would let agents click and type there. */
 const READ_SITES_UPDATE = 'Update the GitSpace extension in this Chrome to 5.9 or later: this version cannot keep agents from clicking or typing on the sites this workspace approved read-only:';
 /** Why an extension before 5.12 cannot add a tab to a workspace from its popup. */
@@ -145,10 +147,10 @@ const BROWSER_SOCKET_TAG = 'browser';
 /** An admitted socket must finish pairing, through the extension's hello, within this long. */
 const PAIRING_DEADLINE_MS = 5000;
 /** What the relay's `ready` offers and its socket attachment records, as of this release; bumped whenever either
- * grows (2: `takeover`; 3: `comments`, `powers`; 4: `addTab`). A Chrome's socket survives a release, keeping the
- * `ready` an older relay sent and the hello flags it kept, so the relay closes one whose hello was answered by another
- * release, and the extension says hello again on its next connect. */
-const BROWSER_SOCKET_RELEASE = 4;
+ * grows (2: `takeover`; 3: `comments`, `powers`; 4: `addTab`; 5: `secureInput`). A Chrome's socket survives a release,
+ * keeping the `ready` an older relay sent and the hello flags it kept, so the relay closes one whose hello was answered
+ * by another release, and the extension says hello again on its next connect. */
+const BROWSER_SOCKET_RELEASE = 5;
 const BrowserSocket = z.object({
   /** The server challenge the pairing proof signs. */
   nonce: z.string(),
@@ -177,6 +179,8 @@ const BrowserSocket = z.object({
   stepEnded: z.boolean().optional(),
   /** Set by a hello saying the extension's popup adds tabs to workspaces. */
   addTab: z.boolean().optional(),
+  /** Set by a hello saying the extension takes `secureFill`. */
+  secureInput: z.boolean().optional(),
   /** The `BROWSER_SOCKET_RELEASE` that answered the hello. */
   release: z.number().int().optional(),
 });
@@ -364,7 +368,7 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     if (cached?.socket === bound.socket) { cached.product = product; return cached; }
     if (cached) this.disconnect(pairingId);
     // Request ids continue past any reply still in flight from before the relay hibernated.
-    const connection: Connection = { socket: bound.socket, product, sequence: Date.now(), pending: new Map(), listeners: new Map(), authorized: new Set(), informed: bound.state.chromeInfo ? new Set() : null, controls: bound.state.controls === true, siteLevels: bound.state.siteLevels === true, takeover: bound.state.takeover === true, comments: bound.state.comments === true, powers: bound.state.powers === true, stepEnded: bound.state.stepEnded === true, addTab: bound.state.addTab === true, agents: null };
+    const connection: Connection = { socket: bound.socket, product, sequence: Date.now(), pending: new Map(), listeners: new Map(), authorized: new Set(), informed: bound.state.chromeInfo ? new Set() : null, controls: bound.state.controls === true, siteLevels: bound.state.siteLevels === true, takeover: bound.state.takeover === true, comments: bound.state.comments === true, powers: bound.state.powers === true, stepEnded: bound.state.stepEnded === true, addTab: bound.state.addTab === true, secureInput: bound.state.secureInput === true, agents: null };
     this.connections.set(pairingId, connection);
     return connection;
   }
@@ -406,7 +410,7 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     const defaultPairingId = preferences.approvals.some(item => item.pairingId === preferences.defaultPairingId && confirmed.some(pairing => pairing.pairingId === item.pairingId && pairing.generation === item.generation)) ? preferences.defaultPairingId : null;
     return RuntimeProjectBrowserSettingsSchema.parse({ projectId, revision: preferences.revision, defaultPairingId, browsers: confirmed.map(pairing => {
       const approval = preferences.approvals.find(item => item.pairingId === pairing.pairingId && item.generation === pairing.generation);
-      return { pairingId: pairing.pairingId, generation: pairing.generation, name: name(pairing), note: pairing.note ?? '', connected: !!this.connection(pairing.pairingId), approved: !!approval, takeover: this.connection(pairing.pairingId)?.takeover === true, powers: approval?.powers ?? [], powersSupported: this.connection(pairing.pairingId)?.powers === true };
+      return { pairingId: pairing.pairingId, generation: pairing.generation, name: name(pairing), note: pairing.note ?? '', connected: !!this.connection(pairing.pairingId), approved: !!approval, takeover: this.connection(pairing.pairingId)?.takeover === true, powers: approval?.powers ?? [], powersSupported: this.connection(pairing.pairingId)?.powers === true, secureInput: this.connection(pairing.pairingId)?.secureInput === true };
     }) });
   }
   async setProjectSettings(projectId: string, expectedRevision: number, value: RuntimeProjectBrowserPreferences) {
@@ -767,7 +771,7 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
         socket.send(JSON.stringify({ updateRequired: { protocol: extension.protocol, minimum: BROWSER_EXTENSION_PROTOCOL - 1 } }));
         return socket.close(1008, 'Extension update required');
       }
-      socket.serializeAttachment({ ...state, product: message.Browser.slice(0, 100), ...(message.chromeInfo ? { chromeInfo: true } : {}), ...(message.controls ? { controls: true } : {}), ...(message.siteLevels ? { siteLevels: true } : {}), ...(message.takeover ? { takeover: true } : {}), ...(message.comments ? { comments: true } : {}), ...(message.powers ? { powers: true } : {}), ...(message.stepEnded ? { stepEnded: true } : {}), ...(message.addTab ? { addTab: true } : {}), release: BROWSER_SOCKET_RELEASE } satisfies BrowserSocketState);
+      socket.serializeAttachment({ ...state, product: message.Browser.slice(0, 100), ...(message.chromeInfo ? { chromeInfo: true } : {}), ...(message.controls ? { controls: true } : {}), ...(message.siteLevels ? { siteLevels: true } : {}), ...(message.takeover ? { takeover: true } : {}), ...(message.comments ? { comments: true } : {}), ...(message.powers ? { powers: true } : {}), ...(message.stepEnded ? { stepEnded: true } : {}), ...(message.addTab ? { addTab: true } : {}), ...(message.secureInput ? { secureInput: true } : {}), release: BROWSER_SOCKET_RELEASE } satisfies BrowserSocketState);
       // `groupActivity`: this relay takes each group's colour and agents in the extension's reports; `takeover`: the tabs
       // you hold (`held`) and each agent's tab (`targetId`) too; `comments`: the in-page comment tool's requests
       // (`BROWSER_COMMENT_PATH`); `powers`: this relay takes `everything` requests and sends `everything` notices;
@@ -1057,6 +1061,25 @@ export class AccountBrowserRelay implements AccountBrowserTransport {
     // The extension matches each field to the signed command, `device` and `threadId` included.
     await this.request(pairingId, { operation, groupId: command.groupId, ...(command.action === 'stop' ? {} : { targetId: command.targetId }), ...(command.action === 'takeOver' ? { device: command.device } : {}), ...(operation === 'showComment' ? { threadId: command.threadId } : {}) });
     return {};
+  }
+  /** Secure input's fill on this Chrome (`secure-input.ts`): the workspace's signed `manage` `secureFill`, verified and
+   * approved as any request for this Chrome and handed to the extension, then the value beside it, sent once over the
+   * Chrome's socket and kept nowhere here. The extension matches every field to the signed command and fills only
+   * while the tab shows its origin; an offline Chrome, or one whose extension cannot fill, refuses. */
+  async secureFill(authorization: RuntimeAccountBrowserAuthorization, value: string): Promise<RuntimeSecureFillResult> {
+    const { scope, command } = authorization.body, placement = scope.placement;
+    if (command.type !== 'manage' || command.action !== 'secureFill' || !command.groupId || !command.targetId || !command.origin || !command.fillKind || !command.secureInputId || (command.selector === undefined) === (command.ref === undefined) || placement.kind !== 'account-relay') throw new Error('Secure fill authorization required');
+    const pairing = (await this.registry()).pairings.find(item => item.pairingId === placement.pairingId);
+    if (!pairing || pairing.state !== 'confirmed') throw new Error('Browser fingerprint confirmation required');
+    const body = await verifyRuntimeAccountBrowserAuthorization(authorization, pairing.trust);
+    if (placement.generation !== pairing.generation) throw new Error('Browser pairing changed');
+    const connection = this.connection(placement.pairingId);
+    const name = (await this.names([pairing]))(pairing);
+    if (!connection) return { refused: `Chrome "${name}" is offline` };
+    if (!connection.secureInput) return { refused: `The GitSpace extension in Chrome "${name}" cannot fill secure input: update it to 5.14 or later` };
+    await this.authorize(authorization, AbortSignal.timeout(Math.max(1, Date.parse(body.expiresAt) - Date.now())));
+    const field = command.selector === undefined ? { ref: command.ref } : { selector: command.selector };
+    return RuntimeSecureFillResultSchema.parse(await this.request(placement.pairingId, { operation: 'secureFill', groupId: command.groupId, targetId: command.targetId, origin: command.origin, ...field, kind: command.fillKind, secureInputId: command.secureInputId, value }));
   }
   /** How many agents use a Chrome now: the scripts and single steps its extension's reports last counted on its
    * groups, or, until its extension reports them (from 5.8, since this object last woke), its running scripts; none

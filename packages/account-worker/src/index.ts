@@ -56,8 +56,9 @@ import { BROWSER_COMMENT_PATH, BROWSER_WORKSPACES_PATH, type RuntimeBrowserComme
 import { BROWSER_SHARE_PATH, browserShareAccount, serveBrowserShare } from './browser-share.js';
 import { BROWSER_WATCH_INTERNAL_PATH, browserWatchDeviceActive, serveBrowserWatch } from './browser-watch.js';
 import { serveBrowserCaptureShare } from './browser-capture-share.js';
+import { serveSecureInput } from './secure-input.js';
 import { BROWSER_CAPTURE_SHARE_PATH, type RuntimeBrowserCaptureShareComment } from '@gitspace/protocol-runtime';
-import { BROWSER_WATCH_PATH, DICTATION_PATH } from '@gitspace/protocol-runtime';
+import { BROWSER_WATCH_PATH, DICTATION_PATH, SECURE_INPUT_API_PATH } from '@gitspace/protocol-runtime';
 import { serveDictation, workersAiDictation } from './dictation.js';
 import { mintUploadLink, serveUploadLink } from './upload-link.js';
 import { UPLOAD_LINK_PATH } from '@gitspace/protocol/rpc-contract';
@@ -452,6 +453,8 @@ export class UserRelayDO extends BudgetedDurableObject {
   browserRelayConfirm(pairingId: string, fingerprint: string) { return this.browserRelay.confirm(pairingId, fingerprint); }
   browserRelaySetChrome(pairingId: string, change: { name?: string; note?: string }) { return this.browserRelay.setChrome(pairingId, change); }
   browserRelayExecute(authorization: RuntimeAccountBrowserAuthorization) { return this.browserRelay.execute(authorization); }
+  /** Secure input's fill on one of your Chromes (`secure-input.ts`): the signed request, then the value. */
+  browserRelaySecureFill(authorization: RuntimeAccountBrowserAuthorization, value: string) { return this.browserRelay.secureFill(authorization, value); }
   /** A workspace's cloud browser session says its browser opened, is still in use, or closed. */
   browserRelayCloudOpen(session: string, open: boolean) { return this.browserRelay.cloudOpen(session, open); }
   /** An archived or deleted workspace's Chrome groups end, and its cloud browser's service sessions with them. */
@@ -1252,6 +1255,8 @@ export default {
     if (url.pathname === BROWSER_CAPTURE_SHARE_PATH || url.pathname.startsWith('/api/capture-shares/')) return serveBrowserCaptureShare(request, env);
     // The Watch dialog's socket: a tab's live frames and, while you hold it from this device, your input.
     if (url.pathname === BROWSER_WATCH_PATH) return serveBrowserWatch(request, env);
+    // The secure-input page's requests, signed by a signed-in GitSpace browser of this account (`secure-input.ts`).
+    if (url.pathname === SECURE_INPUT_API_PATH) return serveSecureInput(request, env);
     // The composer's dictation socket: a recording in, its text from the profile's dictation provider out.
     if (url.pathname === DICTATION_PATH) return serveDictation(request, env, workersAiDictation(env.AI));
     if (url.pathname === '/api/services/approve' || /^\/api\/browser-relay\/(pair|status|unpair|confirm|chrome|project-status|project-update|extension\.zip)$/u.test(url.pathname)) {

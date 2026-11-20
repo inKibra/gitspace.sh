@@ -12,7 +12,7 @@ import { MessageBlockDocument } from '../blocks/BlockDocument.js';
 import { GitSpaceMarkdown } from '../GitSpaceMarkdown.js';
 import { glyph } from '../glyph.js';
 import { MediaPins } from '../resource-files.js';
-import { AskBlockView, AskTakeoverCall, EnvironmentCall } from './AskCards.js';
+import { AskBlockView, AskSecureInputCall, AskTakeoverCall, EnvironmentCall } from './AskCards.js';
 import { AutomationCard, EventCard, Notice, NoticeRow, PERMISSION_BADGE, WorkspaceReportRow } from './EventCards.js';
 import { Execution, SideAgents } from './ExecutionCard.js';
 import { MessageAttachments, MessageFiles, RichContent, userMessageMarkdown } from './RichContent.js';
@@ -111,6 +111,7 @@ export function TranscriptItemView({ item, active, onAnswer, state, onStateChang
       // A custom message the runtime recorded as a call keeps its own block; any other single call is a group of one.
       return item.id.includes(':custom:') ? <ToolCall block={item} state={state} onStateChange={onStateChange} />
         : item.tool === 'ask_takeover' ? <AskTakeoverCall block={item} state={state} onStateChange={onStateChange} />
+        : item.tool === 'ask_secure_input' ? <AskSecureInputCall block={item} state={state} onStateChange={onStateChange} />
         : item.tool === 'environment' ? <EnvironmentCall block={item} state={state} onStateChange={onStateChange} />
         : <ToolGroup calls={[{ block: item, complete: true }]} state={state} onStateChange={onStateChange} />;
     case 'execution':

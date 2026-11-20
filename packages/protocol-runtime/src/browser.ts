@@ -3,6 +3,7 @@ import { BrowserOriginPatternSchema, BrowserSiteLevelSchema, browserOriginMatche
 import { RuntimeDispatchSelectionSchema } from './scheduling.js';
 import { RuntimeBrowserCaptureSchema } from './browser-capture-tracks.js';
 import { RuntimeBrowserCommentStatusSchema, RuntimeBrowserCommentTextSchema, RuntimeBrowserCommentWriteSchema } from './browser-comments.js';
+import { RuntimeSecureInputKindSchema, SECURE_INPUT_ID } from './secure-input.js';
 import { BROWSER_DEBUG_DURATION_MS, BROWSER_DEBUG_KINDS, BROWSER_STORAGE_KINDS, BROWSER_STORAGE_OPS, BrowserEverythingSchema, BrowserPowersSchema, BrowserStorageSiteSchema, browserPowerGrantShape } from './browser-powers.js';
 
 const id = z.string().min(1).max(256);
@@ -104,8 +105,10 @@ export type RuntimeBrowserApprovalCard = z.infer<typeof RuntimeBrowserApprovalCa
  * comment mode on and that thread open. Everything (`browser-powers.ts`): `everything` (`pairingId`, `on`) allows it
  * on the workspace's group on that Chrome for an hour, or ends it. Adding a tab from your Chrome's popup
  * (`browser-workspaces.ts`): `tabGroup` (`pairingId`) makes or renews the workspace's group on that Chrome, as the
- * agent's `tabs` there does, and answers the group's id. */
-export const RuntimeBrowserManagementSchema = z.strictObject({ action: z.enum(['status', 'revoke', 'reconcile', 'discard', 'artifact', 'overview', 'preview', 'captures', 'captureStart', 'captureStop', 'captureShares', 'captureShareCreate', 'captureShareRevoke', 'shares', 'shareCreate', 'shareRevoke', 'shareConnect', 'comments', 'commentWrite', 'stop', 'closeTab', 'focusTab', 'takeOver', 'resume', 'commentShow', 'everything', 'tabGroup']), groupId: z.string().uuid().optional(), recordId: id.optional(), artifactId: id.optional(), targetId: id.optional(), captureId: z.string().uuid().optional(), offset: z.number().int().nonnegative().optional(), limit: z.number().int().min(1).max(65536).optional(),
+ * agent's `tabs` there does, and answers the group's id. Secure input (`secure-input.ts`): `secureFill` (`groupId`,
+ * `targetId`, `origin`, `selector` or `ref`, `fillKind`, `secureInputId`) fills the value sent beside it into that
+ * field of your Chrome's tab, only while the tab shows `origin`. */
+export const RuntimeBrowserManagementSchema = z.strictObject({ action: z.enum(['status', 'revoke', 'reconcile', 'discard', 'artifact', 'overview', 'preview', 'captures', 'captureStart', 'captureStop', 'captureShares', 'captureShareCreate', 'captureShareRevoke', 'shares', 'shareCreate', 'shareRevoke', 'shareConnect', 'comments', 'commentWrite', 'stop', 'closeTab', 'focusTab', 'takeOver', 'resume', 'commentShow', 'everything', 'tabGroup', 'secureFill']), groupId: z.string().uuid().optional(), recordId: id.optional(), artifactId: id.optional(), targetId: id.optional(), captureId: z.string().uuid().optional(), offset: z.number().int().nonnegative().optional(), limit: z.number().int().min(1).max(65536).optional(),
   shareId: z.string().uuid().optional(), secret: z.string().min(16).max(128).optional(), comment: z.boolean().optional(), expiresInMinutes: z.number().int().positive().max(43_200).optional(), device: z.string().min(1).max(256).nullable().optional(),
   /** Capture share links (`browser-capture-share.ts`): `captureShares` lists the workspace's; `captureShareCreate`
    * (`captureId`, `comment`, `expiresInMinutes`) shares a saved capture; `captureShareRevoke` (`captureShareId`) ends one. */
@@ -115,7 +118,9 @@ export const RuntimeBrowserManagementSchema = z.strictObject({ action: z.enum(['
   /** `comments`: open threads only (the default) or every one; `commentWrite`: the change. */
   status: RuntimeBrowserCommentStatusSchema.optional(), write: RuntimeBrowserCommentWriteSchema.optional(),
   /** `everything` and `tabGroup`: the Chrome; `everything`: whether Everything begins (true) or ends. */
-  pairingId: z.string().uuid().optional(), on: z.boolean().optional() });
+  pairingId: z.string().uuid().optional(), on: z.boolean().optional(),
+  /** `secureFill`: where the field must be, the field, what it takes and the request it answers. */
+  origin: z.string().max(2048).optional(), selector: z.string().max(1024).optional(), ref: z.string().max(64).optional(), fillKind: RuntimeSecureInputKindSchema.optional(), secureInputId: z.string().regex(SECURE_INPUT_ID).optional() });
 export type RuntimeBrowserManagement = z.infer<typeof RuntimeBrowserManagementSchema>;
 export const RuntimeBrowserAuthorityCertificateBodySchema = z.strictObject({
   accountId: id, projectId: id, workspaceId: id,
@@ -188,6 +193,8 @@ export type RuntimeAccountBrowserPairingCode = z.infer<typeof RuntimeAccountBrow
  * `takeover` in its hello: it takes `takeOver`/`resume`, reports `held`, and refuses the agent's commands on a tab you
  * hold. Within protocol 6, an extension from 5.11 says `powers` in its hello: it enforces a grant's `powers` and
  * `everything` (`browser-powers.ts`) and takes `everything` notices; an older one never gets a grant with either.
+ * Within protocol 6, an extension from 5.14 says `secureInput` in its hello: it takes `secureFill`, a signed
+ * `manage` `secureFill` with the value beside it (`secure-input.ts`).
  */
 export const BROWSER_EXTENSION_PROTOCOL = 6;
 /** The longest one `browser.run` script runs before it is stopped, in the cloud browser and on your Chrome. */
@@ -237,8 +244,9 @@ export const RuntimeProjectBrowserPreferencesSchema = z.strictObject({ defaultPa
 });
 export type RuntimeProjectBrowserPreferences = z.infer<typeof RuntimeProjectBrowserPreferencesSchema>;
 /** A project's Chromes. `takeover`: the Chrome is online with an extension whose hello said it can be taken over
- * (`takeover`, from 5.10); `powersSupported`: online with one whose hello said `powers` (from 5.11). */
-export const RuntimeProjectBrowserSettingsSchema = z.strictObject({ projectId: id, revision: z.number().int().nonnegative(), defaultPairingId: z.string().uuid().nullable(), browsers: z.array(projectBrowserApproval.extend({ name: RuntimeBrowserNameSchema, note: RuntimeBrowserNoteSchema, generation: z.number().int().nonnegative(), connected: z.boolean(), approved: z.boolean(), takeover: z.boolean().default(false), powersSupported: z.boolean().default(false) })).max(32) });
+ * (`takeover`, from 5.10); `powersSupported`: online with one whose hello said `powers` (from 5.11); `secureInput`:
+ * online with one whose hello said `secureInput` (from 5.14). */
+export const RuntimeProjectBrowserSettingsSchema = z.strictObject({ projectId: id, revision: z.number().int().nonnegative(), defaultPairingId: z.string().uuid().nullable(), browsers: z.array(projectBrowserApproval.extend({ name: RuntimeBrowserNameSchema, note: RuntimeBrowserNoteSchema, generation: z.number().int().nonnegative(), connected: z.boolean(), approved: z.boolean(), takeover: z.boolean().default(false), powersSupported: z.boolean().default(false), secureInput: z.boolean().default(false) })).max(32) });
 export type RuntimeProjectBrowserSettings = z.infer<typeof RuntimeProjectBrowserSettingsSchema>;
 export const RuntimeBrowserArtifactSchema = z.strictObject({ id, url: z.string().max(8192), mediaType: z.string().max(128), bytes: z.number().int().nonnegative(), expiresAt: z.iso.datetime() });
 export const RuntimeBrowserArtifactPageSchema = z.strictObject({ artifact: RuntimeBrowserArtifactSchema, offset: z.number().int().nonnegative(), data: z.string().max(90000), nextOffset: z.number().int().nonnegative().nullable() });

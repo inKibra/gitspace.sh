@@ -11,6 +11,7 @@ import { rpcErrorMessage } from '../rpc-error-message.js';
 import { LifecycleApprovalCard } from '../LifecycleApprovalCard.js';
 import { CLOSED_REASON, QuestionCardsContext } from '../QuestionCards.js';
 import { TakeoverCard } from '../TakeoverCard.js';
+import { SecureInputCard } from '../SecureInputCard.js';
 import { ToolGroup } from './ToolGroup.js';
 import type { ItemInteractionProps, TranscriptItemState } from './TranscriptItemView.js';
 import type { TurnTranscriptProps } from './TurnTranscript.js';
@@ -237,6 +238,14 @@ export function AskTakeoverCall({ block, state, onStateChange }: { block: ToolCa
   const cards = useContext(QuestionCardsContext);
   const question = cards?.questions.find(item => item.kind === 'takeover' && item.takeover?.callId === block.toolCallId);
   return cards && question?.takeover ? <TakeoverCard question={question} card={question.takeover} cards={cards} /> : <ToolGroup calls={[{ block, complete: true }]} state={state} onStateChange={onStateChange} />;
+}
+
+/** An ask_secure_input call shows as its card while the workspace has the card's question; otherwise (a refusal, another
+ * surface) as the tool call it is. */
+export function AskSecureInputCall({ block, state, onStateChange }: { block: ToolCallBlock } & ItemInteractionProps) {
+  const cards = useContext(QuestionCardsContext);
+  const question = cards?.questions.find(item => item.kind === 'secure-input' && item.secureInput?.callId === block.toolCallId);
+  return cards && question?.secureInput ? <SecureInputCard question={question} card={question.secureInput} cards={cards} /> : <ToolGroup calls={[{ block, complete: true }]} state={state} onStateChange={onStateChange} />;
 }
 
 /** An `environment` call that waits, or waited, on a lifecycle approval card shows the card above the call. */

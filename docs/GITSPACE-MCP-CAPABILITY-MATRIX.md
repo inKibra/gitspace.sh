@@ -451,21 +451,24 @@ GitSpace implements the released extension `io.modelcontextprotocol/tasks` ([202
 - **Ownership:** only the caller that created a task verifies its handle; any other caller's `tasks/get`, `tasks/update` or `tasks/cancel` answers `-32602` *Task not found*. `tasks/*` from a client that does not declare the extension answers `-32021`.
 - **Durability:** a task is read from the workspace on every `tasks/get`, so disconnects and client restarts lose nothing; the same id works from a new connection. `ttlMs` is 7 days; after it the handle answers *Task has expired*. `pollIntervalMs` is 5 s while the agent works, 15 s while it waits on a person.
 - **Idempotency:** a `runtime.submit` or a prompt sent again with a `requestId` the conversation already took adds nothing; both tasks follow the same run.
+- **Elicitation modes:** read from that request's declared `elicitation`: `form`, or a bare `{}` (the 2025-06-18 shape), takes form elicitations; `url` takes URL elicitations. A client that declares only `url` gets no forms.
 
 | GitSpace run (`RuntimeRun.state`) | Task status | Payload |
 | --- | --- | --- |
 | `queued`, `running` | `working` | `statusMessage`: queued, or the in-progress todo |
 | `waiting` on a plain question (`kind: ask`), grant has `operator.decide`, client declared form elicitation | `input_required` | `inputRequests[<question id>]`: a form elicitation with the question's choices (`choice`) and a written `answer` |
+| `waiting` on a secure-input request (`kind: secure-input`, APERTURE-DESIGN.md §10.1), client declared URL elicitation | `input_required` | `inputRequests[<question id>]`: a URL elicitation (`mode: 'url'`) whose `url` is the request's `/secure-input/<id>` page and whose message gives the purpose, the exact origin and the kind, and says the value never reaches the agent or this client. Never a form, whatever the grant |
+| `waiting` on a secure-input request, client without URL elicitation | `working` | `statusMessage` names the request, says it waits in GitSpace for a person, and gives its page link |
 | `waiting` otherwise | `working` | `statusMessage` names the question and why it waits in GitSpace |
 | `finished` | `completed` | `result`: the final reply as text, the tool's own structured result, `_meta['sh.gitspace/run']` with the run reference |
 | `failed` (the turn ended without a reply) | `completed` | `result` with `isError: true` and the reason; `failed` is reserved for JSON-RPC errors, which do not occur after a task is created |
 | `stopped` (a person's Stop, `tasks/cancel`) | `cancelled` | `statusMessage` says why |
 
-A run follows the turns its questions' answers start (`question-closed:<id>` inputs, `runtime-core/src/runs.ts`). `tasks/update` answers only the question the task waits on, through `answerAsk` with `answeredBy: 'mcp-client'` (the question records *answered by an MCP client*, and its card and Needs you close as for any answer); responses to other keys, declines and cancels are ignored. `tasks/cancel` calls `runtime.cancel` (Stop) while the run is queued, running or waiting, and does nothing once it ended, since Stop would stop whatever the conversation runs next.
+A run follows the turns its questions' answers start (`question-closed:<id>` inputs, `runtime-core/src/runs.ts`). `tasks/update` answers only the question the task waits on, through `answerAsk` with `answeredBy: 'mcp-client'` (the question records *answered by an MCP client*, and its card and Needs you close as for any answer); responses to other keys, and declines and cancels of a plain question's form, are ignored. For a secure-input request, a response to its URL elicitation with `action: 'decline'` or `'cancel'` declines the request (`answerAsk` with Decline; grant with `operator.decide` only); `accept` does nothing, and content in any response is never read or forwarded: the value reaches GitSpace only through the page, and the task moves on when the person submits there. `tasks/cancel` calls `runtime.cancel` (Stop) while the run is queued, running or waiting, and does nothing once it ended, since Stop would stop whatever the conversation runs next.
 
 **Legacy fallback.** Clients without Tasks keep today's start-and-poll path: start with `gitspace_runtime_submit` and a `requestId` (or a prompt with a `requestId`), then poll `gitspace_runtime_session` with command `{ type: 'run', requestId }`; its `run.state` is the table's left column, `run.question` the open question (answer it with `answerAsk`), `run.text` the final reply.
 
-Not yet: secret or secure input through Tasks, and elicitations from people's MCP servers to GitSpace's client (#155).
+Not yet: elicitations from people's MCP servers to GitSpace's client (#155).
 
 ## Verification
 

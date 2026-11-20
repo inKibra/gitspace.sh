@@ -84,7 +84,8 @@ import { createManagedKey, ManagedKeySchema, mintServiceToken, signManagedToken,
 import { LiveChanges } from './live-changes.js';
 import { sendSized, tenantNamespace, tenantStore, TenantObjectIntegrityError, verifying, type TenantNamespace } from './tenant-store.js';
 import { requireWorkspaceAccess } from './runtime-access.js';
-import { RuntimeIdentitySchema } from '@gitspace/protocol-runtime';
+import { RuntimeIdentitySchema, RuntimeSecureInputQuestionSchema } from '@gitspace/protocol-runtime';
+import type { SecureInputRecord } from './secure-input.js';
 import { migratedRoleSettings } from './inference-role-migration.js';
 import { accountLiveKey } from '@gitspace/protocol/live-notice';
 import { notifyBrowsers } from './live-notices.js';
@@ -610,6 +611,21 @@ export class CredentialVaultDO extends BudgetedDurableObject {
           public_jwk TEXT NOT NULL, created_at TEXT NOT NULL, signs_until TEXT NOT NULL, verifies_until TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS service_token_keys_service ON service_token_keys(workspace_id, service);
+        CREATE TABLE IF NOT EXISTS secure_input_requests (
+          id TEXT PRIMARY KEY, project_id TEXT NOT NULL, workspace_id TEXT NOT NULL, conversation_id TEXT NOT NULL,
+          question_id TEXT NOT NULL, record_json TEXT NOT NULL, expires_at INTEGER NOT NULL,
+          state TEXT NOT NULL CHECK (state IN ('open', 'used')), device_id TEXT, used_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS site_credentials (
+          id TEXT PRIMARY KEY, owner TEXT NOT NULL, origin TEXT NOT NULL, kind TEXT NOT NULL, sealed_value TEXT NOT NULL,
+          created_at TEXT NOT NULL, created_by TEXT NOT NULL, request_id TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS site_credentials_origin ON site_credentials(owner, origin, kind);
+        CREATE TABLE IF NOT EXISTS site_credential_audit (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, event TEXT NOT NULL, origin TEXT NOT NULL,
+          request_id TEXT NOT NULL, credential_id TEXT, device_id TEXT NOT NULL, project_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL, detail TEXT
+        );
         INSERT OR IGNORE INTO inference_migration(id, version, revision) VALUES (1, 0, 0);
       `);
       this.ctx.storage.sql.exec('INSERT OR IGNORE INTO credential_snapshot(id, generation) VALUES (1, ?)', Date.now());
@@ -1476,6 +1492,76 @@ export class CredentialVaultDO extends BudgetedDurableObject {
 
   deleteProviderSecret(provider: 'composio'): { deleted: boolean } {
     return { deleted: this.ctx.storage.sql.exec('DELETE FROM provider_secrets WHERE provider = ?', provider).rowsWritten === 1 };
+  }
+
+  /** Secure input (`secure-input.ts`): records a request a workspace's agent made. Requests that ended more than a
+   * day ago are dropped. */
+  secureInputRecord(record: Omit<SecureInputRecord, 'state'>): void {
+    this.ctx.storage.sql.exec('DELETE FROM secure_input_requests WHERE expires_at < ?', Date.now() - 86_400_000);
+    this.ctx.storage.sql.exec(
+      'INSERT INTO secure_input_requests(id, project_id, workspace_id, conversation_id, question_id, record_json, expires_at, state) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      record.id, record.projectId, record.workspaceId, record.conversationId, record.questionId, JSON.stringify(record.request), Date.parse(record.request.expiresAt), 'open',
+    );
+  }
+
+  /** A secure-input request by its id, or null. */
+  secureInputRequest(id: string): SecureInputRecord | null {
+    const row = this.ctx.storage.sql.exec<{ project_id: string; workspace_id: string; conversation_id: string; question_id: string; record_json: string; state: string }>(
+      'SELECT project_id, workspace_id, conversation_id, question_id, record_json, state FROM secure_input_requests WHERE id = ?', id,
+    ).toArray()[0];
+    if (!row) return null;
+    return { id, projectId: row.project_id, workspaceId: row.workspace_id, conversationId: row.conversation_id, questionId: row.question_id, request: RuntimeSecureInputQuestionSchema.parse(JSON.parse(row.record_json)), state: row.state === 'used' ? 'used' : 'open' };
+  }
+
+  /** Takes request `id` for its one answer: while open and unexpired at `now` it becomes used, by `deviceId`, and is
+   * returned; otherwise why it takes none. Single use: a second claim is refused. */
+  secureInputClaim(id: string, deviceId: string, now = Date.now()): { claimed: SecureInputRecord } | { refused: 'unknown' | 'expired' | 'used' } {
+    const record = this.secureInputRequest(id);
+    if (!record) return { refused: 'unknown' };
+    const taken = this.ctx.storage.sql.exec("UPDATE secure_input_requests SET state = 'used', device_id = ?, used_at = ? WHERE id = ? AND state = 'open' AND expires_at > ?", deviceId, new Date(now).toISOString(), id, now).rowsWritten === 1;
+    if (taken) return { claimed: { ...record, state: 'used' } };
+    return { refused: record.state === 'used' ? 'used' : 'expired' };
+  }
+
+  /** The values saved for `origin` and `kind` by this account's person, newest first, for the secure-input page. */
+  siteCredentials(origin: string, kind: string): { credentialId: string; savedAt: string }[] {
+    const owner = `operator/${this.config()?.user_id ?? ''}`;
+    return this.ctx.storage.sql.exec<{ id: string; created_at: string }>('SELECT id, created_at FROM site_credentials WHERE owner = ? AND origin = ? AND kind = ? ORDER BY created_at DESC LIMIT 20', owner, origin, kind).toArray()
+      .map(row => ({ credentialId: row.id, savedAt: row.created_at }));
+  }
+
+  /** Seals a value a person typed on the secure-input page and chose to save (docs/APERTURE-DESIGN.md §10.1): owned by
+   * them (`operator/<user>`), usable only for `origin` and `kind`, and audited. Returns its id. */
+  async saveSiteCredential(input: { origin: string; kind: string; value: string; deviceId: string; requestId: string; projectId: string; workspaceId: string }): Promise<string> {
+    const config = this.config();
+    if (!config) throw new Error('This account has no credential vault');
+    const id = crypto.randomUUID(), owner = `operator/${config.user_id}`, at = new Date().toISOString();
+    const sealed = await sealVaultText(input.value, credentialProtocolBase64.decode(config.vault_key), JSON.stringify(['site-credential/v1', id, owner, input.origin, input.kind]));
+    this.ctx.storage.sql.exec('INSERT INTO site_credentials(id, owner, origin, kind, sealed_value, created_at, created_by, request_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', id, owner, input.origin, input.kind, sealed, at, input.deviceId, input.requestId);
+    this.auditSiteCredential({ event: 'saved', origin: input.origin, requestId: input.requestId, credentialId: id, deviceId: input.deviceId, projectId: input.projectId, workspaceId: input.workspaceId, detail: null });
+    return id;
+  }
+
+  /** A saved value, only for the `origin` and `kind` it was saved for and only its owner's; null otherwise. */
+  async openSiteCredential(credentialId: string, origin: string, kind: string): Promise<string | null> {
+    const config = this.config();
+    if (!config) return null;
+    const owner = `operator/${config.user_id}`;
+    const row = this.ctx.storage.sql.exec<{ sealed_value: string }>('SELECT sealed_value FROM site_credentials WHERE id = ? AND owner = ? AND origin = ? AND kind = ?', credentialId, owner, origin, kind).toArray()[0];
+    return row ? openVaultText(row.sealed_value, credentialProtocolBase64.decode(config.vault_key), JSON.stringify(['site-credential/v1', credentialId, owner, origin, kind])) : null;
+  }
+
+  /** Every secure fill, refusal, decline and save, by request, origin, device and workspace; never the value. */
+  auditSiteCredential(entry: { event: 'filled' | 'refused' | 'declined' | 'saved'; origin: string; requestId: string; credentialId: string | null; deviceId: string; projectId: string; workspaceId: string; detail: string | null }): void {
+    this.ctx.storage.sql.exec('INSERT INTO site_credential_audit(at, event, origin, request_id, credential_id, device_id, project_id, workspace_id, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      new Date().toISOString(), entry.event, entry.origin, entry.requestId, entry.credentialId, entry.deviceId, entry.projectId, entry.workspaceId, entry.detail);
+  }
+
+  /** The newest audit entries, for the account's own review and tests. */
+  siteCredentialAudit(limit = 100): { at: string; event: string; origin: string; requestId: string; credentialId: string | null; deviceId: string; projectId: string; workspaceId: string; detail: string | null }[] {
+    return this.ctx.storage.sql.exec<{ at: string; event: string; origin: string; request_id: string; credential_id: string | null; device_id: string; project_id: string; workspace_id: string; detail: string | null }>(
+      'SELECT at, event, origin, request_id, credential_id, device_id, project_id, workspace_id, detail FROM site_credential_audit ORDER BY id DESC LIMIT ?', limit,
+    ).toArray().map(row => ({ at: row.at, event: row.event, origin: row.origin, requestId: row.request_id, credentialId: row.credential_id, deviceId: row.device_id, projectId: row.project_id, workspaceId: row.workspace_id, detail: row.detail }));
   }
 
   /** One custom MCP connection's OAuth state (client registration, tokens, discovery) as JSON, sealed per revision. */

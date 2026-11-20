@@ -16,7 +16,9 @@ import { workspaceDrive } from './workspace-drive.js';
 import { refreshCloudEnvironment } from './cloud-environment.js';
 import { ArtifactsCodeStore, artifactsProjectRepository, artifactsWorkspaceRepository, createToolResultStore, isAttachmentOnline, isAttachmentReady, isSupportedBranchName, CloudPublicationUncertain, readCurrentCheckpoint, readRuntimeLfsRoots, reconcileRuntimeLfsSources, type ProjectAnswerOutcome, type ProjectQuestion, type RuntimeAccepted, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
 import { settleProjectAnswers } from './project-answers.js';
-import { questionState } from '@gitspace/protocol-runtime';
+import { questionState, type RuntimeSecureFillResult } from '@gitspace/protocol-runtime';
+import { approvedBrowserSites, browserOriginMatches } from '@gitspace/protocol-environment';
+import { secureFillTab, type SecureInputRecord } from './secure-input.js';
 import { createAccountWorkspaceRuntime, ensureProjectCodeRepository } from './account-runtime-host.js';
 import { createRuntimeQaServices } from './runtime-services.js';
 import { RuntimeSessionInputSchema, type PendingAskAnswer } from '@gitspace/protocol-runtime/session-controls';
@@ -677,6 +679,41 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     await holdersChanged({ storage: this.ctx.storage, workspaceId: identity.workspaceId, runtime: () => this.getRuntime(identity), browser: { source: 'cloud', pairingId: null, groupId, name: 'Cloud browser' },
       before: RuntimeBrowserHolderSchema.array().parse(holders), after: [], acting: () => false, page: () => undefined, note });
     this.liveNotify([{ ...workspaceLiveKey(identity.workspaceId, 'browsers', identity.projectId), version: Date.now() }]);
+  }
+
+  /** Secure input (`secure-input.ts`): whether question `questionId` still waits for request `requestId`. */
+  async secureInputOpen(raw: unknown, questionId: string, requestId: string): Promise<boolean> {
+    return (await this.getRuntime(RuntimeIdentitySchema.parse(raw))).secureInputOpen(questionId, requestId);
+  }
+
+  /** A person declined request `record` on its page: its question is answered declined, with `reason`. */
+  async secureInputDeclined(raw: unknown, record: SecureInputRecord, reason: string): Promise<void> {
+    const identity = RuntimeIdentitySchema.parse(raw);
+    if (record.projectId !== identity.projectId || record.workspaceId !== identity.workspaceId) throw new Error('Secure-input request belongs to another workspace');
+    await (await this.getRuntime(identity)).secureInputSettled(record.questionId, record.id, { outcome: 'declined', reason });
+  }
+
+  /**
+   * A person answered request `record` on its page with `value`: while its question is still open, the workspace fills
+   * the value into the request's tab (`secureFillTab`), on your Chrome only while its origin is still an approved site,
+   * and answers the question provided, or declined with why the fill refused. The value is used for this call only.
+   */
+  async secureInputFill(raw: unknown, record: SecureInputRecord, value: string): Promise<RuntimeSecureFillResult> {
+    const identity = RuntimeIdentitySchema.parse(raw);
+    if (record.projectId !== identity.projectId || record.workspaceId !== identity.workspaceId) throw new Error('Secure-input request belongs to another workspace');
+    const runtime = await this.getRuntime(identity);
+    if (!await runtime.secureInputOpen(record.questionId, record.id)) return { refused: 'This request is no longer open: it was declined, or its conversation moved on' };
+    let result: RuntimeSecureFillResult;
+    try {
+      const host = new URL(record.request.origin).hostname;
+      const approved = record.request.source === 'cloud' || approvedBrowserSites((await this.refreshBrowserOrigins(identity)).state).some(site => browserOriginMatches(site.pattern, host));
+      result = approved ? await secureFillTab({ storage: this.ctx.storage, env: this.env, identity, conversationId: record.conversationId, request: record.request, value })
+        : { refused: `${host} is no longer an approved site of this workspace` };
+    } catch (error) {
+      result = { refused: `The fill did not run: ${error instanceof Error ? error.message : String(error)}` };
+    }
+    await runtime.secureInputSettled(record.questionId, record.id, 'filled' in result ? { outcome: 'provided' } : { outcome: 'declined', reason: `GitSpace did not fill it: ${result.refused}`.slice(0, 500) });
+    return result;
   }
 
   /** Everything (`browser-powers.ts`) began or ended for this workspace on one of its Chromes: tabs showing the

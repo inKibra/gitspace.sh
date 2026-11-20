@@ -134,7 +134,7 @@ async function fixture(kind: FleetMachineDefinition['kind'] = 'physical', realRe
   };
   /** Repository files in the cloud working copy, by path, and the commit holding each (`skillCommit`). */
   const skills = new Map<string, string>();
-  const env = { ACCOUNT_ID: 'account', RELAY_NAME: 'account-relay', RELAY: { getByName: () => relayObject ?? relay }, BROWSER_SESSION, ACCOUNT_STATE: { getByName: () => ({ certifyBrowserAuthority: async (body: RuntimeBrowserAuthorityCertificateBody) => signRuntimeBrowserAuthorityCertificate(body, signingRoot.privateKey) }) }, FLEET_CATALOG: { getByName: () => ({ getMachine: async (id: string) => machines.get(id) ?? null }) } };
+  const env = { ACCOUNT_ID: 'account', ACCOUNT_URL: 'https://account.example', RELAY_NAME: 'account-relay', RELAY: { getByName: () => relayObject ?? relay }, BROWSER_SESSION, ACCOUNT_STATE: { getByName: () => ({ certifyBrowserAuthority: async (body: RuntimeBrowserAuthorityCertificateBody) => signRuntimeBrowserAuthorityCertificate(body, signingRoot.privateKey) }) }, FLEET_CATALOG: { getByName: () => ({ getMachine: async (id: string) => machines.get(id) ?? null }) } };
   /** The workspace's running services at their workspace URLs. */
   const services: WorkspaceServiceUrl[] = [];
   const authority = createRuntimeBrowserAuthority({ storage, env, identity, runtime: () => runtime, async selectExecution(args, candidates) {
@@ -371,7 +371,7 @@ test('forgetting a Chrome leaves remaining browser groups discoverable', async (
 test('browser_control lists approved offline Chrome names and notes without dispatching to them', async () => {
   const f = await fixture(); await f.authority.prepare(f.input); f.offlinePairings.add(f.pairing.pairingId);
   const status = RuntimeBrowserStatusSchema.parse(await f.authority.manage(f.input.conversationId, undefined, { action: 'status' }));
-  expect(status.browsers).toEqual([{ pairingId: f.pairing.pairingId, generation: 1, approved: true, connected: false, name: 'Work Chrome', note: 'Production account', takeover: false, powers: [], powersSupported: false }]);
+  expect(status.browsers).toEqual([{ pairingId: f.pairing.pairingId, generation: 1, approved: true, connected: false, name: 'Work Chrome', note: 'Production account', takeover: false, powers: [], powersSupported: false, secureInput: false }]);
   expect(f.dispatches).toEqual([]);
 });
 test('reapproving the same Chrome rotates the workspace group and rejects the old prepared grant', async () => {

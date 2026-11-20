@@ -10,7 +10,7 @@ import type { TranscriptPageRequest, TranscriptPage, TranscriptContentRequest, T
 import type { SessionUsageReport } from '@gitspace/protocol-runtime/session-controls';
 import { RuntimeBrowserStatusSchema, RuntimeBrowserArtifactPageSchema, RuntimeBrowserOverviewSchema, RuntimeBrowserPreviewSchema, RuntimeBrowserCaptureViewSchema, RuntimeBrowserShareSchema, RuntimeBrowserConnectedTabSchema, type RuntimeBrowserManagement, type RuntimeBrowserStatus, type RuntimeBrowserArtifactPage, type RuntimeBrowserOverview, type RuntimeBrowserPreview, type RuntimeBrowserCaptureView, type RuntimeBrowserShare, type RuntimeBrowserConnectedTab } from '@gitspace/protocol-runtime';
 import { RuntimeBrowserCommentThreadSchema, RuntimeBrowserCommentThreadViewSchema, type RuntimeBrowserCommentThread, type RuntimeBrowserCommentThreadView, type RuntimeBrowserCommentWrite } from '@gitspace/protocol-runtime';
-import { isSubagentTool, questionState, TAKEOVER_ANSWERS, TAKEOVER_CHOICES } from '@gitspace/protocol-runtime';
+import { isSubagentTool, questionState, SECURE_INPUT_CHOICES, TAKEOVER_ANSWERS, TAKEOVER_CHOICES } from '@gitspace/protocol-runtime';
 import { RuntimeBrowserCaptureShareSchema, type RuntimeBrowserCaptureShare } from '@gitspace/protocol-runtime';
 import { BUILT_IN_AGENT_DEFINITIONS } from './builtin-agents.js';
 import type { ConversationLifecycle } from './conversation-lifecycle.js';
@@ -122,12 +122,18 @@ export type SessionControlServices = Pick<RuntimeHarnessOptions, 'admitInference
   browser?(conversationId: string, machineId: string | undefined, command: RuntimeBrowserManagement): Promise<RuntimeBrowserStatus | RuntimeBrowserArtifactPage | RuntimeBrowserOverview | RuntimeBrowserPreview | RuntimeBrowserCaptureView | RuntimeBrowserCaptureView[] | RuntimeBrowserShare | RuntimeBrowserShare[] | RuntimeBrowserConnectedTab | RuntimeBrowserCommentThreadView[] | RuntimeBrowserCommentThread | RuntimeBrowserCaptureShare | RuntimeBrowserCaptureShare[] | string | null>;
 };
 /** How the answer `answers` from a question's card closes `question`. An ask_takeover card is answered only by Not now:
- * Take over is browserTakeOver, and a held tab's card ends at its handback. */
+ * Take over is browserTakeOver, and a held tab's card ends at its handback. A secure-input request is answered here only
+ * by Decline alone: its value is typed on the secure-input page, never sent as an answer, so a Decline carrying text is
+ * refused. */
 function askClosure(question: Question, answers: Extract<RuntimeSessionCommand, { type: 'answerAsk' }>['answers']): Exclude<QuestionClosure, { dismissed: true }> {
   if (question.kind === 'takeover') {
     if (answers[0]?.selectedOptions[0] !== TAKEOVER_CHOICES.notNow) throw new Error('A take-over request is answered only by Not now');
     if (question.takeover?.holder === 'you') throw new Error('You hold this tab: hand it back with Resume agent');
     return { answer: TAKEOVER_ANSWERS.declined };
+  }
+  if (question.kind === 'secure-input') {
+    if (answers.length !== 1 || answers[0]?.selectedOptions.length !== 1 || answers[0].selectedOptions[0] !== SECURE_INPUT_CHOICES.decline || answers[0].customInput) throw new Error('A secure-input request takes its value only on its secure-input page; here it can only be declined');
+    return { answer: { outcome: 'declined', reason: 'The person declined it' } };
   }
   if (question.kind !== 'ask') throw new Error('Approval requests require an explicit runtime approval answer');
   if (!answers.length) throw new Error('Question answer is required');

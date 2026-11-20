@@ -6,14 +6,14 @@ import { AssistantEntry, GenerationTask, LiveDoc, ToolResultEntry, UserEntry } f
 import { appendNotice, CacheNoticesDoc } from './notices.js';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { diffRevisions } from '@earendil-works/chord/delta';
-import { createRuntimeHarness, createConversationTools, AgentDefinitionContextDoc, BlockCorrectionsDoc, BlockFixEntry, CommentLookupDoc, MediaPinsDoc, StagedCommentsDoc, SubagentRunQueueDoc, commentWindow, correctedReply, type SubagentMetadata, ProcessExitsDoc, QuestionsDoc, WorkspaceDoc, answerPlan, closeRepliedQuestions, questionRefusal, recordMachineReconnection, recordProcessExit, replyQuestion, type PlanDecision, type QuestionClosure, type ToolServices, type RuntimeHarnessOptions } from '@gitspace/runtime-core';
+import { createRuntimeHarness, createConversationTools, AgentDefinitionContextDoc, BlockCorrectionsDoc, BlockFixEntry, CommentLookupDoc, MediaPinsDoc, StagedCommentsDoc, SubagentRunQueueDoc, commentWindow, correctedReply, type SubagentMetadata, ProcessExitsDoc, QuestionsDoc, WorkspaceDoc, answerPlan, closeRepliedQuestions, expireSecureInputs, questionRefusal, recordMachineReconnection, recordProcessExit, replyQuestion, secureInputOpen, settleSecureInput, type PlanDecision, type QuestionClosure, type ToolServices, type RuntimeHarnessOptions } from '@gitspace/runtime-core';
 import { RuntimeApprovalAnswerSchema, RuntimeLifecycleApprovalAnswerSchema, RuntimeSnapshotSchema, RuntimeWatchEventSchema, RuntimeToolResultSchema, WORKSPACE_TOOL_RESULTS_MAX_BYTES, questionState, receiptDigest, type RuntimeToolResult, type RuntimeSnapshot, type RuntimeWatchEvent, type RuntimeSubmitInput, type RuntimeCancelInput, type RuntimeAnswerInput, type RuntimeGitCheckpoint, type RuntimeWorkspaceStatus } from '@gitspace/protocol-runtime';
 import type { CommentsDocument } from '@gitspace/protocol-runtime/comments';
 import { DurableObjectSqliteDatabase } from './sqlite.js';
 import { AttachmentStore, isAttachmentOnline, isAttachmentReady, type AttachmentServices } from './attachments.js';
 import { applyInferenceThinking, createSessionControls, SessionControlsDoc, type SessionControlServices } from '@gitspace/runtime-core/session-controls';
 import type { PendingAskAnswer, RuntimeSessionCommand, RuntimeSessionResult } from '@gitspace/protocol-runtime/session-controls';
-import { RuntimeQaDocumentSchema, RuntimeSnapshotCommitInputSchema, type RuntimeBrowsersDocument, type RuntimeProcessExitedInput, type RuntimeQaActionInput, type RuntimeSnapshotCommitInput, type RuntimeSnapshotCommitResult } from '@gitspace/protocol-runtime';
+import { RuntimeQaDocumentSchema, RuntimeSnapshotCommitInputSchema, type RuntimeBrowsersDocument, type RuntimeProcessExitedInput, type RuntimeQaActionInput, type RuntimeSecureInputAnswer, type RuntimeSnapshotCommitInput, type RuntimeSnapshotCommitResult } from '@gitspace/protocol-runtime';
 import type { z } from 'zod';
 import { createAutomationRequests, UNANSWERED_INPUT, type RuntimeAutomationInput, type RuntimeRequestStatus } from '@gitspace/runtime-core';
 import type { JsonValue } from '@earendil-works/chord/json';
@@ -52,14 +52,15 @@ export type RuntimeAccepted = { accepted: true; cursor: number; conversationId?:
 export type ProjectQuestion = { id: string; conversation: string; kind: ProjectQuestionKind; prompt: string; choices: string[]; answerable: boolean; why: string | null };
 /** What became of one answer the project agent delivered: the question took it, or it was no longer open (`reason`). */
 export type ProjectAnswerOutcome = { delivered: true } | { delivered: false; reason: string };
-type ProjectQuestionKind = 'ask' | 'plan-approval' | 'tool-approval' | 'lifecycle-approval' | 'takeover';
+type ProjectQuestionKind = 'ask' | 'plan-approval' | 'tool-approval' | 'lifecycle-approval' | 'takeover' | 'secure-input';
 const PERSON_DECIDES: Record<Exclude<ProjectQuestionKind, 'ask'>, string> = {
   'plan-approval': 'A person approves this: approving or rejecting a plan is their decision.',
   'tool-approval': 'A person approves this: the agent asked a person to allow a tool action.',
   'lifecycle-approval': 'A person approves this: lifecycle scripts run only once a person allows them.',
   takeover: 'A person answers this: it asks them to take over a browser tab.',
+  'secure-input': 'A person answers this: it asks for a secret only a person types, on GitSpace\'s secure-input page.',
 };
-function projectQuestionKind(question: { kind: 'ask' | 'approval' | 'takeover' | 'lifecycle-approval'; tool?: unknown }): ProjectQuestionKind {
+function projectQuestionKind(question: { kind: 'ask' | 'approval' | 'takeover' | 'lifecycle-approval' | 'secure-input'; tool?: unknown }): ProjectQuestionKind {
   if (question.kind === 'approval') return question.tool === undefined ? 'plan-approval' : 'tool-approval';
   return question.kind;
 }
@@ -127,6 +128,11 @@ export type WorkspaceRuntime = {
    * steps to be replayed (§11); a person commented on a page or replied in a comment thread (§9): an event for the
    * main conversation, which starts a turn when it is idle (after the current one when it is busy). */
   browserEvent(event: { kind: 'browser-taken' | 'browser-handback' | 'capture-replay' | 'page-comment'; requestId: string; sender: { id: string; name: string }; text: string; payload: JsonValue }): Promise<void>;
+  /** Secure input (docs/APERTURE-DESIGN.md §10.1): `secureInputOpen` says whether question `questionId` still waits
+   * for request `requestId` (a page fills a value only while it does); `secureInputSettled` answers it with what the
+   * fill did, which its conversation hears as its next input. */
+  secureInputOpen(questionId: string, requestId: string): Promise<boolean>;
+  secureInputSettled(questionId: string, requestId: string, answer: RuntimeSecureInputAnswer): Promise<void>;
   invokeConversationTool: ToolServices['invoke'];
   /** A human request run once per request id as a tool call of the main conversation: MCP discovery, a sync action,
    * or an environment run dispatched to the cache machine its arguments name. */
@@ -827,6 +833,11 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
       await runtime.lifecycle.deliver({ ...event, conversationId: String(runtime.root.id) });
       publish(); await line;
     },
+    secureInputOpen: (questionId, requestId) => secureInputOpen(harness, questionId, requestId),
+    async secureInputSettled(questionId, requestId, answer) {
+      await settleSecureInput(runtime.lifecycle, questionId, requestId, answer);
+      publish(); await line;
+    },
     async cacheReady(attachmentId, generation) {
       const attachment = attachments.list().find(item => item.attachmentId === attachmentId && item.generation === generation && item.state === 'ready');
       if (!attachment) return;
@@ -900,6 +911,7 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
       if (current?.answer !== null && current?.answer !== undefined && JSON.stringify(current.answer) === JSON.stringify(input.answer)) { await line; return { accepted: true as const, cursor: snapshot.cursor }; }
       const decision = await runtime.lifecycle.closeQuestion(input.questionId, async (question, tx, conversationId): Promise<{ closure: QuestionClosure; value: PlanDecision | null }> => {
         if (question.kind === 'takeover') throw new Error('A take-over request is answered on its card: Not now, or Take over and then Resume agent');
+        if (question.kind === 'secure-input') throw new Error('A secure-input request is answered on its secure-input page, or declined on its card');
         if (question.kind === 'approval' && !actor.canApprove) throw new Error('Human approval capability required');
         // The account approves the card's scripts as the person before it records their answer here.
         if (question.kind === 'lifecycle-approval') {
@@ -942,6 +954,9 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
         const recovering = marks.stage('conversation recovery', `${sizes.conversations} conversations, lifecycle documents ${megabytes(sizes.lifecycle)}`);
         try { await runtime.lifecycle.recover(); } finally { recovering.end(); }
         harness.resume();
+        // Secure-input requests nobody answered in time close as expired; the next one to expire wakes the workspace.
+        const expiring = await expireSecureInputs(harness, runtime.lifecycle, Date.now());
+        if (expiring !== null) await options.schedule(expiring);
         if (messageDecisions) options.waitUntil(messageDecisions.retry(async (conversationId, requestId) => {
           const id = await history.conversation(conversationId).catch(() => undefined);
           return id === undefined ? undefined : await storage.submissionByRequest(id, requestId, BACKGROUND_CONTEXT) ?? undefined;

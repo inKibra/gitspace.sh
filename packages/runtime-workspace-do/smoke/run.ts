@@ -279,6 +279,23 @@ try {
     console.log(`PASS an idle wake leaves no alarm and reads ${wake.rowsRead} rows (budget ${IDLE_WAKE_ROWS}); the event held meanwhile goes in when the run ends`);
   }
 
+  // A secure-input request nobody answers: the workspace keeps a wake at its expiry, and that wake closes it as expired,
+  // which the conversation hears.
+  {
+    await request('/submit?text=ask%20for%20a%20secret&requestId=secure-input');
+    const pending = await until(snapshot => snapshot.questions.some(item => item.kind === 'secure-input' && questionState(item) === 'open'));
+    const question = pending.questions.find(item => item.kind === 'secure-input' && questionState(item) === 'open');
+    const expiresAt = Date.parse(question?.secureInput?.expiresAt ?? '');
+    const early = z.object({ alarm: z.number().nullable() }).parse(await request('/idle-wake'));
+    assert.equal(early.alarm, expiresAt, `An open secure-input request left the wake at ${String(early.alarm)}, not its expiry ${expiresAt}`);
+    await Bun.sleep(Math.max(0, expiresAt - Date.now()) + 50);
+    await request('/idle-wake');
+    const closed = await until(snapshot => snapshot.questions.find(item => item.id === question?.id)?.answer !== null);
+    assert.deepEqual(closed.questions.find(item => item.id === question?.id)?.answer, { outcome: 'expired' });
+    await until(snapshot => snapshot.conversations.flatMap(item => item.messages).some(message => message.content.some(block => block.type === 'text' && block.text.includes('expired: nobody provided the value in time'))));
+    console.log('PASS a secure-input request keeps a wake at its expiry, and that wake closes it as expired for the conversation');
+  }
+
   // The person's message closes the open questions as replied and the workspace stops needing them; the project
   // agent's instruction, which comes from no device, closes none.
   {

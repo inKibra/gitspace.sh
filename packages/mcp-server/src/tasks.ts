@@ -1,7 +1,8 @@
-import { CLIENT_CAPABILITIES_META_KEY, ProtocolError, ProtocolErrorCode, inputResponse, type CallToolResult, type Server, type ServerContext } from '@modelcontextprotocol/server';
+import { CLIENT_CAPABILITIES_META_KEY, ProtocolError, ProtocolErrorCode, inputRequired, inputResponse, type CallToolResult, type Server, type ServerContext } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import { decodeApiKey, deviceProtocolBase64 } from '@gitspace/protocol/device-grant';
 import { RuntimeRunSchema, type RuntimeRun } from '@gitspace/protocol-runtime/session-controls';
+import { SECURE_INPUT_CHOICES, type RuntimeSecureInputKind } from '@gitspace/protocol-runtime/secure-input';
 
 /** The MCP Tasks extension (https://tasks.extensions.modelcontextprotocol.io/specification/2026-07-28/tasks). */
 export const TASKS_EXTENSION = 'io.modelcontextprotocol/tasks';
@@ -55,6 +56,17 @@ export function declaredCapabilities(ctx: ServerContext): z.infer<typeof Declare
   const parsed = DeclaredSchema.safeParse(ctx.mcpReq.envelope && Reflect.get(ctx.mcpReq.envelope, CLIENT_CAPABILITIES_META_KEY));
   return parsed.success ? parsed.data : undefined;
 }
+/** The elicitation modes a request's client declared (`elicitation.form`, `elicitation.url`); a bare `elicitation: {}`
+ * is form, as the 2025-06-18 revision declared it. */
+const ElicitationSchema = z.object({ form: z.unknown().optional(), url: z.unknown().optional() });
+function elicitationModes(ctx: ServerContext): { form: boolean; url: boolean } {
+  const modes = ElicitationSchema.safeParse(declaredCapabilities(ctx)?.elicitation);
+  if (!modes.success) return { form: false, url: false };
+  const url = modes.data.url !== undefined;
+  return { form: modes.data.form !== undefined || !url, url };
+}
+/** What a secure-input request asks for, as its elicitation and status name it. */
+const SECURE_INPUT_KIND_NAMES: Record<RuntimeSecureInputKind, string> = { password: 'password', otp: 'one-time code', text: 'text' };
 
 export function createGitSpaceTasks(options: { key: string; capabilities: readonly string[]; execute: Execute }): GitSpaceTasks {
   const caller = decodeApiKey(options.key);
@@ -98,10 +110,11 @@ export function createGitSpaceTasks(options: { key: string; capabilities: readon
     if (read.result.run.state === 'missing') throw new ProtocolError(ProtocolErrorCode.InvalidParams, NOT_FOUND);
     return { value, run: read.result.run, working: read.result.control.todos.flatMap(list => list.tasks).find(task => task.status === 'in_progress')?.content };
   }
-  /** Whether this caller may answer `run`'s question as the task's input: a plain question, a grant that decides as the
-   * person, and a client that takes form elicitations on this request. */
+  /** Whether this caller may answer `run`'s question through a form: a plain question, a grant that decides as the
+   * person, and a client that takes form elicitations on this request. A secure-input request never is: its value is
+   * typed only on GitSpace's secure-input page. */
   function answerable(run: RuntimeRun, ctx: ServerContext): boolean {
-    return run.question?.kind === 'ask' && options.capabilities.includes('operator.decide') && declaredCapabilities(ctx)?.elicitation !== undefined;
+    return run.question?.kind === 'ask' && options.capabilities.includes('operator.decide') && elicitationModes(ctx).form;
   }
   function inputRequest(question: NonNullable<RuntimeRun['question']>) {
     const properties = {
@@ -109,6 +122,18 @@ export function createGitSpaceTasks(options: { key: string; capabilities: readon
       answer: { type: 'string', title: 'Written answer', description: question.choices.length > 0 ? 'Instead of, or beside, a choice.' : 'Your answer.' },
     };
     return { method: 'elicitation/create', params: { mode: 'form', message: question.prompt, requestedSchema: { type: 'object', properties, required: question.choices.length > 0 ? [] : ['answer'] } } };
+  }
+  /** Answers question `questionId` as an MCP client (`answerAsk`, `answeredBy: 'mcp-client'`). One answered or closed in
+   * the meantime takes no other answer; the next tasks/get shows what followed. */
+  async function answerAsk(handle: Handle, questionId: string, selectedOptions: string[], customInput: string | null, signal: AbortSignal): Promise<void> {
+    try {
+      await options.execute('runtime.session', { projectId: handle.projectId, workspaceId: handle.workspaceId, conversationId: handle.conversationId, command: { type: 'answerAsk', id: questionId, answers: [{ id: questionId, selectedOptions, customInput }], answeredBy: 'mcp-client' } }, signal);
+    } catch (error) {
+      if (error instanceof ProtocolError) throw error;
+      const latest = await readRun(handle, signal);
+      if (latest.run.state !== 'waiting' || latest.run.question?.id !== questionId) return;
+      throw new ProtocolError(ProtocolErrorCode.InternalError, `GitSpace could not answer question ${questionId}`);
+    }
   }
 
   /** The `DetailedTask` for `handle`'s run (GITSPACE-MCP-CAPABILITY-MATRIX.md, MCP Tasks). */
@@ -121,6 +146,16 @@ export function createGitSpaceTasks(options: { key: string; capabilities: readon
       case 'waiting': {
         const question = run.question;
         if (!question) throw new ProtocolError(ProtocolErrorCode.InternalError, 'GitSpace reported a waiting run without its question');
+        const secure = question.kind === 'secure-input' ? question.secureInput : undefined;
+        if (secure) {
+          // The page takes the value from a signed-in person; a client only ever gets its link, never a form.
+          const asked = `the ${SECURE_INPUT_KIND_NAMES[secure.kind]} for ${secure.origin}`;
+          if (elicitationModes(ctx).url) {
+            const message = `${secure.purpose}: enter ${asked} in GitSpace (secure input; the value never reaches the agent or this client)`;
+            return { ...task, pollIntervalMs: POLL_PERSON_MS, status: 'input_required', statusMessage: `The agent asks for ${asked}: ${secure.purpose}`, inputRequests: { [question.id]: inputRequired.elicitUrl({ message, url: secure.url }) } };
+          }
+          return { ...task, pollIntervalMs: POLL_PERSON_MS, status: 'working', statusMessage: `Waiting in GitSpace for a person to enter ${asked} (secure-input request ${question.id}: ${secure.purpose}) at ${secure.url}; this client did not declare URL elicitation.` };
+        }
         if (answerable(run, ctx)) return { ...task, pollIntervalMs: POLL_PERSON_MS, status: 'input_required', statusMessage: `The agent asks: ${question.prompt}`, inputRequests: { [question.id]: inputRequest(question) } };
         const why = question.kind !== 'ask' ? 'only a person answers it in GitSpace' : !options.capabilities.includes('operator.decide') ? 'this MCP access is not granted operator.decide' : 'this client did not declare form elicitation';
         return { ...task, pollIntervalMs: POLL_PERSON_MS, status: 'working', statusMessage: `Waiting in GitSpace for a person to answer "${question.prompt}" (question ${question.id}); ${why}.` };
@@ -176,24 +211,25 @@ export function createGitSpaceTasks(options: { key: string; capabilities: readon
         const handle = await verify(params.taskId);
         const { run } = await readRun(handle, ctx.mcpReq.signal);
         const question = run.state === 'waiting' ? run.question : null;
+        if (!question) return {};
         // Only the question the task waits on takes an answer; responses to any other key are ignored.
-        const response = question && answerable(run, ctx) ? inputResponse(ctx.mcpReq.inputResponses, question.id) : null;
-        if (!question || response?.kind !== 'elicit' || response.action !== 'accept') return {};
+        if (question.kind === 'secure-input') {
+          // The value arrives only through the page, so an accept does nothing and no content is read; a decline or cancel
+          // of the link declines the request.
+          const response = elicitationModes(ctx).url && question.secureInput ? inputResponse(ctx.mcpReq.inputResponses, question.id) : null;
+          if (response?.kind !== 'elicit' || response.action === 'accept' || !options.capabilities.includes('operator.decide')) return {};
+          await answerAsk(handle, question.id, [SECURE_INPUT_CHOICES.decline], null, ctx.mcpReq.signal);
+          return {};
+        }
+        const response = answerable(run, ctx) ? inputResponse(ctx.mcpReq.inputResponses, question.id) : null;
+        if (response?.kind !== 'elicit' || response.action !== 'accept') return {};
         const parsed = AnswerSchema.safeParse(response.content ?? {});
         const choice = parsed.success ? parsed.data.choice : undefined;
         const written = parsed.success ? parsed.data.answer?.trim() : undefined;
         if (!parsed.success || (choice !== undefined && !question.choices.includes(choice)) || (choice === undefined && !written)) {
           throw new ProtocolError(ProtocolErrorCode.InvalidParams, `An answer to question ${question.id} picks one of its choices (${question.choices.join(', ') || 'none'}) or writes an answer`);
         }
-        try {
-          await options.execute('runtime.session', { projectId: handle.projectId, workspaceId: handle.workspaceId, conversationId: handle.conversationId, command: { type: 'answerAsk', id: question.id, answers: [{ id: question.id, selectedOptions: choice === undefined ? [] : [choice], customInput: written || null }], answeredBy: 'mcp-client' } }, ctx.mcpReq.signal);
-        } catch (error) {
-          if (error instanceof ProtocolError) throw error;
-          // A question answered or closed in the meantime takes no other answer; the next tasks/get shows what followed.
-          const latest = await readRun(handle, ctx.mcpReq.signal);
-          if (latest.run.state !== 'waiting' || latest.run.question?.id !== question.id) return {};
-          throw new ProtocolError(ProtocolErrorCode.InternalError, `GitSpace could not answer question ${question.id}`);
-        }
+        await answerAsk(handle, question.id, choice === undefined ? [] : [choice], written || null, ctx.mcpReq.signal);
         return {};
       });
       server.setRequestHandler('tasks/cancel', { params: TaskIdSchema, result: EmptySchema }, async (params, ctx) => {

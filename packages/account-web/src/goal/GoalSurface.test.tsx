@@ -6,6 +6,8 @@ import type { GoalRequirement, JournalEntryView } from '@gitspace/protocol';
 import type { SessionControlView } from '@gitspace/protocol-runtime/session-controls';
 import { GoalSurface, type GoalSurfaceProps } from '../inspector/GoalSurface.js';
 import { formatDate } from '../inspector/inspector-shared.js';
+import type { RuntimeQuestion } from '@gitspace/protocol-runtime';
+import { QuestionCardsContext, type QuestionCards } from '../QuestionCards.js';
 
 const at = '2026-03-02T09:30:00.000Z';
 const requirement = (id: string, title: string, fields: Partial<GoalRequirement>): GoalRequirement => ({ id, title, description: '', required: true, status: 'review', workflowNodeId: null, criterionId: null, evidence: [], ...fields });
@@ -77,6 +79,20 @@ describe('Goal tab', () => {
     await render();
     expect(container.textContent).toContain('Awaiting your approval');
     expect(container.textContent).toContain('Needs you: approve the proposed plan');
+  });
+
+  it('an open secure-input request needs you as a secret for its origin, linking to its page; an ended one does not', async () => {
+    const requestId = 'C'.repeat(43);
+    const asked = (callId: string, origin: string): RuntimeQuestion => ({ id: `question:${callId}`, conversationId: 'main', kind: 'secure-input', prompt: 'Sign in', choices: ['Decline'], answer: null, secureInput: {
+      requestId, url: `https://acme.gitspace.sh/secure-input/${requestId}`, source: 'cloud', pairingId: null, browser: 'Cloud browser', groupId: '00000000-0000-4000-8000-0000000000a1', targetId: 'tab-a',
+      title: 'Sign in', workspace: 'checkout-fix', origin, selector: '#password', kind: 'password', purpose: 'Sign in', expiresAt: at, callId, askedAt: at,
+    } });
+    const cards: QuestionCards = { questions: [asked('call-1', 'https://github.com'), { ...asked('call-2', 'https://shop.example'), answer: { outcome: 'expired' } }], request: unexpected, answer: unexpected, watch: () => null };
+    await act(async () => root.render(<QuestionCardsContext.Provider value={cards}><GoalSurface {...props} /></QuestionCardsContext.Provider>));
+    expect(container.textContent).toContain('Needs you: Asks for a secret for https://github.com');
+    expect(container.textContent).not.toContain('https://shop.example');
+    const link = [...container.querySelectorAll('a')].find(anchor => anchor.textContent === 'Asks for a secret for https://github.com');
+    expect(link?.getAttribute('href')).toBe(`https://acme.gitspace.sh/secure-input/${requestId}`);
   });
 
   it('accepts a requirement with evidence to check, shows who accepted one and when, and reopens it', async () => {

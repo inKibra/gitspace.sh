@@ -1,7 +1,8 @@
 /// <reference path="./global-props.d.ts" />
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import { z } from 'zod';
-import { BROWSER_RUN_LIMIT_MS, RuntimeBrowserHolderSchema, type RuntimeAccountBrowserAuthorization, type RuntimeBrowserCapture, type RuntimeBrowserHolder, type RuntimeBrowserPreview, type RuntimeToolResult } from '@gitspace/protocol-runtime';
+import { BROWSER_RUN_LIMIT_MS, RuntimeBrowserHolderSchema, type RuntimeAccountBrowserAuthorization, type RuntimeBrowserCapture, type RuntimeBrowserHolder, type RuntimeBrowserPreview, type RuntimeSecureInputField, type RuntimeToolResult } from '@gitspace/protocol-runtime';
+import { secureFillField, type SecureFillOutcome } from '@gitspace/runtime-machine/browser-secure-fill';
 import { launchCloudBrowser, type BrowserChannel } from './browser-cdp.js';
 import { AccountBrowserRuntime } from './browser-runtime.js';
 import { BROWSER_CLOUD_RENEW_MS, BROWSER_SCRIPT_PATH } from './browser-relay.js';
@@ -305,6 +306,23 @@ export class BrowserSessionDO extends BudgetedDurableObject {
     if (!this.browser) throw new Error('The cloud browser is not running');
     const client = (await this.browser).client(() => {});
     try { await client.send('Target.closeTarget', { targetId }); } finally { await client.close(); }
+  }
+
+  /** Secure input's fill on a cloud tab (`secure-input.ts`), through a client of its own that never draws a cursor:
+   * the field the request names, only while the tab shows its origin (`secureFillField`). With no browser open, or the
+   * tab gone, there is nothing to fill. The value is used for this call only. */
+  async secureFill(input: { projectId: string; workspaceId: string; targetId: string; origin: string; field: RuntimeSecureInputField; value: string }): Promise<SecureFillOutcome> {
+    if (this.ctx.id.name !== `${this.env.ACCOUNT_ID}:${input.projectId}:${input.workspaceId}`) throw new Error('Browser session belongs to another workspace');
+    if (!this.browser) return { refused: 'The cloud browser closed, so the tab is gone' };
+    const shim = await this.browser;
+    if (!(await browserPages(shim)).some(tab => tab.targetId === input.targetId)) return { refused: 'The tab is closed' };
+    const client = shim.client(() => {});
+    try {
+      const { sessionId } = z.object({ sessionId: z.string() }).parse(await client.send('Target.attachToTarget', { targetId: input.targetId, flatten: true }));
+      const outcome = await secureFillField((method, params) => client.send(method, params ?? {}, sessionId), { field: input.field, origin: input.origin, value: input.value });
+      if ('filled' in outcome) await this.used();
+      return outcome;
+    } finally { await client.close(); }
   }
 
   /** Starts recording a cloud tab's screencast into the workspace's drive (you, from the Browser tab). The browser

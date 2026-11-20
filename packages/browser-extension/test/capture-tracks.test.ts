@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, jest } from 'bun:test';
 import { Window, type Element, type ShadowRoot } from 'happy-dom';
 import { RuntimeBrowserCaptureStepsSchema, RuntimeBrowserLayoutSampleSchema } from '@gitspace/protocol-runtime';
 import { browserCaptureBarFunction, browserCaptureRecorderFunction, CaptureTrackRecorder, CaptureTracksInChrome, type CaptureCommentMode, type CaptureTracksHost, type ChromeCapture } from '../src/capture-tracks.js';
+import { SECURE_INPUT_MARK } from '@gitspace/runtime-machine/browser-secure-fill';
 import { browserOverlayFunction } from '../src/overlay.js';
 
 const windows: Window[] = [];
@@ -85,6 +86,17 @@ describe('the steps you take while capturing', () => {
     you(element('#name'), new window.Event('input', { bubbles: true }));
     expect(call(browserCaptureRecorderFunction, { flush: true })).toEqual({ kind: 'fill', url: 'https://shop.example/order?session=1', locator: "getByRole('textbox', { name: 'Customer name' })", value: 'Grace' });
     expect(call(browserCaptureRecorderFunction, { flush: true })).toBeNull();
+  });
+
+  it('a field secure input filled is recorded masked', () => {
+    const { window, calls, call, you, element } = page('<label for="user">Username</label><input id="user" name="user">');
+    call(browserCaptureRecorderFunction, { binding: '__gitspaceSend' });
+    const input = element('#user');
+    input.setAttribute(SECURE_INPUT_MARK, '');
+    Reflect.set(input, 'value', 'ada-secret-login');
+    you(input, new window.Event('change', { bubbles: true }));
+    expect(calls.filter(text => text.startsWith('step ')).map(text => JSON.parse(text.slice(5)).value)).toEqual(['«secret»']);
+    expect(calls.join('\n')).not.toContain('ada-secret-login');
   });
 });
 

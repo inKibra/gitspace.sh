@@ -104,7 +104,7 @@ test('offline approved Chrome remains discoverable and refuses dispatch without 
   await relay.setProjectSettings('project', 0, { defaultPairingId: a.pairingId, approvals: [{ pairingId: a.pairingId }, { pairingId: b.pairingId }] });
   const pending = await authorization(root, await relay.placement('project', a.pairingId));
   const closed = new Promise<void>(resolve => a.socket.addEventListener('close', () => resolve(), { once: true })); a.socket.close(); await closed;
-  expect((await relay.projectSettings('project')).browsers).toContainEqual({ pairingId: a.pairingId, generation: a.generation, name: 'Work', note: 'Local Chrome', connected: false, approved: true, takeover: false, powers: [], powersSupported: false });
+  expect((await relay.projectSettings('project')).browsers).toContainEqual({ pairingId: a.pairingId, generation: a.generation, name: 'Work', note: 'Local Chrome', connected: false, approved: true, takeover: false, powers: [], powersSupported: false, secureInput: false });
   const other = `"Chrome ${b.pairingId.slice(0, 8)}" (${b.pairingId}, online)`;
   await expect(relay.placement('project')).rejects.toThrow(`"Work" (${a.pairingId}) is approved but offline: its GitSpace extension is not connected. Ask the user to open that Chrome, or pass another approved pairingId: ${other}.`);
   await expect(relay.execute(pending)).rejects.toThrow(`"Work" (${a.pairingId}) is approved but offline: its GitSpace extension is not connected. Ask the user to open that Chrome.`); expect(b.operations).toEqual([]);

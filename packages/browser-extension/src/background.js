@@ -3,6 +3,7 @@
 import { browserScreenshotPrepareFunction, browserScreenshotRestoreFunction } from '@gitspace/runtime-machine/browser-screenshot';
 import { CAPTURE_MAX_MS, CAPTURE_SCREENCAST, jpegSize, ScreencastRecorder } from '@gitspace/runtime-machine/browser-screencast';
 import { remoteInputCommand } from '@gitspace/runtime-machine/browser-remote-input';
+import { secureFillField } from '@gitspace/runtime-machine/browser-secure-fill';
 import { permitted, readSiteStepRefusal, relayCommandAllowed, relayRunCommand, relayRunEvent, restoredGroup, restoredMembers, runDestinationRefusal, runSites, runTabRefusal, SCRIPT_TAKEN_REFUSAL, siteOf, TAB_HELD_REFUSAL, tabWithinGrant } from './commands.ts';
 import { verifyRelayAuthorization } from './authorization.ts';
 import { groupTitle, RUN_LOG_LIMIT, runLogEntry } from './runs.ts';
@@ -946,6 +947,29 @@ async function control(message) {
 }
 /** The relay operations `control` answers, and why each is refused without its signed request. */
 const CONTROL_OPERATIONS = { stopGroup: 'Signed stop required', closeTab: 'Signed tab close required', focusTab: 'Signed tab focus required', takeOver: 'Signed take over required', resume: 'Signed resume required', showComment: 'Signed comment show required' };
+/**
+ * Secure input (`secure-input.ts`): fills the value the account sent beside a signed `manage` `secureFill` into the
+ * field it names of a tab in this workspace's group, only while the tab shows the signed origin (`browser-secure-fill.ts`).
+ * A refusal is an answer, not an error. The value goes only to the tab: it is not logged, stored or reported, and the
+ * fill's typed text is not your input, so it never takes the tab from the agent.
+ */
+async function secureFill(message) {
+  const { groupId, targetId, origin, selector, ref, kind, secureInputId } = message;
+  const authorization = management('secureFill', { groupId, targetId, origin, selector, ref, fillKind: kind, secureInputId });
+  if (!authorization || typeof message.value !== 'string' || typeof origin !== 'string' || (selector === undefined) === (ref === undefined)) throw new Error('Signed secure input fill required');
+  const { scope } = authorization.body, identity = await stored('identity');
+  const key = 'group:' + JSON.stringify([identity.trust.accountId, identity.pairingId, scope.projectId, scope.workspaceId]);
+  const found = (await workspaceGroups()).find(entry => entry.key === key && entry.record.groupId === groupId);
+  if (!found) throw new Error('This workspace has no tab group in this Chrome');
+  let target, tab;
+  try { target = await targetInfo(targetId); tab = await chrome.tabs.get(target.tabId); } catch { return { refused: 'The tab is closed' }; }
+  if (tab.groupId !== found.group.id) return { refused: 'The tab left the workspace group' };
+  let shown = null;
+  try { const url = new URL(tab.url ?? ''); if (url.protocol === 'https:' || url.protocol === 'http:') shown = url.origin; } catch {}
+  if (shown !== origin) return { refused: `The tab shows ${shown ?? 'no web page'}, not ${origin}` };
+  const { source } = await debuggeeOf(target);
+  return secureFillField((method, params) => method === 'Input.insertText' ? agentInput(target.id, chrome.debugger.sendCommand(source, method, params)) : chrome.debugger.sendCommand(source, method, params), { field: selector !== undefined ? { selector } : { ref }, origin, value: message.value });
+}
 /** Signs the begin request of one upload to the account (`upload.ts`) with this Chrome's pairing key. */
 async function signUpload(method, pathname, bodySha256) {
   const identity = await stored('identity');
@@ -1731,6 +1755,7 @@ async function execute(message) {
   if (message.operation === 'shareHit') return shareHit(message);
   if (message.operation === 'shareAnchor') return shareAnchor(message);
   if (message.operation === 'adoptTab') return adoptTab(message.groupId, message.targetId);
+  if (message.operation === 'secureFill') return secureFill(message);
   if (message.operation !== 'command') throw new Error('Unsupported relay operation');
   // Before any await: the script's commands reach its tab in the order they arrived.
   if (message.attemptId !== undefined) return runCommand(message);
@@ -2150,8 +2175,9 @@ async function connect() {
           // and `resume`, and refuses the agent's commands on a tab you hold; `comments`: it has the in-page comment
           // tool, takes the account's `comments` notices and Show on page (`showComment`); `captureTracks`: its captures
           // record steps and layout (`capture-tracks.ts`); `stepEnded`: it takes the account's `stepEnded` notices;
-          // `addTab`: its popup adds tabs to workspaces (`workspaces.ts`).
-          connection.send(JSON.stringify({ hello: true, Browser: navigator.userAgent.match(/Chrome\/[\d.]+/)?.[0] || 'Chrome', protocol: EXTENSION_PROTOCOL, extension: chrome.runtime.getManifest().version, platform: await platform, chromeInfo: true, controls: true, siteLevels: true, takeover: true, comments: true, captureTracks: true, powers: true, stepEnded: true, addTab: true }));
+          // `addTab`: its popup adds tabs to workspaces (`workspaces.ts`); `secureInput`: it takes `secureFill`, a signed
+          // fill of a secure input's value into a group tab's field (`secure-input.ts`).
+          connection.send(JSON.stringify({ hello: true, Browser: navigator.userAgent.match(/Chrome\/[\d.]+/)?.[0] || 'Chrome', protocol: EXTENSION_PROTOCOL, extension: chrome.runtime.getManifest().version, platform: await platform, chromeInfo: true, controls: true, siteLevels: true, takeover: true, comments: true, captureTracks: true, powers: true, stepEnded: true, addTab: true, secureInput: true }));
           return;
         } finally { authenticating = false; }
       }

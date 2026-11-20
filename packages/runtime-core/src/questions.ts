@@ -2,7 +2,7 @@ import { AssistantEntry, type ConversationId, type Cursor, type Harness, type St
 import type { JsonValue } from '@earendil-works/chord/json';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { z } from 'zod';
-import { RuntimeApprovalAnswerSchema, RuntimeLifecycleApprovalAnswerSchema, RuntimeTakeoverQuestionSchema, TAKEOVER_ANSWERS, askAnswerParts, questionState, type RuntimeQuestionClosed } from '@gitspace/protocol-runtime';
+import { RuntimeApprovalAnswerSchema, RuntimeLifecycleApprovalAnswerSchema, RuntimeSecureInputAnswerSchema, RuntimeTakeoverQuestionSchema, TAKEOVER_ANSWERS, askAnswerParts, questionState, type RuntimeQuestionClosed } from '@gitspace/protocol-runtime';
 import type { SentAnswer } from '@gitspace/protocol-runtime/comments';
 import { PendingAskAnswerSchema } from '@gitspace/protocol-runtime/session-controls';
 import { askAnswererName, openerAt, piMessageRowId, type AskAnswerer } from '@gitspace/blocks';
@@ -164,6 +164,15 @@ function answerText(question: Question, answer: JsonValue, answeredBy: AskAnswer
     const tab = question.takeover ? `tab ${question.takeover.targetId} (${question.takeover.title || question.takeover.url}) in ${question.takeover.browser}` : 'the tab';
     if (answer === TAKEOVER_ANSWERS.declined) return `The user declined to take over ${tab} (Not now) (question ${question.id}). Continue without that tab, or tell the user what still needs them.`;
     return `The user handed ${tab} back (question ${question.id}). Observe it again before acting.`;
+  }
+  if (question.kind === 'secure-input') {
+    const request = question.secureInput;
+    const field = request ? `the ${request.kind === 'otp' ? 'one-time code' : request.kind} field ${request.selector ?? request.ref ?? ''} of tab ${request.targetId} in ${request.browser} (${request.origin})` : 'the field';
+    const outcome = RuntimeSecureInputAnswerSchema.safeParse(answer);
+    if (outcome.success && outcome.data.outcome === 'provided') return `A person provided the value for your secure-input request (question ${question.id}), and GitSpace filled it into ${field}. Never read the field's value back (no script, evaluate or observe aimed at it): continue the sign-in (submit or next) without inspecting the field.`;
+    if (outcome.success && outcome.data.outcome === 'expired') return `Your secure-input request (question ${question.id}) expired: nobody provided the value in time, and nothing was filled into ${field}. Ask again if it is still needed, or tell the user.`;
+    const reason = outcome.success && outcome.data.outcome === 'declined' ? outcome.data.reason : 'declined';
+    return `Your secure-input request (question ${question.id}) was declined${answeredBy?.by === 'mcp-client' ? ' through an MCP client' : ''}: ${reason}. Nothing was filled into ${field}. Continue without it, or tell the user what still needs them.`;
   }
   const decision = RuntimeApprovalAnswerSchema.safeParse(answer);
   const approved = decision.success && decision.data.approved;

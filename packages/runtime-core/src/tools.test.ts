@@ -32,6 +32,7 @@ const services: ToolServices = {
   async prepareBrowser() { return RuntimeBrowserApprovalCardSchema.parse({ id: 'browser', projectId: 'project', workspaceId: 'workspace', machineId: 'machine', attachmentId: 'attachment', generation: 1, groupId: '00000000-0000-4000-8000-000000000001', groupName: 'Workspace', origins: [], source: 'headless', expiresAt: new Date(Date.now() + 60000).toISOString(), action: 'tabs' }); },
   instructions: async () => '', preflight: async () => {}, lifecycleApproval: async () => null,
   async takeoverTab(input) { return { source: 'cloud', pairingId: null, browser: 'Cloud browser', groupId: '00000000-0000-4000-8000-000000000002', targetId: input.args.targetId, url: 'https://example.com/', title: 'Example', holder: 'agent' }; },
+  async secureInput(input) { return { requestId: 'r'.repeat(43), url: `https://account.example/secure-input/${'r'.repeat(43)}`, source: 'cloud', pairingId: null, browser: 'Cloud browser', groupId: '00000000-0000-4000-8000-000000000002', targetId: input.args.targetId, title: 'Example', workspace: 'Workspace', origin: input.args.origin, kind: input.args.kind, purpose: input.args.purpose, selector: '#password', expiresAt: new Date(Date.now() + 60_000).toISOString(), callId: input.callId, askedAt: new Date().toISOString() }; },
   results: {
     async put(input) { kept.set(keptReference(input), input.text); return keptReference(input); },
     async text(key) { const text = kept.get(keptReference(key)); if (text === undefined) throw new Error(`${keptReference(key)} names no kept tool output`); return text; },
@@ -51,6 +52,7 @@ const samples: Record<string, ToolCall['arguments']> = {
   mcp_discover: {}, mcp_invoke: { connectionId: 'connection', name: 'lookup', arguments: { query: 'hello' } }, web_browser: { action: 'tabs' },
   todo: { items: [{ id: 'proof', text: 'Exercise registrations', status: 'completed' }] }, propose_plan: { prompt: 'Implement the selected plan', choices: ['Approve', 'Reject'], steps: [{ id: 'implement', title: 'Implement the selected plan', detail: 'The selected path.' }] },
   ask_takeover: { source: 'headless', targetId: 'tab', reason: 'Solve the CAPTCHA' },
+  ask_secure_input: { source: 'headless', targetId: 'tab', origin: 'https://example.com', selector: '#password', kind: 'password', purpose: 'Sign in to Example' },
 };
 async function registered(rounds: ToolCall[][], invoke: ToolServices['invoke'] = completed, given: JobServices = operations, extraTools: ToolRegistration[] = [], chatModel: Model<Api> = model) {
   // A foreground bash command runs as a job, which reaches its machine through `execute`: unless a test supplies one,
@@ -95,17 +97,17 @@ test('every registered tool advertises its real object contract and executes thr
     expect(results.filter(result => result.isError)).toEqual([]);
     // There is no ask tool: an agent asks with a block's required ask. The question tools it has post their questions
     // and end: the transcript reads each card's question from its details.
-    expect(offered[0]).toEqual(expect.arrayContaining(['propose_plan', 'ask_takeover']));
+    expect(offered[0]).toEqual(expect.arrayContaining(['propose_plan', 'ask_takeover', 'ask_secure_input']));
     expect(offered.flat()).not.toContain('ask');
     const questions = (await harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items ?? [];
-    for (const [callId, kind] of [['propose_plan', 'approval'], ['ask_takeover', 'takeover']]) {
+    for (const [callId, kind] of [['propose_plan', 'approval'], ['ask_takeover', 'takeover'], ['ask_secure_input', 'secure-input']]) {
       const questionId = Reflect.get(Object(results.find(result => result.toolCallId === callId)?.details), 'questionId');
       expect(questions.find(question => question.id === questionId)).toMatchObject({ kind, answer: null });
     }
     // Models call web_browser (OpenAI reserves `browser`); dispatch keeps the signed protocol name.
-    expect(routed.sort()).toEqual(Object.keys(samples).filter(name => !['todo', 'propose_plan', 'ask_takeover'].includes(name)).map(name => name === 'web_browser' ? 'browser' : name).sort());
+    expect(routed.sort()).toEqual(Object.keys(samples).filter(name => !['todo', 'propose_plan', 'ask_takeover', 'ask_secure_input'].includes(name)).map(name => name === 'web_browser' ? 'browser' : name).sort());
     expect((await harness.snapshot(TodosDoc, root.id, BACKGROUND_CONTEXT))?.items).toEqual(samples.todo?.items);
-    expect((await harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items.map(question => question.kind).sort()).toEqual(['approval', 'takeover']);
+    expect((await harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items.map(question => question.kind).sort()).toEqual(['approval', 'secure-input', 'takeover']);
     expect((await harness.snapshot(PlanDoc, root.id, BACKGROUND_CONTEXT))?.status).toBe('proposed');
   } finally { await harness.close(BACKGROUND_CONTEXT); }
 });

@@ -8,7 +8,8 @@ import { Badge, Button, Card, CardAction, CardContent, CardDescription, CardFoot
 import type { EvidenceReference, InspectorOverview, JournalEntryView, ReviewThreadView, RubricCriterion, RubricView, WorkflowNode, WorkflowView } from '@gitspace/protocol';
 import type { SessionControlView } from '@gitspace/protocol-runtime/session-controls';
 import { ArrowUpRight, Play, Scales02, Terminal, User01, Users01 } from '@untitledui/icons';
-import { useContext, useEffect, useMemo, useState, type ReactElement, type ReactNode } from 'react';
+import { Fragment, useContext, useEffect, useMemo, useState, type ReactElement, type ReactNode } from 'react';
+import { questionState } from '@gitspace/protocol-runtime';
 import { STAGED_CHOICE_DATA } from '@gitspace/protocol-runtime/session-controls';
 import { AutomationPhaseGrid } from '../automations/AutomationPhaseGrid.js';
 import { MODE_LABEL } from '../automations/automation-formatters.js';
@@ -19,6 +20,7 @@ import { CommentLayer, DocumentComments, type DocumentCommentsValue } from '../c
 import { entityQuote, goalNotes, useFoundAgain } from '../comments/document-notes.js';
 import { useComposerStaging, workspaceBlockActions } from '../chat/staging.js';
 import { GitSpaceMarkdown } from '../GitSpaceMarkdown.js';
+import { QuestionCardsContext } from '../QuestionCards.js';
 import { EmptyState, type AgentScopeView } from '../GitSpaceShell.js';
 import { DecisionsSection } from '../goal/DecisionsSection.js';
 import { EvidenceList } from '../goal/Evidence.js';
@@ -91,6 +93,8 @@ export function GoalSurface({ overview, scope, controls, journalEntries, threads
     ...controls?.pendingAsk ? ['answer the agent’s question'] : [],
     ...toAccept ? [`accept ${toAccept} requirement${toAccept === 1 ? '' : 's'} with evidence to check`] : [],
   ];
+  // A secret an agent asks for is typed only on its secure-input page, which each one links to.
+  const secrets = useContext(QuestionCardsContext)?.questions.flatMap((question) => question.kind === 'secure-input' && question.secureInput && questionState(question) === 'open' ? [question.secureInput] : []) ?? [];
   const entries = journalEntries.length ? journalEntries : overview.journal.recent;
   const done = [
     ...plan?.steps.length ? [`${stepsDone} of ${plan.steps.length} plan steps`] : [],
@@ -119,7 +123,10 @@ export function GoalSurface({ overview, scope, controls, journalEntries, threads
         {pullRequests.length ? <PrChips pulls={pullRequests} full /> : workspace ? <span className="text-caption text-muted-foreground">no PR</span> : null}
       </div>
       {done.length ? <p className="text-body text-foreground">Done: {done.join(', ')}.</p> : null}
-      <p className="text-body text-foreground"><span className="font-medium">Needs you:</span> {needsYou.length ? needsYou.join(' · ') : 'nothing right now'}</p>
+      <p className="text-body text-foreground"><span className="font-medium">Needs you:</span> {needsYou.length || secrets.length ? <>
+        {needsYou.join(' · ')}
+        {secrets.map((secret, index) => <Fragment key={secret.requestId}>{needsYou.length || index ? ' · ' : null}<a href={secret.url} target="_blank" rel="noopener" className="underline underline-offset-2 [overflow-wrap:anywhere]">Asks for a secret for <span className="font-mono">{secret.origin}</span></a></Fragment>)}
+      </> : 'nothing right now'}</p>
     </section>
 
     <Part number={2} title={goal?.title ?? 'The goal'} detail={workspace ? <>The goal · <span className="font-mono">{workspace.branch}</span>{goal ? ` · revision ${goal.revision}` : null}</> : 'The goal'}>

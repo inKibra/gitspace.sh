@@ -30,6 +30,8 @@ import { AccountSidebarContext, AppSidebar, sidebarWorkspaceSummary, type AppSid
 import { accountHandleFromUrl, browserInvitationStatus, canConnectBrowser, cancelBrowserInvitation, createBrowserInvitation, enrollmentTokenForLocation, recoverAccountBrowser } from './browser-enrollment.js';
 import { AccountConnectPage } from './AccountConnectPage.js';
 import { ServiceAccessApproval } from './ServiceAccessApproval.js';
+import { SecureInputPage } from './SecureInputPage.js';
+import { SECURE_INPUT_PAGE } from '@gitspace/protocol-runtime/secure-input';
 import { SkillsPage } from './SkillsPage.js';
 import { PluginsPage } from './PluginsPage.js';
 import { ProjectSecretsPage, type ProjectSecretsProps } from './ProjectSecretsPage.js';
@@ -1495,5 +1497,7 @@ function AccountProductRoute() {
 
 export function LiveApp() {
   if (window.location.pathname === '/service-access') return <DeviceGate><ServiceAccessApproval /></DeviceGate>;
+  const secureInput = SECURE_INPUT_PAGE.exec(window.location.pathname)?.[1];
+  if (secureInput) return <DeviceGate><SecureInputPage id={secureInput} /></DeviceGate>;
   return <DeviceGate><ResultRpcProvider client={rpcClient}><SynchronizationProvider><InferenceProvider><Toasts><AccountFrame><AccountProductRoute /></AccountFrame></Toasts></InferenceProvider></SynchronizationProvider></ResultRpcProvider></DeviceGate>;
 }

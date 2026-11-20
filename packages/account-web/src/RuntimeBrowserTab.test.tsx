@@ -154,7 +154,7 @@ it('shows each approved site as host · level', async () => {
 });
 
 it('offers to approve a confirmed Chrome when none is approved here, making it the default', async () => {
-  const settings: RuntimeProjectBrowserSettings = { projectId: 'project', revision: 4, defaultPairingId: null, browsers: [{ pairingId: work, name: 'Work Chrome', note: 'staging admin', generation: 1, connected: true, approved: false, takeover: false, powers: [], powersSupported: true }] };
+  const settings: RuntimeProjectBrowserSettings = { projectId: 'project', revision: 4, defaultPairingId: null, browsers: [{ pairingId: work, name: 'Work Chrome', note: 'staging admin', generation: 1, connected: true, approved: false, takeover: false, powers: [], powersSupported: true, secureInput: false }] };
   vi.mocked(projectBrowserSettings).mockResolvedValue(settings);
   vi.mocked(updateProjectBrowserSettings).mockImplementation(async () => { overview = { ...overview, chromes: overview.chromes.map(chrome => ({ ...chrome, approved: true, isDefault: true })) }; return settings; });
   await render();
@@ -167,7 +167,7 @@ it('offers to approve a confirmed Chrome when none is approved here, making it t
 });
 
 it('turns a power on for an approved Chrome from its card, keeping its other powers, and asks for 5.11 before offering Everything', async () => {
-  const settings: RuntimeProjectBrowserSettings = { projectId: 'project', revision: 7, defaultPairingId: work, browsers: [{ pairingId: work, name: 'Work Chrome', note: '', generation: 1, connected: true, approved: true, takeover: false, powers: ['record'], powersSupported: false }] };
+  const settings: RuntimeProjectBrowserSettings = { projectId: 'project', revision: 7, defaultPairingId: work, browsers: [{ pairingId: work, name: 'Work Chrome', note: '', generation: 1, connected: true, approved: true, takeover: false, powers: ['record'], powersSupported: false, secureInput: false }] };
   vi.mocked(projectBrowserSettings).mockResolvedValue(settings);
   vi.mocked(updateProjectBrowserSettings).mockImplementation(async (_projectId, _revision, preferences) => {
     overview = { ...overview, chromes: overview.chromes.map(chrome => ({ ...chrome, powers: preferences.approvals[0]!.powers })) };

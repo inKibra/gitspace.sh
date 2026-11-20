@@ -16,6 +16,7 @@
  *   service worker.
  */
 import { CAPTURE_LAYOUT_ELEMENTS, CAPTURE_LAYOUT_INTERVAL_MS, CAPTURE_SECRET_NAME, CAPTURE_SECRET_VALUE, CAPTURE_STEPS_MAX, CAPTURE_TRACK_FILES, captureMaskedUrl } from '@gitspace/protocol-runtime/browser-capture-rules';
+import { SECURE_INPUT_MARK } from '@gitspace/runtime-machine/browser-secure-fill';
 import type { RuntimeBrowserCaptureStep, RuntimeBrowserCaptureTracks, RuntimeBrowserLayoutSample } from '@gitspace/protocol-runtime';
 import { accountValue, relaySignature, sha256Hex, SIGNATURE_HEADER, type SigningIdentity } from './upload.js';
 
@@ -130,6 +131,8 @@ export const browserCaptureRecorderFunction = `function(command) {
   const checkable = el => el.localName === 'input' && (typeOf(el) === 'checkbox' || typeOf(el) === 'radio');
   const secret = el => {
     if (el.localName === 'input' && typeOf(el) === 'password') return true;
+    // A field secure input filled (browser-secure-fill.ts in runtime-machine).
+    if (el.hasAttribute(${JSON.stringify(SECURE_INPUT_MARK)})) return true;
     if (clean(el.getAttribute('autocomplete')).toLowerCase().split(' ').some(token => token.startsWith('cc-') || token === 'one-time-code')) return true;
     return SECRET_NAME.test(el.getAttribute('name') || '') || SECRET_NAME.test(el.id || '');
   };

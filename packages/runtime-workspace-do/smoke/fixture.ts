@@ -2,7 +2,7 @@ import { DurableObject } from 'cloudflare:workers';
 import { createModels, createAssistantMessageEventStream, type Model, type StreamFunction, type AssistantMessage, type ToolCall } from '@earendil-works/pi-ai';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { createOperationalTasks, type OperationalServices } from '../../runtime-core/src/tasks.js';
-import { RuntimeAnswerInputSchema, RuntimeIdentitySchema, RuntimeSessionInputSchema, RuntimeSnapshotSchema } from '@gitspace/protocol-runtime';
+import { RuntimeAnswerInputSchema, RuntimeIdentitySchema, RuntimeSessionInputSchema, RuntimeSnapshotSchema, type RuntimeSecureInputQuestion } from '@gitspace/protocol-runtime';
 import { WorkspaceDraftSaveSchema } from '@gitspace/protocol-runtime/draft';
 import { workspaceTurnReportSchema } from '@gitspace/blocks';
 import { createWorkspaceRuntime, type WorkspaceRuntimeOptions } from '../src/runtime.js';
@@ -100,9 +100,12 @@ const stream: StreamFunction = (_model, context, options) => {
   const plan = last?.role === 'user' && text === 'propose a plan';
   // A block fix step: the fixture corrects block 1 as a Mermaid graph.
   const fix = last?.role === 'user' && text.includes('call fix_block once per block');
+  // "ask for a secret" asks for secure input on the user's Chrome; the request expires 4 s later (`secureInput`).
+  const secret = last?.role === 'user' && text === 'ask for a secret';
   const call: Pick<ToolCall, 'name' | 'arguments'> = plan ? { name: 'propose_plan', arguments: { prompt: 'Approve this deterministic smoke plan?', choices: ['Misleading model choice', 'Another model choice'], steps: [{ id: 'smoke', title: 'Run the smoke step', detail: 'One deterministic step.' }] } }
+    : secret ? { name: 'ask_secure_input', arguments: { source: 'relay', targetId: 'tab', origin: 'https://github.com', selector: '#password', kind: 'password', purpose: 'Sign in to GitHub' } }
     : { name: 'fix_block', arguments: { block: 1, source: 'graph TD; A-->B' } };
-  const calls = plan || fix;
+  const calls = plan || fix || secret;
   // "ask for a color" asks as an agent does: a reply ending with an AskCard that carries a required ask.
   const reply = ask ? `Pick one:\n\`\`\`gitspace-ui\n${JSON.stringify({ root: 'color', state: { answer: '', options: [{ value: 'blue', label: 'blue' }, { value: 'green', label: 'green' }] }, elements: { color: { type: 'AskCard', id: 'color', ask: { required: true, prompt: 'Choose a color' }, props: { questionId: 'color', question: 'Choose a color', prompt: 'Choose a color', options: { $state: '/options' }, value: { $bindState: '/answer' }, answered: { $state: '/answered' } }, children: [] } } })}\n\`\`\`` : `fixture reply: ${text}`;
   const output: AssistantMessage = { role: 'assistant', api: 'fixture', provider: 'fixture', model: 'fixture', content: calls ? [{ type: 'toolCall', id: crypto.randomUUID(), ...call }] : [{ type: 'text', text: reply }], stopReason: calls ? 'toolUse' : 'stop', timestamp: Date.now(), usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0.000001, output: 0.000002, cacheRead: 0, cacheWrite: 0, total: 0.000003 } } };
@@ -144,7 +147,11 @@ function openSmokeRuntime(ctx: DurableObjectState, storage: DurableObjectStorage
     code: { readFile: unsupported, writeSnapshot: unsupported, mergeSnapshot: unsupported, listSnapshotPaths: async () => ['.agents/agents/repository.md'], changedSnapshotPaths: unsupported, reader: () => ({ readTree: async oid => definitionTrees.get(oid) ?? null, readBlob: async oid => oid === 'c'.repeat(40) ? new Blob([repositoryDefinition]) : null, close: async () => {} }) },
     initialCheckpoint: async () => await ctx.storage.get('definitions-enabled') ? definitionCheckpoint : null,
     lfs: { has: unsupported, get: unsupported, put: unsupported }, retainLfs: async () => {},
-    tools: { images: { store: async image => image, load: async image => image }, invoke: unsupported, prepareBrowser: unsupported, takeoverTab: unsupported, lifecycleApproval: async () => null, instructions: async () => 'Deterministic local-only smoke. No external services or machine.', preflight: async () => {} },
+    tools: { images: { store: async image => image, load: async image => image }, invoke: unsupported, prepareBrowser: unsupported, takeoverTab: unsupported, lifecycleApproval: async () => null, instructions: async () => 'Deterministic local-only smoke. No external services or machine.', preflight: async () => {},
+      async secureInput(input): Promise<RuntimeSecureInputQuestion> {
+        const id = 's'.repeat(43), now = Date.now();
+        return { requestId: id, url: `https://account.example/secure-input/${id}`, source: 'chrome', pairingId: '00000000-0000-4000-8000-0000000000b2', browser: 'Chrome "Smoke"', groupId: '00000000-0000-4000-8000-0000000000a1', targetId: input.args.targetId, title: 'Sign in', workspace: 'Smoke', origin: input.args.origin, selector: '#password', kind: input.args.kind, purpose: input.args.purpose, expiresAt: new Date(now + 4000).toISOString(), callId: input.callId, askedAt: new Date(now).toISOString() };
+      } },
     operations, retainedRules: { loadRules: async () => [] }, editTool: () => 'edit',
     onReport: error => console.error('RUNTIME_REPORT', String(error)),
     admitInference: async input => { await ctx.storage.put(`admission:${input.requestId}`, input.conversationId); return modelRef; },

@@ -16,6 +16,16 @@ const keyFor = (userId: string) => encodeApiKey({
 const capabilities = ['rpc.read', 'rpc.write', 'session.prompt', 'operator.decide'];
 const identity = { projectId: 'project', workspaceId: 'workspace' };
 const question = { id: 'q-cache', conversationId: 'conversation', kind: 'ask' as const, prompt: 'Which cache?', choices: ['Workers KV', 'Durable Object'], answer: null };
+const SECURE_URL = 'https://owner.gitspace.test/secure-input/AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_abcde';
+/** An ask_secure_input request as its question shows it: the password for accounts.example.com on the user's Chrome. */
+const secureQuestion = {
+  id: 'q-secret', conversationId: 'conversation', kind: 'secure-input' as const, prompt: 'Sign in to GitHub as octocat', choices: ['Decline'], answer: null,
+  secureInput: {
+    requestId: 'AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_abcde', url: SECURE_URL, source: 'chrome' as const, pairingId: crypto.randomUUID(), browser: 'Work Chrome',
+    groupId: crypto.randomUUID(), targetId: 'tab-7', title: 'Sign in', workspace: 'workspace', origin: 'https://accounts.example.com', selector: '#password', kind: 'password' as const,
+    purpose: 'Sign in to GitHub as octocat', expiresAt: new Date(Date.now() + 900_000).toISOString(), callId: 'call-1', askedAt: new Date().toISOString(),
+  },
+};
 
 /** An MCP endpoint as the account worker serves it. */
 interface McpEndpoint { fetch(request: Request): Promise<Response> }
@@ -66,8 +76,8 @@ function workspace(): FakeWorkspace {
   return { fetch, calls, runs, move };
 }
 
-function mcp(backend: FakeWorkspace, key = keyFor('owner')): McpEndpoint {
-  return createGitSpaceMcpHandler({ key, capabilities, scope: { kind: 'user' }, fetch: backend.fetch });
+function mcp(backend: FakeWorkspace, key = keyFor('owner'), granted = capabilities): McpEndpoint {
+  return createGitSpaceMcpHandler({ key, capabilities: granted, scope: { kind: 'user' }, fetch: backend.fetch });
 }
 
 async function connect(handler: McpEndpoint, options: ClientOptions = {}) {
@@ -76,10 +86,16 @@ async function connect(handler: McpEndpoint, options: ClientOptions = {}) {
   return client;
 }
 
-/** A 2026-07-28 client that declares the Tasks extension, and form elicitation when `elicits`. */
-function tasksClient(handler: McpEndpoint, elicits = true) {
-  return connect(handler, { versionNegotiation: { mode: 'auto' }, capabilities: { extensions: { [TASKS]: {} }, ...(elicits ? { elicitation: { form: {} } } : {}) } });
+/** A 2026-07-28 client that declares the Tasks extension, and the elicitation capability `elicitation` (form unless
+ * given; none when null). */
+function tasksClient(handler: McpEndpoint, elicitation: { form?: object; url?: object } | null = { form: {} }) {
+  return connect(handler, { versionNegotiation: { mode: 'auto' }, capabilities: { extensions: { [TASKS]: {} }, ...(elicitation ? { elicitation } : {}) } });
 }
+/** The `answerAsk` commands the workspace took. */
+const answers = (backend: FakeWorkspace) => backend.calls.flatMap(call => {
+  const parsed = z.object({ command: z.looseObject({ type: z.literal('answerAsk') }) }).safeParse(call.input);
+  return parsed.success ? [parsed.data.command] : [];
+});
 
 const TaskSchema = z.looseObject({ taskId: z.string(), status: z.string(), statusMessage: z.string().optional(), createdAt: z.string(), lastUpdatedAt: z.string(), ttlMs: z.number().nullable(), pollIntervalMs: z.number().optional() });
 const getTask = (client: Client, taskId: string) => client.request({ method: 'tasks/get', params: { taskId } }, TaskSchema);
@@ -207,12 +223,81 @@ describe('GitSpace MCP server on SDK v2', () => {
     const second = await startTask(handler, 'gitspace_runtime_submit', { ...identity, requestId: 'retry-1', text: 'Pick a cache' });
     expect(backend.runs.size).toBe(1);
     backend.move('retry-1', { state: 'waiting', question });
-    const client = await tasksClient(handler, false);
+    const client = await tasksClient(handler, null);
     try {
       for (const started of [first, second]) {
         expect(await getTask(client, z.string().parse(started.taskId))).toMatchObject({ status: 'working', statusMessage: 'Waiting in GitSpace for a person to answer "Which cache?" (question q-cache); this client did not declare form elicitation.' });
       }
     } finally { await client.close(); }
+  });
+
+  test('a plain question goes to a client that declared form elicitation (a bare `{}` is form), not to one that declared only URL elicitation', async () => {
+    const backend = workspace();
+    const handler = mcp(backend);
+    const started = await startTask(handler, 'gitspace_runtime_submit', { ...identity, requestId: 'cache-1', text: 'Pick a cache' });
+    const taskId = z.string().parse(started.taskId);
+    backend.move('cache-1', { state: 'waiting', question });
+    const bare = await tasksClient(handler, {});
+    try { expect(await getTask(bare, taskId)).toMatchObject({ status: 'input_required', inputRequests: { [question.id]: { params: { mode: 'form' } } } }); }
+    finally { await bare.close(); }
+    const linkOnly = await tasksClient(handler, { url: {} });
+    try { expect(await getTask(linkOnly, taskId)).toMatchObject({ status: 'working', statusMessage: 'Waiting in GitSpace for a person to answer "Which cache?" (question q-cache); this client did not declare form elicitation.' }); }
+    finally { await linkOnly.close(); }
+  });
+
+  test('a client that declared URL elicitation gets a secure-input request as its page link; declining it declines the request, and accepting forwards nothing', async () => {
+    const backend = workspace();
+    const key = keyFor('owner');
+    const handler = mcp(backend, key);
+    const started = await startTask(handler, 'gitspace_runtime_submit', { ...identity, requestId: 'sign-in', text: 'Sign in to GitHub' });
+    const taskId = z.string().parse(started.taskId);
+    backend.move('sign-in', { state: 'waiting', question: secureQuestion });
+    const client = await tasksClient(handler, { form: {}, url: {} });
+    try {
+      const asking = await getTask(client, taskId);
+      expect(asking).toMatchObject({ status: 'input_required', inputRequests: { [secureQuestion.id]: { method: 'elicitation/create', params: {
+        mode: 'url', url: SECURE_URL,
+        message: 'Sign in to GitHub as octocat: enter the password for https://accounts.example.com in GitSpace (secure input; the value never reaches the agent or this client)',
+      } } } });
+      expect(JSON.stringify(asking)).not.toContain('requestedSchema');
+
+      // The value arrives only through the page: an accept carrying content reaches no runtime call.
+      await client.request({ method: 'tasks/update', params: { taskId, inputResponses: { [secureQuestion.id]: { action: 'accept', content: { password: 'hunter2-secret' } } } } }, z.looseObject({}));
+      expect(JSON.stringify(backend.calls)).not.toContain('hunter2-secret');
+      expect(answers(backend)).toEqual([]);
+      expect(await getTask(client, taskId)).toMatchObject({ status: 'input_required' });
+
+      // A grant without operator.decide declines nothing.
+      const undecided = await tasksClient(mcp(backend, key, capabilities.filter(capability => capability !== 'operator.decide')), { url: {} });
+      try { await undecided.request({ method: 'tasks/update', params: { taskId, inputResponses: { [secureQuestion.id]: { action: 'cancel' } } } }, z.looseObject({})); }
+      finally { await undecided.close(); }
+      expect(answers(backend)).toEqual([]);
+
+      await client.request({ method: 'tasks/update', params: { taskId, inputResponses: { [secureQuestion.id]: { action: 'decline' } } } }, z.looseObject({}));
+      expect(answers(backend)).toEqual([{ type: 'answerAsk', id: secureQuestion.id, answers: [{ id: secureQuestion.id, selectedOptions: ['Decline'], customInput: null }], answeredBy: 'mcp-client' }]);
+      expect(await getTask(client, taskId)).toMatchObject({ status: 'working' });
+    } finally { await client.close(); }
+  });
+
+  test('a client without URL elicitation hears a secure-input request waits in GitSpace with its link, and never gets a form for it', async () => {
+    const backend = workspace();
+    const handler = mcp(backend);
+    const started = await startTask(handler, 'gitspace_runtime_submit', { ...identity, requestId: 'sign-in', text: 'Sign in to GitHub' });
+    const taskId = z.string().parse(started.taskId);
+    backend.move('sign-in', { state: 'waiting', question: secureQuestion });
+    // The grant has operator.decide, and each client takes form elicitations (a bare `{}` is form) or none.
+    for (const elicitation of [{ form: {} }, {}, null]) {
+      const client = await tasksClient(handler, elicitation);
+      try {
+        const waiting = await getTask(client, taskId);
+        expect(waiting).toMatchObject({ status: 'working', statusMessage: `Waiting in GitSpace for a person to enter the password for https://accounts.example.com (secure-input request q-secret: Sign in to GitHub as octocat) at ${SECURE_URL}; this client did not declare URL elicitation.` });
+        expect(waiting.inputRequests).toBeUndefined();
+        // Without the link it was never shown, a form answer or a decline changes nothing.
+        await client.request({ method: 'tasks/update', params: { taskId, inputResponses: { [secureQuestion.id]: { action: 'accept', content: { choice: 'Decline' } } } } }, z.looseObject({}));
+        await client.request({ method: 'tasks/update', params: { taskId, inputResponses: { [secureQuestion.id]: { action: 'decline' } } } }, z.looseObject({}));
+        expect(answers(backend)).toEqual([]);
+      } finally { await client.close(); }
+    }
   });
 
   test('tasks methods from a client that did not declare Tasks are refused as a missing capability', async () => {

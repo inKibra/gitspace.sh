@@ -2,7 +2,7 @@ import type { RuntimeAccountBrowserPairing, RuntimeBrowserTrust } from '@gitspac
 import type { AccountBrowserRelay } from '../../src/browser-relay.js';
 import type { UserRelayDO } from '../../src/index.js';
 
-type Driven = Pick<AccountBrowserRelay, 'fetch' | 'pair' | 'redeemPairingCode' | 'status' | 'confirm' | 'setChrome' | 'placement' | 'unpair' | 'execute' | 'scriptBegin' | 'projectSettings' | 'setProjectSettings' | 'retireWorkspace' | 'powers' | 'everything'>;
+type Driven = Pick<AccountBrowserRelay, 'fetch' | 'pair' | 'redeemPairingCode' | 'status' | 'confirm' | 'setChrome' | 'placement' | 'unpair' | 'execute' | 'secureFill' | 'scriptBegin' | 'projectSettings' | 'setProjectSettings' | 'retireWorkspace' | 'powers' | 'everything'>;
 
 /** `pair` starts a pairing and redeems its short code, as GitSpace and then the extension do, answering the pairing's
  * details; `start` and `redeem` are those two steps apart. */
@@ -31,6 +31,7 @@ export function drivenBrowserRelay(relay: Driven): HostedBrowserRelay {
     unpair: pairingId => relay.unpair(pairingId),
     execute: authorization => relay.execute(authorization),
     scriptBegin: authorization => relay.scriptBegin(authorization),
+    secureFill: (authorization, value) => relay.secureFill(authorization, value),
     projectSettings: projectId => relay.projectSettings(projectId),
     setProjectSettings: (projectId, expectedRevision, preferences) => relay.setProjectSettings(projectId, expectedRevision, preferences),
     retireWorkspace: (projectId, workspaceId) => relay.retireWorkspace(projectId, workspaceId),
@@ -52,6 +53,7 @@ export function hostedBrowserRelay(relay: UserRelayDO): HostedBrowserRelay {
     placement: (projectId, pairingId) => relay.browserRelayPlacement(projectId, pairingId),
     unpair: pairingId => relay.browserRelayUnpair(pairingId),
     execute: authorization => relay.browserRelayExecute(authorization),
+    secureFill: (authorization, value) => relay.browserRelaySecureFill(authorization, value),
     scriptBegin: authorization => relay.browserRelayScriptBegin(authorization),
     projectSettings: projectId => relay.browserRelayProjectSettings(projectId),
     setProjectSettings: (projectId, expectedRevision, preferences) => relay.browserRelaySetProjectSettings(projectId, expectedRevision, preferences),
