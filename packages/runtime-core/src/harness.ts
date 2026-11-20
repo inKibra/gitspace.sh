@@ -325,7 +325,7 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
   registry.install(createSubagentReplyExtension(deliver));
   const blockFixes = createBlockFixes(async (id, requestId) => (await lifecycleReady.promise).admit(id, requestId));
   registry.install(blockFixes.extension);
-  const harness = await Harness.open(options.storage, { models: options.models, registry, settings: { ...options.settings, extensions: options.settings?.extensions ?? registry.snapshot().installed().filter(item => item.name !== childExtension.name), followUpMode: 'one-at-a-time',
+  const harness = await Harness.open(options.storage, { models: options.models, registry, settings: { ...options.settings, extensions: options.settings?.extensions ?? registry.snapshot().installed().filter(item => item.name !== childExtension.name),
     // An idle conversation's parsed context (8 MB for a 250k-token conversation with screenshots) is dropped at once:
     // a workspace object holds many conversations, and re-reading one costs tens of milliseconds.
     contextRetentionMs: 0 }, onReport: report => options.onReport(report.error), ...(options.onWake ? { onWake: options.onWake } : {}) }, BACKGROUND_CONTEXT);
