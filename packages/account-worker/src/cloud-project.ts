@@ -116,7 +116,7 @@ export function projectOperationView(operation: CloudProjectOperation) {
   return {
     id: operation.id, projectId: operation.projectId, workspaceId: operation.workspaceId, kind: operation.kind, state: operation.state,
     steps: operation.steps.map(step => ({ id: step.id, label: step.label, state: step.state, message: step.message, updatedAt: new Date(step.updatedAt) })),
-    error: operation.error, summary: operation.summary, revision: operation.revision,
+    error: operation.error, summary: operation.summary, restack: operation.restack, revision: operation.revision,
     createdAt: new Date(operation.createdAt), updatedAt: new Date(operation.updatedAt),
   };
 }

@@ -119,11 +119,12 @@ type OperationKind = z.infer<typeof OperationKindSchema>;
 const labelled = (labels: readonly string[]) => labels.map((label, index) => ({ id: `step-${index + 1}`, label }));
 
 /** Records a lifecycle change a request checked, to run in the background; the request returns with it queued. One
- * project change runs at a time, as does one change per workspace: a second could act on what the first changes. */
-async function queueOperation(authority: ProjectAuthority, input: { projectId: string; workspaceId: string | null; kind: OperationKind; steps: ReadonlyArray<{ id: string; label: string }>; summary: string | null; request?: Record<string, unknown> }): Promise<CloudProjectOperation> {
-  const running = (await authority.visibleOperations()).find(operation => operation.workspaceId === input.workspaceId && (operation.state === 'queued' || operation.state === 'running'));
+ * project change runs at a time, as does one change per workspace: a second could act on what the first changes.
+ * `after` names one still running that this one is meant to follow: it queues behind it and runs once it ends. */
+async function queueOperation(authority: ProjectAuthority, input: { projectId: string; workspaceId: string | null; kind: OperationKind; steps: ReadonlyArray<{ id: string; label: string }>; summary: string | null; request?: Record<string, unknown>; after?: string }): Promise<CloudProjectOperation> {
+  const running = (await authority.visibleOperations()).find(operation => operation.workspaceId === input.workspaceId && operation.id !== input.after && (operation.state === 'queued' || operation.state === 'running'));
   if (running) throw new Error(`Another ${input.workspaceId === null ? 'change to this project' : 'change to this workspace'} is still running (${running.kind}); wait for it to finish`);
-  return authority.queueOperation({ ...input, steps: [...input.steps], request: input.request ?? {}, createdBy: 'account' });
+  return authority.queueOperation({ projectId: input.projectId, workspaceId: input.workspaceId, kind: input.kind, summary: input.summary, steps: [...input.steps], request: input.request ?? {}, createdBy: 'account' });
 }
 
 interface QueuedRun {
@@ -402,20 +403,33 @@ async function runWorkspaceArchive({ env, userId, authority, operation }: Queued
 }
 
 /** Queues returning an archived workspace to active use: the workspace object accepts writes again, then tells its
- * project. Its runtime reopens on first use. */
-export async function restoreCloudWorkspace(env: Env, userId: string, input: { spaceId: string; expectedGeneration: number }): Promise<CloudProjectOperation> {
+ * project. Its runtime reopens on first use. With `undoArchive`, the restore is that archive's Undo: it queues behind
+ * the archive while it still runs, and then puts back the stack moves the archive made that nobody changed since. */
+export async function restoreCloudWorkspace(env: Env, userId: string, input: { spaceId: string; expectedGeneration: number; undoArchive?: string }): Promise<CloudProjectOperation> {
   const { authority, definition } = await requireWorktree(env, userId, input.spaceId);
   await requireReleasedPlacement(env, userId, definition.id, input.expectedGeneration, 0);
   if (definition.lifecycle !== 'archived' && definition.lifecycle !== 'active') throw new Error(`Workspace ${definition.name} is ${definition.lifecycle}; only an archived workspace can be restored`);
-  return queueOperation(authority, { projectId: definition.projectId, workspaceId: definition.id, kind: 'workspace.restore', steps: labelled(['Restore workspace']), summary: definition.name });
+  if (input.undoArchive === undefined) return queueOperation(authority, { projectId: definition.projectId, workspaceId: definition.id, kind: 'workspace.restore', steps: labelled(['Restore workspace']), summary: definition.name });
+  const archive = (await authority.visibleOperations()).find(operation => operation.id === input.undoArchive && operation.kind === 'workspace.archive' && operation.workspaceId === definition.id);
+  if (!archive) throw new Error(`That archive of ${definition.name} can no longer be undone; restore it from Archived instead`);
+  if (archive.state === 'failed' || archive.state === 'canceled') throw new Error(`Archiving ${definition.name} did not finish, so there is nothing to undo`);
+  return queueOperation(authority, { projectId: definition.projectId, workspaceId: definition.id, kind: 'workspace.restore', steps: labelled(['Restore workspace', 'Put its stack back']), summary: definition.name, request: { undoArchive: archive.id }, after: archive.id });
 }
 
-async function runWorkspaceRestore({ env, userId, authority, operation }: QueuedRun): Promise<void> {
+const RestoreRequestSchema = z.object({ undoArchive: z.string().optional() });
+
+/** A restore that is an archive's Undo (`undoArchive`) puts the stack back once the workspace is active, also when an
+ * earlier run restored it and was cut off. */
+async function runWorkspaceRestore({ env, userId, authority, operation, request, advance }: QueuedRun): Promise<void> {
   const definition = await operationWorkspace(authority, operation);
-  if (definition.lifecycle === 'active') return;
-  if (definition.lifecycle !== 'archived') throw new Error(`Workspace ${definition.name} is ${definition.lifecycle}; only an archived workspace can be restored`);
-  await requireCloudPlacement(env, userId, definition.id);
-  await env.SPACE_AUTHORITY.getByName(`${userId}:${definition.id}`).restoreWorkspace(definition);
+  if (definition.lifecycle === 'archived') {
+    await requireCloudPlacement(env, userId, definition.id);
+    await env.SPACE_AUTHORITY.getByName(`${userId}:${definition.id}`).restoreWorkspace(definition);
+  } else if (definition.lifecycle !== 'active') throw new Error(`Workspace ${definition.name} is ${definition.lifecycle}; only an archived workspace can be restored`);
+  const { undoArchive } = RestoreRequestSchema.parse(request ?? {});
+  if (undoArchive === undefined) return;
+  await advance();
+  await authority.undoArchiveRestack(operation.id, undoArchive);
 }
 
 /** Queues permanently deleting a workspace in any state: its runtime state, caches, repository and definition. */

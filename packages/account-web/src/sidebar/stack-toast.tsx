@@ -4,14 +4,18 @@ import { STATUS_COLOR } from '../GitSpaceShell.js';
 import { rpcErrorMessage } from '../rpc-error-message.js';
 import { TOAST_HIDE_MS } from '../toasts.js';
 
+/** How a change is taken back: resolves when it is, to what the pill says next (nothing: the pill hides). */
+export type StackUndo = () => Promise<string | void>;
+
 /** What the pill says: an applied change and how to take it back (null when it can't be), or why a change (or its
- * undo) was refused. */
-type StackToast = { text: string; undo: (() => Promise<void>) | null; refused: boolean };
+ * undo) was refused. `id` tells one change's pill from the next. */
+type StackToast = { id: number; text: string; undo: StackUndo | null; refused: boolean };
 
 /** Every stack, relation and phase change the person makes reports here. */
 export interface StackToastApi {
-  /** A change landed: says what it did, with Undo when `undo` (the reverse, through the same API) is given. */
-  applied(text: string, undo: (() => Promise<void>) | null): void;
+  /** A change landed (or started): says what it did, with Undo when `undo` (the reverse, through the same API) is
+   * given. Returns what rewrites the text while the pill still shows this change, its Undo kept. */
+  applied(text: string, undo: StackUndo | null): (text: string) => void;
   /** A change or its undo was refused: says why. */
   refused(failure: unknown, operation: string): void;
   /** Hides the pill, as choosing in the list does. */
@@ -21,7 +25,7 @@ export interface StackToastApi {
 const StackToastContext = createContext<StackToastApi | null>(null);
 
 /** The pill at the bottom left (across the bottom on a phone) that reports stack, relation and phase changes. Nested
- * inside another it adds nothing, so the sidebar and the pane header share one. */
+ * inside another it adds nothing, so the sidebar and the pane header share one. A rewrite starts its time over. */
 export function StackToasts({ children }: { children: ReactNode }): ReactElement {
   const outer = useContext(StackToastContext);
   const [toast, setToast] = useState<StackToast | null>(null);
@@ -31,16 +35,27 @@ export function StackToasts({ children }: { children: ReactNode }): ReactElement
     const timer = window.setTimeout(() => setToast(null), TOAST_HIDE_MS);
     return () => window.clearTimeout(timer);
   }, [toast]);
-  const api = useMemo((): StackToastApi => ({
-    applied: (text, undo) => setToast({ text, undo, refused: false }),
-    refused: (failure, operation) => setToast({ text: rpcErrorMessage(failure, operation), undo: null, refused: true }),
-    clear: () => setToast(null),
-  }), []);
+  const api = useMemo((): StackToastApi => {
+    let shown = 0;
+    return {
+      applied: (text, undo) => {
+        const id = ++shown;
+        setToast({ id, text, undo, refused: false });
+        return (revised) => setToast((current) => current?.id === id ? { ...current, text: revised } : current);
+      },
+      refused: (failure, operation) => setToast({ id: ++shown, text: rpcErrorMessage(failure, operation), undo: null, refused: true }),
+      clear: () => setToast(null),
+    };
+  }, []);
   if (outer) return <>{children}</>;
   const undo = async (): Promise<void> => {
     if (!toast?.undo || pending) return;
     setPending(true);
-    try { await toast.undo(); setToast(null); } catch (failure) { api.refused(failure, 'Undo'); } finally { setPending(false); }
+    try {
+      const after = await toast.undo();
+      if (after) api.applied(after, null);
+      else setToast(null);
+    } catch (failure) { api.refused(failure, 'Undo'); } finally { setPending(false); }
   };
   return <StackToastContext.Provider value={api}>
     {children}

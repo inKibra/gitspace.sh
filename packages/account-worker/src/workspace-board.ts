@@ -26,7 +26,7 @@ export async function readProjectWorkspaces(env: Env, projectId: string): Promis
   const entries = definitions.map(definition => {
     const stored = statuses[definition.id];
     const related = relations[definition.id] ?? emptyRelations();
-    return { definition, relations: related, id: definition.id, stackedOn: related.stackedOn, board: {
+    return { definition, relations: related, id: definition.id, name: definition.name, phase: definition.phase ?? null, stackedOn: related.stackedOn, board: {
       workspaceId: definition.id, name: definition.name, phase: definition.phase ?? null, lifecycle: definition.lifecycle,
       status: stored?.status ?? null, waitingOn: stored?.waitingOn ?? null, since: stored?.since ?? null,
       pullRequests: links.filter(link => link.workspaceId === definition.id).map(link => ({ number: link.number, state: link.state?.state ?? null, checks: link.state?.checks ?? null })),

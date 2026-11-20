@@ -1,4 +1,4 @@
-import { stackBelow } from '@gitspace/protocol-workspace';
+import { stackBelow, type StackOrderItem } from '@gitspace/protocol-workspace';
 
 /** A workspace as the sidebar's stack tree and the Relations tab's chain and graph read it: `stackedOn` is the branch it
  * builds on and merges after; `dependsOn` what it waits on, a planning label that never includes `stackedOn`. */
@@ -60,8 +60,9 @@ export function stackRoot(items: readonly GraphWorkspace[], id: string): string 
   return current;
 }
 
-/** The whole stack a workspace is in, bottom first, depth-first through forks; one entry when it is in no stack. */
-export function stackOf<T extends GraphWorkspace>(items: readonly T[], id: string): readonly T[] {
+/** The whole stack a workspace is in, bottom first, depth-first through forks, siblings furthest phase first; one entry
+ * when it is in no stack. */
+export function stackOf<T extends GraphWorkspace & StackOrderItem>(items: readonly T[], id: string): readonly T[] {
   const root = items.find(item => item.id === stackRoot(items, id));
   return root ? [root, ...stackBelow(items, root.id)] : [];
 }

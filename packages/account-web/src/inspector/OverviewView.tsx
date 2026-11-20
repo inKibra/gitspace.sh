@@ -127,7 +127,7 @@ function WorkspaceOverview({ scope, workspaces, onSelectWorkspace, onSetRelation
   for (const workspace of workspaces) if (workspace.projectId === scope.projectId) dependsOnEdges.set(workspace.id, workspace.relations.dependsOn);
   const dependents = transitiveDependents(scope.id, dependsOnEdges);
   const open = workspaces.filter((workspace) => workspace.projectId === scope.projectId && !workspace.closedAt);
-  const chainItems: ChainWorkspace[] = open.map((workspace) => ({ id: workspace.id, name: workspace.name, branch: workspace.branch, dependsOn: workspace.relations.dependsOn, stackedOn: workspace.relations.stackedOn, status: workspace, position: workspace.stack.position }));
+  const chainItems: ChainWorkspace[] = open.map((workspace) => ({ id: workspace.id, name: workspace.name, branch: workspace.branch, phase: workspace.phase, dependsOn: workspace.relations.dependsOn, stackedOn: workspace.relations.stackedOn, status: workspace, position: workspace.stack.position }));
   const rules = open.map((workspace) => ({ id: workspace.id, name: workspace.name, phase: workspace.phase, dependsOn: workspace.relations.dependsOn, relatedTo: workspace.relations.relatedTo, stackedOn: workspace.relations.stackedOn }));
   const self = rules.find((rule) => rule.id === scope.id);
   const stackSize = stackOf(chainItems, scope.id).length;

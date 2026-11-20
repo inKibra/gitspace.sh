@@ -16,7 +16,7 @@ import {
   type AgentHealthState, type AgentLifecycleState, type AgentSessionRenderState, type SessionActivity,
 } from '@gitspace/protocol-agent';
 import { AgentFailureSchema, AgentIncidentChangeSchema, type AgentFailure, type AgentIncidentChange } from '@gitspace/protocol-agent';
-import { SpaceAuthorityRecordSchema, WorkspaceFailureSchema, WorkspaceRelationsSchema, WorkspacePhaseSchema, WorkspaceStatusSummarySchema, type SpaceAuthorityRecord, type WorkspaceFailure, type WorkspaceRelations, type WorkspacePhase, type WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
+import { SpaceAuthorityRecordSchema, StackRestackSchema, WorkspaceFailureSchema, WorkspaceRelationsSchema, WorkspacePhaseSchema, WorkspaceStatusSummarySchema, type SpaceAuthorityRecord, type StackRestack, type WorkspaceFailure, type WorkspaceRelations, type WorkspacePhase, type WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
 import { z } from 'zod';
 import { CloudImageChoiceCodec, CloudImageSelectionCodec, CloudImageStateCodec } from './cloud-image.js';
 import { StreamCursorCodec, streamCodec } from './stream-codec.js';
@@ -191,6 +191,7 @@ export const ProjectLifecycleViewCodec = wire.object({
 });
 
 const ProjectOperationStateCodec = wire.enum(['queued', 'claimed', 'running', 'blocked', 'failed', 'succeeded', 'canceled']);
+export const StackRestackCodec = wire.serializable((value): value is StackRestack => StackRestackSchema.safeParse(value).success, { id: 'gitspace/stack-restack/v1', jsonSchema: StackRestackSchema });
 /** A recorded project or workspace operation: it runs in the background, and each step says where it stands. */
 export const ProjectOperationViewCodec = wire.object({
   id: wire.string,
@@ -202,6 +203,8 @@ export const ProjectOperationViewCodec = wire.object({
   error: wire.nullable(wire.string),
   /** What it changes, as people read it (`feat/x → develop`), or null. */
   summary: wire.nullable(wire.string),
+  /** What it changed in the stacks (an archive and its Undo), or null. */
+  restack: wire.nullable(StackRestackCodec),
   revision: wire.number,
   createdAt: wire.date,
   updatedAt: wire.date,
@@ -643,9 +646,12 @@ export const archiveWorkspaceContract = gitspaceRpc
   .input(wire.object({ projectId: wire.string, spaceId: wire.string, expectedGeneration: wire.nullable(wire.number) }))
   .output(ProjectOperationViewCodec).errors({ WorkspaceFailure: rpcErrors.workspaceFailure, WorkspaceNotFound: rpcErrors.workspaceNotFound, OperationFailed: rpcErrors.operationFailed }).mutation();
 
+/** `undoArchive`, an archive operation of this workspace: the restore is that archive's Undo. It queues behind the
+ * archive when that still runs, and once the workspace is back puts back each stack move the archive made that nobody
+ * changed since; its operation's `restack` says what it put back and what it left. */
 export const restoreWorkspaceContract = gitspaceRpc
   .procedure()
-  .input(wire.object({ spaceId: wire.string, expectedGeneration: wire.number }))
+  .input(wire.object({ spaceId: wire.string, expectedGeneration: wire.number, undoArchive: wire.optional(wire.string) }))
   .output(ProjectOperationViewCodec).errors({ WorkspaceFailure: rpcErrors.workspaceFailure, WorkspaceNotFound: rpcErrors.workspaceNotFound, OperationFailed: rpcErrors.operationFailed }).mutation();
 
 export const listProjectsContract = gitspaceRpc

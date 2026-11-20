@@ -4,7 +4,8 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { verticalSliceFixture } from './App.js';
-import { AppSidebar, type AppSidebarProps, type SidebarProject, type SidebarWorkspace } from './AppSidebar.js';
+import type { StackRestack } from '@gitspace/protocol-workspace';
+import { AppSidebar, type AppSidebarProps, type SidebarArchive, type SidebarProject, type SidebarWorkspace } from './AppSidebar.js';
 import type { GraphRelations } from './sidebar/project-graph.js';
 
 let root: Root;
@@ -258,6 +259,29 @@ it('shows a refused undo\'s message', async () => {
   await undo();
   expect(toast()?.getAttribute('role')).toBe('alert');
   expect(toast()?.textContent).toContain(refusal);
+});
+
+it('reports an archive at once with Undo, then what moved in its stack; its Undo says what it could not put back', async () => {
+  const archived = Promise.withResolvers<StackRestack>();
+  const putBack = vi.fn(async (): Promise<StackRestack> => ({
+    moved: [{ workspaceId: 'menu-redesign', from: 'billing-ui', to: 'billing-export' }],
+    kept: [{ workspaceId: 'billing-ui', from: 'billing-export', to: null, reason: 'Billing UI was moved since' }],
+  }));
+  const onArchive = vi.fn(async (): Promise<SidebarArchive> => ({ done: archived.promise, undo: putBack }));
+  await renderProject({ projects: [bakery({ 'menu-redesign': rel('billing-export') })], onArchive });
+  await openMenu('Billing export');
+  await choose('Archive workspace');
+  expect(onArchive).toHaveBeenCalledWith('billing-export');
+  expect(toast()?.textContent).toContain('Archiving Billing export…');
+  await act(async () => archived.resolve({ moved: [
+    { workspaceId: 'billing-ui', from: 'billing-export', to: null },
+    { workspaceId: 'menu-redesign', from: 'billing-export', to: 'billing-ui' },
+  ], kept: [] }));
+  expect(toast()?.textContent).toContain('Billing export archived. Billing UI is the head now; Menu redesign is on it.');
+  await undo();
+  expect(putBack).toHaveBeenCalledTimes(1);
+  expect(toast()?.textContent).toContain('Billing export restored. Not put back: Billing UI was moved since.');
+  expect(Array.from(toast()!.querySelectorAll('button'), (button) => button.textContent)).toEqual(['Dismiss']);
 });
 
 it('chooses waits-on as a draft: a cycle and the stack parent are refused, Done applies it', async () => {

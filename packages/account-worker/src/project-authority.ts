@@ -33,7 +33,7 @@ import { DEVICE_AUTHORITY_UNAVAILABLE, deviceAuthority, withDeviceAuthority } fr
 import type { CredentialVaultDO } from './application.js';
 import type { SpaceAuthorityDO } from './space-authority.js';
 import type { FleetCatalogDO } from './fleet-catalog.js';
-import { WorkspaceDomainError, WorkspaceRelationsSchema, WorkspaceReportSchema, emptyRelations, normalizeRelations, resolveWorkspaceRelations, stackBelow, type PhaseCarrier, type WorkspaceFailure, type GitLfsSnapshot, type GitLfsObject, type GitLfsConfirmedObject, type WorkspacePhase, type WorkspaceRelations, type WorkspaceRelationsInput, type WorkspaceReport } from '@gitspace/protocol-workspace';
+import { StackRestackSchema, WorkspaceDomainError, WorkspaceRelationsSchema, WorkspaceReportSchema, archiveRestack, emptyRelations, normalizeRelations, resolveWorkspaceRelations, stackBelow, type PhaseCarrier, type StackRestack, type WorkspaceFailure, type GitLfsSnapshot, type GitLfsObject, type GitLfsConfirmedObject, type WorkspacePhase, type WorkspaceRelations, type WorkspaceRelationsInput, type WorkspaceReport } from '@gitspace/protocol-workspace';
 import { GitLfsRetention, type RetainedLfsSnapshot } from './git-lfs-retention.js';
 import { confirmCloudOrigin } from './git-lfs-origin.js';
 import { gitLfsObjectKey } from './git-lfs-store.js';
@@ -139,6 +139,8 @@ interface OperationRow extends Record<string, SqlStorageValue> {
   input_json: string | null;
   summary: string | null;
   dismissed_at: string | null;
+  /** What it changed in the stacks (`StackRestack` JSON); null for none recorded. */
+  restack_json: string | null;
   revision: number;
   created_by: string;
   created_at: string;
@@ -281,6 +283,7 @@ function projectOperation(row: OperationRow): CloudProjectOperation {
     error: row.error,
     summary: row.summary,
     dismissedAt: row.dismissed_at,
+    restack: row.restack_json === null ? null : StackRestackSchema.parse(JSON.parse(row.restack_json)),
     revision: row.revision,
     createdBy: row.created_by,
     createdAt: row.created_at,
@@ -1016,7 +1019,7 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
       // One-time: operations no longer record target machines, a claim token or a lease.
       const operationColumns = this.ctx.storage.sql.exec<{ name: string }>('PRAGMA table_info(operations)').toArray().map(column => column.name);
       for (const column of ['target_machines_json', 'claim_token', 'lease_expires_at']) if (operationColumns.includes(column)) this.ctx.storage.sql.exec(`ALTER TABLE operations DROP COLUMN ${column}`);
-      for (const column of ['input_json', 'summary', 'dismissed_at']) if (!operationColumns.includes(column)) this.ctx.storage.sql.exec(`ALTER TABLE operations ADD COLUMN ${column} TEXT`);
+      for (const column of ['input_json', 'summary', 'dismissed_at', 'restack_json']) if (!operationColumns.includes(column)) this.ctx.storage.sql.exec(`ALTER TABLE operations ADD COLUMN ${column} TEXT`);
       // Conversation numbers belong to a space. Older authorities enforced a
       // project-wide UNIQUE column, whose SQLite autoindex cannot be dropped.
       const sessionIndexes = this.ctx.storage.sql.exec<{ name: string; unique: number }>('PRAGMA index_list(canonical_sessions)').toArray();
@@ -1516,7 +1519,7 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
         }
         const carriers = workspaces.map(workspace => ({ id: workspace.id, name: workspace.name, phase: workspace.phase ?? 'plan' }));
         const relations = resolveWorkspaceRelations(workspaceId, input, carriers, new Map(Object.entries(existing)));
-        this.ctx.storage.sql.exec('INSERT INTO workspace_relations(workspace_id,relations_json) VALUES(?,?) ON CONFLICT(workspace_id) DO UPDATE SET relations_json=excluded.relations_json', workspaceId, JSON.stringify(relations));
+        this.putRelations(workspaceId, relations);
         return relations;
       });
       return { status: 'ok', value };
@@ -1524,6 +1527,63 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
       if (error instanceof WorkspaceDomainError) return { status: 'error', failure: error.toJSON() };
       throw error;
     }
+  }
+
+  private putRelations(workspaceId: string, relations: WorkspaceRelations): void {
+    this.ctx.storage.sql.exec('INSERT INTO workspace_relations(workspace_id,relations_json) VALUES(?,?) ON CONFLICT(workspace_id) DO UPDATE SET relations_json=excluded.relations_json', workspaceId, JSON.stringify(relations));
+  }
+
+  private recordRestack(operationId: string, restack: StackRestack): void {
+    this.ctx.storage.sql.exec('UPDATE operations SET restack_json=?,revision=revision+1,updated_at=? WHERE operation_id=?', JSON.stringify(restack), new Date().toISOString(), operationId);
+  }
+
+  /** Inside the write that records `workspaceId` archived: moves the open workspaces stacked on it (`archiveRestack`:
+   * a head's furthest member promoted, the others onto it; a member's onto its parent) and records the moves on its
+   * queued or running archive operation. Their other relations stay. */
+  private restackArchived(workspaceId: string): void {
+    const relations = this.listWorkspaceRelations();
+    const items = this.listWorkspaces().filter(workspace => workspace.kind === 'worktree').map(workspace => ({
+      id: workspace.id, name: workspace.name, phase: workspace.phase ?? null, stackedOn: relations[workspace.id]?.stackedOn ?? null,
+      open: workspace.lifecycle !== 'archived' && workspace.lifecycle !== 'deleting',
+    }));
+    const moved = archiveRestack(items, workspaceId);
+    for (const move of moved) this.putRelations(move.workspaceId, normalizeRelations(move.workspaceId, { ...relations[move.workspaceId] ?? emptyRelations(), stackedOn: move.to }));
+    const operation = this.ctx.storage.sql.exec<{ operation_id: string }>("SELECT operation_id FROM operations WHERE workspace_id=? AND kind='workspace.archive' AND state IN ('queued','running') ORDER BY created_at DESC LIMIT 1", workspaceId).toArray()[0];
+    if (operation) this.recordRestack(operation.operation_id, { moved, kept: [] });
+  }
+
+  /** An archive's Undo, run by the restore operation `operationId` once the workspace is back: puts back, in one write,
+   * each move the archive operation `archiveOperationId` recorded whose workspace is still stacked where the archive
+   * put it (compare-and-set, newest move first), through the same checks as any relation write. A workspace moved,
+   * archived or deleted since, or one the phase rule or a stack loop refuses, stays, kept with why. Records the result
+   * on the restore operation; run again, it returns what it recorded. */
+  undoArchiveRestack(operationId: string, archiveOperationId: string): StackRestack {
+    return this.commit('operation', operationId, () => {
+      const recorded = this.getOperation(operationId).restack;
+      if (recorded) return recorded;
+      const workspaces = this.listWorkspaces().filter(workspace => workspace.kind === 'worktree' && workspace.lifecycle !== 'deleting');
+      const carriers = workspaces.map(workspace => ({ id: workspace.id, name: workspace.name, phase: workspace.phase ?? 'plan' }));
+      const existing = new Map(Object.entries(this.listWorkspaceRelations()));
+      const restack: StackRestack = { moved: [], kept: [] };
+      for (const move of (this.getOperation(archiveOperationId).restack?.moved ?? []).toReversed()) {
+        const workspace = workspaces.find(candidate => candidate.id === move.workspaceId);
+        const current = existing.get(move.workspaceId) ?? emptyRelations();
+        const name = workspace?.name ?? move.workspaceId;
+        const changed = !workspace ? `${name} was deleted` : workspace.lifecycle === 'archived' ? `${name} is archived` : current.stackedOn !== move.to ? `${name} was moved since` : null;
+        if (changed) { restack.kept.push({ ...move, reason: changed }); continue; }
+        try {
+          const relations = resolveWorkspaceRelations(move.workspaceId, { ...current, stackedOn: move.from }, carriers, existing);
+          this.putRelations(move.workspaceId, relations);
+          existing.set(move.workspaceId, relations);
+          restack.moved.push({ workspaceId: move.workspaceId, from: move.to, to: move.from });
+        } catch (error) {
+          if (!(error instanceof WorkspaceDomainError)) throw error;
+          restack.kept.push({ ...move, reason: error.message });
+        }
+      }
+      this.recordRestack(operationId, restack);
+      return restack;
+    });
   }
 
   /** Initializes canonical base metadata only; never creates or acquires a checkout. */
@@ -1664,7 +1724,7 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
     const relations = this.listWorkspaceRelations();
     const stackedOn = relations[workspaceId]?.stackedOn ?? null;
     const worktrees = this.listWorkspaces().filter(workspace => workspace.kind === 'worktree')
-      .map(workspace => ({ id: workspace.id, name: workspace.name, open: workspace.lifecycle !== 'archived' && workspace.lifecycle !== 'deleting', stackedOn: relations[workspace.id]?.stackedOn ?? null }));
+      .map(workspace => ({ id: workspace.id, name: workspace.name, phase: workspace.phase ?? null, open: workspace.lifecycle !== 'archived' && workspace.lifecycle !== 'deleting', stackedOn: relations[workspace.id]?.stackedOn ?? null }));
     const members = stackedOn === null ? stackBelow(worktrees, workspaceId).filter(member => member.open).map(member => ({ id: member.id, name: member.name })) : [];
     return { name: this.getWorkspace(workspaceId)?.name ?? workspaceId, stackedOn, members };
   }
@@ -1684,7 +1744,8 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
     };
   }
 
-  /** Records a lifecycle the workspace object has already applied to itself. Repeating a recorded lifecycle returns it. Archive ends the workspace's URLs. */
+  /** Records a lifecycle the workspace object has already applied to itself. Repeating a recorded lifecycle returns it.
+   * Archive reorganizes the stacks in the same write (`restackArchived`) and ends the workspace's URLs. */
   async commitWorkspaceLifecycle(workspaceId: string, lifecycle: WorkspaceLifecycle): Promise<CloudWorkspaceDefinition> {
     const recorded = this.commitWorkspaceChange(workspaceId, { lifecycle });
     if (lifecycle === 'archived') await this.clearHostedPointers(workspaceId);
@@ -1719,8 +1780,10 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
     if ('lifecycle' in change ? current.lifecycle === change.lifecycle : current.phase === change.phase) return current;
     return this.commit('workspace', workspaceId, () => {
       const now = new Date().toISOString();
-      if ('lifecycle' in change) this.ctx.storage.sql.exec('UPDATE workspaces SET lifecycle=?,archived_at=?,revision=revision+1,updated_at=? WHERE workspace_id=?', change.lifecycle, change.lifecycle === 'archived' ? now : null, now, workspaceId);
-      else this.ctx.storage.sql.exec('UPDATE workspaces SET phase=?,revision=revision+1,updated_at=? WHERE workspace_id=?', change.phase, now, workspaceId);
+      if ('lifecycle' in change) {
+        this.ctx.storage.sql.exec('UPDATE workspaces SET lifecycle=?,archived_at=?,revision=revision+1,updated_at=? WHERE workspace_id=?', change.lifecycle, change.lifecycle === 'archived' ? now : null, now, workspaceId);
+        if (change.lifecycle === 'archived') this.restackArchived(workspaceId);
+      } else this.ctx.storage.sql.exec('UPDATE workspaces SET phase=?,revision=revision+1,updated_at=? WHERE workspace_id=?', change.phase, now, workspaceId);
       return workspaceDefinition(this.ctx.storage.sql.exec<WorkspaceRow>('SELECT * FROM workspaces WHERE workspace_id=?', workspaceId).one());
     });
   }

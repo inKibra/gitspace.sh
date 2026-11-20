@@ -83,19 +83,27 @@ export function normalizeRelations(selfId: string, input: WorkspaceRelationsInpu
   return { dependsOn, relatedTo: unique(input.relatedTo.filter((id) => id !== selfId && !taken.has(id))), stackedOn };
 }
 
-/** A workspace as stack order reads it: the workspace it is stacked on, null for none. */
-export interface StackOrderItem { id: string; stackedOn: string | null }
+/** A workspace as stack order reads it: the workspace it is stacked on (null for none), its name, and its phase (null:
+ * never read, which counts as the first phase). */
+export interface StackOrderItem { id: string; stackedOn: string | null; name: string; phase: WorkspacePhase | null }
 
-/** Everything stacked on `id`, depth-first: each branch of a fork fully before the next, in list order. */
+/** The order of workspaces stacked on the same one: furthest phase first (Ship, Review, Code, Plan), then by name. The
+ * first of a head's members in this order is the one archiving the head promotes. */
+export function stackSiblingOrder(left: StackOrderItem, right: StackOrderItem): number {
+  return PHASE_ORDER[right.phase ?? 'plan'] - PHASE_ORDER[left.phase ?? 'plan'] || left.name.localeCompare(right.name) || left.id.localeCompare(right.id);
+}
+
+/** Everything stacked on `id`, depth-first: each branch of a fork fully before the next, siblings in `stackSiblingOrder`. */
 export function stackBelow<T extends StackOrderItem>(items: readonly T[], id: string, seen: ReadonlySet<string> = new Set([id])): readonly T[] {
-  return items.filter(item => item.stackedOn === id && !seen.has(item.id)).flatMap(child => {
+  return items.filter(item => item.stackedOn === id && !seen.has(item.id)).toSorted(stackSiblingOrder).flatMap(child => {
     const visited = new Set([...seen, child.id]);
     return [child, ...stackBelow(items, child.id, visited)];
   });
 }
 
-/** Every workspace stacked on nothing listed, each followed by its whole stack (depth-first, a fork's branches one after
- * another): the sidebar's order. `stacked` entries belong to the stack of the root before them. */
+/** Every workspace stacked on nothing listed, in list order, each followed by its whole stack (depth-first, a fork's
+ * branches one after another, siblings in `stackSiblingOrder`): the sidebar's order. `stacked` entries belong to the
+ * stack of the root before them. */
 export function stackTree<T extends StackOrderItem>(items: readonly T[]): readonly { item: T; stacked: boolean }[] {
   const listed = new Set(items.map(item => item.id));
   const roots = items.filter(item => !item.stackedOn || !listed.has(item.stackedOn));
@@ -103,6 +111,46 @@ export function stackTree<T extends StackOrderItem>(items: readonly T[]): readon
   // A stack whose parents form a loop has no root; its rows still show, at the first level.
   const shown = new Set(placed.map(entry => entry.item.id));
   return [...placed, ...items.filter(item => !shown.has(item.id)).map(item => ({ item, stacked: false }))];
+}
+
+/** A stack relation a reorganization wrote: `workspaceId` was stacked on `from` and is now stacked on `to` (null:
+ * nothing). */
+export const StackMoveSchema = z.object({ workspaceId: relationIdSchema, from: relationIdSchema.nullable(), to: relationIdSchema.nullable() });
+export type StackMove = z.infer<typeof StackMoveSchema>;
+
+/** What an operation changed in the stacks: `moved`, the relations it wrote; `kept`, for an archive's Undo, the
+ * archive's moves it left as they are, each with why. */
+export const StackRestackSchema = z.object({
+  moved: z.array(StackMoveSchema),
+  kept: z.array(StackMoveSchema.extend({ reason: z.string() })),
+});
+export type StackRestack = z.infer<typeof StackRestackSchema>;
+
+/** A workspace as archiving reads it: `open` when it is neither archived nor being deleted. */
+export interface ArchiveStackItem extends StackOrderItem { open: boolean }
+
+/**
+ * How archiving `archivedId` reorganizes the stacks, so it stays no open workspace's parent. Only the open workspaces
+ * stacked on it directly move; those stacked on them stay where they are.
+ * - Stacked on an open workspace (a member): each moves onto that parent, in sibling order.
+ * - Stacked on nothing (a head): the first in `stackSiblingOrder`, the furthest phase, is promoted to stacked on
+ *   nothing, the new head, and the others move onto it. None of them is further along than it.
+ * A workspace further along than its new parent (possible only in a stack that broke the phase rule before it) is
+ * stacked on nothing instead, so the rule holds after every move. Empty when nothing open is stacked on it.
+ */
+export function archiveRestack(items: readonly ArchiveStackItem[], archivedId: string): StackMove[] {
+  const archived = items.find(item => item.id === archivedId);
+  const children = items.filter(item => item.open && item.stackedOn === archivedId && item.id !== archivedId).toSorted(stackSiblingOrder);
+  const [first, ...rest] = children;
+  if (!archived || !first) return [];
+  const parent = items.find(item => item.open && item.id === archived.stackedOn);
+  const targets: { child: ArchiveStackItem; onto: ArchiveStackItem | null }[] = parent
+    ? children.map(child => ({ child, onto: parent }))
+    : [{ child: first, onto: null }, ...rest.map(child => ({ child, onto: first }))];
+  return targets.map(({ child, onto }) => ({
+    workspaceId: child.id, from: archivedId,
+    to: onto && PHASE_ORDER[child.phase ?? 'plan'] <= PHASE_ORDER[onto.phase ?? 'plan'] ? onto.id : null,
+  }));
 }
 
 export interface PhaseCarrier {

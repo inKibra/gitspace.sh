@@ -108,13 +108,13 @@ describe('OverviewView', () => {
 
   it('chains a forked stack bottom first, each branch of the fork whole before the next, with every link’s position', () => {
     const stacked = (base: WorkspaceView, id: string, name: string, parent: string, at: WorkspaceView['stack']['position']): WorkspaceView => ({ ...base, id, name, branch: name, projectId: alpha.projectId, relations: { dependsOn: [], relatedTo: [], stackedOn: parent }, stack: { ...unstacked, position: at } });
-    // Listed out of stacking order: the chain orders by the stack, siblings of a fork in list order.
+    // Listed out of stacking order: the chain orders by the stack, siblings of a fork furthest phase first, then by name.
     const fork = stacked(gamma, 'fork', 'fork-branch', bottom.id, position(bottom.id, 0, 'merged'));
     const middle = stacked(alpha, alpha.id, alpha.name, bottom.id, position(bottom.id, 3, 'not-merged'));
     const top = stacked(alpha, 'top', 'top-branch', middle.id, position(middle.id, 0, 'not-merged'));
     const html = renderToStaticMarkup(<OverviewView scope={top} workspaces={[top, middle, fork, bottom]} onSelectWorkspace={() => undefined} />);
     expect(html).toContain('4 workspaces, merged in this order');
-    expect([...html.matchAll(/data-stack-link="([^"]+)"/gu)].map((match) => match[1])).toEqual([bottom.id, middle.id, top.id, fork.id]);
+    expect([...html.matchAll(/data-stack-link="([^"]+)"/gu)].map((match) => match[1])).toEqual([bottom.id, fork.id, middle.id, top.id]);
     expect(html).toContain('bottom of the stack · merges into main');
     expect(html).toContain('merges after relay-hardening · 3 commits behind relay-hardening');
     expect(html).toContain('optional: <code class="font-mono [overflow-wrap:anywhere]">git rebase relay-hardening</code>');

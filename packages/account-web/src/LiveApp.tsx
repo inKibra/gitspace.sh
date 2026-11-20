@@ -26,7 +26,8 @@ import { LiveEnvironment } from './environment/LiveEnvironment.js';
 import { Inspector } from './inspector/index.js';
 import type { InspectorDrive } from './inspector/DriveSurface.js';
 import { ACCOUNT_DIRECTORY_CHANGED, AUTOMATIONS_PROJECT_PARAM, AUTOMATIONS_RUN_PARAM, PRODUCT_ROUTE_LABELS, automationsUrl, isGlobalView, navigateProductUrl, productRouteFromLocation, setProductRoute, type AppView, type ProductRoute } from './routes.js';
-import { AccountSidebarContext, AppSidebar, sidebarWorkspaceSummary, type AppSidebarProps, type SidebarProject } from './AppSidebar.js';
+import { AccountSidebarContext, AppSidebar, sidebarWorkspaceSummary, type AppSidebarProps, type SidebarArchive, type SidebarProject } from './AppSidebar.js';
+import type { StackRestack } from '@gitspace/protocol-workspace';
 import { accountHandleFromUrl, browserInvitationStatus, canConnectBrowser, cancelBrowserInvitation, createBrowserInvitation, enrollmentTokenForLocation, recoverAccountBrowser } from './browser-enrollment.js';
 import { AccountConnectPage } from './AccountConnectPage.js';
 import { ServiceAccessApproval } from './ServiceAccessApproval.js';
@@ -434,7 +435,11 @@ function refreshInspection(): void {
   window.dispatchEvent(new Event(ACCOUNT_DIRECTORY_CHANGED));
 }
 
-type AccountWorkActions = Required<ComponentProps<typeof AccountWorkPages>['actions']>;
+/** The account's actions, and the sidebar's archive: reported with what moved in the stacks, with Undo. */
+type AccountWorkActions = Required<ComponentProps<typeof AccountWorkPages>['actions']> & { archiveWithUndo(spaceId: string): Promise<SidebarArchive | null> };
+/** How often, and how long at most, an archive or its Undo reads its operation again while waiting for it to end. */
+const OPERATION_FOLLOW_MS = 1_000;
+const OPERATION_FOLLOW_LIMIT_MS = 10 * 60_000;
 const AccountWorkActionsContext = createContext<AccountWorkActions | null>(null);
 /** The sidebar can open a project's Settings from any route; the Projects view renders the dialog. */
 const ProjectSettingsContext = createContext<{ projectId: string | null; onChange(projectId: string | null): void } | null>(null);
@@ -504,10 +509,11 @@ function AccountFrame({ children }: { children: ReactNode }) {
   const automationOverview = useResultQuery(rpcClient.automations.overview, AUTOMATIONS_OVERVIEW_INPUT);
   useEventRefresh(useLiveChanges(accountLiveKey('automations')), () => automationOverview.refetch());
   const automationSummaries = useRetainedQueryValue(automationOverview, 'automations-overview')?.projects ?? [];
-  const runSidebarAction = async (operation: () => void | Promise<void>): Promise<void> => {
+  /** Runs a sidebar action, showing its failure; resolves to its result, nothing when it failed. */
+  const runSidebarAction = async <T,>(operation: () => T | Promise<T>): Promise<T | undefined> => {
     setSidebarActionError(null);
-    try { await operation(); }
-    catch (cause) { setSidebarActionError(rpcErrorMessage(cause, 'Workspace action')); }
+    try { return await operation(); }
+    catch (cause) { setSidebarActionError(rpcErrorMessage(cause, 'Workspace action')); return undefined; }
   };
   const navigate = (view: ProductRoute, section?: 'source' | 'github'): void => {
     const url = setProductRoute(new URL(window.location.href), view);
@@ -531,7 +537,7 @@ function AccountFrame({ children }: { children: ReactNode }) {
           try { await runSidebarAction(() => actions.onReleaseMachines(spaceId)); }
           finally { setReleasePendingSpaceId(null); }
         }}
-        onArchive={(spaceId) => runSidebarAction(() => actions.onArchiveWorkspace(spaceId))}
+        onArchive={(spaceId) => runSidebarAction(() => actions.archiveWithUndo(spaceId))}
         onRename={(spaceId, name) => runSidebarAction(() => actions.onRenameWorkspace(spaceId, name))}
         onDelete={(spaceId) => runSidebarAction(() => actions.onDeleteWorkspace(spaceId))}
         onRestore={(spaceId) => runSidebarAction(() => actions.onRestoreWorkspace(spaceId))}
@@ -1298,6 +1304,27 @@ function useAccountWorkActions(account: NonNullable<ContextType<typeof AccountDi
     try { return await configurationResult(request); }
     finally { account.refresh(); }
   };
+  /** Queues archiving a workspace once the person agreed to leave it; null when they did not. */
+  const startArchive = async (spaceId: string) => {
+    const canonical = await inspectTarget(spaceId);
+    if (canonical.workspace.lifecycle === 'active' && !await confirmLeaving(canonical)) return null;
+    return mutate(rpcClient.workspace.archive({
+      projectId: canonical.workspace.projectId, spaceId, expectedGeneration: canonical.placement?.generation ?? null,
+    }));
+  };
+  /** Waits for one of a project's operations to end, read again every second, and resolves to what it changed in the
+   * stacks; one that failed rejects with its error. */
+  const followOperation = async (projectId: string, operationId: string): Promise<StackRestack> => {
+    for (const deadline = Date.now() + OPERATION_FOLLOW_LIMIT_MS; Date.now() < deadline;) {
+      const operation = await configurationResult(rpcClient.project.operation({ projectId, operationId }));
+      if (operation.state === 'succeeded') { account.refresh(); return operation.restack ?? { moved: [], kept: [] }; }
+      if (operation.state === 'failed' || operation.state === 'canceled') throw new Error(operation.error ?? `${operation.summary ?? operation.kind} did not finish`);
+      const { promise, resolve } = Promise.withResolvers<void>();
+      window.setTimeout(resolve, OPERATION_FOLLOW_MS);
+      await promise;
+    }
+    throw new Error('It is still running; its progress shows in the project\'s operations');
+  };
   const actions = {
     onCreateProject: async (input) => {
       const result = await mutate(rpcClient.project.create(input));
@@ -1321,13 +1348,7 @@ function useAccountWorkActions(account: NonNullable<ContextType<typeof AccountDi
       const canonical = await inspectTarget(spaceId);
       await mutate(rpcClient.workspace.restore({ spaceId, expectedGeneration: canonical.placement?.generation ?? 0 }));
     },
-    onArchiveWorkspace: async (spaceId) => {
-      const canonical = await inspectTarget(spaceId);
-      if (canonical.workspace.lifecycle === 'active' && !await confirmLeaving(canonical)) return;
-      await mutate(rpcClient.workspace.archive({
-        projectId: canonical.workspace.projectId, spaceId, expectedGeneration: canonical.placement?.generation ?? null,
-      }));
-    },
+    onArchiveWorkspace: async (spaceId) => { await startArchive(spaceId); },
     onArchiveProject: async (projectId, expectedRevision) => { await mutate(rpcClient.project.archive({ projectId, expectedRevision })); },
     onRestoreProject: async (projectId, expectedRevision) => { await mutate(rpcClient.project.restore({ projectId, expectedRevision })); },
     onSetProjectBaseBranch: async (projectId, expectedRevision, baseBranch) => { await mutate(rpcClient.project.setBaseBranch({ projectId, expectedRevision, baseBranch })); },
@@ -1359,7 +1380,21 @@ function useAccountWorkActions(account: NonNullable<ContextType<typeof AccountDi
     },
     onRenameWorkspace: async (workspaceId, name) => { await mutate(rpcClient.workspace.rename({ workspaceId, name })); },
   } satisfies ComponentProps<typeof AccountWorkPages>['actions'];
-  return actions;
+  return {
+    ...actions,
+    archiveWithUndo: async (spaceId) => {
+      const archive = await startArchive(spaceId);
+      if (!archive) return null;
+      return {
+        done: followOperation(archive.projectId, archive.id),
+        undo: async () => {
+          const canonical = await inspectTarget(spaceId);
+          const restore = await mutate(rpcClient.workspace.restore({ spaceId, expectedGeneration: canonical.placement?.generation ?? 0, undoArchive: archive.id }));
+          return followOperation(restore.projectId, restore.id);
+        },
+      };
+    },
+  };
 }
 
 function AccountWork({ view }: { view: 'kanban' | 'projects' }) {

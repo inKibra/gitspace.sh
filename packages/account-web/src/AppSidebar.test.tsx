@@ -217,13 +217,25 @@ describe('AppSidebar stacks', () => {
     const html = renderStacks(stackedProject);
     // Each row in sidebar order with its left inset.
     expect([...html.matchAll(/data-workspace="([^"]+)"[^>]*><button[^>]*?style="padding-left:(\d+)px"/gu)].map((match) => [match[1], Number(match[2])]))
-      .toEqual([['bakery-payments', 14], ['bakery-core', 14], ['bakery-api', 30], ['bakery-web', 30], ['bakery-admin', 30], ['bakery-stock', 14]]);
+      .toEqual([['bakery-payments', 14], ['bakery-core', 14], ['bakery-admin', 30], ['bakery-api', 30], ['bakery-web', 30], ['bakery-stock', 14]]);
     expect(html).toContain('title="Stacked on bakery-core: it merges after it');
     expect(html).toContain('title="Stacked on bakery-api: it merges after it');
     // Its open pull request with failing checks first, the merged one counted after it.
     expect(html).toMatch(/data-pr-state="open"[^>]*>#42<svg[^>]*aria-label="checks fail"/u);
     expect(html).toContain('+1');
     expect(html).not.toContain('#40');
+  });
+
+  it('orders the workspaces stacked on the same one furthest phase first (Ship, Review, Code, Plan), then by name', () => {
+    const workspace = (id: string, name: string, phase: 'plan' | 'code' | 'review' | 'ship') => ({ id, projectId: 'oven', name, branch: `feature/${id}`, closedAt: null, phase });
+    // Ids run against the names, so only the names can put Apple pie before Bagels.
+    const html = renderStacks({ id: 'oven', name: 'Oven',
+      workspaces: [workspace('w1', 'Rye', 'plan'), workspace('w2', 'Bagels', 'code'), workspace('w3', 'Oven core', 'ship'), workspace('w4', 'Croissants', 'review'), workspace('w5', 'Apple pie', 'code'), workspace('w6', 'Scones', 'plan')],
+      graph: { baseBranch: 'develop', pullRequests: {}, relations: {
+        w1: stackedOn('w3'), w2: stackedOn('w3'), w4: stackedOn('w3'), w5: stackedOn('w3'), w6: stackedOn('w2'),
+      } } });
+    // Oven core, then Croissants (Review), Apple pie and Bagels (Code; Scones on Bagels), Rye (Plan).
+    expect([...html.matchAll(/data-workspace="([^"]+)"/gu)].map((match) => match[1])).toEqual(['w3', 'w4', 'w5', 'w2', 'w6', 'w1']);
   });
 
   it('tags the head of a stack that has members, and puts "on <parent>" on the name line with the full text in its title', () => {

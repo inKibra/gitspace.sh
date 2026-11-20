@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { AgentHealthStateSchema, AgentLifecycleStateSchema, SessionActivitySchema } from '@gitspace/protocol-agent';
+import { StackRestackSchema } from '@gitspace/protocol-workspace';
 
 export const projectLifecycleSchema = z.enum([
   'cloud-only',
@@ -173,6 +174,9 @@ export const cloudProjectOperationSchema = z.object({
   summary: z.string().max(512).nullable(),
   /** When someone dismissed it; a dismissed operation is no longer shown. */
   dismissedAt: z.string().datetime().nullable(),
+  /** What it changed in the stacks: an archive's moves (`archiveRestack`, empty when nothing open was stacked on it), or
+   * what an archive's Undo put back and left. Null for other operations, and until it gets that far. */
+  restack: StackRestackSchema.nullable().default(null),
   revision: z.number().int().positive(),
   createdBy: z.string().min(1).max(160),
   createdAt: z.string().datetime(),

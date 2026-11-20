@@ -1,8 +1,8 @@
 # Stacks — Design Doc
 
 How workspaces relate to each other: what a stack is, the phase rule that keeps one in order, the state each member
-shows, how the sidebar draws it (step 1), and how a stack's head leads its stack (step 2). Merge with promotion (step 3)
-builds on them.
+shows, how the sidebar draws it (step 1), how a stack's head leads its stack (step 2), and how archiving a workspace
+reorganizes its stack (step 3).
 
 ## 1. Two kinds of relation
 
@@ -21,8 +21,10 @@ migration runs.
 
 A stack is a workspace stacked on nothing, its **head**, and every workspace stacked on it directly or through another,
 its **members**. The sidebar draws every member one level under the head, depth-first, a fork's branches one after
-another (`sidebar/graph.ts` `stackTree`). A head is tagged "head" once it has members. Stack loops are refused on write
-(`WORKSPACE_STACK_CYCLE`).
+another (`sidebar/graph.ts` `stackTree`). Workspaces stacked on the same one are in **sibling order**
+(`stackSiblingOrder`): furthest phase first (Ship, Review, Code, Plan), then by name, so the member right under a head
+is the one that would head the stack next (§8). A head is tagged "head" once it has members. Stack loops are refused on
+write (`WORKSPACE_STACK_CYCLE`).
 
 ## 3. The phase rule
 
@@ -179,3 +181,49 @@ Stack board, 2026-11-19 10:00:00 UTC (2 workspaces):
 The `space-chain` skill says it: a member syncs when it enters Review or before it ships, or when its Base line shows
 files overlapping its own changes, and never mid-turn (queued). The head syncs itself first. Members in Plan, or in Code
 without overlapping files, are left alone.
+
+## 8. Archiving reorganizes a stack (step 3)
+
+Archiving a workspace never leaves it the parent of an open one. In the same write that records it archived
+(`ProjectAuthorityDO.commitWorkspaceLifecycle` → `restackArchived`, computed by `archiveRestack` in
+`protocol-workspace`), the open workspaces stacked on it directly move; those stacked on them stay where they are.
+GitSpace does no merging and asks nothing first.
+
+| Archived | Its members move | Example |
+| --- | --- | --- |
+| A head (stacked on nothing, or on a workspace no longer open) | The first in sibling order is promoted: stacked on nothing, measured against the base branch, the new head (leader tools, stack board). The others move onto it | Billing export archived: "Billing emails is the head now; Billing docs is on it" |
+| A member | Each moves onto its parent, in sibling order | Invoices archived: "Refunds and Receipts are on Ledger now" |
+| A workspace nothing open is stacked on | Nothing changes | |
+
+**The phase rule after a move.** Siblings are ordered furthest phase first, so the promoted head is at least as far
+along as each sibling moved onto it, and a member is never further along than its old parent, which is no further along
+than its own parent. The one case left is a stack that broke the rule before it (only possible from before the rule):
+a workspace further along than its new parent is stacked on nothing instead, never ahead of a parent. Its own members
+stay on it.
+
+Every archive reorganizes, the person's and an MCP client's alike (agents have no archive tool): all of them run
+`workspace.archive` (`runWorkspaceArchive` → `SpaceAuthorityDO.archiveWorkspace` → `commitWorkspaceLifecycle`). The
+same write records the moves on the archive operation as its `restack` (`{ moved, kept }`, each move
+`{ workspaceId, from, to }`), which `project.operation`, the project's operation list and the account directory carry.
+A moved workspace is compared with its new parent from scratch (a stored comparison keys on its parent).
+
+### The pill and Undo
+
+Archive from the sidebar reports in the stack pill at once, "Archiving Billing export…", with Undo. When the archive
+operation ends, the pill says what moved, from its `restack`: "Billing export archived. Billing emails is the head
+now; Billing docs is on it." A failed archive shows its error instead. Undo lives as long as the pill (each rewrite
+starts its time over).
+
+Undo puts it back: `workspace.restore` with `undoArchive` (the archive operation's id). The restore queues behind the
+archive when that still runs (`queueOperation`'s `after`), so an Undo clicked before the archive ended waits for it, and
+then:
+
+1. restores the workspace, as Restore does;
+2. puts back the archive's moves, newest first, in one write (`ProjectAuthorityDO.undoArchiveRestack`): only a workspace
+   still stacked where the archive put it moves back (compare-and-set, as the picker's Undo), through the same checks as
+   any relation write. One moved, archived or deleted since, or refused by the phase rule or a stack loop, stays,
+   recorded in `kept` with why.
+
+The pill then says "Billing export restored" or "Billing export restored. Not put back: Billing docs was moved since."
+Restoring later from Archived brings the workspace back alone: it keeps what it was stacked on, and its old members stay
+where the archive put them.

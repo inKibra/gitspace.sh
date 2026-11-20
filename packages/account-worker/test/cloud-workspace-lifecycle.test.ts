@@ -457,6 +457,78 @@ describe('cloud workspace lifecycle with no machines', () => {
     expect(await client.workspace.delete({ workspaceId })).toMatchObject({ status: 'error', error: { _tag: 'gitspace/workspace-not-found' } });
   });
 
+  /** A project's workspaces created in their phases, each stacked on the one named (by name), and what reads their
+   * stack parents back by name. */
+  async function stacks(name: string, workspaces: ReadonlyArray<{ name: string; phase: 'plan' | 'code' | 'review' | 'ship'; on?: string }>) {
+    const setup = await cloudProject(name);
+    const ids = new Map<string, string>();
+    for (const workspace of workspaces) {
+      const created = await setup.ready(setup.client.workspace.create({ projectId: setup.project.id, name: workspace.name, branch: workspace.name.toLowerCase().replaceAll(' ', '-'), phase: workspace.phase, sourceKind: 'base', sourceRef: '' }));
+      ids.set(workspace.name, created.workspace.id);
+    }
+    const id = (named: string) => ids.get(named) ?? named;
+    for (const workspace of workspaces) {
+      if (workspace.on) expect(await setup.client.workspace.setRelations({ workspaceId: id(workspace.name), dependsOn: [], relatedTo: [], stackedOn: id(workspace.on) })).toMatchObject({ status: 'ok' });
+    }
+    const names = new Map([...ids].map(([named, workspaceId]) => [workspaceId, named]));
+    const parents = async () => Object.fromEntries(Object.entries(await setup.authority.listWorkspaceRelations()).map(([workspaceId, relations]) => [names.get(workspaceId), relations.stackedOn === null ? null : names.get(relations.stackedOn)]));
+    const named = (moves: ReadonlyArray<{ workspaceId: string; from: string | null; to: string | null }>) => moves.map(move => ({ workspace: names.get(move.workspaceId), from: move.from === null ? null : names.get(move.from), to: move.to === null ? null : names.get(move.to) }));
+    return { ...setup, id, parents, named };
+  }
+
+  it('archiving a head promotes its furthest member to head, restacks the others onto it, and its Undo puts back only what nobody changed since', async () => {
+    const { client, project, id, run, parents, named } = await stacks('Archive head', [
+      { name: 'Billing export', phase: 'ship' }, { name: 'Billing docs', phase: 'code', on: 'Billing export' },
+      { name: 'Billing emails', phase: 'review', on: 'Billing export' }, { name: 'Billing copy', phase: 'plan', on: 'Billing docs' },
+    ]);
+    const archived = await run(client.workspace.archive({ projectId: project.id, spaceId: id('Billing export'), expectedGeneration: null }));
+    expect(archived.state).toBe('succeeded');
+    // Billing emails is furthest along, so it heads the stack; Billing docs moves onto it, Billing copy stays on Billing docs.
+    expect(named(archived.restack?.moved ?? [])).toEqual([
+      { workspace: 'Billing emails', from: 'Billing export', to: null },
+      { workspace: 'Billing docs', from: 'Billing export', to: 'Billing emails' },
+    ]);
+    expect(await parents()).toMatchObject({ 'Billing emails': null, 'Billing docs': 'Billing emails', 'Billing copy': 'Billing docs' });
+
+    // Someone unstacks Billing docs; the Undo puts Billing emails back and leaves Billing docs, saying why.
+    expect(await client.workspace.setRelations({ workspaceId: id('Billing docs'), dependsOn: [], relatedTo: [], stackedOn: null })).toMatchObject({ status: 'ok' });
+    const undone = await run(client.workspace.restore({ spaceId: id('Billing export'), expectedGeneration: 0, undoArchive: archived.id }));
+    expect(undone).toMatchObject({ kind: 'workspace.restore', state: 'succeeded' });
+    expect(named(undone.restack?.moved ?? [])).toEqual([{ workspace: 'Billing emails', from: null, to: 'Billing export' }]);
+    expect(undone.restack?.kept).toEqual([{ workspaceId: id('Billing docs'), from: id('Billing export'), to: id('Billing emails'), reason: 'Billing docs was moved since' }]);
+    expect(await parents()).toMatchObject({ 'Billing emails': 'Billing export', 'Billing docs': null, 'Billing copy': 'Billing docs' });
+  }, 60_000);
+
+  it('archiving a member moves its members onto its parent, an Undo before the archive ran waits for it, and a workspace with no members moves nothing', async () => {
+    const { client, project, id, run, settle, parents, named } = await stacks('Archive member', [
+      { name: 'Ledger', phase: 'ship' }, { name: 'Invoices', phase: 'review', on: 'Ledger' },
+      { name: 'Receipts', phase: 'plan', on: 'Invoices' }, { name: 'Refunds', phase: 'code', on: 'Invoices' }, { name: 'Search index', phase: 'code' },
+    ]);
+    // The Undo is queued while the archive has not run yet: it runs after it and puts everything back.
+    const queued = await client.workspace.archive({ projectId: project.id, spaceId: id('Invoices'), expectedGeneration: null });
+    if (queued.status === 'error') throw queued.error;
+    const undo = await client.workspace.restore({ spaceId: id('Invoices'), expectedGeneration: 0, undoArchive: queued.value.id });
+    if (undo.status === 'error') throw undo.error;
+    const archived = await settle(queued.value.id);
+    expect(named(archived.restack?.moved ?? [])).toEqual([
+      { workspace: 'Refunds', from: 'Invoices', to: 'Ledger' },
+      { workspace: 'Receipts', from: 'Invoices', to: 'Ledger' },
+    ]);
+    const undone = await settle(undo.value.id);
+    expect(undone.state).toBe('succeeded');
+    expect(named(undone.restack?.moved ?? [])).toEqual([
+      { workspace: 'Receipts', from: 'Ledger', to: 'Invoices' },
+      { workspace: 'Refunds', from: 'Ledger', to: 'Invoices' },
+    ]);
+    expect(undone.restack?.kept).toEqual([]);
+    expect(await parents()).toMatchObject({ Invoices: 'Ledger', Receipts: 'Invoices', Refunds: 'Invoices' });
+
+    const before = await parents();
+    const lone = await run(client.workspace.archive({ projectId: project.id, spaceId: id('Search index'), expectedGeneration: null }));
+    expect(lone.restack).toEqual({ moved: [], kept: [] });
+    expect(await parents()).toEqual(before);
+  }, 60_000);
+
   it('a workspace whose starts keep failing refuses callers until a growing delay passes, then pauses itself', async () => {
     const { userId, client, project, ready } = await cloudProject('Failed starts');
     const created = await ready(client.workspace.create({ projectId: project.id, name: 'Crashing', branch: 'crashing', sourceKind: 'base', sourceRef: '' }));

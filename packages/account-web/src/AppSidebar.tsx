@@ -1,6 +1,6 @@
 import type { DeploymentStatusView } from '@gitspace/protocol';
 import type { CloudProjectOperation, CloudWorkspaceDefinition, RemoteBranchState } from '@gitspace/protocol/project-authority';
-import { stackBelow, stackTree, type WorkspaceStatusColor } from '@gitspace/protocol-workspace';
+import { stackBelow, stackTree, type StackMove, type StackRestack, type WorkspaceStatusColor } from '@gitspace/protocol-workspace';
 import type { IconComponentProps } from '@gitspace/ui';
 import {
   DropdownContent,
@@ -159,6 +159,11 @@ export interface SidebarProject {
 /** A running pane contributes runtime controls; the account owns navigation and lifecycle actions. */
 export const AccountSidebarContext = createContext<Dispatch<SetStateAction<AppSidebarProps | null>> | null>(null);
 
+/** An archive the sidebar reports. `done` settles when its operation ends, to what it moved in the stacks (rejected
+ * when it failed); `undo` restores the workspace and puts back the moves nobody changed since, waiting for the archive
+ * first, and settles when that restore ends, to what it put back and what it left. */
+export interface SidebarArchive { done: Promise<StackRestack>; undo(): Promise<StackRestack> }
+
 export interface AppSidebarProps {
   view: ProductRoute;
   onView(view: AppView): void;
@@ -171,7 +176,9 @@ export interface AppSidebarProps {
   onSelectWorkspace(workspace: SidebarWorkspace): void;
   onReleaseMachines?(spaceId: string): void | Promise<void>;
   releasePendingSpaceId?: string | null;
-  onArchive?(spaceId: string): void | Promise<void>;
+  /** Archives a workspace. Resolves to the archive to report (null or nothing: there is none, as when the person
+   * cancelled); the pill then says what moved in the stacks, with Undo. */
+  onArchive?(spaceId: string): void | Promise<SidebarArchive | null | void>;
   /** Renames a workspace: its id and branch stay. */
   onRename?(spaceId: string, name: string): void | Promise<void>;
   onDelete?(spaceId: string): void | Promise<void>;
@@ -357,6 +364,29 @@ function rowItem(workspace: SidebarWorkspace, graph: ProjectGraph | undefined): 
 
 function relationsOf(item: RowItem): WorkspaceView['relations'] {
   return { dependsOn: item.dependsOn, relatedTo: item.relatedTo, stackedOn: item.stackedOn };
+}
+
+/** What the pill says once an archive ran: the workspace archived and where the workspaces stacked on it went. A
+ * promoted head reads "Billing emails is the head now; Billing docs is on it", a member's children "Invoices is on
+ * Billing export now". */
+function archivedText(name: string, moved: readonly StackMove[], nameOf: (id: string) => string): string {
+  const onto = (id: string | null) => moved.filter((move) => move.to === id);
+  const said = (moves: readonly StackMove[], rest: string) => `${new Intl.ListFormat('en', { type: 'conjunction' }).format(moves.map((move) => nameOf(move.workspaceId)))} ${moves.length === 1 ? 'is' : 'are'} ${rest}`;
+  const heads = onto(null).filter((move) => onto(move.workspaceId).length > 0);
+  const top = onto(null).filter((move) => !heads.includes(move));
+  const parents = [...new Set(moved.flatMap((move) => move.to !== null && !heads.some((head) => head.workspaceId === move.to) ? [move.to] : []))];
+  const parts = [
+    ...heads.map((head) => `${nameOf(head.workspaceId)} is the head now; ${said(onto(head.workspaceId), 'on it')}`),
+    ...parents.map((parent) => said(onto(parent), `on ${nameOf(parent)} now`)),
+    ...top.length ? [said(top, 'at the top level now')] : [],
+  ];
+  return parts.length ? `${name} archived. ${parts.join('. ')}.` : `${name} archived`;
+}
+
+/** What the pill says once an archive's Undo ran: the workspace back, and each move it could not put back with why. */
+function restoredText(name: string, restack: StackRestack): string {
+  if (restack.kept.length) return `${name} restored. Not put back: ${restack.kept.map((kept) => kept.reason).join('; ')}.`;
+  return restack.moved.length ? `${name} restored, its stack put back` : `${name} restored`;
 }
 
 function matches(item: RowItem, filter: SidebarFilter): boolean {
@@ -776,6 +806,15 @@ function SidebarBody({ view, onView, selected, selectedSummary, projects, onSele
       (failure: unknown) => toast.refused(failure, 'Change phase'),
     );
   } : null;
+  // The pill says the archive started, with Undo, and once it ran what moved. An Undo before then waits for it.
+  const archive = onArchive ? async (spaceId: string): Promise<void> => {
+    const started = await onArchive(spaceId);
+    if (!started) return;
+    const nameOf = (id: string) => shown.flatMap((project) => project.workspaces).find((workspace) => workspace.id === id)?.name ?? id;
+    const name = nameOf(spaceId);
+    const revise = toast.applied(`Archiving ${name}…`, async () => restoredText(name, await started.undo()));
+    void started.done.then((restack) => revise(archivedText(name, restack.moved, nameOf)), (failure: unknown) => toast.refused(failure, 'Archive workspace'));
+  } : undefined;
   const done = (): void => {
     if (!mode || !source || mode.kind === 'stack') return;
     leave();
@@ -817,7 +856,7 @@ function SidebarBody({ view, onView, selected, selectedSummary, projects, onSele
     window.addEventListener('keydown', key);
     return () => window.removeEventListener('keydown', key);
   });
-  const rowProps = { selected, deployment, onSelectProject, onSelectWorkspace, onReleaseMachines, releasePendingSpaceId, onArchive, onRestore, onDelete, onRename, onNewWorkspace, onOpenProjectSettings, onOpenProjectAutomations, filter, groupBy, hovered, onHover: setHovered, picker, edit, move };
+  const rowProps = { selected, deployment, onSelectProject, onSelectWorkspace, onReleaseMachines, releasePendingSpaceId, onArchive: archive, onRestore, onDelete, onRename, onNewWorkspace, onOpenProjectSettings, onOpenProjectAutomations, filter, groupBy, hovered, onHover: setHovered, picker, edit, move };
   return <Sidebar ref={scroller} variant="inset">
     <SidebarHeader>
       <div className="relative">

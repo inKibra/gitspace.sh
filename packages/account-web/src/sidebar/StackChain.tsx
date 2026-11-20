@@ -1,10 +1,12 @@
 import type { StackStatus } from '@gitspace/protocol';
+import type { WorkspacePhase } from '@gitspace/protocol-workspace';
 import { StatusDot, WorkspaceStatusDot, type SpaceStatusView } from '../GitSpaceShell.js';
 import { stackOf, type GraphWorkspace } from './graph.js';
 
 /** A workspace of a stack as the chain shows it; `status` absent while it is unknown. `position` is its branch against
- * the workspace it is stacked on, as the project view publishes it; null when unstacked or unread. */
-export interface ChainWorkspace extends GraphWorkspace { name: string; branch: string; status?: SpaceStatusView; position: StackStatus | null }
+ * the workspace it is stacked on, as the project view publishes it; null when unstacked or unread. `phase` orders
+ * siblings (null: unread). */
+export interface ChainWorkspace extends GraphWorkspace { name: string; branch: string; phase: WorkspacePhase | null; status?: SpaceStatusView; position: StackStatus | null }
 
 /** A stacked workspace's git position against its parent, as information: what the parent has that it lacks, the
  * same in a few words for its sidebar row (null when up to date), and the optional command that takes it in. */
