@@ -31,6 +31,33 @@ function visible(element: Element): boolean {
   return true;
 }
 
+describe('the agent screenshot mask', () => {
+  it('covers secrets only: password, one-time-code, secure-input and shadow-root password fields; the page shows the rest', () => {
+    const { window, roots, call } = page();
+    const document = window.document;
+    document.body.innerHTML = `<input id="password" type="password" value="hunter2">
+      <input id="otp" autocomplete="one-time-code"><input id="secure" type="text" data-gitspace-secure-input>
+      <input id="plain" type="text" value="hello"><x-card id="custom">Pull requests</x-card>
+      <iframe id="frame"></iframe><canvas id="canvas"></canvas><div id="shadowed"></div>`;
+    const shadowed = document.getElementById('shadowed');
+    if (!shadowed) throw new Error('No shadow host');
+    const shadow = shadowed.attachShadow({ mode: 'open' });
+    shadow.innerHTML = '<input id="inner" type="password">';
+    call(browserScreenshotPrepareFunction, [{ x: 0, y: 0, ref: 'e1' }]);
+    const hidden = (element: Element | null) => {
+      if (!element) throw new Error('Missing element');
+      return window.getComputedStyle(element).visibility === 'hidden';
+    };
+    expect(['password', 'otp', 'secure'].map(id => hidden(document.getElementById(id)))).toEqual([true, true, true]);
+    expect(hidden(shadow.getElementById('inner'))).toBe(true);
+    expect(['plain', 'custom', 'frame', 'canvas'].map(id => hidden(document.getElementById(id)))).toEqual([false, false, false, false]);
+    const covers = [...roots.at(-1)?.children ?? []].map(cover => cover.textContent);
+    expect(covers).toEqual(['[masked]', '[masked]', '[masked]', '[masked]', 'e1']);
+    call(browserScreenshotRestoreFunction);
+    expect(hidden(document.getElementById('password'))).toBe(false);
+  });
+});
+
 describe('the in-page overlay', () => {
   it('stays out of the accessibility tree and the focus order, and the screenshot mask hides it', () => {
     const { window, roots, call, host } = page();

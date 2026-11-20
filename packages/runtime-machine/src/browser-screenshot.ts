@@ -1,6 +1,9 @@
-/** Fixed isolated-world functions shared with the generated extension. No caller-supplied code. The mask also hides
- * the GitSpace in-page overlay (`[data-gitspace-overlay]`: the agent cursor and the Stop control on your Chrome), which
- * is never part of what the agent sees. */
+/** Fixed isolated-world functions shared with the generated extension. No caller-supplied code. The mask covers only
+ * secrets with a black `[masked]` box: password inputs, fields filled by secure input (`[data-gitspace-secure-input]`)
+ * and inputs or textareas whose `autocomplete` names a credential or payment secret. Every other field, frame, canvas,
+ * video and custom element shows as the page renders it: ordinary fields hold what the agent typed or the page shows.
+ * Open shadow roots are searched too. The mask also hides the GitSpace in-page overlay (`[data-gitspace-overlay]`: the
+ * agent cursor and the Stop control on your Chrome), which is never part of what the agent sees. */
 export const browserScreenshotPrepareFunction = `function(boxes) {
   const key = '__gitspaceBrowserMask';
   if (globalThis[key]) throw new Error('Screenshot mask already active');
@@ -15,13 +18,13 @@ export const browserScreenshotPrepareFunction = `function(boxes) {
     el.style.width = rect.width+'px'; el.style.height = rect.height+'px';
     el.textContent = label; root.appendChild(el);
   };
+  const secret = 'input[type=password],[data-gitspace-secure-input],' + ['current-password','new-password','one-time-code','cc-number','cc-csc','cc-exp','cc-exp-month','cc-exp-year'].flatMap(name=>['input','textarea'].map(tag=>tag+'[autocomplete~="'+name+'"]')).join(',');
   const scan = (parent) => {
     const style = document.createElement('style');
-    const custom = [...parent.querySelectorAll('*')].filter(el=>el.localName.includes('-')).map(el=>el.localName);
-    style.textContent = ['input','textarea','select','[contenteditable]','iframe','canvas','video','[data-gitspace-overlay]',...custom].join(',') + '{visibility:hidden!important}';
+    style.textContent = secret + ',[data-gitspace-overlay]{visibility:hidden!important}';
     (parent === document ? document.documentElement : parent).appendChild(style); styles.push(style);
     for (const el of parent.querySelectorAll('*')) {
-      if (el.matches('input,textarea,select,[contenteditable],iframe,canvas,video')) cover(el.getBoundingClientRect(), '[masked]');
+      if (el.matches(secret)) cover(el.getBoundingClientRect(), '[masked]');
       if (el.shadowRoot) scan(el.shadowRoot);
     }
   };
