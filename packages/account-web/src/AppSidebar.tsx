@@ -555,8 +555,12 @@ function ProjectRows({ project, archived: projectArchived, collapsed, onCollapse
   const mode = picker.mode?.projectId === project.id ? picker.mode : null;
   const source = mode ? byId.get(mode.id) : undefined;
   const stacking = mode?.kind === 'stack' ? mode : null;
-  // A focus with nothing related lights nothing, rather than fading every other row; choosing lights nothing.
-  const focus = picker.mode ? null : [hovered, selectedId].map((id) => lit(items, id)).find((light): light is Lit => light !== null && light.upstream.size + light.downstream.size > 0) ?? null;
+  // A focus with nothing related lights nothing, rather than fading every other row; choosing lights nothing. Hovering
+  // a related row fades this project's unrelated rows; the selected workspace only tints its relations, so working
+  // inside a stack fades nothing. Other projects never fade: `lit` finds no focus among their rows.
+  const hoverLight = picker.mode ? null : lit(items, hovered);
+  const focus = [hoverLight, picker.mode ? null : lit(items, selectedId)].find((light): light is Lit => light !== null && light.upstream.size + light.downstream.size > 0) ?? null;
+  const fades = focus !== null && focus === hoverLight;
   const target = (item: RowItem, archivedRow: boolean): Target | null => {
     if (!picker.mode) return null;
     if (!mode || !source) return { role: 'refused', why: 'in another project' };
@@ -598,7 +602,8 @@ function ProjectRows({ project, archived: projectArchived, collapsed, onCollapse
       `${item.branch} · ${summary ? summaryLabel(summary) : 'Status unknown'}${released ? ' · released' : ''}`,
       parentWorkspace ? `on ${parentWorkspace.name}${position?.short ? ` · ${position.short}` : ''}` : null,
     ].filter(Boolean).join(' · ');
-    return <WorkspaceRow key={item.id} item={item} kin={relation(focus, item.id)} selected={selectedId === item.id} inset={stacked ? INSET.stacked : INSET.first} guides={archivedRow ? [] : stacked ? STACK_GUIDES : FIRST_GUIDES} dimmed={dimmed} title={title} target={choosing}
+    const kin = relation(focus, item.id);
+    return <WorkspaceRow key={item.id} item={item} kin={kin === 'unrelated' && !fades ? 'none' : kin} selected={selectedId === item.id} inset={stacked ? INSET.stacked : INSET.first} guides={archivedRow ? [] : stacked ? STACK_GUIDES : FIRST_GUIDES} dimmed={dimmed} title={title} target={choosing}
       onHover={(id) => { onHover(id); if (mode) picker.setHover(id && choosing?.role === 'choice' ? id : null); }}
       onClick={() => { if (!picker.mode) onSelectWorkspace(item.workspace); else if (mode) picker.pick(item.id); }}
       caption={<>{parentWorkspace ? <StackCaption parent={parentWorkspace.name} position={position} /> : null}{head ? <HeadTag /> : null}</>}

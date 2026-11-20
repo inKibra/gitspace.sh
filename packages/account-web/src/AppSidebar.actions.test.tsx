@@ -312,3 +312,20 @@ it('lists every phase in the row menu, a refused one disabled with why, and repo
   await undo();
   expect(onSetPhase).toHaveBeenLastCalledWith('bakery', 'billing-emails', 'code', 'plan');
 });
+
+it('working inside a stack fades nothing; hovering a related row fades only its own project\'s unrelated rows', async () => {
+  const other: SidebarProject = { id: 'other', name: 'Other', workspaces: [{ id: 'other-work', projectId: 'other', name: 'Other work', branch: 'other-work', closedAt: null, phase: 'code', summary: summaryOf('green') }] };
+  await renderProject({ projects: [bakery(), other], selected: { projectId: 'bakery', workspaceId: 'billing-ui' } });
+  const faded = (id: string) => pickRow(id).className.includes('opacity-40');
+  const relationOf = (id: string) => container.querySelector<HTMLElement>(`[data-workspace="${id}"]`)?.dataset.relation;
+  // Selected Billing UI tints its stack and leaves everything else as it is.
+  expect(relationOf('billing-export')).toBe('upstream');
+  expect(relationOf('billing-emails')).toBe('downstream');
+  expect(['menu-redesign', 'loyalty-points', 'other-work'].map(faded)).toEqual([false, false, false]);
+  // Hovering Loyalty points (Gift cards is stacked on it) fades Bakery's unrelated rows, not Other's.
+  await act(() => pickRow('loyalty-points').focus());
+  expect(relationOf('gift-cards')).toBe('downstream');
+  expect(['menu-redesign', 'billing-export', 'other-work'].map(faded)).toEqual([true, true, false]);
+  await act(() => pickRow('loyalty-points').blur());
+  expect(['menu-redesign', 'billing-export', 'other-work'].map(faded)).toEqual([false, false, false]);
+});
