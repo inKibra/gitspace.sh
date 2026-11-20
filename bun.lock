@@ -273,6 +273,7 @@
         "@cfworker/json-schema": "^4.1.1",
         "@gitspace/protocol": "workspace:*",
         "@gitspace/protocol-runtime": "workspace:*",
+        "@modelcontextprotocol/ext-tasks": "0.2.3",
         "@modelcontextprotocol/server": "2.4.0",
         "result-rpc": "0.5.0",
         "zod": "^4.4.3",

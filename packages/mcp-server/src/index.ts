@@ -9,7 +9,8 @@ import { DEFAULT_SKILLS } from '@gitspace/protocol/default-skills';
 import { reviewedAnnotations } from './annotations.js';
 import { toolDescriptions } from './descriptions.js';
 import { OperationFailure, type RpcResult } from './rpc-result.js';
-import { createGitSpaceTasks, declaredCapabilities, TASKS_EXTENSION } from './tasks.js';
+import { TASKS_EXTENSION_ID_V2 } from '@modelcontextprotocol/ext-tasks/core/v2';
+import { createGitSpaceTasks, declaredCapabilities } from './tasks.js';
 
 export interface GitSpaceMcpOptions {
   key: string;
@@ -244,7 +245,7 @@ export function createGitSpaceMcpHandler(options: GitSpaceMcpOptions): { fetch(r
    * request's server answers exactly as before. */
   function build(era: 'legacy' | 'modern', request: Request): Server {
     const server = new Server({ name: 'gitspace', version: '0.0.0' }, {
-      capabilities: { tools: {}, resources: {}, ...(era === 'modern' ? { extensions: { [TASKS_EXTENSION]: {} } } : {}) }, jsonSchemaValidator: new CfWorkerJsonSchemaValidator(),
+      capabilities: { tools: {}, resources: {}, ...(era === 'modern' ? { extensions: { [TASKS_EXTENSION_ID_V2]: {} } } : {}) }, jsonSchemaValidator: new CfWorkerJsonSchemaValidator(),
       // 2026-07-28 list results carry a cache policy. Each depends on this caller's grant, so caches are private; every
       // call is authorized again, so a list cached across a grant change only lists a tool that then refuses.
       cacheHints: { 'tools/list': { ttlMs: 300_000, cacheScope: 'private' }, 'resources/templates/list': { ttlMs: 300_000, cacheScope: 'private' }, 'resources/list': { ttlMs: 60_000, cacheScope: 'private' } },
@@ -260,7 +261,7 @@ export function createGitSpaceMcpHandler(options: GitSpaceMcpOptions): { fetch(r
       try {
         // A client that declares Tasks on this request gets a task for a call that starts agent work; any other gets
         // the ordinary result (docs/GITSPACE-MCP-CAPABILITY-MATRIX.md, MCP Tasks).
-        if (era === 'modern' && declaredCapabilities(ctx)?.extensions?.[TASKS_EXTENSION] !== undefined && tasks.starts(entry.path, message.params.arguments)) {
+        if (era === 'modern' && declaredCapabilities(ctx)?.extensions?.[TASKS_EXTENSION_ID_V2] !== undefined && tasks.starts(entry.path, message.params.arguments)) {
           return await tasks.start(entry.path, message.params.arguments, signal);
         }
         const value = await execute(entry.path, message.params.arguments, signal);
