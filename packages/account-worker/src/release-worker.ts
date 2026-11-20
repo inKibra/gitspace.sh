@@ -5,7 +5,7 @@ import { platformDeploy, type WorkerSwap } from './tenant-platform.js';
  * (`/__platform/objects`), from account storage or, for a published release, from the channel. */
 export async function deployReleaseWorker(env: Env, userId: string, record: ReleaseRecord): Promise<WorkerSwap> {
   const worker = record.artifacts.worker;
-  if (!worker || !record.worker) return { status: 'failed', error: 'Worker artifact and metadata are required' };
+  if (!worker || !record.worker) return { status: 'failed', error: 'Worker artifact and metadata are required', startupTimeMs: null };
   return platformDeploy(env, { sha: record.sha, manifestKey: `users/${userId}/${worker.key}`, manifestHash: worker.hash, metadata: record.worker, accountId: userId });
 }
 

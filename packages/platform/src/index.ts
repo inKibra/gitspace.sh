@@ -6,7 +6,7 @@ import { sendSpendDigestIfDue } from './spend-digest.js';
 
 /** `wrangler.jsonc` cron of the storage watchdog and the spend digest; the other cron is the daily usage report. */
 const STORAGE_WATCHDOG_CRON = '*/10 * * * *';
-import { legacyPlatformDeployRequestSchema, platformDeployRequestSchema, platformRevertRequestSchema, tenantIdSchema } from '@gitspace/protocol/deployment';
+import { legacyPlatformDeployRequestSchema, platformDeployRequestSchema, platformRevertRequestSchema, tenantIdSchema, workerStartupWarning } from '@gitspace/protocol/deployment';
 import { CloudflareR2PlatformClient } from './storage-provider.js';
 import { CreditLedgerDO, isCreditLedgerRecord } from './credit-ledger.js';
 import { deployTenantWorker, type DeployResult } from './deployer.js';
@@ -113,7 +113,7 @@ async function handleTenantBootstrap(request: Request, env: Env, tenant: string)
     await storage.ensureBucket({ bucketName: blobBucket });
     await deployments.providerToken();
     const current = await deployments.getState();
-    const deployed: DeployResult = current.active ? { status: 'ok', value: { sha: current.active.sha, healthy: current.active.healthy, revertedTo: null, appliedMigrationTag: current.appliedMigrationTag } } : await deployments.deploy(tenant, { kind: 'bootstrap' }, null);
+    const deployed: DeployResult = current.active ? { status: 'ok', value: { sha: current.active.sha, healthy: current.active.healthy, revertedTo: null, appliedMigrationTag: current.appliedMigrationTag, startupTimeMs: current.active.startupTimeMs } } : await deployments.deploy(tenant, { kind: 'bootstrap' }, null);
     if (deployed.status === 'error') return platformError(deployed.error.status, deployed.error.code, deployed.error.message);
     return Response.json({ tenant, relayUrl: 'https://' + tenant + env.TENANT_HOST_SUFFIX, accountUrl: 'https://' + tenant + '.gitspace.sh', deployment: deployed.value });
   } catch (error) { return platformError(409, 'TENANT_PROVISIONING_FAILED', error instanceof Error ? error.message : 'Tenant provisioning failed'); }
@@ -305,6 +305,8 @@ async function handleOperatorTenant(request: Request, env: Env, tenant: string, 
         active: deploymentState.active?.sha ?? null,
         uploadedAt: deploymentState.active?.uploadedAt ?? null,
         appliedMigrationTag: deploymentState.appliedMigrationTag,
+        startupTimeMs: deploymentState.active?.startupTimeMs ?? null,
+        startupWarning: workerStartupWarning(deploymentState.active?.startupTimeMs ?? null),
       },
     }, { headers: { 'cache-control': 'private, no-store' } });
   }
@@ -353,7 +355,7 @@ async function handleTenantResource(request: Request, env: Env, tenant: string, 
   }
   if (path === '/state' && request.method === 'GET') {
     const [control, deployment] = await Promise.all([env.TENANT_CONTROL.getByName(tenant).get(), deployments.getState()]);
-    return Response.json({ control, deployment: { active: deployment.active?.sha ?? null } }, { headers: { 'cache-control': 'private, no-store' } });
+    return Response.json({ control, deployment: { active: deployment.active?.sha ?? null, startupTimeMs: deployment.active?.startupTimeMs ?? null } }, { headers: { 'cache-control': 'private, no-store' } });
   }
   if (path === '/storage' && request.method === 'GET') return Response.json({ bucket: config.blobBucket, endpoint: 'https://' + env.CF_ACCOUNT_ID + '.r2.cloudflarestorage.com', region: 'auto' });
   if (path === '/storage/credentials' && request.method === 'POST') {

@@ -133,7 +133,7 @@ async function tenant() {
 async function launchEnded(userId: string) {
   const releases = env.TENANT_RELEASES.getByName(userId);
   return vi.waitFor(async () => {
-    const status = deploymentStatusSchema.parse(await releases.status(userId, { sha: null, version: null }));
+    const status = deploymentStatusSchema.parse(await releases.status(userId, { sha: null, version: null, startupTimeMs: null }));
     if (status.launch?.status === 'running') throw new Error('The launch is still running');
     return status;
   });
@@ -218,7 +218,7 @@ describe('tenant releases', () => {
     await releases.machineApplied('machine-b', { sha: input.sha, target: 'machine', generation: 'generation-b', status: 'failed', error: 'This release runs on Bun 1.4.0; this machine runs Bun 1.3.2' });
     await releases.launch({ sha: input.sha, targets: ['worker'] });
     await releases.certifyOwnLaunch(input.sha);
-    const record = async () => deploymentStatusSchema.parse(await releases.status(userId, { sha: null, version: null })).releases.find(release => release.sha === input.sha);
+    const record = async () => deploymentStatusSchema.parse(await releases.status(userId, { sha: null, version: null, startupTimeMs: null })).releases.find(release => release.sha === input.sha);
     expect((await record())?.machineErrors).toEqual({ 'machine-a': 'Executable platform linux is incompatible with host darwin', 'machine-b': 'This release runs on Bun 1.4.0; this machine runs Bun 1.3.2' });
     await releases.machineApplied('machine-a', { sha: input.sha, target: 'machine', generation: 'generation-a2', status: 'applied' });
     expect((await record())?.machineErrors).toEqual({ 'machine-b': 'This release runs on Bun 1.4.0; this machine runs Bun 1.3.2' });
@@ -232,7 +232,7 @@ describe('tenant releases', () => {
     const { userId } = await tenant();
     const releases = env.TENANT_RELEASES.getByName(userId);
     const portable = (sha: string) => ({ ...canonicalInput(sha), artifacts: { worker: null, machine: null, frontend: null, portable: { key: `releases/${sha}/portable.manifest.json`, hash: HASH, size: 1 } }, worker: null });
-    const followed = async (machineId: string) => deploymentStatusSchema.parse(await releases.status(userId, { sha: null, version: null }, machineId)).desired.machine;
+    const followed = async (machineId: string) => deploymentStatusSchema.parse(await releases.status(userId, { sha: null, version: null, startupTimeMs: null }, machineId)).desired.machine;
     await releases.stage(portable('default-one'), 'machine-a');
     expect(await followed('machine-b')).toBeNull();
     expect(await releases.installRelease()).toBeNull();
@@ -309,7 +309,7 @@ describe('tenant releases', () => {
     network.use(http.get(`${env.PLATFORM_URL}/__platform/tenants/${env.TENANT_ID}/state`, () => HttpResponse.json({ control: { status: 'active' }, deployment: { active: 'test-inference-worker' } })));
     await env.CREDENTIALS.getByName(userId).ensureInference();
     await expect(Promise.resolve(releases.launch({ sha: input.sha, targets: ['worker', 'frontend'] }))).rejects.toThrow();
-    const rejected = await releases.status(userId, { sha: null, version: null });
+    const rejected = await releases.status(userId, { sha: null, version: null, startupTimeMs: null });
     expect(rejected.desired).toMatchObject({ worker: null, machine: null, frontend: null });
 
     // Replacing every legacy target with a compatible build permits forward repair.
@@ -329,7 +329,7 @@ describe('tenant releases', () => {
     await env.DATA.put(`users/${userId}/releases/split-targets/frontend/index.html`, html);
     await control('deploy.stage', { ...input, artifacts: { ...input.artifacts, machine: null } });
     await releases.launch({ sha: input.sha, targets: ['worker', 'frontend'] });
-    await releases.setWorkerStatus(input.sha, 'applied', null);
+    await releases.setWorkerStatus(input.sha, { status: 'applied', error: null, startupTimeMs: null });
     await control('deploy.stage', {
       ...input, artifacts: { worker: null, machine: input.artifacts.machine, frontend: null },
       worker: null,
@@ -402,6 +402,36 @@ describe('tenant releases', () => {
     expect(status.desired).toMatchObject({ worker: 'bad222', machine: 'machine333', frontend: 'bad222' });
     expect(status.current.worker).toEqual({ sha: 'test-inference-worker', version: 'test-inference-worker' });
     expect(status.current.platformWorker).toEqual({ sha: 'good111', version: 'good111' });
+  });
+
+  it('shows the startup the platform measured for each Worker release, warns from 700 ms, and takes it from the platform when the swap answer lacked it', async () => {
+    const { control } = await tenant();
+    const platform: Partial<Env> = { PLATFORM_URL: 'https://platform.test', PLATFORM_TOKEN: 'tenant-token' };
+    const startups: Record<string, number> = { quick111: 699, slow222: 700 };
+    let serving: { active: string | null; startupTimeMs?: number } = { active: null };
+    network.use(
+      http.get(`https://platform.test/__platform/tenants/${env.TENANT_ID}/state`, () => HttpResponse.json({ control: { status: 'active' }, deployment: serving })),
+      http.post(`https://platform.test/__platform/tenants/${env.TENANT_ID}/deploy`, async ({ request }) => {
+        const body = platformDeployRequestSchema.parse(await request.json());
+        serving = { active: body.sha };
+        const startupTimeMs = startups[body.sha];
+        return HttpResponse.json({ sha: body.sha, healthy: true, revertedTo: null, appliedMigrationTag: 'v1', ...(startupTimeMs === undefined ? {} : { startupTimeMs }) });
+      }),
+    );
+    for (const sha of ['quick111', 'slow222', 'unmeasured333']) {
+      await control('deploy.stage', stageInput(sha));
+      await control('deploy.launch', { sha, targets: ['worker'] }, platform);
+    }
+    const startup = async () => Object.fromEntries(deploymentStatusSchema.parse(await control('deploy.status', {}, platform)).releases.map(release => [release.sha, [release.status.worker, release.startupTimeMs, release.startupWarning]]));
+    expect(await startup()).toEqual({
+      quick111: ['applied', 699, null],
+      slow222: ['applied', 700, expect.stringContaining('700 ms')],
+      unmeasured333: ['applied', null, null],
+    });
+
+    // A swap that replaced this Worker before its answer arrived: the platform still holds the startup it measured.
+    serving = { active: 'unmeasured333', startupTimeMs: 950 };
+    expect((await startup()).unmeasured333).toEqual(['applied', 950, expect.stringContaining('950 ms')]);
   });
 
   it('a commit of the GitSpace project selected for every target becomes the default once its Worker runs; a workspace trial never does', async () => {

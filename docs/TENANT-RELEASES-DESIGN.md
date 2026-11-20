@@ -147,6 +147,21 @@ behind-origin follows the fork's branch.
 
 The project menu's **Launch canonical develop** becomes **Launch** with the project's base branch.
 
+### 9. Worker startup in deployment status
+
+Cloudflare refuses a Worker whose startup (parse and global scope) exceeds 1000 ms (`10021`), and its script upload
+answers with the startup it measured (`result.startup_time_ms`). The platform reads it on every tenant upload, the
+release's and an auto-revert's, logs it (`worker-startup`, with tenant, sha and `startupTimeMs`), keeps it with the
+upload in the tenant's deployment object, and returns it in the `/deploy` answer and in `/state` for the running
+upload; the operator's tenant view shows it with `startupWarning`. An upload whose answer has none records null and
+deploys as before. From 700 ms (`WORKER_STARTUP_WARNING_MS` in `protocol/src/deployment.ts`) the platform also logs
+`worker-startup-near-limit` at warn.
+
+In `deployment.status` (`gitspace_deployment_status`) each release record carries `startupTimeMs` and, from 700 ms,
+`startupWarning`. The account records them from the `/deploy` answer, and from `/state` when the swap replaced the
+Worker before that answer arrived. A record from before this has neither. There is no alert path from the platform to
+an account's Needs you; the status field and the warn log are the warning.
+
 ## What leaves the platform
 
 - `/v1/default-releases/*` and `defaultFrontendResponse`.

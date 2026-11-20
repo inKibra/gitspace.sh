@@ -1,11 +1,13 @@
 import {
   WORKER_MANIFEST_FILE,
+  WORKER_STARTUP_LIMIT_MS,
   WORKER_VERSION_HEADER,
   platformDeployResponseSchema,
   workerBundleSchema,
   workerManifestSchema,
   workerModuleKey,
   workerReleaseMetadataSchema,
+  workerStartupWarning,
   type LegacyPlatformDeployRequest,
   type PlatformRevertRequest,
   type PlatformDeployRequest,
@@ -278,6 +280,8 @@ interface CloudflareApiEnvelope {
   success: boolean;
   /** `code: message` per API error. */
   errors: string[];
+  /** `result.startup_time_ms` of a script upload; null when the response has none. */
+  startupTimeMs: number | null;
 }
 
 async function readCloudflareEnvelope(response: Response): Promise<CloudflareApiEnvelope | null> {
@@ -293,7 +297,9 @@ async function readCloudflareEnvelope(response: Response): Promise<CloudflareApi
         errors.push(`${code}: ${message}`);
       }
     }
-    return { success: parsed.success, errors };
+    const result = 'result' in parsed && parsed.result && typeof parsed.result === 'object' ? parsed.result : null;
+    const startupTimeMs = result && 'startup_time_ms' in result && typeof result.startup_time_ms === 'number' ? result.startup_time_ms : null;
+    return { success: parsed.success, errors, startupTimeMs };
   } catch {
     return null;
   }
@@ -301,11 +307,12 @@ async function readCloudflareEnvelope(response: Response): Promise<CloudflareApi
 
 /**
  * Streams the multipart upload from the module bytes already in memory: a `FormData` body would copy every module into
- * a Blob and again into the serialized request.
+ * a Blob and again into the serialized request. Its value is the startup Cloudflare measured for the script (null when
+ * the response has none), logged as `worker-startup`, and as `worker-startup-near-limit` from `WORKER_STARTUP_WARNING_MS`.
  */
-async function uploadScript(env: Env, tenant: string, workerKey: string, metadata: ScriptUploadMetadata): Promise<DeployFailure | null> {
+async function uploadScript(env: Env, tenant: string, sha: string, workerKey: string, metadata: ScriptUploadMetadata): Promise<Outcome<number | null>> {
   const modules = await loadWorkerModules(env, workerKey, metadata.main_module);
-  if (modules.status === 'error') return modules.error;
+  if (modules.status === 'error') return modules;
   const boundary = `gitspace-${crypto.randomUUID()}`;
   const encoder = new TextEncoder();
   const parts: Uint8Array[] = [
@@ -330,15 +337,24 @@ async function uploadScript(env: Env, tenant: string, workerKey: string, metadat
   try {
     response = await fetch(url, { method: 'PUT', headers: { authorization: `Bearer ${env.CF_API_TOKEN}`, 'content-type': `multipart/form-data; boundary=${boundary}` }, body });
   } catch (error) {
-    return { status: 502, code: 'UPLOAD_UNREACHABLE', message: error instanceof Error ? error.message : String(error) };
+    return { status: 'error', error: { status: 502, code: 'UPLOAD_UNREACHABLE', message: error instanceof Error ? error.message : String(error) } };
   }
   const envelope = await readCloudflareEnvelope(response);
-  if (response.ok && envelope?.success) return null;
+  if (response.ok && envelope?.success) {
+    const startupTimeMs = envelope.startupTimeMs;
+    console.info(JSON.stringify({ event: 'worker-startup', tenant, sha, startupTimeMs }));
+    const warning = workerStartupWarning(startupTimeMs);
+    if (warning) console.warn(JSON.stringify({ event: 'worker-startup-near-limit', tenant, sha, startupTimeMs, limitMs: WORKER_STARTUP_LIMIT_MS, message: warning }));
+    return { status: 'ok', value: startupTimeMs };
+  }
   const detail = envelope?.errors.join('; ');
   return {
-    status: 502,
-    code: 'UPLOAD_REJECTED',
-    message: `Cloudflare rejected the script upload (HTTP ${response.status})${detail ? `: ${detail}` : ''}`,
+    status: 'error',
+    error: {
+      status: 502,
+      code: 'UPLOAD_REJECTED',
+      message: `Cloudflare rejected the script upload (HTTP ${response.status})${detail ? `: ${detail}` : ''}`,
+    },
   };
 }
 
@@ -427,28 +443,29 @@ async function swap(env: Env, tenant: string, records: DeploymentRecords, state:
     publicAssetsService: env.PUBLIC_ASSETS_SERVICE,
     releaseChannelService: env.RELEASE_CHANNEL_SERVICE,
   });
-  const rejected = await uploadScript(env, tenant, candidate.workerKey, uploadMetadata);
-  if (rejected) return { status: 'error', error: rejected };
+  const uploaded = await uploadScript(env, tenant, candidate.sha, candidate.workerKey, uploadMetadata);
+  if (uploaded.status === 'error') return uploaded;
+  const startupTimeMs = uploaded.value;
   const appliedMigrationTag = delta ? delta.new_tag : state.appliedMigrationTag;
   const probe = await probeHealth(env, tenant, expectedSha);
   const sha = probe.version ?? candidate.sha;
   if (probe.healthy) {
-    await records.recordDeploy({ sha, workerKey: candidate.workerKey, metadata: candidate.metadata, healthy: true, revertedTo: null, appliedMigrationTag });
-    return { status: 'ok', value: { sha, healthy: true, revertedTo: null, appliedMigrationTag } };
+    await records.recordDeploy({ sha, workerKey: candidate.workerKey, metadata: candidate.metadata, healthy: true, revertedTo: null, appliedMigrationTag, startupTimeMs });
+    return { status: 'ok', value: { sha, healthy: true, revertedTo: null, appliedMigrationTag, startupTimeMs } };
   }
 
   const fallback = autoRevert ? await loadFallback(env, state, candidate.sha) : null;
   let revertedTo: string | null = null;
   if (fallback) {
     const fallbackDelta = migrationDelta(fallback.metadata.migrations, appliedMigrationTag);
-    const fallbackRejected = await uploadScript(env, tenant, fallback.workerKey, scriptUploadMetadata(
+    const fallbackUploaded = await uploadScript(env, tenant, fallback.sha, fallback.workerKey, scriptUploadMetadata(
       fallback.metadata,
       fallbackDelta,
       [tenant, fallback.sha],
       { id: tenant, accountId, token, platformUrl: env.PLATFORM_URL, platformService: env.PLATFORM_SERVICE_NAME, rootPublicKey: tenantConfig.rootPublicKey, blobBucket: tenantConfig.blobBucket, publicAssetsService: env.PUBLIC_ASSETS_SERVICE, releaseChannelService: env.RELEASE_CHANNEL_SERVICE },
     ));
-    if (fallbackRejected) {
-      console.error(JSON.stringify({ event: 'deploy-revert-rejected', tenant, sha: candidate.sha, message: fallbackRejected.message }));
+    if (fallbackUploaded.status === 'error') {
+      console.error(JSON.stringify({ event: 'deploy-revert-rejected', tenant, sha: candidate.sha, message: fallbackUploaded.error.message }));
     } else {
       const fallbackProbe = await probeHealth(env, tenant, fallback.sha);
       const fallbackSha = fallbackProbe.version ?? fallback.sha;
@@ -461,12 +478,13 @@ async function swap(env: Env, tenant: string, records: DeploymentRecords, state:
           healthy: true,
           revertedTo: null,
           appliedMigrationTag: fallbackDelta ? fallbackDelta.new_tag : null,
+          startupTimeMs: fallbackUploaded.value,
         });
       }
     }
   }
-  await records.recordDeploy({ sha: candidate.sha, workerKey: candidate.workerKey, metadata: candidate.metadata, healthy: false, revertedTo, appliedMigrationTag });
-  return { status: 'ok', value: { sha: candidate.sha, healthy: false, revertedTo, appliedMigrationTag } };
+  await records.recordDeploy({ sha: candidate.sha, workerKey: candidate.workerKey, metadata: candidate.metadata, healthy: false, revertedTo, appliedMigrationTag, startupTimeMs });
+  return { status: 'ok', value: { sha: candidate.sha, healthy: false, revertedTo, appliedMigrationTag, startupTimeMs } };
 }
 
 /** One swap the tenant's deployment object runs under its lease: a staged tenant release, a revert to the previous

@@ -49,7 +49,7 @@ export async function ensureAccountGitSpaceProject(
       const metadata = gitSpaceSourceProvenanceSchema.parse(await new Response(file.body).json());
       source = { ...metadata, release: frontend.sha, commit: /^[a-f0-9]{40,64}$/iu.test(frontend.sha) ? frontend.sha : metadata.commit };
     } else {
-      const status = await releasesNamespace.get(releasesNamespace.idFromName(userId)).status(userId, { sha: null, version: null });
+      const status = await releasesNamespace.get(releasesNamespace.idFromName(userId)).status(userId, { sha: null, version: null, startupTimeMs: null });
       const record = status.releases.find((candidate) => candidate.sha === frontend.sha);
       const origin = record?.source ?? null;
       if (origin?.kind === 'canonical') source = { ...source, branch: origin.branch ?? source.branch, commit: origin.commit };

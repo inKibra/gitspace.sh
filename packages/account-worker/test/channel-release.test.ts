@@ -135,12 +135,12 @@ it('takes the published release it was created from as its default once, by refe
   const script = await worker.fetch(new Request(`${origin}/assets/app-1.js`), runtime);
   expect([script.status, script.headers.get('cache-control'), await script.text()]).toEqual([200, 'public, max-age=31536000, immutable', 'export {};']);
 
-  const status = deploymentStatusSchema.parse(await releases.status(userId, { sha: null, version: null }));
+  const status = deploymentStatusSchema.parse(await releases.status(userId, { sha: null, version: null, startupTimeMs: null }));
   expect(status.defaultRelease).toBe(release.commit);
   expect(status.desired).toMatchObject({ worker: null, machine: null, frontend: null });
   expect(status.releases.find(record => record.sha === release.commit)?.source).toEqual({ kind: 'release', tag: 'v1.0.0', pin: release.pin });
   // Machines and new computers follow the default, whose files stay in the channel; only the natives are copied.
-  expect(deploymentStatusSchema.parse(await releases.status(userId, { sha: null, version: null }, 'machine-b')).desired.machine).toBe(release.commit);
+  expect(deploymentStatusSchema.parse(await releases.status(userId, { sha: null, version: null, startupTimeMs: null }, 'machine-b')).desired.machine).toBe(release.commit);
   expect(await releases.installRelease()).toMatchObject({ sha: release.commit, portable: { key: `channel/defaults/releases/${release.commit}/${PORTABLE_MANIFEST_FILE}` } });
   expect((await env.DATA.list({ prefix: `users/${userId}/channel/` })).objects).toEqual([]);
   expect(downloads).toHaveLength(6);
@@ -158,7 +158,7 @@ it('serves the frontend bundled with the Worker and has no default while the cha
   const { runtime } = channel([]);
   const page = await worker.fetch(new Request(`${origin}/`), { ...runtime, DEFAULT_ACCOUNT_RELEASE: release.pin });
   expect(page.headers.get('x-gitspace-frontend-release')).toBeNull();
-  expect(deploymentStatusSchema.parse(await releases.status(userId, { sha: null, version: null })).defaultRelease).toBeNull();
+  expect(deploymentStatusSchema.parse(await releases.status(userId, { sha: null, version: null, startupTimeMs: null })).defaultRelease).toBeNull();
 });
 
 it('answers its machines and the platform with a published release\'s files from the channel, read only', async () => {
@@ -195,13 +195,13 @@ it('launches a published release by its tag to every target with no machine, and
     return HttpResponse.json({ sha: platformDeployRequestSchema.parse(body).sha, healthy: true, revertedTo: null, appliedMigrationTag: 'v1' });
   }));
   await worker.fetch(new Request(`${origin}/`), { ...runtime, DEFAULT_ACCOUNT_RELEASE: first.pin });
-  expect(deploymentStatusSchema.parse(await releases.status(userId, { sha: null, version: null })).defaultRelease).toBe(first.commit);
+  expect(deploymentStatusSchema.parse(await releases.status(userId, { sha: null, version: null, startupTimeMs: null })).defaultRelease).toBe(first.commit);
   await expect(launchPublishedRelease(runtime, userId, 'v9.9.9')).rejects.toThrow('no release v9.9.9');
 
   const started = deploymentStatusSchema.parse(await launchPublishedRelease(runtime, userId, 'v1.1.0'));
   expect(started.launch).toMatchObject({ source: { kind: 'release', sha: next.commit }, targets: ['worker', 'machine', 'frontend'] });
   const finished = await vi.waitFor(async () => {
-    const status = deploymentStatusSchema.parse(await releases.status(userId, { sha: null, version: null }));
+    const status = deploymentStatusSchema.parse(await releases.status(userId, { sha: null, version: null, startupTimeMs: null }));
     if (status.launch?.status === 'running') throw new Error('The launch is still running');
     return status;
   });
@@ -230,7 +230,7 @@ it('launches a published commit the account already built as the release it hold
 
   await launchPublishedRelease(runtime, userId, 'v1.1.0');
   const finished = await vi.waitFor(async () => {
-    const status = deploymentStatusSchema.parse(await releases.status(userId, { sha: null, version: null }));
+    const status = deploymentStatusSchema.parse(await releases.status(userId, { sha: null, version: null, startupTimeMs: null }));
     if (status.launch?.status === 'running') throw new Error('The launch is still running');
     return status;
   });

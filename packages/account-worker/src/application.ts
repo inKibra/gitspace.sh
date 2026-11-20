@@ -2771,7 +2771,7 @@ async function launchRelease(env: Env, userId: string, payload: Record<string, u
   if (!launched) throw new ReleaseNotFoundError(input.sha);
   if (launched.record.status.worker !== 'pending') { await releases.finishLaunch(launched.record, input.targets); return launched; }
   const outcome = await deployReleaseWorker(env, userId, launched.record);
-  const record = await releases.setWorkerStatus(input.sha, outcome.status, outcome.error) ?? launched.record;
+  const record = await releases.setWorkerStatus(input.sha, outcome) ?? launched.record;
   if (outcome.status === 'applied') await restartSpacesForRelease(env, userId, input.sha);
   await releases.finishLaunch(record, input.targets);
   return { ...launched, record };

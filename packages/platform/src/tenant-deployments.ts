@@ -17,6 +17,8 @@ export interface TenantDeployRecord {
   uploadedAt: string;
   healthy: boolean;
   revertedTo: string | null;
+  /** Startup Cloudflare measured at this upload; null when it reported none (and for uploads recorded before it was read). */
+  startupTimeMs: number | null;
 }
 
 export interface TenantDeploymentState {
@@ -36,6 +38,8 @@ export interface DeployOutcome {
   revertedTo: string | null;
   /** Migration tag now applied on Cloudflare, or null when unchanged. */
   appliedMigrationTag: string | null;
+  /** Startup Cloudflare measured at the upload (`result.startup_time_ms`); null when it reported none. */
+  startupTimeMs: number | null;
 }
 
 interface DeployRow extends Record<string, SqlStorageValue> {
@@ -46,6 +50,7 @@ interface DeployRow extends Record<string, SqlStorageValue> {
   uploaded_at: string;
   healthy: number;
   reverted_to: string | null;
+  startup_time_ms: number | null;
 }
 
 interface StateRow extends Record<string, SqlStorageValue> {
@@ -83,6 +88,7 @@ function toRecord(row: DeployRow): TenantDeployRecord {
     uploadedAt: row.uploaded_at,
     healthy: row.healthy === 1,
     revertedTo: row.reverted_to,
+    startupTimeMs: row.startup_time_ms,
   };
 }
 
@@ -122,7 +128,8 @@ export class TenantDeploymentsDO extends BudgetedDurableObject {
           metadata_json TEXT NOT NULL,
           uploaded_at TEXT NOT NULL,
           healthy INTEGER NOT NULL CHECK (healthy IN (0, 1)),
-          reverted_to TEXT
+          reverted_to TEXT,
+          startup_time_ms REAL
         );
         CREATE TABLE IF NOT EXISTS tenant_config (
           id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -138,6 +145,10 @@ export class TenantDeploymentsDO extends BudgetedDurableObject {
         INSERT OR IGNORE INTO tenant_state(id, applied_migration_tag, active_deploy_id, lease_until, updated_at)
         VALUES (1, NULL, NULL, NULL, '1970-01-01T00:00:00.000Z');
       `);
+      // Deploy tables created before startup was recorded.
+      if (!ctx.storage.sql.exec<{ name: string }>('PRAGMA table_info(deploys)').toArray().some(column => column.name === 'startup_time_ms')) {
+        ctx.storage.sql.exec('ALTER TABLE deploys ADD COLUMN startup_time_ms REAL');
+      }
     });
   }
   private computeProviderFor(tenant: string, accountId: string): TenantComputeProvider {
@@ -304,14 +315,15 @@ export class TenantDeploymentsDO extends BudgetedDurableObject {
     return this.ctx.storage.transactionSync(() => {
       const uploadedAt = new Date().toISOString();
       const cursor = this.ctx.storage.sql.exec<DeployRow>(
-        `INSERT INTO deploys(sha, bundle_key, metadata_json, uploaded_at, healthy, reverted_to)
-         VALUES (?, ?, ?, ?, ?, ?) RETURNING *`,
+        `INSERT INTO deploys(sha, bundle_key, metadata_json, uploaded_at, healthy, reverted_to, startup_time_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING *`,
         outcome.sha,
         outcome.workerKey,
         JSON.stringify(outcome.metadata),
         uploadedAt,
         outcome.healthy ? 1 : 0,
         outcome.revertedTo,
+        outcome.startupTimeMs,
       );
       const row = cursor.toArray()[0];
       if (!row) throw new Error('Deploy insert returned no row');

@@ -3,7 +3,7 @@ import { ed25519 } from '@noble/curves/ed25519.js';
 import { env } from 'cloudflare:workers';
 import { createRelayAuthorization } from '@gitspace/protocol/relay';
 import { workerModuleKey, type PlatformDeployResponse, type WorkerReleaseMetadata } from '@gitspace/protocol/deployment';
-import { afterEach, beforeEach, describe, expect, it, onTestFinished } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import worker from '../src/index.js';
 import { migrationDelta, type ScriptUploadMetadata } from '../src/deployer.js';
 import { createWorkerManifest, type WorkerModule } from '@gitspace/protocol/worker-bundle';
@@ -31,6 +31,8 @@ const probeVersions = new Map<string, string[]>();
 // An in-flight dispatch response retains its script version until its body is released.
 const activeProbes = new Map<string, { version: string; bodies: number }>();
 let rejectNextUpload: string | null = null;
+/** `result.startup_time_ms` of each next upload, in order; once empty, uploads report none. */
+const startupTimes: number[] = [];
 /** The next script upload waits for `release` after signalling `started`, so a test acts while a swap is in flight. */
 let heldUpload: { started: PromiseWithResolvers<void>; release: PromiseWithResolvers<void> } | null = null;
 const realFetch = globalThis.fetch;
@@ -248,6 +250,7 @@ beforeEach(() => {
   probeVersions.clear();
   activeProbes.clear();
   rejectNextUpload = null;
+  startupTimes.length = 0;
   heldUpload = null;
   globalThis.fetch = async (input, init) => {
     const url = new URL(input instanceof Request ? input.url : String(input));
@@ -301,7 +304,8 @@ beforeEach(() => {
     const parts = [...form.entries()].flatMap(([name, value]) => name !== 'metadata' && value instanceof File ? [{ name, type: value.type }] : []);
     uploads.push({ metadata: parsed as ScriptUploadMetadata, module, wasm: [...new Uint8Array(await wasm.arrayBuffer())], parts });
     scripts.set(match[1]!, module);
-    return Response.json({ success: true, errors: [], result: { id: match[1] } });
+    const startupTimeMs = startupTimes.shift();
+    return Response.json({ success: true, errors: [], result: { id: match[1], ...(startupTimeMs === undefined ? {} : { startup_time_ms: startupTimeMs }) } });
   };
 });
 
@@ -397,7 +401,7 @@ describe('POST /__platform/tenants/:tenant/deploy', () => {
     await env.CREDITS.getByName('bravo').configure({ balanceMicros: 1_000_000, riskReserveMicros: 0 });
     const token = await mintToken('bravo', 'v8');
     const result = await deploy('bravo', token, 'abc123', ['v7', 'v8', 'v9', 'v10']);
-    expect(result).toEqual({ sha: 'abc123', healthy: true, revertedTo: null, appliedMigrationTag: 'v10' });
+    expect(result).toEqual({ sha: 'abc123', healthy: true, revertedTo: null, appliedMigrationTag: 'v10', startupTimeMs: null });
 
     expect(uploads).toHaveLength(1);
     const upload = uploads[0]!;
@@ -484,7 +488,7 @@ describe('POST /__platform/tenants/:tenant/deploy', () => {
     objects.delete(`${env.DISPATCH_NAMESPACE}-tenant-legacy`);
     const response = await tenantPost('legacy', 'revert', token, { to: 'previous' });
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ sha: 'one', healthy: true, revertedTo: null, appliedMigrationTag: 'v1' });
+    expect(await response.json()).toEqual({ sha: 'one', healthy: true, revertedTo: null, appliedMigrationTag: 'v1', startupTimeMs: null });
     expect(uploads[2]).toMatchObject({ module: bundleSource('one'), wasm: WASM, metadata: { tags: ['legacy', 'one'] } });
   });
 
@@ -528,7 +532,7 @@ describe('POST /__platform/tenants/:tenant/deploy', () => {
 
     // The staged bundle stamps itself as "stale", so the probe never sees `bad`.
     const bad = await deploy('foxtrot', token, 'bad', ['v1', 'v2'], 'stale');
-    expect(bad).toEqual({ sha: 'bad', healthy: false, revertedTo: 'good', appliedMigrationTag: 'v2' });
+    expect(bad).toEqual({ sha: 'bad', healthy: false, revertedTo: 'good', appliedMigrationTag: 'v2', startupTimeMs: null });
 
     expect(uploads.map((upload) => upload.metadata.tags)).toEqual([['foxtrot', 'good'], ['foxtrot', 'bad'], ['foxtrot', 'good']]);
     const restore = uploads[2]!;
@@ -550,8 +554,56 @@ describe('POST /__platform/tenants/:tenant/deploy', () => {
     await publishDefault('a'.repeat(40), ['v1']);
     const token = await mintToken('golf');
     const result = await deploy('golf', token, 'unhealthy', ['v1'], 'nope');
-    expect(result).toEqual({ sha: 'unhealthy', healthy: false, revertedTo: null, appliedMigrationTag: 'v1' });
+    expect(result).toEqual({ sha: 'unhealthy', healthy: false, revertedTo: null, appliedMigrationTag: 'v1', startupTimeMs: null });
     expect(uploads).toHaveLength(1);
+  });
+
+  it('records the startup Cloudflare measured for each upload, shows it in status, and warns from 700 ms', async () => {
+    const warnings = vi.spyOn(console, 'warn');
+    onTestFinished(() => warnings.mockRestore());
+    const token = await mintToken('kilo');
+    const status = async () => {
+      const tenant = await worker.fetch(new Request('https://platform.test/__platform/tenants/kilo/state', { headers: { authorization: `Bearer ${token}` } }), testEnv, createExecutionContext());
+      const operator = await worker.fetch(new Request('https://platform.test/__platform/operator/tenants/kilo', { headers: { authorization: 'Bearer test-bootstrap-token' } }), testEnv, createExecutionContext());
+      return { tenant: await tenant.json(), operator: await operator.json() };
+    };
+
+    startupTimes.push(699);
+    expect(await deploy('kilo', token, 'quick', ['v1'])).toMatchObject({ sha: 'quick', healthy: true, startupTimeMs: 699 });
+    expect(await status()).toMatchObject({
+      tenant: { deployment: { active: 'quick', startupTimeMs: 699 } },
+      operator: { deployment: { active: 'quick', startupTimeMs: 699, startupWarning: null } },
+    });
+    expect(warnings.mock.calls.flat().filter(line => String(line).includes('worker-startup-near-limit'))).toEqual([]);
+
+    startupTimes.push(700);
+    expect(await deploy('kilo', token, 'slow', ['v1'])).toMatchObject({ sha: 'slow', healthy: true, startupTimeMs: 700 });
+    expect(await status()).toMatchObject({
+      tenant: { deployment: { active: 'slow', startupTimeMs: 700 } },
+      operator: { deployment: { active: 'slow', startupTimeMs: 700, startupWarning: expect.stringContaining('700 ms') } },
+    });
+    const nearLimit = warnings.mock.calls.flat().filter(line => String(line).includes('worker-startup-near-limit')).map(line => JSON.parse(String(line)));
+    expect(nearLimit).toEqual([expect.objectContaining({ tenant: 'kilo', sha: 'slow', startupTimeMs: 700, limitMs: 1000 })]);
+    expect((await env.DEPLOYMENTS.getByName('kilo').getState()).deploys.map(deploy => [deploy.sha, deploy.startupTimeMs])).toEqual([['slow', 700], ['quick', 699]]);
+  });
+
+  it('records each upload of a reverted swap with its own startup', async () => {
+    const token = await mintToken('lambda');
+    startupTimes.push(120, 750, 130);
+    await deploy('lambda', token, 'good', ['v1']);
+    expect(await deploy('lambda', token, 'bad', ['v1'], 'stale')).toMatchObject({ sha: 'bad', healthy: false, revertedTo: 'good', startupTimeMs: 750 });
+    expect((await env.DEPLOYMENTS.getByName('lambda').getState()).deploys.map(deploy => [deploy.sha, deploy.healthy, deploy.startupTimeMs])).toEqual([
+      ['bad', false, 750],
+      ['good', true, 130],
+      ['good', true, 120],
+    ]);
+  });
+
+  it('records no startup without failing the deploy when Cloudflare reports none', async () => {
+    const token = await mintToken('mike');
+    expect(await deploy('mike', token, 'unmeasured', ['v1'])).toEqual({ sha: 'unmeasured', healthy: true, revertedTo: null, appliedMigrationTag: 'v1', startupTimeMs: null });
+    const state = await env.DEPLOYMENTS.getByName('mike').getState();
+    expect(state.active).toMatchObject({ sha: 'unmeasured', healthy: true, startupTimeMs: null });
   });
 });
 
@@ -564,7 +616,7 @@ describe('POST /__platform/tenants/:tenant/revert', () => {
 
     const response = await tenantPost('juliet', 'revert', token, { to: 'previous' });
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ sha: 'one', healthy: true, revertedTo: null, appliedMigrationTag: 'v1' });
+    expect(await response.json()).toEqual({ sha: 'one', healthy: true, revertedTo: null, appliedMigrationTag: 'v1', startupTimeMs: null });
     expect(uploads[2]!.module).toBe(bundleSource('one'));
     expect(uploads[2]!.metadata.tags).toEqual(['juliet', 'one']);
   });
@@ -587,15 +639,15 @@ describe('POST /__platform/tenants/:tenant/revert', () => {
     // Calls on one stub arrive in order: once this answers, the object holds the request above on the running swap.
     await deployments.getState();
     upload.release();
-    expect(await outcome).toEqual({ status: 'ok', value: { sha: 'l1', healthy: true, revertedTo: null, appliedMigrationTag: 'v1' } });
+    expect(await outcome).toEqual({ status: 'ok', value: { sha: 'l1', healthy: true, revertedTo: null, appliedMigrationTag: 'v1', startupTimeMs: null } });
     const answered = await operationGet('lima', token, operationId);
     expect(answered.status).toBe(200);
-    expect(await answered.json()).toEqual({ sha: 'l1', healthy: true, revertedTo: null, appliedMigrationTag: 'v1' });
+    expect(await answered.json()).toEqual({ sha: 'l1', healthy: true, revertedTo: null, appliedMigrationTag: 'v1', startupTimeMs: null });
     expect((await deployments.getState()).active?.sha).toBe('l1');
 
     // The same id answers from the record and never swaps twice.
     const repeated = await tenantPost('lima', 'revert', token, { to: 'previous', operationId });
-    expect(await repeated.json()).toEqual({ sha: 'l1', healthy: true, revertedTo: null, appliedMigrationTag: 'v1' });
+    expect(await repeated.json()).toEqual({ sha: 'l1', healthy: true, revertedTo: null, appliedMigrationTag: 'v1', startupTimeMs: null });
     expect(uploads).toHaveLength(3);
     expect((await operationGet('lima', token, crypto.randomUUID())).status).toBe(404);
 

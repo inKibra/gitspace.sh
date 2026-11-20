@@ -21,6 +21,7 @@ import {
   type ReleaseTarget,
   type StageReleaseInput,
   type TenantDesired,
+  workerStartupWarning,
 } from '@gitspace/protocol/deployment';
 import { z } from 'zod';
 import type { FleetCatalogDO } from './fleet-catalog.js';
@@ -28,6 +29,7 @@ import type { CredentialVaultDO } from './application.js';
 import { GITSPACE_SOURCE_REPOSITORY } from '@gitspace/protocol/project-authority';
 import { notifyMachines } from './machine-notices.js';
 import { deployReleaseWorker, restartSpacesForRelease } from './release-worker.js';
+import type { WorkerSwap } from './tenant-platform.js';
 import { BudgetedDurableObject } from './storage-quarantine.js';
 
 declare const GITSPACE_WORKER_SHA: string | undefined;
@@ -59,6 +61,8 @@ export type MachineChannelAppliedInput = z.infer<typeof machineChannelAppliedInp
 export interface WorkerVersion {
   sha: string | null;
   version: string | null;
+  /** Startup Cloudflare measured at the upload of the Worker the platform runs; null when it reported none. */
+  startupTimeMs: number | null;
 }
 
 export interface LaunchResult {
@@ -341,13 +345,16 @@ export class TenantReleasesDO extends BudgetedDurableObject {
     return { record, desired };
   }
 
-  async setWorkerStatus(sha: string, status: ReleaseStatus, error: string | null): Promise<ReleaseRecord | null> {
-    const cutover = status === 'applied' && await this.inferenceCutover();
+  /** Records the platform's answer to a Worker swap: its status, its error, and the startup Cloudflare measured. */
+  async setWorkerStatus(sha: string, swap: WorkerSwap): Promise<ReleaseRecord | null> {
+    const cutover = swap.status === 'applied' && await this.inferenceCutover();
     const record = this.findRelease(sha);
     if (!record) return null;
     this.requireInferenceCompatibility(record.inferenceVersion, record.sha, cutover);
-    record.status.worker = releaseStatusSchema.parse(status);
-    record.error = error;
+    record.status.worker = releaseStatusSchema.parse(swap.status);
+    record.error = swap.error;
+    record.startupTimeMs = swap.startupTimeMs;
+    record.startupWarning = workerStartupWarning(swap.startupTimeMs);
     this.saveRecord(record);
     if (record.status.worker === 'applied') this.promoteDefault(record);
     return record;
@@ -369,7 +376,7 @@ export class TenantReleasesDO extends BudgetedDurableObject {
     if (launched.record.status.worker !== 'pending') { this.finishLaunch(launched.record, targets); return this.latestLaunch() ?? progress; }
     this.ctx.waitUntil((async () => {
       const outcome = await deployReleaseWorker(this.env, this.env.ACCOUNT_ID, launched.record);
-      const record = await this.setWorkerStatus(sha, outcome.status, outcome.error) ?? launched.record;
+      const record = await this.setWorkerStatus(sha, outcome) ?? launched.record;
       if (outcome.status === 'applied') await restartSpacesForRelease(this.env, this.env.ACCOUNT_ID, sha);
       this.finishLaunch(record, targets);
     })().catch((error: unknown) => {
@@ -506,6 +513,15 @@ export class TenantReleasesDO extends BudgetedDurableObject {
         record.status.worker = 'applied';
         this.saveRecord(record);
         this.promoteDefault(record);
+      }
+    }
+    // The swap that replaced this Worker may never have reached `setWorkerStatus`; the platform keeps its startup.
+    if (platformWorker.sha !== null && platformWorker.startupTimeMs !== null) {
+      const record = this.findRelease(platformWorker.sha);
+      if (record && record.startupTimeMs !== platformWorker.startupTimeMs) {
+        record.startupTimeMs = platformWorker.startupTimeMs;
+        record.startupWarning = workerStartupWarning(platformWorker.startupTimeMs);
+        this.saveRecord(record);
       }
     }
     const machines: DeploymentStatus['current']['machines'] = {};

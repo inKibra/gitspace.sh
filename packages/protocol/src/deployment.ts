@@ -253,8 +253,24 @@ export const releaseRecordSchema = z.object({
   /** When a launch last selected this release for machines. Each launch asks the machines that failed it to try again:
    * a failure a machine recorded before it belongs to an earlier launch and is not reported again. */
   machineLaunchedAt: z.string().datetime().optional(),
+  /** Worker startup (parse and global scope) in milliseconds, as Cloudflare measured it at this release's last upload;
+   * null when Cloudflare did not report it, absent until a platform that reads it uploads the release. */
+  startupTimeMs: z.number().nonnegative().nullable().optional(),
+  /** Set from `startupTimeMs` (`workerStartupWarning`) when the Worker starts close to Cloudflare's limit. */
+  startupWarning: z.string().max(4_096).nullable().optional(),
 });
 export type ReleaseRecord = z.infer<typeof releaseRecordSchema>;
+
+/** Cloudflare refuses a Worker upload whose startup (parse and global scope) exceeds this (`10021`). */
+export const WORKER_STARTUP_LIMIT_MS = 1_000;
+/** A Worker release whose startup reaches this is close enough to the limit that a slower upload may be refused. */
+export const WORKER_STARTUP_WARNING_MS = 700;
+
+/** The warning a Worker startup of `startupTimeMs` carries; null below `WORKER_STARTUP_WARNING_MS` or when unmeasured. */
+export function workerStartupWarning(startupTimeMs: number | null): string | null {
+  if (startupTimeMs === null || startupTimeMs < WORKER_STARTUP_WARNING_MS) return null;
+  return `Worker startup took ${startupTimeMs} ms at upload; Cloudflare refuses a Worker whose startup exceeds ${WORKER_STARTUP_LIMIT_MS} ms`;
+}
 
 export const stageReleaseInputSchema = releaseRecordSchema.pick({ sha: true, label: true, source: true, worker: true, inferenceVersion: true }).extend({
   artifacts: releaseRecordSchema.shape.artifacts.omit({ omp: true }).strict(),
@@ -360,6 +376,9 @@ export const platformDeployResponseSchema = z.object({
   /** Set when the health probe failed and the platform restored the previous script. */
   revertedTo: z.string().nullable(),
   appliedMigrationTag: z.string().nullable(),
+  /** Startup Cloudflare measured for the uploaded `sha` (`result.startup_time_ms`); null when it did not report one.
+   * Absent from platforms that predate it and from outcomes they stored. */
+  startupTimeMs: z.number().nonnegative().nullable().optional(),
 });
 export type PlatformDeployResponse = z.infer<typeof platformDeployResponseSchema>;
 
