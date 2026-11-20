@@ -284,6 +284,19 @@ it('reports an archive at once with Undo, then what moved in its stack; its Undo
   expect(Array.from(toast()!.querySelectorAll('button'), (button) => button.textContent)).toEqual(['Dismiss']);
 });
 
+it('calls a promoted workspace the head when something stays stacked on it, and at the top level when nothing does', async () => {
+  const archived = (moved: StackRestack['moved']): SidebarArchive => ({ done: Promise.resolve({ moved, kept: [] }), undo: async () => ({ moved: [], kept: [] }) });
+  // Billing emails stays on Billing UI, so Billing UI heads a stack once Billing export is archived.
+  await renderProject({ projects: [bakery()], onArchive: async () => archived([{ workspaceId: 'billing-ui', from: 'billing-export', to: null }]) });
+  await openMenu('Billing export');
+  await choose('Archive workspace');
+  expect(toast()?.textContent).toContain('Billing export archived. Billing UI is the head now.');
+  await renderProject({ projects: [bakery()], onArchive: async () => archived([{ workspaceId: 'gift-cards', from: 'loyalty-points', to: null }]) });
+  await openMenu('Loyalty points');
+  await choose('Archive workspace');
+  expect(toast()?.textContent).toContain('Loyalty points archived. Gift cards is at the top level now.');
+});
+
 it('chooses waits-on as a draft: a cycle and the stack parent are refused, Done applies it', async () => {
   const onSetRelations = vi.fn<NonNullable<AppSidebarProps['onSetRelations']>>(async (_id, relations) => relations);
   await renderProject({ projects: [bakery()], onSetRelations });

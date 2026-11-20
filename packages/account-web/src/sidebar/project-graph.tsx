@@ -44,8 +44,9 @@ export interface ProjectGraph {
 /** Project graphs by project id; empty outside the account frame. */
 export const ProjectGraphsContext = createContext<Readonly<Record<string, ProjectGraph>>>({});
 
-/** Reads one project's relations and links, again whenever the project or its automations change; renders nothing. */
-function ProjectGraphReader({ projectId, onRead }: { projectId: string; onRead(projectId: string, graph: ProjectGraph): void }) {
+/** Reads one project's relations and links, again whenever the project or its automations change, and when `refresh`
+ * moves (then `onRefreshed`); renders nothing. */
+function ProjectGraphReader({ projectId, refresh, onRead, onRefreshed }: { projectId: string; refresh: number; onRead(projectId: string, graph: ProjectGraph): void; onRefreshed(projectId: string): void }) {
   const view = useResultQuery(rpcClient.space.view, { projectId, workspaceId: null });
   const automations = useResultQuery(rpcClient.automations.list, { projectId });
   useEventRefresh(useProjectChanges(projectId), () => view.refetch());
@@ -54,6 +55,9 @@ function ProjectGraphReader({ projectId, onRead }: { projectId: string; onRead(p
   const links = useRetainedQueryValue(automations, projectId)?.links;
   const report = useRef(onRead);
   report.current = onRead;
+  useEventRefresh(refresh === 0 ? null : refresh, async () => {
+    try { await view.refetch(); } finally { onRefreshed(projectId); }
+  });
   const graph = useMemo((): ProjectGraph | null => {
     if (!viewValue) return null;
     const pullRequests: Record<string, LinkedPullRequest[]> = {};
@@ -75,9 +79,24 @@ function ProjectGraphReader({ projectId, onRead }: { projectId: string; onRead(p
   return null;
 }
 
-/** Keeps a graph for each listed project, read in the background by `readers`, which the caller renders. */
-export function useProjectGraphs(projectIds: readonly string[]): { graphs: Readonly<Record<string, ProjectGraph>>; readers: ReactNode } {
+/** Keeps a graph for each listed project, read in the background by `readers`, which the caller renders. `refresh`
+ * reads one project's graph again now, settling once the read ended (at once for a project not listed). */
+export function useProjectGraphs(projectIds: readonly string[]): { graphs: Readonly<Record<string, ProjectGraph>>; readers: ReactNode; refresh(projectId: string): Promise<void> } {
   const [graphs, setGraphs] = useState<Readonly<Record<string, ProjectGraph>>>({});
-  const readers = projectIds.map(projectId => <ProjectGraphReader key={projectId} projectId={projectId} onRead={(id, graph) => setGraphs(current => ({ ...current, [id]: graph }))} />);
-  return { graphs, readers };
+  const [requests, setRequests] = useState<Readonly<Record<string, number>>>({});
+  const waiting = useRef(new Map<string, Array<() => void>>());
+  const settle = (projectId: string) => {
+    for (const resolve of waiting.current.get(projectId) ?? []) resolve();
+    waiting.current.delete(projectId);
+  };
+  const refresh = (projectId: string): Promise<void> => {
+    if (!projectIds.includes(projectId)) return Promise.resolve();
+    const { promise, resolve } = Promise.withResolvers<void>();
+    waiting.current.set(projectId, [...waiting.current.get(projectId) ?? [], resolve]);
+    setRequests(current => ({ ...current, [projectId]: (current[projectId] ?? 0) + 1 }));
+    return promise;
+  };
+  const readers = projectIds.map(projectId => <ProjectGraphReader key={projectId} projectId={projectId} refresh={requests[projectId] ?? 0} onRefreshed={settle}
+    onRead={(id, graph) => setGraphs(current => ({ ...current, [id]: graph }))} />);
+  return { graphs, readers, refresh };
 }

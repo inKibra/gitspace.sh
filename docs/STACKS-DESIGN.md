@@ -210,9 +210,11 @@ A moved workspace is compared with its new parent from scratch (a stored compari
 ### The pill and Undo
 
 Archive from the sidebar reports in the stack pill at once, "Archiving Billing export…", with Undo. When the archive
-operation ends, the pill says what moved, from its `restack`: "Billing export archived. Billing emails is the head
-now; Billing docs is on it." A failed archive shows its error instead. Undo lives as long as the pill (each rewrite
-starts its time over).
+operation ends, the project's relations are read again (`useProjectGraphs` `refresh`), so the rows already show the
+moves, and the pill says what moved, from its `restack`: "Billing export archived. Billing emails is the head now;
+Billing docs is on it." A promoted workspace with anything stacked on it after the moves (its own members included) is
+"the head now"; one with nothing is "at the top level now". A failed archive shows its error instead. Undo lives as
+long as the pill (each rewrite starts its time over); its result is reported the same way, after the same read.
 
 Undo puts it back: `workspace.restore` with `undoArchive` (the archive operation's id). The restore queues behind the
 archive when that still runs (`queueOperation`'s `after`), so an Undo clicked before the archive ended waits for it, and

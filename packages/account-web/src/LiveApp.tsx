@@ -473,7 +473,7 @@ function AccountFrame({ children }: { children: ReactNode }) {
   // A link naming the project's own id as its workspace opens the base space, which the shell selects as null.
   const live = route === 'agent' && runtimeSidebar?.selected?.projectId === projectId && runtimeSidebar.selected.workspaceId === (workspaceId === projectId ? null : workspaceId) ? runtimeSidebar : null;
   const operations = useAccountOperations();
-  const { graphs, readers: graphReaders } = useProjectGraphs(projectValues.filter((project) => project.lifecycle !== 'archived' && project.lifecycle !== 'deleting').map((project) => project.id));
+  const { graphs, readers: graphReaders, refresh: refreshGraph } = useProjectGraphs(projectValues.filter((project) => project.lifecycle !== 'archived' && project.lifecycle !== 'deleting').map((project) => project.id));
   const sidebarProjects: SidebarProject[] = projectValues.map((project) => ({
     id: project.id, name: project.name, lifecycle: project.lifecycle, remote: project.remote,
     ...directory[project.id], workspaces: directory[project.id]?.workspaces ?? [],
@@ -505,7 +505,7 @@ function AccountFrame({ children }: { children: ReactNode }) {
     refresh: refreshInspection,
   }), [projectValues, directory, acceptRuntime, projects.state]);
   const lfsTransition = useLfsTransition();
-  const actions = useAccountWorkActions(accountDirectory, lfsTransition.confirm);
+  const actions = useAccountWorkActions(accountDirectory, lfsTransition.confirm, refreshGraph);
   const automationOverview = useResultQuery(rpcClient.automations.overview, AUTOMATIONS_OVERVIEW_INPUT);
   useEventRefresh(useLiveChanges(accountLiveKey('automations')), () => automationOverview.refetch());
   const automationSummaries = useRetainedQueryValue(automationOverview, 'automations-overview')?.projects ?? [];
@@ -1281,7 +1281,8 @@ const accountSecretsApi: Omit<ProjectSecretsProps, 'projects'> = {
   deleteValue: async (target, name) => { await configurationResult(rpcClient.configuration.values.delete({ ...target, name })); },
 };
 
-function useAccountWorkActions(account: NonNullable<ContextType<typeof AccountDirectoryContext>>, confirmLfs: ConfirmLfsTransition): AccountWorkActions {
+/** `refreshGraph` reads a project's relation graph again, so the sidebar shows an operation's stack moves once it ends. */
+function useAccountWorkActions(account: NonNullable<ContextType<typeof AccountDirectoryContext>>, confirmLfs: ConfirmLfsTransition, refreshGraph: (projectId: string) => Promise<void>): AccountWorkActions {
   const inspectTarget = async (spaceId: string): Promise<InspectorView> => {
     const project = account.projects.find((candidate) => candidate.id === spaceId || account.directory[candidate.id]?.workspaces.some((workspace) => workspace.id === spaceId));
     if (!project) throw new Error('This workspace is no longer in the account directory. Refresh before retrying.');
@@ -1313,11 +1314,15 @@ function useAccountWorkActions(account: NonNullable<ContextType<typeof AccountDi
     }));
   };
   /** Waits for one of a project's operations to end, read again every second, and resolves to what it changed in the
-   * stacks; one that failed rejects with its error. */
+   * stacks once the project's graph shows it; one that failed rejects with its error. */
   const followOperation = async (projectId: string, operationId: string): Promise<StackRestack> => {
     for (const deadline = Date.now() + OPERATION_FOLLOW_LIMIT_MS; Date.now() < deadline;) {
       const operation = await configurationResult(rpcClient.project.operation({ projectId, operationId }));
-      if (operation.state === 'succeeded') { account.refresh(); return operation.restack ?? { moved: [], kept: [] }; }
+      if (operation.state === 'succeeded') {
+        account.refresh();
+        await refreshGraph(projectId);
+        return operation.restack ?? { moved: [], kept: [] };
+      }
       if (operation.state === 'failed' || operation.state === 'canceled') throw new Error(operation.error ?? `${operation.summary ?? operation.kind} did not finish`);
       const { promise, resolve } = Promise.withResolvers<void>();
       window.setTimeout(resolve, OPERATION_FOLLOW_MS);

@@ -366,17 +366,20 @@ function relationsOf(item: RowItem): WorkspaceView['relations'] {
   return { dependsOn: item.dependsOn, relatedTo: item.relatedTo, stackedOn: item.stackedOn };
 }
 
-/** What the pill says once an archive ran: the workspace archived and where the workspaces stacked on it went. A
- * promoted head reads "Billing emails is the head now; Billing docs is on it", a member's children "Invoices is on
- * Billing export now". */
-function archivedText(name: string, moved: readonly StackMove[], nameOf: (id: string) => string): string {
+/** What the pill says once an archive ran: the workspace archived and where the workspaces stacked on it went, read
+ * against `open`, the project's other open workspaces as stacked before the archive. One stacked on nothing with members
+ * after the moves reads "Billing emails is the head now; Billing docs is on it" (its own members count too), one without
+ * "… is at the top level now"; a member's children "Invoices is on Billing export now". */
+function archivedText(name: string, moved: readonly StackMove[], open: readonly { id: string; name: string; stackedOn: string | null }[]): string {
+  const nameOf = (id: string) => open.find((workspace) => workspace.id === id)?.name ?? id;
   const onto = (id: string | null) => moved.filter((move) => move.to === id);
   const said = (moves: readonly StackMove[], rest: string) => `${new Intl.ListFormat('en', { type: 'conjunction' }).format(moves.map((move) => nameOf(move.workspaceId)))} ${moves.length === 1 ? 'is' : 'are'} ${rest}`;
-  const heads = onto(null).filter((move) => onto(move.workspaceId).length > 0);
+  // A promoted workspace heads a stack when anything open is stacked on it once the moves are made.
+  const heads = onto(null).filter((head) => open.some((workspace) => (moved.find((move) => move.workspaceId === workspace.id) ?? { to: workspace.stackedOn }).to === head.workspaceId));
   const top = onto(null).filter((move) => !heads.includes(move));
   const parents = [...new Set(moved.flatMap((move) => move.to !== null && !heads.some((head) => head.workspaceId === move.to) ? [move.to] : []))];
   const parts = [
-    ...heads.map((head) => `${nameOf(head.workspaceId)} is the head now; ${said(onto(head.workspaceId), 'on it')}`),
+    ...heads.map((head) => onto(head.workspaceId).length ? `${nameOf(head.workspaceId)} is the head now; ${said(onto(head.workspaceId), 'on it')}` : `${nameOf(head.workspaceId)} is the head now`),
     ...parents.map((parent) => said(onto(parent), `on ${nameOf(parent)} now`)),
     ...top.length ? [said(top, 'at the top level now')] : [],
   ];
@@ -810,10 +813,12 @@ function SidebarBody({ view, onView, selected, selectedSummary, projects, onSele
   const archive = onArchive ? async (spaceId: string): Promise<void> => {
     const started = await onArchive(spaceId);
     if (!started) return;
-    const nameOf = (id: string) => shown.flatMap((project) => project.workspaces).find((workspace) => workspace.id === id)?.name ?? id;
-    const name = nameOf(spaceId);
+    const project = shown.find((candidate) => candidate.workspaces.some((workspace) => workspace.id === spaceId));
+    const name = project?.workspaces.find((workspace) => workspace.id === spaceId)?.name ?? spaceId;
+    const open = (project?.workspaces ?? []).filter((workspace) => !workspace.closedAt && workspace.id !== spaceId)
+      .map((workspace) => ({ id: workspace.id, name: workspace.name, stackedOn: project?.graph?.relations[workspace.id]?.stackedOn ?? null }));
     const revise = toast.applied(`Archiving ${name}…`, async () => restoredText(name, await started.undo()));
-    void started.done.then((restack) => revise(archivedText(name, restack.moved, nameOf)), (failure: unknown) => toast.refused(failure, 'Archive workspace'));
+    void started.done.then((restack) => revise(archivedText(name, restack.moved, open)), (failure: unknown) => toast.refused(failure, 'Archive workspace'));
   } : undefined;
   const done = (): void => {
     if (!mode || !source || mode.kind === 'stack') return;
