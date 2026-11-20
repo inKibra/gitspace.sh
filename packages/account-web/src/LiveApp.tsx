@@ -1447,6 +1447,7 @@ function AccountPlugins({ projects }: { projects: readonly ConfigurationProject[
       await connections.refetch();
       return result.redirectUrl;
     }}
+    onReconnectComposio={async (connectionId) => (await configurationResult(rpcClient.mcp.composio.reconnect({ connectionId }))).redirectUrl}
     onRefreshComposio={async (connectionId) => { await configurationResult(rpcClient.mcp.composio.refresh({ connectionId })); await refresh(); }}
     onLoadComposioTools={(connectionId) => configurationResult(rpcClient.mcp.composio.tools({ connectionId }))}
     onUpdateComposioTools={async (connectionId, expectedRevision, toolPolicy) => { await configurationResult(rpcClient.mcp.composio.updateTools({ connectionId, expectedRevision, toolPolicy })); await refresh(); }}

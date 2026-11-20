@@ -13,7 +13,7 @@ export interface ComposioAuthorizationStart {
 }
 
 export interface ComposioAccountStatus {
-  status: 'connecting' | 'ready' | 'failed';
+  status: 'connecting' | 'ready' | 'failed' | 'expired';
   message: string | null;
 }
 
@@ -79,13 +79,12 @@ export class ComposioPluginGateway implements ComposioPluginProvider {
 
   async status(connectedAccountId: string): Promise<ComposioAccountStatus> {
     const account = await (await sdk(this.env, this.accountApiKey)).connectedAccounts.get(connectedAccountId);
-    if (account.status === 'ACTIVE' && !account.isDisabled) {
-      return { status: 'ready', message: null };
+    if (account.status === 'EXPIRED' || account.status === 'REVOKED') {
+      return { status: 'expired', message: account.statusReason ?? `Composio account is ${account.status.toLowerCase()}` };
     }
-    if (account.status === 'FAILED'
-      || account.status === 'EXPIRED'
-      || account.status === 'REVOKED'
-      || account.isDisabled) {
+    if (account.isDisabled) return { status: 'failed', message: account.statusReason ?? 'Composio account is disabled' };
+    if (account.status === 'ACTIVE') return { status: 'ready', message: null };
+    if (account.status === 'FAILED' || account.status === 'INACTIVE') {
       return { status: 'failed', message: account.statusReason ?? `Composio account is ${account.status.toLowerCase()}` };
     }
     return { status: 'connecting', message: 'Finish authentication in the browser' };

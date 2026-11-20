@@ -47,12 +47,22 @@ interface AuditRow extends Record<string, SqlStorageValue> {
   created_at: string;
 }
 
+/** `connected_account_id` is the account a reconnect authorizes; NULL when the authorization creates the connection. */
 interface ComposioAuthorizationRow extends Record<string, SqlStorageValue> {
   state: string;
   principal_id: string;
   connection_id: string;
   expires_at: string;
   consumed_at: string | null;
+  connected_account_id: string | null;
+}
+
+/** A consumed Composio authorization: `replaces` is the account a reconnect replaces, null when the authorization is for
+ * the connection's current account (a first connect, or Composio reauthorizing the same account). */
+export interface ComposioAuthorizationGrant {
+  connectionId: string;
+  connectedAccountId: string;
+  replaces: string | null;
 }
 
 export class McpConnectionNotFoundError extends Error {
@@ -186,9 +196,13 @@ export class UserMcpConnectionsDO extends BudgetedDurableObject {
           principal_id TEXT NOT NULL,
           connection_id TEXT NOT NULL,
           expires_at TEXT NOT NULL,
-          consumed_at TEXT
+          consumed_at TEXT,
+          connected_account_id TEXT
         );
       `);
+      if (!this.ctx.storage.sql.exec<{ name: string }>('PRAGMA table_info(composio_authorizations)').toArray().some((column) => column.name === 'connected_account_id')) {
+        this.ctx.storage.sql.exec('ALTER TABLE composio_authorizations ADD COLUMN connected_account_id TEXT');
+      }
       this.migrateLegacyComposioTransports();
     });
   }
@@ -279,7 +293,7 @@ export class UserMcpConnectionsDO extends BudgetedDurableObject {
       now,
     );
     this.ctx.storage.sql.exec(
-      'INSERT INTO composio_authorizations VALUES(?,?,?,?,NULL)',
+      'INSERT INTO composio_authorizations(state,principal_id,connection_id,expires_at) VALUES(?,?,?,?)',
       input.state,
       principalId,
       input.id,
@@ -288,7 +302,26 @@ export class UserMcpConnectionsDO extends BudgetedDurableObject {
     return this.get(principalId, input.id)!;
   }
 
-  consumeComposioAuthorization(principalId: string, state: string): McpConnection {
+  /** Records a reconnect's pending account; the connection keeps its current account until the callback completes it. */
+  startComposioReconnect(
+    principalId: string,
+    input: { connectionId: string; connectedAccountId: string; state: string; expiresAt: string },
+  ): McpConnection {
+    const current = this.get(principalId, input.connectionId);
+    if (!current) throw new McpConnectionNotFoundError(input.connectionId);
+    if (current.transport.type !== 'composio') throw new McpConnectionValidationError('connectionId', 'Connection is not a Composio plugin');
+    this.ctx.storage.sql.exec(
+      'INSERT INTO composio_authorizations(state,principal_id,connection_id,expires_at,connected_account_id) VALUES(?,?,?,?,?)',
+      input.state,
+      principalId,
+      input.connectionId,
+      input.expiresAt,
+      input.connectedAccountId,
+    );
+    return current;
+  }
+
+  consumeComposioAuthorization(principalId: string, state: string): ComposioAuthorizationGrant {
     const row = this.ctx.storage.sql.exec<ComposioAuthorizationRow>(
       'SELECT * FROM composio_authorizations WHERE state=? AND principal_id=?',
       state,
@@ -305,13 +338,36 @@ export class UserMcpConnectionsDO extends BudgetedDurableObject {
     );
     const current = this.get(principalId, row.connection_id);
     if (!current) throw new McpConnectionNotFoundError(row.connection_id);
-    return current;
+    if (current.transport.type !== 'composio') throw new McpConnectionValidationError('connectionId', 'Connection is not a Composio plugin');
+    if (row.connected_account_id === null || row.connected_account_id === current.transport.connectedAccountId) {
+      return { connectionId: current.id, connectedAccountId: current.transport.connectedAccountId, replaces: null };
+    }
+    return { connectionId: current.id, connectedAccountId: row.connected_account_id, replaces: current.transport.connectedAccountId };
+  }
+
+  /** Completes a reconnect: the connection uses the newly active account from here on. */
+  replaceComposioAccount(principalId: string, connectionId: string, connectedAccountId: string): McpConnection {
+    const current = this.get(principalId, connectionId);
+    if (!current) throw new McpConnectionNotFoundError(connectionId);
+    if (current.transport.type !== 'composio') throw new McpConnectionValidationError('connectionId', 'Connection is not a Composio plugin');
+    const transport = mcpComposioTransportSchema.parse({ ...current.transport, connectedAccountId });
+    const now = new Date().toISOString();
+    this.ctx.storage.sql.exec(
+      `UPDATE mcp_connections SET transport_json=?,status='ready',status_message=NULL,status_checked_at=?,revision=revision+1,updated_at=?
+       WHERE principal_id=? AND connection_id=?`,
+      JSON.stringify(transport),
+      now,
+      now,
+      principalId,
+      connectionId,
+    );
+    return this.get(principalId, connectionId)!;
   }
 
   updateComposioStatus(
     principalId: string,
     connectionId: string,
-    status: Extract<McpConnectionStatus, 'connecting' | 'ready' | 'failed'>,
+    status: Extract<McpConnectionStatus, 'connecting' | 'ready' | 'failed' | 'expired'>,
     message: string | null,
   ): McpConnection {
     const current = this.get(principalId, connectionId);

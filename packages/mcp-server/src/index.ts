@@ -37,7 +37,7 @@ const resourceReaders: Record<string, { path: string; description: string }> = {
 // browser made on GitHub, pairing a Chrome, and protected terminal bytes. Decisions the person makes are tools for a
 // connection granted `operator.decide` (`requiresOperatorDecision`).
 const excluded = (path: string) => path.startsWith('providers.login.') || [
-  'mcp.composio.authorize', 'mcp.connections.signIn', 'terminals.live', 'runtime.browserTrust',
+  'mcp.composio.authorize', 'mcp.composio.reconnect', 'mcp.connections.signIn', 'terminals.live', 'runtime.browserTrust',
   'github.app.start', 'github.app.rotateKey', 'github.install.start', 'github.request.record',
 ].includes(path);
 /** Without `operator.decide`, a session command or QA action that decides as the person is left out of the schema. */

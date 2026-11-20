@@ -89,8 +89,9 @@ export type McpComposioTransport = z.infer<typeof mcpComposioTransportSchema>;
 export const mcpTransportSchema = z.union([mcpCustomTransportSchema, mcpComposioTransportSchema]);
 export type McpTransport = z.infer<typeof mcpTransportSchema>;
 
-/** `sign-in-required`: the server answered with an OAuth Bearer challenge and GitSpace holds no usable token for it. */
-export const mcpConnectionStatusSchema = z.enum(['disabled', 'connecting', 'ready', 'offline', 'failed', 'sign-in-required']);
+/** `sign-in-required`: the server answered with an OAuth Bearer challenge and GitSpace holds no usable token for it.
+ * `expired`: Composio reports the plugin's connected account expired or revoked; Reconnect authorizes it again. */
+export const mcpConnectionStatusSchema = z.enum(['disabled', 'connecting', 'ready', 'offline', 'failed', 'sign-in-required', 'expired']);
 export type McpConnectionStatus = z.infer<typeof mcpConnectionStatusSchema>;
 
 export const mcpConnectionDraftSchema = z.object({
@@ -303,7 +304,7 @@ export const McpConnectionViewCodec = wire.object({
   target: McpExecutionTargetCodec,
   transport: McpTransportCodec,
   timeoutMs: wire.number,
-  status: wire.enum(['disabled', 'connecting', 'ready', 'offline', 'failed', 'sign-in-required']),
+  status: wire.enum(['disabled', 'connecting', 'ready', 'offline', 'failed', 'sign-in-required', 'expired']),
   statusMessage: wire.nullable(wire.string),
   statusCheckedAt: wire.nullable(wire.date),
   serverFingerprint: wire.nullable(wire.string),

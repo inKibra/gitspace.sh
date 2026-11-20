@@ -110,6 +110,7 @@ export const ACCOUNT_RPC_AUTHORITY = {
   'mcp.composio.setup.delete': 'cloud',
   'mcp.composio.catalog': 'cloud',
   'mcp.composio.authorize': 'cloud',
+  'mcp.composio.reconnect': 'cloud',
   'mcp.composio.refresh': 'cloud',
   'mcp.composio.tools': 'cloud',
   'mcp.composio.updateTools': 'cloud',

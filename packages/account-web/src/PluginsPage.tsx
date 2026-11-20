@@ -67,6 +67,8 @@ export interface PluginsPageProps {
   /** Starts OAuth sign-in for a Streamable HTTP or SSE plugin: the page to open, or null when none is needed. */
   onSignIn(connectionId: string): Promise<string | null>;
   onAuthorizeComposio(toolkit: string, label: string): Promise<string>;
+  /** Starts a fresh Composio authorization for an expired or failed plugin: the page to open. */
+  onReconnectComposio(connectionId: string): Promise<string>;
   onRefreshComposio(connectionId: string): Promise<void>;
   onLoadComposioTools(connectionId: string): Promise<readonly ComposioPluginToolRpcView[]>;
   onUpdateComposioTools(connectionId: string, expectedRevision: number, toolPolicy: ComposioToolPolicy): Promise<void>;
@@ -108,7 +110,7 @@ function bindings(source: string) {
 function statusColor(status: McpConnectionRpcView['status']): 'gray' | 'green' | 'blue' | 'amber' | 'red' {
   if (status === 'ready') return 'green';
   if (status === 'connecting') return 'blue';
-  if (status === 'offline' || status === 'sign-in-required') return 'amber';
+  if (status === 'offline' || status === 'sign-in-required' || status === 'expired') return 'amber';
   if (status === 'failed') return 'red';
   return 'gray';
 }
@@ -235,29 +237,33 @@ export function PluginsPage(props: PluginsPageProps) {
     }
   };
 
-  const signIn = async (connection: McpConnectionRpcView) => {
+  /** Opens the popup before the request so browsers treat it as user-initiated; `start` returns the page it loads. */
+  const authorizeInPopup = async (key: string, windowName: string, operation: string, start: () => Promise<string | null>) => {
     if (pendingRef.current) return;
     pendingRef.current = true;
-    const popup = window.open('', 'gitspace-mcp-sign-in', 'popup,width=720,height=760');
-    setPending(`sign-in:${connection.id}`);
+    const popup = window.open('', windowName, 'popup,width=720,height=760');
+    setPending(key);
     setActionError(null);
     try {
-      const authorizationUrl = await props.onSignIn(connection.id);
+      const authorizationUrl = await start();
       if (authorizationUrl === null) { popup?.close(); await props.onRefresh(); }
       else if (popup) popup.location.href = authorizationUrl;
       else window.location.assign(authorizationUrl);
     } catch (failure) {
       popup?.close();
-      setActionError(rpcErrorMessage(failure, 'Sign in'));
+      setActionError(rpcErrorMessage(failure, operation));
     } finally {
       pendingRef.current = false;
       setPending(null);
     }
   };
+  const signIn = (connection: McpConnectionRpcView) => authorizeInPopup(`sign-in:${connection.id}`, 'gitspace-mcp-sign-in', 'Sign in', () => props.onSignIn(connection.id));
+  const reconnectComposio = (connection: McpConnectionRpcView) => authorizeInPopup(`reconnect:${connection.id}`, 'gitspace-composio', 'Reconnect plugin', () => props.onReconnectComposio(connection.id));
 
+  // The sign-in and Composio callback pages tell their opener when they finish, so the list shows the new state.
   useEffect(() => {
     const signedIn = (event: MessageEvent<unknown>) => {
-      if (event.origin === window.location.origin && typeof event.data === 'object' && event.data !== null && 'type' in event.data && event.data.type === 'gitspace:mcp-sign-in') void props.onRefresh();
+      if (event.origin === window.location.origin && typeof event.data === 'object' && event.data !== null && 'type' in event.data && (event.data.type === 'gitspace:mcp-sign-in' || event.data.type === 'gitspace:composio-connected')) void props.onRefresh();
     };
     window.addEventListener('message', signedIn);
     return () => window.removeEventListener('message', signedIn);
@@ -290,7 +296,7 @@ export function PluginsPage(props: PluginsPageProps) {
           return <Card size="compact" key={connection.id}>
             <CardMedia icon={CloudGlyph} />
             <CardHeader><CardTitle>{connection.label}</CardTitle><CardDescription>{connection.transport.toolkit} · Composio managed</CardDescription><span className="text-caption tabular-nums text-muted-foreground">{composioToolPolicySummary(connection.transport.toolPolicy)} · {grantCount} project grants</span>{connection.statusMessage ? <span className="flex items-center gap-1 text-caption text-destructive"><AlertCircle width={12} height={12} strokeWidth={1.5} />{connection.statusMessage}</span> : null}</CardHeader>
-            <CardFooter className="gap-2"><Badge color={statusColor(connection.status)}>{connection.status}</Badge>{connection.status === 'connecting' ? <Button variant="ghost" loading={pending === `refresh:${connection.id}`} onClick={() => void settle(`refresh:${connection.id}`, () => props.onRefreshComposio(connection.id))}>Check connection</Button> : null}<Button variant="ghost" onClick={() => setExpanded(connection.id)}>Manage plugin</Button><Button variant="tertiary" size="icon-compact" aria-label={`Disconnect ${connection.label}`} onClick={() => void settle(`disconnect:${connection.id}`, () => props.onDisconnectComposio(connection.id, connection.revision))}><Trash01 width={16} height={16} strokeWidth={1.5} /></Button></CardFooter>
+            <CardFooter className="gap-2"><Badge color={statusColor(connection.status)}>{connection.status}</Badge>{connection.status === 'connecting' ? <Button variant="ghost" loading={pending === `refresh:${connection.id}`} onClick={() => void settle(`refresh:${connection.id}`, () => props.onRefreshComposio(connection.id))}>Check connection</Button> : null}{connection.status === 'expired' || connection.status === 'failed' ? <Button variant="primary" disabled={pending !== null} loading={pending === `reconnect:${connection.id}`} onClick={() => void reconnectComposio(connection)}>Reconnect</Button> : null}<Button variant="ghost" onClick={() => setExpanded(connection.id)}>Manage plugin</Button><Button variant="tertiary" size="icon-compact" aria-label={`Disconnect ${connection.label}`} onClick={() => void settle(`disconnect:${connection.id}`, () => props.onDisconnectComposio(connection.id, connection.revision))}><Trash01 width={16} height={16} strokeWidth={1.5} /></Button></CardFooter>
           </Card>;
         })}</CardGroup> : <EmptyState title="No Composio plugins connected" description="Choose a plugin below and connect an account. Connecting alone does not grant an agent access." />}
       </section>

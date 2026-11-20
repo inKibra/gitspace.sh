@@ -17,7 +17,7 @@
   },
   "dependencies": {
     "@gitspace/browser-runner": "workspace:*",
-    "@composio/core": "0.18.0",
+    "@composio/core": "0.30.0",
     "@earendil-works/chord": "1.5.2",
     "@gitspace/account-machine": "workspace:*",
     "@gitspace/blocks": "workspace:*",

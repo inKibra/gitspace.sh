@@ -12,6 +12,7 @@ const browsers: BrowserPluginsState = {
 const composioProps = {
   composioCatalog: { configured: true, toolkits: [] },
   onAuthorizeComposio: async () => 'https://connect.composio.dev/test',
+  onReconnectComposio: async () => 'https://connect.composio.dev/reconnect',
   onSignIn: async () => null,
   onRefreshComposio: noop,
   onLoadComposioTools: async () => [],
@@ -73,5 +74,29 @@ describe('PluginsPage', () => {
     expect(html).toContain('Manage plugin');
     expect(html).toContain('GitHub');
     expect(html).not.toContain('Integration');
+    expect(html).not.toContain('>Reconnect<');
+  });
+
+  it('offers Reconnect on an expired Composio plugin and says why', () => {
+    const now = new Date();
+    const html = renderToStaticMarkup(<Toasts><PluginsPage
+      {...composioProps}
+      projects={[]}
+      connections={[{
+        principalId: 'principal-a', id: 'composio-gmail-a', label: 'Work Gmail', enabled: true,
+        target: { kind: 'cloud' }, transport: { type: 'composio', toolkit: 'gmail', connectedAccountId: 'ca_old', toolPolicy: { groups: { readOnly: true, write: true, destructive: true }, allow: [], deny: [] } }, timeoutMs: 30_000,
+        status: 'expired', statusMessage: 'Composio account is expired', statusCheckedAt: now, serverFingerprint: null, serverVersion: null, revision: 3, createdAt: now, updatedAt: now,
+      }]}
+      grants={[]}
+      machines={[]}
+      onCreate={noop}
+      onUpdate={noop}
+      onDelete={noop}
+      onSetGrant={noop}
+      onRefresh={noop}
+    /></Toasts>);
+    expect(html).toContain('expired');
+    expect(html).toContain('Composio account is expired');
+    expect(html).toContain('>Reconnect<');
   });
 });

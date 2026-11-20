@@ -25,6 +25,7 @@ import {
   deleteProjectMcpGrantContract,
   listComposioPluginCatalogContract,
   authorizeComposioPluginContract,
+  reconnectComposioPluginContract,
   refreshComposioPluginContract,
   listComposioPluginToolsContract,
   updateComposioPluginToolsContract,
@@ -319,12 +320,37 @@ export function configurationCloudProcedures(env: Env, userId: string, deviceId:
       return err(errors.OperationFailed({ operation: 'catalog', message: error instanceof Error ? error.message : String(error) }));
     }
   });
+  /** Starts a Composio authorization whose browser return lands on the signed `/v1/mcp/composio/callback`. */
+  const startComposioAuthorization = async (toolkit: string) => {
+    const state = crypto.randomUUID();
+    const accountApiKey = await vault.getProviderSecret('composio');
+    const callback = new URL('/v1/mcp/composio/callback', origin);
+    callback.searchParams.set('principal', userId);
+    callback.searchParams.set('gitspace_state', state);
+    callback.searchParams.set('signature', await signComposioState(env, userId, state, accountApiKey));
+    const authorization = await new ComposioPluginGateway(env, accountApiKey).authorize(userId, toolkit, callback.toString());
+    return { ...authorization, state, expiresAt: new Date(Date.now() + 600_000).toISOString() };
+  };
   const authorize = server.implement(authorizeComposioPluginContract).handler(async ({ input, errors }) => {
     try {
-      const toolkit = input.toolkit.trim().toLowerCase(); const label = input.label.trim(); if (!toolkit || !label) throw new McpConnectionValidationError('toolkit', 'Choose a plugin and provide an account label'); const state = crypto.randomUUID(); const accountApiKey = await vault.getProviderSecret('composio'); const callback = new URL('/v1/mcp/composio/callback', origin); callback.searchParams.set('principal', userId); callback.searchParams.set('gitspace_state', state); callback.searchParams.set('signature', await signComposioState(env, userId, state, accountApiKey)); const authorization = await new ComposioPluginGateway(env, accountApiKey).authorize(userId, toolkit, callback.toString()); const saved = await connections.createComposio(userId, { id: `composio-${toolkit.slice(0, 80)}-${crypto.randomUUID().slice(0, 8)}`, label, toolkit, connectedAccountId: authorization.connectedAccountId, state, expiresAt: new Date(Date.now() + 600_000).toISOString() }); return ok({ connection: mcpConnectionView(saved), redirectUrl: authorization.redirectUrl });
+      const toolkit = input.toolkit.trim().toLowerCase(); const label = input.label.trim(); if (!toolkit || !label) throw new McpConnectionValidationError('toolkit', 'Choose a plugin and provide an account label');
+      const authorization = await startComposioAuthorization(toolkit);
+      const saved = await connections.createComposio(userId, { id: `composio-${toolkit.slice(0, 80)}-${crypto.randomUUID().slice(0, 8)}`, label, toolkit, connectedAccountId: authorization.connectedAccountId, state: authorization.state, expiresAt: authorization.expiresAt });
+      return ok({ connection: mcpConnectionView(saved), redirectUrl: authorization.redirectUrl });
     } catch (error) {
       if (error instanceof McpConnectionValidationError) return err(errors.McpInvalid({ field: error.field, message: error.message }));
       return err(errors.OperationFailed({ operation: 'authorize', message: error instanceof Error ? error.message : String(error) }));
+    }
+  });
+  const reconnect = server.implement(reconnectComposioPluginContract).handler(async ({ input, errors }) => {
+    try {
+      const current = await composioConnection(input.connectionId);
+      const authorization = await startComposioAuthorization(current.transport.toolkit);
+      const saved = await connections.startComposioReconnect(userId, { connectionId: current.id, connectedAccountId: authorization.connectedAccountId, state: authorization.state, expiresAt: authorization.expiresAt });
+      return ok({ connection: mcpConnectionView(saved), redirectUrl: authorization.redirectUrl });
+    } catch (error) {
+      if (error instanceof McpConnectionNotFoundError) return err(errors.McpNotFound({ resource: 'connection', id: error.connectionId }));
+      return err(errors.OperationFailed({ operation: 'reconnect', message: error instanceof Error ? error.message : String(error) }));
     }
   });
   const refresh = server.implement(refreshComposioPluginContract).handler(async ({ input, errors }) => {
@@ -577,6 +603,6 @@ export function configurationCloudProcedures(env: Env, userId: string, deviceId:
     configuration: { values: { get: getValues, put: putValue, delete: deleteValue } },
     skills: { list: listSkills, update: updateSkill },
     automations: { list: listAutomations, create: createAutomation, update: updateAutomation, delete: deleteAutomation, approve: approveAutomation, runNow: runAutomationNow, cancelRun: cancelAutomationRun, retryRun: retryAutomationRun, runs: automationRuns, test: testAutomation, events: automationEvents, authors: automationAuthors, runOnEvent: runAutomationOnEvent, link: linkAutomationSubject, unlink: unlinkAutomationSubject, updateSettings: updateAutomationSettings, overview: automationsOverview, exceptions: { list: listAutomationExceptions, set: setAutomationException } },
-    mcp: { discover, connections: { list: listConnections, create: createConnection, update: updateConnection, delete: deleteConnection, status: connectionStatus, signIn }, grants: { list: listGrants, put: putGrant, delete: deleteGrant }, composio: { catalog, authorize, refresh, tools, updateTools, disconnect } },
+    mcp: { discover, connections: { list: listConnections, create: createConnection, update: updateConnection, delete: deleteConnection, status: connectionStatus, signIn }, grants: { list: listGrants, put: putGrant, delete: deleteGrant }, composio: { catalog, authorize, reconnect, refresh, tools, updateTools, disconnect } },
   };
 }

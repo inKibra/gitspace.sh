@@ -3946,7 +3946,20 @@ const worker = {
         return new Response('Invalid or expired Composio authorization', { status: 400, headers: { 'cache-control': 'no-store' } });
       }
       try {
-        await userMcpConnections(env, principalId).consumeComposioAuthorization(principalId, state);
+        const connections = userMcpConnections(env, principalId);
+        const gateway = new ComposioPluginGateway(env, accountApiKey);
+        const authorization = await connections.consumeComposioAuthorization(principalId, state);
+        const status = await gateway.status(authorization.connectedAccountId);
+        // The connection's own account records what Composio reports; a reconnect's new account replaces it only once active.
+        if (authorization.replaces === null) {
+          await connections.updateComposioStatus(principalId, authorization.connectionId, status.status, status.message);
+        } else if (status.status === 'ready') {
+          await connections.replaceComposioAccount(principalId, authorization.connectionId, authorization.connectedAccountId);
+          try { await gateway.disconnect(authorization.replaces); }
+          catch (error) { throw new Error(`Plugin reconnected; removing its previous Composio account failed: ${error instanceof Error ? error.message : String(error)}`); }
+        } else {
+          return new Response(`Composio has not connected the account (${status.status}${status.message ? `: ${status.message}` : ''}). The plugin keeps its previous connection; choose Reconnect again.`, { status: 400, headers: { 'cache-control': 'no-store' } });
+        }
         return new Response(`<!doctype html><meta charset=\"utf-8\"><title>Plugin connected</title><style>body{font:16px system-ui;margin:48px;color:#161616}p{color:#5f5f5f}</style><h1>Plugin connected</h1><p>You can close this window and return to GitSpace.</p><script>window.opener?.postMessage({type:'gitspace:composio-connected'},location.origin);window.close()</script>`, {
           headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
         });

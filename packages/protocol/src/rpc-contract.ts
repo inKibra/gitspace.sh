@@ -1286,6 +1286,15 @@ export const authorizeComposioPluginContract = gitspaceRpc
   .errors({ McpInvalid: rpcErrors.mcpInvalid, OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
+/** Starts a fresh Composio authorization for a plugin's toolkit. The connection keeps its connected account until the
+ * signed callback finds the new one active; a reconnect that never completes leaves the connection as it was. */
+export const reconnectComposioPluginContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ connectionId: wire.string }))
+  .output(ComposioPluginAuthorizationViewCodec)
+  .errors({ McpNotFound: rpcErrors.mcpNotFound, OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
 export const refreshComposioPluginContract = gitspaceRpc
   .procedure()
   .input(wire.object({ connectionId: wire.string }))
@@ -2620,6 +2629,7 @@ export const gitspaceContract = gitspaceRpc.contract({
       },
       catalog: listComposioPluginCatalogContract,
       authorize: authorizeComposioPluginContract,
+      reconnect: reconnectComposioPluginContract,
       refresh: refreshComposioPluginContract,
       tools: listComposioPluginToolsContract,
       updateTools: updateComposioPluginToolsContract,
