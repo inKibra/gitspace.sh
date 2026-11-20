@@ -10,7 +10,7 @@ import { createRuntimeServices, createRuntimeQaServices, type RuntimeIdentity } 
 import { workspaceBrowsersDocument } from './runtime-browser.js';
 import { createCloudRuntimeInference } from './runtime-inference.js';
 import { z } from 'zod';
-import { parseRuntimeSettings, type CloudProjectSummary } from '@gitspace/protocol';
+import { parseRuntimeSettings, RUNTIME_SETTING_DEFAULTS, type CloudProjectSummary } from '@gitspace/protocol';
 import { createRuntimeRuleServices } from './runtime-instructions.js';
 import { createRuntimeInstructionLoader } from './runtime-instruction-loader.js';
 import { createLatestSender } from './latest-sender.js';
@@ -103,7 +103,7 @@ export async function createAccountWorkspaceRuntime(
   const images = await createRuntimeImages(env, identity.workspaceId);
   const inference = await createCloudRuntimeInference(ctx, env, identity, retrying, inferenceWorkerRunner(ctx, env, identity.workspaceId));
   const configuration = await env.USER_SETTINGS.getByName(env.ACCOUNT_ID).getRuntime();
-  const settings = parseRuntimeSettings(JSON.parse(configuration.content || '{}'));
+  const settings = { ...RUNTIME_SETTING_DEFAULTS, ...parseRuntimeSettings(JSON.parse(configuration.content || '{}')) };
   const judge = async (conversationId: string, state: string, questions: Record<string, string>) => {
     const answers = z.record(z.string(), z.object({ bool: z.number().min(0).max(1) })).parse(await inference.modelHelper({ conversationId, operation: 'judge', args: { state, questions: Object.fromEntries(Object.entries(questions).map(([id, instructions]) => [id, { type: 'bool', instructions }])) } }));
     const scores: Record<string, number> = {};

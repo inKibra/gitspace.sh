@@ -121,6 +121,10 @@ export function parseRuntimeSettings(value: unknown): RuntimeSettings {
   return parsed.data;
 }
 
+/** GitSpace's values for runtime settings left unset, where they differ from pi's: everything queued while the agent
+ * works (steers at the next tool boundary, follow-ups when it finishes) goes in together as one turn. */
+export const RUNTIME_SETTING_DEFAULTS: Pick<RuntimeSettings, 'steeringMode' | 'followUpMode'> = { steeringMode: 'all', followUpMode: 'all' };
+
 export function runtimeSettingsView(value: RuntimeSettings): RuntimeSettingSchemaItem[] {
   const rows: Array<[string, string, RuntimeSettingSchemaItem['kind'], string[]]> = [
     ['compaction.enabled', 'Automatic compaction', 'boolean', []],
@@ -138,7 +142,9 @@ export function runtimeSettingsView(value: RuntimeSettings): RuntimeSettingSchem
   return rows.map(([path, label, kind, options]) => {
     let selected: unknown = value;
     for (const part of path.split('.')) selected = selected && typeof selected === 'object' ? (selected as Record<string, unknown>)[part] : undefined;
-    return { path, label, tab: 'runtime', kind, value: (selected ?? null) as RuntimeSettingValue, options, credential: false, description: 'Applies to newly opened cloud sessions. Unset values use Pi runtime defaults.' };
+    const fallback = Object.entries(RUNTIME_SETTING_DEFAULTS).find(([key]) => key === path)?.[1];
+    return { path, label, tab: 'runtime', kind, value: (selected ?? null) as RuntimeSettingValue, options, credential: false, ...(fallback === undefined ? {} : { defaultJson: JSON.stringify(fallback) }),
+      description: fallback === undefined ? 'Applies to newly opened cloud sessions. Unset values use Pi runtime defaults.' : `Applies to newly opened cloud sessions. Unset: ${fallback}, so everything queued goes in together.` };
   });
 }
 
