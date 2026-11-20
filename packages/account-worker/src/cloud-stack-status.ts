@@ -78,7 +78,7 @@ export async function compareCloudHistory(code: HistoryReader, left: Tip, right:
   await reach(left.head, LEFT, true);
   await reach(right.head, RIGHT, true);
   for (let examined = 0; active > 0; examined++) {
-    if (examined >= STACK_WALK_LIMIT) throw new Error(`Stack history exceeds ${STACK_WALK_LIMIT} commits`);
+    if (examined >= STACK_WALK_LIMIT) throw new StackHistoryUnavailable(`Stack history exceeds ${STACK_WALK_LIMIT} commits`);
     const commit = queue.shift();
     if (!commit) break;
     queued.delete(commit.hash);
@@ -125,6 +125,13 @@ const StackComparisonSchema = z.object({
   builtOn: z.string().nullable(), baseRewritten: z.boolean(),
 });
 type StackComparison = z.infer<typeof StackComparisonSchema>;
+/** What the project keeps per stacked workspace: its last comparison, or why the commits it last read cannot be compared
+ * with the comparison before (`earlier`, which the next comparison starts from). */
+const StoredComparisonSchema = z.union([StackComparisonSchema, z.object({ unavailable: z.string(), earlier: StackComparisonSchema.nullable() })]);
+
+/** Cloud history that cannot answer a comparison for these commits (shallow, incomplete or too long): the same commits
+ * give the same answer, so it is kept until one of them changes. */
+class StackHistoryUnavailable extends Error {}
 
 /** The project repository's copy of a branch: what Update base moves and new workspaces start from. */
 export async function readProjectBranchTip(env: Env, projectId: string, branch: string): Promise<Tip | null> {
@@ -173,7 +180,7 @@ async function readCommittedTip(env: Env, userId: string, projectId: string, wor
  * `previous` (whose `builtOn` the rewrite check starts from). */
 async function compareStack(code: HistoryReader, child: Tip, parentTip: Tip, base: Tip | null, parent: Pick<CloudWorkspaceDefinition, 'id' | 'branch' | 'sourceCommit'>, baseBranch: string, previous: StackComparison | null): Promise<StackComparison> {
   const stack = await compareCloudHistory(code, parentTip, child);
-  if (!stack.complete) throw new Error('Stack comparison is unavailable because cloud history is shallow or incomplete');
+  if (!stack.complete) throw new StackHistoryUnavailable('Stack comparison is unavailable because cloud history is shallow or incomplete');
   let merged: StackStatus['parentMerged'] = 'not-merged';
   if (parentMerges(parent, parentTip.head, baseBranch)) {
     if (!base) merged = 'unknown';
@@ -225,14 +232,23 @@ async function stackPosition(authority: DurableObjectStub<ProjectAuthorityDO>, c
   });
   if (!child || !parentTip) return status({ mergeBase: null, parentAhead: 0, parentMerged: parentTip ? 'not-merged' : 'unknown', builtOn: null, baseRewritten: false });
   const base = await input.readBase();
-  const parsed = input.stored ? StackComparisonSchema.safeParse(JSON.parse(input.stored.resultJson)) : null;
-  const previous = parsed?.success ? parsed.data : null;
+  const parsed = input.stored ? StoredComparisonSchema.safeParse(JSON.parse(input.stored.resultJson)) : null;
+  const stored = parsed?.success ? parsed.data : null;
+  const previous = stored && 'unavailable' in stored ? stored.earlier : stored;
   // The comparison depends only on these commits and branches, so it is computed once per change of any of them.
   const source = JSON.stringify([child.head, parentTip.head, base?.head ?? null, parent.id, parent.branch, parent.sourceCommit, baseBranch]);
-  if (previous && input.stored?.source === source) return status(previous);
-  const comparison = await compareStack(code, child, parentTip, base, parent, baseBranch, previous);
-  await authority.putStackComparison(input.workspaceId, source, JSON.stringify(comparison));
-  return status(comparison);
+  if (stored && input.stored?.source === source) {
+    if ('unavailable' in stored) throw new StackHistoryUnavailable(stored.unavailable);
+    return status(stored);
+  }
+  try {
+    const comparison = await compareStack(code, child, parentTip, base, parent, baseBranch, previous);
+    await authority.putStackComparison(input.workspaceId, source, JSON.stringify(comparison));
+    return status(comparison);
+  } catch (error) {
+    if (error instanceof StackHistoryUnavailable) await authority.putStackComparison(input.workspaceId, source, JSON.stringify({ unavailable: error.message, earlier: previous }));
+    throw error;
+  }
 }
 
 /** A stacked workspace's position against its `stackedOn` parent, from cloud checkpoints and Artifacts history. Null

@@ -117,3 +117,14 @@ it('runs without IndexedDB: nothing is saved and nothing fails', async () => {
   expect(copy.read()).toBeUndefined();
   expect(await copy.load()).toBeUndefined();
 });
+
+it('opens without saved copies within seconds when IndexedDB never answers', async () => {
+  vi.stubGlobal('indexedDB', { open: () => ({}) });
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  const cache = await reload();
+  let opened = false;
+  void cache.openFirstPaintCache('account-a', [cache.ACCOUNT_GROUP]).then(() => { opened = true; });
+  await vi.advanceTimersByTimeAsync(3000);
+  expect(opened).toBe(true);
+  expect(cache.savedCopy(cache.ACCOUNT_GROUP, 'settings', cache.schemaForm(text)).read()).toBeUndefined();
+});

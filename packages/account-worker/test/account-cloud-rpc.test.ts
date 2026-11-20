@@ -1348,6 +1348,37 @@ describe('workspace environment edits and stack status with no machines', () => 
     expect(await client.workspace.stackStatus({ workspaceId: 'missing' })).toMatchObject({ status: 'error', error: { _tag: rpcErrors.workspaceNotFound.tag, data: { workspaceId: 'missing' } } });
   });
 
+  it('keeps a stacked workspace whose cloud history cannot be compared unavailable without walking it again until a head moves', async () => {
+    const fixture = await account(['rpc.read', 'rpc.write']);
+    const { projectId, spaceId: parentId, authority } = await inspectorWorkspace(fixture.userId);
+    const childId = `space-${crypto.randomUUID()}`;
+    await authority.putWorkspace({ id: childId, projectId, kind: 'worktree', name: 'Child', branch: 'child', phase: 'code', sourceKind: 'base', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
+    await env.USER_PROJECTS.getByName(fixture.userId).putWorkspaceLocation(childId, projectId);
+    const client = inspectorClient(fixture);
+    expect(await client.workspace.setRelations({ workspaceId: childId, dependsOn: [], relatedTo: [], stackedOn: parentId })).toMatchObject({ status: 'ok' });
+    const [projectRepository, parentRepository, childRepository] = [`project-${projectId}`, `workspace-${parentId}`, `workspace-${childId}`];
+    const history = artifactsHistory();
+    const walked = vi.mocked(ArtifactsCodeStore.prototype.readCommit);
+    vi.spyOn(ArtifactsCodeStore.prototype, 'resolveRef').mockResolvedValue(null);
+    // Both branches start past a shallow boundary: the commits they fork from are in no repository.
+    const main = history.commit([], projectRepository, parentRepository, childRepository);
+    const parentHead = history.commit(['a'.repeat(40)], parentRepository);
+    await seedCheckpoint(env.SPACE_AUTHORITY.getByName(`${fixture.userId}:${parentId}`), checkpointAt(parentId, 'review', parentHead));
+    const child = env.SPACE_AUTHORITY.getByName(`${fixture.userId}:${childId}`);
+    await seedCheckpoint(child, checkpointAt(childId, 'child', history.commit(['b'.repeat(40)], childRepository)));
+    const unavailable = { status: 'error', error: { data: { message: 'Stack comparison is unavailable because cloud history is shallow or incomplete' } } };
+    expect(await client.workspace.stackStatus({ workspaceId: childId })).toMatchObject(unavailable);
+    walked.mockClear();
+    expect(await client.workspace.stackStatus({ workspaceId: childId })).toMatchObject(unavailable);
+    expect((await client.space.view({ projectId, workspaceId: null })).status).toBe('ok');
+    expect(walked).not.toHaveBeenCalled();
+
+    // The child merges the parent's branch: its history reaches the parent's head, and it is compared again.
+    history.copy(childRepository, parentHead);
+    await seedCheckpoint(child, checkpointAt(childId, 'child', history.commit([main, parentHead], childRepository)));
+    expect(await client.workspace.stackStatus({ workspaceId: childId })).toMatchObject({ status: 'ok', value: { mergeBase: parentHead, parentAhead: 0 } });
+  });
+
   it('publishes each stacked workspace\'s state in the project view (behind, base rewritten, merged), and Restack after a merge unstacks it', async () => {
     const fixture = await account(['rpc.read', 'rpc.write']);
     const { projectId, spaceId: parentId, authority } = await inspectorWorkspace(fixture.userId);

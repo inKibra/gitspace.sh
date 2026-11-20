@@ -768,7 +768,7 @@ function Shell({ project, projects, workspace, baseSpace, workspaces, mainAgent,
     return [...byProject.values()];
   }, [accountSidebar, projects, baseSpace, workspaces, workspace.id, selectedSummary]);
   const projectGraph = useContext(ProjectGraphsContext)[workspace.projectId];
-  const pullRequests = workspace.kind === 'workspace' ? projectGraph?.pullRequests[workspace.id] ?? [] : [];
+  const pullRequests = workspace.kind === 'workspace' ? projectGraph?.pullRequests?.[workspace.id] ?? [] : [];
   const referenceTargets = useMemo((): BlockReferenceTargets => {
     const repository = githubRepositoryOf(project.repository);
     return {
@@ -830,7 +830,7 @@ function Shell({ project, projects, workspace, baseSpace, workspaces, mainAgent,
           {workspace.kind === 'workspace' ? <><span className="text-muted-foreground">·</span><span className="max-w-80 truncate font-semibold text-foreground" title={workspace.name}>{workspace.name}</span></> : null}
           <StatusBadge color={workspaceStatusColor(selectedSummary)} label={recovering ? 'Recovering agent…' : workspaceStatusLabel(selectedSummary)} />
           {history?.saved ? <SavedCopyIndicator loading={history.loading} /> : null}
-          {workspace.kind === 'workspace' && projectGraph ? pullRequests.length ? <PrChips pulls={pullRequests} full /> : <span className="text-caption text-muted-foreground">no PR</span> : null}
+          {workspace.kind === 'workspace' && projectGraph?.pullRequests ? pullRequests.length ? <PrChips pulls={pullRequests} full /> : <span className="text-caption text-muted-foreground">no PR</span> : null}
         </nav>
         <div className="flex shrink-0 items-center gap-1">
             {renderEnvironmentStatus?.(openEnvironment, (name) => { setRequestedTerminal({ spaceId: workspace.id, name }); setTerminalOpen(true); })}

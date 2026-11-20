@@ -594,7 +594,10 @@ export class UserProjectIndexDO extends BudgetedDurableObject {
   }
 
   private async hydrateDirectory(): Promise<void> {
-    if (this.directory.hydrated()) return;
+    if (this.directory.hydrated()) {
+      await this.readRelations();
+      return;
+    }
     if (!this.hydration) {
       this.hydration = (async () => {
         // Only a one-time migration read, never an authority subscription.
@@ -616,6 +619,16 @@ export class UserProjectIndexDO extends BudgetedDurableObject {
       })().finally(() => { this.hydration = null; });
     }
     await this.hydration;
+  }
+
+  /** Reads again, once, the projects whose directory entry was stored before entries carried relations. */
+  private async readRelations(): Promise<void> {
+    const listed = new Set(this.list().map((project) => project.id));
+    const stale = this.directory.projectsWithoutRelations().filter((projectId) => listed.has(projectId));
+    await Promise.all(stale.map(async (projectId) => {
+      const publication = await (this.env.PROJECT_AUTHORITY as DurableObjectNamespace<ProjectAuthorityDO>).getByName(`${this.env.ACCOUNT_ID}:${projectId}`).directoryPublication();
+      if (publication) this.publishDirectory(publication);
+    }));
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -1139,9 +1152,10 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
   }
 
 
+  /** This project's directory entry under a new version, so the directory takes it over the entry it holds. */
   directoryPublication(): Extract<DirectoryPublication, { source: 'project' }> | null {
     const project = this.getProject();
-    return project ? { source: 'project', cursor: this.directory.version(), project, workspaces: this.listWorkspaces(), operations: this.visibleOperations() } : null;
+    return project ? this.directory.next({ source: 'project', project, workspaces: this.listWorkspaces(), operations: this.visibleOperations(), relations: this.listWorkspaceRelations() }) : null;
   }
 
   /** Check the origin: how often this project reads its origin on its own. */
@@ -1236,8 +1250,8 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
         return value;
       } finally { this.committing = false; }
     });
-    // Project, workspace and operation records are in the directory.
-    if (entity === 'project' || entity === 'workspace' || entity === 'operation') this.directory.publish({ source: 'project', project: this.requireProject(), workspaces: this.listWorkspaces(), operations: this.visibleOperations() });
+    // Project, workspace (relations included) and operation records are in the directory.
+    if (entity === 'project' || entity === 'workspace' || entity === 'operation') this.directory.publish({ source: 'project', project: this.requireProject(), workspaces: this.listWorkspaces(), operations: this.visibleOperations(), relations: this.listWorkspaceRelations() });
     this.changes.wake();
     return result;
   }
@@ -1498,8 +1512,8 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
     return row ? workspaceDefinition(row) : null;
   }
 
-  /** Each stacked workspace's last history comparison, as JSON, with the commits and branches it compared (`source`):
-   * reused while they are unchanged, and the earlier reading the next comparison starts from. */
+  /** Each stacked workspace's last history comparison, or why its commits could not be compared, as JSON, with the
+   * commits and branches it read (`source`): reused while they are unchanged, and the earlier reading the next comparison starts from. */
   stackComparisons(): Record<string, { source: string; resultJson: string }> {
     return Object.fromEntries(this.ctx.storage.sql.exec<{ workspace_id: string; source: string; result_json: string }>('SELECT workspace_id,source,result_json FROM stack_comparisons').toArray()
       .map(row => [row.workspace_id, { source: row.source, resultJson: row.result_json }]));

@@ -348,8 +348,9 @@ const FIRST_GUIDES: readonly number[] = [7];
 const STACK_GUIDES: readonly number[] = [7, 21];
 const ROW = 'relative flex w-full min-w-0 select-none flex-col gap-0.5 rounded-[10px] py-[5px] text-left outline-none transition-[opacity,background-color] duration-150 focus-visible:ring-2 focus-visible:ring-[#6B97FF]/50';
 
-/** An open workspace as its row, the stack chain and the phase rule read it: its relations, its branch's position against
- * its parent and whether it is ahead of that parent, as the project view last published them (`known` once read). */
+/** An open workspace as its row, the stack chain and the phase rule read it: its relations, as the account directory holds
+ * them (`known` once listed there), and its branch's position against its parent and whether it is ahead of that parent,
+ * as the project view last published them. */
 interface RowItem extends ChainWorkspace { workspace: SidebarWorkspace; summary: SidebarSpaceSummary | undefined; state: RowState; phase: WorkspaceView['phase'] | null; relatedTo: readonly string[]; aheadOfParent: string | null; known: boolean }
 
 function rowItem(workspace: SidebarWorkspace, graph: ProjectGraph | undefined): RowItem {
@@ -640,7 +641,7 @@ function ProjectRows({ project, archived: projectArchived, collapsed, onCollapse
       onHover={(id) => { onHover(id); if (mode) picker.setHover(id && choosing?.role === 'choice' ? id : null); }}
       onClick={() => { if (!picker.mode) onSelectWorkspace(item.workspace); else if (mode) picker.pick(item.id); }}
       caption={<>{parentWorkspace ? <StackCaption parent={parentWorkspace.name} position={position} /> : null}{head ? <HeadTag /> : null}</>}
-      meta={archivedRow ? <PhaseTag phase={item.phase} /> : <><PhaseTag phase={item.phase} /><PrChips pulls={graph?.pullRequests[item.id] ?? []} /><StackMarker position={position} ahead={item.aheadOfParent} /><LabelText waits={waits} blocks={blocked} /></>}
+      meta={archivedRow ? <PhaseTag phase={item.phase} /> : <><PhaseTag phase={item.phase} /><PrChips pulls={graph?.pullRequests?.[item.id] ?? []} /><StackMarker position={position} ahead={item.aheadOfParent} /><LabelText waits={waits} blocks={blocked} /></>}
       override={choosing?.role === 'source' ? sourceLine() : choosing?.role === 'refused' ? <><Lock01 width={11} height={11} className="shrink-0" /><span className="truncate">{choosing.why}</span></> : null}
       renaming={renamed} onStartRename={startRename}
       drag={edit && editable ? { draggable: !picker.mode && renaming !== item.id, start: () => { picker.setDragging(item.id); picker.start(item, 'stack'); }, drop: () => { if (picker.dragging) picker.pick(item.id); picker.setDragging(null); }, end: () => { picker.setDragging(null); if (picker.dragging) picker.leave(); } } : undefined}
@@ -901,8 +902,6 @@ function SidebarBody({ view, onView, selected, selectedSummary, projects, onSele
           Group by
           {GROUP_BYS.map((option) => <button type="button" key={option.id} aria-pressed={groupBy === option.id} onClick={() => chooseGroupBy(option.id)}
             className={`rounded-md px-1.5 py-0.5 ${groupBy === option.id ? 'bg-active text-foreground' : 'hover:bg-hover hover:text-foreground'}`}>{option.label}</button>)}
-          {/* Every grouping draws stacks whole. */}
-          <span className="ml-auto truncate text-muted-foreground/80">stacks</span>
         </div>
       </div>
 

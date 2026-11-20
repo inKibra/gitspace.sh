@@ -32,6 +32,8 @@ export const FIRST_PAINT_BUDGET_BYTES = 24 * 1024 * 1024;
 /** One saved value, at most; a larger one is not saved. */
 const ENTRY_BYTES = 4 * 1024 * 1024;
 const WRITE_DELAY_MS = 1000;
+/** How long reading saved copies before the first paint may take; past it the page paints without them. */
+const OPEN_TIMEOUT_MS = 3000;
 const DATABASE = 'gitspace-first-paint';
 const ENTRIES = 'entries';
 const SIZES = 'sizes';
@@ -104,11 +106,14 @@ function erase(db: IDBDatabase): Promise<void> {
 
 /**
  * Opens the saved copies of `nextOwner` and reads `groups` into memory. A database owned by anyone else is erased
- * first. Resolves without saved copies when IndexedDB is unavailable or fails.
+ * first. Resolves without saved copies when IndexedDB is unavailable, fails, or does not answer within OPEN_TIMEOUT_MS.
  */
 export async function openFirstPaintCache(nextOwner: string, groups: readonly string[]): Promise<void> {
   if (typeof indexedDB === 'undefined') return;
-  try {
+  let late = false;
+  const deadline = Promise.withResolvers<void>();
+  const timer = window.setTimeout(() => { late = true; deadline.resolve(); }, OPEN_TIMEOUT_MS);
+  const read = (async () => {
     const db = await openDatabase();
     const stored = await requested(db.transaction(META).objectStore(META).get(OWNER));
     if (stored !== nextOwner) {
@@ -120,6 +125,8 @@ export async function openFirstPaintCache(nextOwner: string, groups: readonly st
     }
     const index = db.transaction(ENTRIES).objectStore(ENTRIES).index('group');
     const rows = await Promise.all(groups.map((group) => requested(index.getAll(group))));
+    // The page painted without copies that answer after the deadline.
+    if (late) return;
     for (const row of rows.flat()) {
       const entry = entrySchema.safeParse(row);
       if (entry.success) memory.set(entry.data.key, entry.data.value);
@@ -127,7 +134,14 @@ export async function openFirstPaintCache(nextOwner: string, groups: readonly st
     owner = nextOwner;
     // Copies written in the last second before a reload are saved as the page goes.
     window.addEventListener('pagehide', () => { void flushFirstPaintCache(); }, { once: true });
-  } catch {
+  })().catch(() => {
+    if (late) return;
+    owner = null;
+    memory.clear();
+  });
+  await Promise.race([read, deadline.promise]);
+  window.clearTimeout(timer);
+  if (late) {
     owner = null;
     memory.clear();
   }

@@ -36,7 +36,7 @@ const classifier: ClassifierModel<string> = {
   baseUrl: 'https://vault-provider.invalid', input: ['text'], cost, type: 'classifier', contextWindow: 8192,
 };
 const pool: readonly CredentialAccount[] = ['alpha', 'beta'].map(id => ({
-  id, provider: providerId, type: 'oauth', revision: 1, expiresAt: 4_102_444_800_000, identity: id,
+  id, provider: providerId, type: 'oauth', revision: 1, expiresAt: 4_102_444_800_000, identity: id, label: `${id}@example.com`,
   // No usage observation: inference must not depend on a successful usage collector.
 }));
 
@@ -65,6 +65,8 @@ async function fixture(options: {
   filterAllModels?: Provider['filterAllModels'];
   /** The kind of the profile's accounts (OAuth sign-ins unless said). */
   accountType?: CredentialAccount['type'];
+  /** Accounts whose token refresh the provider refuses: resolving them records the refusal and throws, as the vault does. */
+  refusedRefresh?: readonly string[];
 } = {}) {
   const accounts = pool.map(account => ({ ...account, type: options.accountType ?? account.type }));
   const effects: RequestEffect[] = [];
@@ -73,14 +75,19 @@ async function fixture(options: {
   const classifierEffects: string[] = [];
   const failures: AccountFailure[] = [];
   const out = new Map<string, number>();
+  const signIns = new Map<string, string>();
   const pins = served();
   const vault: VaultAccess = {
     async list(profileId, provider) {
       if (profileId !== 'profile') throw new Error('Unexpected profile');
-      return provider === undefined || provider === providerId ? accounts.map(account => ({ ...account, cooldownUntil: out.get(account.id) ?? 0 })) : [];
+      return provider === undefined || provider === providerId ? accounts.map(account => {
+        const signIn = signIns.get(account.id);
+        return { ...account, cooldownUntil: out.get(account.id) ?? 0, ...(signIn ? { signIn } : {}) };
+      }) : [];
     },
     async recordFailure(input) {
       failures.push(input);
+      if (input.kind === 'signIn') { signIns.set(input.credentialId, input.reason); return { label: input.credentialId, until: Number.POSITIVE_INFINITY }; }
       const until = input.until ?? Date.now() + 60_000;
       out.set(input.credentialId, until);
       return { label: input.credentialId, until };
@@ -91,6 +98,10 @@ async function fixture(options: {
         throw new Error('Credential escaped the admitted profile');
       }
       resolutions.push({ accountId: input.credentialId, refresh: input.forceRefresh === true });
+      if (options.refusedRefresh?.includes(input.credentialId)) {
+        signIns.set(input.credentialId, 'HTTP 400, invalid_grant');
+        throw new Error('Provider rejected request');
+      }
       return {
         id: input.credentialId, provider: providerId, revision: input.forceRefresh ? 2 : 1,
         credential: {
@@ -304,6 +315,37 @@ describe('vault-bound provider dispatch', () => {
     expect(test.effects.map(effect => effect.key)).toEqual([
       'alpha:original', 'alpha:refreshed', 'beta:original', 'beta:refreshed',
     ]);
+  });
+
+  it('moves a request off an account whose token refresh the provider refused, and skips that account after', async () => {
+    const test = await fixture({ refusedRefresh: ['alpha'] });
+    expect((await test.models.completeSimple(test.chatModel, context)).content).toEqual([{ type: 'text', text: 'beta:original' }]);
+    expect(test.resolutions).toEqual([{ accountId: 'alpha', refresh: false }, { accountId: 'beta', refresh: false }]);
+    test.resolutions.length = 0;
+    expect((await test.models.completeSimple(test.chatModel, context)).content).toEqual([{ type: 'text', text: 'beta:original' }]);
+    expect(test.resolutions).toEqual([{ accountId: 'beta', refresh: false }]);
+  });
+
+  it('names every account whose sign-in was refused in one message when none is left', async () => {
+    const test = await fixture({ refusedRefresh: ['alpha', 'beta'] });
+    const message = 'No Vault test provider account could be used: alpha@example.com was refused (HTTP 400, invalid_grant); beta@example.com was refused (HTTP 400, invalid_grant). Sign them in again in Inference → Providers.';
+    expect((await test.models.completeSimple(test.chatModel, context)).errorMessage).toBe(message);
+    expect(test.effects).toEqual([]);
+    // The next request finds no account left before it resolves any.
+    test.resolutions.length = 0;
+    expect((await test.models.completeSimple(test.chatModel, context)).errorMessage).toBe(message);
+    expect(test.resolutions).toEqual([]);
+  });
+
+  it('takes an account out for sign-in when the provider refuses its refreshed token, and names the move when the next account fails', async () => {
+    const test = await fixture({ async reply(request) {
+      return request.key.startsWith('alpha:')
+        ? { status: 401, error: '401 {"type":"error","error":{"type":"authentication_error","message":"Invalid bearer token sk-ant-secret"}}' }
+        : { status: 400, error: 'Prompt is too long' };
+    } });
+    const result = await test.models.completeSimple(test.chatModel, context);
+    expect(test.failures).toEqual([{ profileId: 'profile', credentialId: 'alpha', kind: 'signIn', reason: 'HTTP 401, authentication_error' }]);
+    expect(result.errorMessage).toBe('Vault test provider account alpha@example.com was refused (HTTP 401, authentication_error): sign it in again in Inference → Providers. GitSpace moved to beta@example.com.\n\nPrompt is too long');
   });
 
   it.each([403, 429])('rotates HTTP %i account failures without refreshing the rejected account', async status => {

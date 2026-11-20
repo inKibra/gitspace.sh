@@ -195,16 +195,12 @@ export class DeviceVerifier {
     const header = input.header ? decodeSignedRpcHeader(input.header) : null;
     if (!header) return reject('RPC_UNAUTHORIZED', 'Device signature is missing or invalid');
     const device = this.device(header.deviceId, now);
-    if (!device) {
-      const unknown = this.resolve(header.deviceId) === null;
-      return input.method === 'GET'
-        ? reject('RPC_DEVICE_UNKNOWN', 'Device grant is unknown, expired or revoked', unknown)
-        : reject('RPC_UNAUTHORIZED', 'Device signature is invalid or its grant is revoked', unknown);
-    }
+    // Every method names a missing grant, so a browser holding a revoked key drops it on its first request.
+    if (!device) return reject('RPC_DEVICE_UNKNOWN', 'Device grant is unknown, expired or revoked', this.resolve(header.deviceId) === null);
     const signed = input.body === null
       ? verifyRpcDigestSignature(header, { method: input.method, path: input.target }, device.signingPublicKey)
       : verifyRpcSignature(header, { method: input.method, path: input.target, body: input.body }, device.signingPublicKey);
-    if (!signed) return reject('RPC_UNAUTHORIZED', 'Device signature is invalid or its grant is revoked');
+    if (!signed) return reject('RPC_UNAUTHORIZED', 'Device signature does not match the request');
     if ((input.browserOnly && device.kind !== 'browser') || (input.accountScope && device.scope.kind !== 'user')
       || !input.capabilities.every((capability) => device.capabilities.includes(capability))) {
       return reject('RPC_FORBIDDEN', 'Device is out of scope or lacks permission');

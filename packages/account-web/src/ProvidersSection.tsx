@@ -130,14 +130,16 @@ function UsageMeter({ limit, now }: { limit: ProviderUsageLimit; now: number }) 
   </div>;
 }
 
-/** Whether inference uses an account now: off, paused until a time (a limit or failure cooldown), or in use. */
-function accountState(account: ProviderAccount, now: number): { color: 'green' | 'gray' | 'amber'; label: string; paused: boolean } {
-  if (account.disabled) return { color: 'gray', label: 'Off', paused: false };
+/** Whether inference uses an account now: off, out until it is signed in again (its provider refused its sign-in, so it
+ * has a reason and no end time), paused until a time (a limit or failure cooldown), or in use. */
+function accountState(account: ProviderAccount, now: number): { color: 'green' | 'gray' | 'amber'; label: string; paused: boolean; signIn: boolean } {
+  if (account.disabled) return { color: 'gray', label: 'Off', paused: false, signIn: false };
+  if (account.outUntil === null && account.outReason !== null) return { color: 'amber', label: 'Sign in again', paused: true, signIn: true };
   const until = account.outUntil === null ? Number.NaN : Date.parse(account.outUntil);
-  if (!(until > now)) return { color: 'green', label: 'In use', paused: false };
+  if (!(until > now)) return { color: 'green', label: 'In use', paused: false, signIn: false };
   const back = new Date(until);
   const sameDay = back.toDateString() === new Date(now).toDateString();
-  return { color: 'amber', label: `Paused · back ${sameDay ? back.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : back.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}`, paused: true };
+  return { color: 'amber', label: `Paused · back ${sameDay ? back.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : back.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}`, paused: true, signIn: false };
 }
 
 /** An account: who it is, whether inference uses it now, its usage windows (or why there are none), and its actions. */
@@ -185,7 +187,7 @@ function AccountRow({ provider, account, report, failure, usageStatus, now, pend
         <DropdownContent align="end">{actions.map((action, index) => <MenuItem key={action.label} index={index} label={action.label} onSelect={action.run} />)}</DropdownContent>
       </DropdownMenu>
     </div>
-    {state.paused && account.outReason ? <p className="text-caption text-muted-foreground">{account.outReason}. Inference skips this account until then.</p> : null}
+    {state.paused && account.outReason ? <p className="text-caption text-muted-foreground">{account.outReason}. {state.signIn ? 'Inference skips this account until it is signed in again.' : 'Inference skips this account until then.'}</p> : null}
     {usage}
   </li>;
 }

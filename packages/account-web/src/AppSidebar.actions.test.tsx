@@ -165,7 +165,6 @@ it('draws each stack whole under its head\'s group, counts every workspace in th
   /** The project's list as headings (label and count) and rows, in order. */
   const listed = () => Array.from(container.querySelectorAll('[data-sidebar="menu-sub"] > li:not([aria-hidden])'), (item) => item.getAttribute('data-workspace') ?? item.textContent ?? '');
   const inset = (id: string) => container.querySelector<HTMLElement>(`[data-workspace="${id}"] button`)?.style.paddingLeft;
-  const hint = () => container.querySelector('[aria-label="Group by"]')?.textContent;
   const press = async (group: string, label: string) => {
     const button = Array.from(container.querySelectorAll<HTMLButtonElement>(`[aria-label="${group}"] button`)).find((candidate) => candidate.textContent?.startsWith(label));
     expect(button).toBeDefined();
@@ -173,17 +172,14 @@ it('draws each stack whole under its head\'s group, counts every workspace in th
   };
   await render();
   expect(listed()).toEqual(['bakery-core', 'bakery-api', 'bakery-payments', 'bakery-docs']);
-  expect(hint()).toContain('stacks');
   await press('Group by', 'State');
   // bakery-api needs you yet sits in its stack under its head's Running; Needs you still counts it, as its filter tab
   // does, and Running counts only bakery-core.
   expect(listed()).toEqual(['Needs you2', 'bakery-docs', 'Running1', 'bakery-core', 'bakery-api', 'Waiting1', 'bakery-payments']);
   expect(inset('bakery-api')).toBe('30px');
   expect(container.querySelector('[data-workspace="bakery-api"]')?.textContent).toContain('on bakery-core');
-  expect(hint()).toContain('stacks');
   await press('Group by', 'Phase');
   expect(listed()).toEqual(['Review2', 'bakery-payments', 'bakery-docs', 'Code2', 'bakery-core', 'bakery-api']);
-  expect(hint()).toContain('stacks');
   await press('Filter workspaces', 'Needs you');
   // The stack stays whole while bakery-api matches; its head is faded and not counted.
   expect(listed()).toEqual(['Review1', 'bakery-docs', 'Code1', 'bakery-core', 'bakery-api']);

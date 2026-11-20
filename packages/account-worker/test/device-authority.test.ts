@@ -80,6 +80,15 @@ describe('signed request window', () => {
     expect(request(-59_000)).toMatchObject({ status: 'ok', value: { device: { deviceId: binding.deviceId, generation: 1 } } });
     expect(request(61_000)).toMatchObject({ status: 'error', error: { code: 'REQUEST_EXPIRED' } });
   });
+
+  it('names a revoked device on a signed POST, so the browser holding it drops it', () => {
+    const current = verifier(registry([{ ...device, generation: 2, revokedAt: now - 1_000 }]));
+    const body = new TextEncoder().encode('{"v":1}');
+    expect(current.authorizeRequest({
+      header: signRpcRequest({ deviceId: binding.deviceId, signingPrivateKey: deviceKey, method: 'POST', path: '/rpc', body, timestamp: now }),
+      method: 'POST', target: '/rpc', body, capabilities: ['rpc.read'], accountScope: true,
+    }, now)).toMatchObject({ status: 'error', error: { code: 'RPC_DEVICE_UNKNOWN' } });
+  });
 });
 
 describe('isolate device authority cache', () => {

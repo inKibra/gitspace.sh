@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { classifyAuthFailure, orderedAccounts, providerResetAt, type CredentialAccount, type VaultAccess } from './selection';
+import { classifyAuthFailure, modelAvailability, orderedAccounts, providerResetAt, type CredentialAccount, type VaultAccess } from './selection';
 
 const now = 10_000_000;
 function account(id: string, fields: Partial<CredentialAccount> = {}): CredentialAccount {
@@ -48,6 +48,12 @@ describe('profile account selection', () => {
   it('says when the first account is back once every account is out', async () => {
     await expect(order([account('later', { cooldownUntil: now + 7_200_000 }), account('sooner', { cooldownUntil: now + 3_600_000 })]))
       .rejects.toThrow(`out until ${new Date(now + 3_600_000).toUTCString()}`);
+  });
+  it('counts an account whose sign-in was refused as out with no time it is back', () => {
+    const refused = account('refused', { signIn: 'HTTP 401, authentication_error' });
+    expect(modelAvailability([refused, account('cooling', { cooldownUntil: now + 3_600_000 })], 'anthropic', 'claude-test', now).out).toEqual({ until: now + 3_600_000, reason: 'account out' });
+    // With only refused accounts left, the request itself names the refusals.
+    expect(modelAvailability([refused], 'anthropic', 'claude-test', now)).toEqual({ listed: true, out: null });
   });
   it('ignores stale usage observations when comparing accounts', async () => {
     const accounts = [account('first'), account('second')];

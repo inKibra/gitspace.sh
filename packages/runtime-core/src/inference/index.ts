@@ -4,7 +4,7 @@ import { isModelType } from '@earendil-works/pi-ai';
 import { isRetryableAssistantError } from '@earendil-works/pi-ai/utils/retry';
 import type { Credential, ProviderResponse } from '@earendil-works/pi-ai';
 import { limitContextWindows } from './catalog.js';
-import { classifyAuthFailure, orderedAccounts, providerResetAt, type VaultAccess, type CredentialAccount, type CredentialPins, type ResolvedCredential } from './selection.js';
+import { classifyAuthFailure, noAccountLeft, orderedAccounts, providerResetAt, refusedSignInNote, type VaultAccess, type CredentialAccount, type CredentialPins, type ResolvedCredential } from './selection.js';
 import { withCatalogRows, type ProfileCatalog } from './account-models.js';
 import { contextWindowLimits } from './admission.js';
 import { attemptOptions, createAttemptRunner, inferenceProviderSource, noAmbientAuth, profileProviders, requestAuth, type AttemptRequest, type AttemptRunner, type ModelAttempt, type WebSearchAttempt } from './attempts.js';
@@ -208,16 +208,40 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
       const until = kind === 'rotate' ? providerResetAt(attempt.headers, Date.now()) : undefined;
       return options.vault.recordFailure({ profileId: options.profileId, credentialId: candidate.id, kind, reason, ...(until === undefined ? {} : { until }) });
     }
+    /** How the provider refused `candidate`'s sign-in, as the vault recorded it when its token refresh was refused;
+     * undefined when it was not, or when the vault cannot say (the resolve's own error stands). */
+    async function refusedSignIn(candidate: CredentialAccount): Promise<string | undefined> {
+      try { return (await options.vault.list(options.profileId, candidate.provider)).find(account => account.id === candidate.id)?.signIn; }
+      catch { return undefined; }
+    }
+    /** The provider refused a request (HTTP 401) on a freshly refreshed token: the account is out until it is signed in
+     * again. Only the error type of its answer is kept. */
+    async function refusedRequest(candidate: CredentialAccount, message: string): Promise<CredentialAccount> {
+      const type = /\b([a-z]+(?:_[a-z]+)*_error)\b/u.exec(message)?.[1];
+      const signIn = `HTTP 401${type ? `, ${type}` : ''}`;
+      await options.vault.recordFailure({ profileId: options.profileId, credentialId: candidate.id, kind: 'signIn', reason: signIn });
+      return { ...candidate, signIn };
+    }
     async function* streamAttempts(model: AnyModel, invoke: (credential: ResolvedCredential, attempt: Attempt, subscription: boolean) => AsyncIterable<AssistantMessageEvent>, signal?: AbortSignal): AsyncGenerator<AssistantMessageEvent> {
       canonical(model);
-      const candidates = await orderedAccounts({ ...options, provider: model.provider, model: model.id });
+      const providerName = providerById.get(model.provider)?.name ?? model.provider;
+      const candidates = await orderedAccounts({ ...options, provider: model.provider, providerName, model: model.id });
+      // Accounts whose sign-in the provider refused during this request; the request moved on from each.
+      const refused: CredentialAccount[] = [];
       for (let index = 0; index < candidates.length; index++) {
         const candidate = candidates[index]!;
+        const more = index < candidates.length - 1;
         for (let refresh = 0; refresh < 2; refresh++) {
           let credential: ResolvedCredential;
           try { credential = await resolveCredential(model.provider, candidate.id, refresh === 1, signal); }
           catch (error) {
-            if (refresh === 1 && index < candidates.length - 1 && !signal?.aborted) break;
+            const signIn = signal?.aborted ? undefined : await refusedSignIn(candidate);
+            if (signIn !== undefined) {
+              refused.push({ ...candidate, signIn });
+              if (more) break;
+              throw new Error(noAccountLeft(providerName, refused));
+            }
+            if (refresh === 1 && more && !signal?.aborted) break;
             throw error;
           }
           await pins.write(model.provider, { credentialId: candidate.id });
@@ -237,29 +261,46 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
           const message = failure.error.errorMessage ?? '';
           const policy = classifyAuthFailure(message, attempt.status);
           if (!signal?.aborted && !published && policy === 'refresh' && refresh === 0 && candidate.type === 'oauth') continue;
-          const more = index < candidates.length - 1;
+          if (!signal?.aborted && !published && policy === 'refresh' && attempt.status === 401 && candidate.type === 'oauth') {
+            refused.push(await refusedRequest(candidate, message));
+            if (more) break;
+            for (const start of deferred) yield start;
+            yield { ...failure, error: { ...failure.error, errorMessage: noAccountLeft(providerName, refused) } };
+            return;
+          }
           if (!signal?.aborted && !published && policy !== 'none' && more) { await failed(candidate, policy, attempt, message); break; }
           for (const start of deferred) yield start;
-          if (signal?.aborted || policy !== 'rotate') { yield failure; return; }
+          const moved = refused.length ? `${refusedSignInNote(providerName, refused, candidate)}\n\n` : '';
+          if (signal?.aborted || policy !== 'rotate') { yield moved ? { ...failure, error: { ...failure.error, errorMessage: `${moved}${message}` } } : failure; return; }
           // Published output is never replayed on another account: the turn ends here, and the account stays out so
           // the next request (pi's own retry of this turn, or the next turn) starts on another one.
           const out = await failed(candidate, policy, attempt, message);
           const note = `${out.label} ran out until ${new Date(out.until).toUTCString()}${published && more ? '; the next turn uses another account' : ''}.`;
-          yield { ...failure, error: { ...failure.error, errorMessage: message ? `${message}\n\n${note}` : note } };
+          yield { ...failure, error: { ...failure.error, errorMessage: `${moved}${message ? `${message}\n\n${note}` : note}` } };
           return;
         }
       }
     }
     async function resultAttempts<T extends { stopReason: string; errorMessage?: string }>(model: AnyModel, invoke: (credential: ResolvedCredential, attempt: Attempt) => Promise<T>, signal?: AbortSignal): Promise<T> {
       canonical(model);
-      const candidates = await orderedAccounts({ ...options, provider: model.provider, model: model.id });
+      const providerName = providerById.get(model.provider)?.name ?? model.provider;
+      const candidates = await orderedAccounts({ ...options, provider: model.provider, providerName, model: model.id });
+      // Accounts whose sign-in the provider refused during this request; the request moved on from each.
+      const refused: CredentialAccount[] = [];
       for (let index = 0; index < candidates.length; index++) {
         const candidate = candidates[index]!;
+        const more = index < candidates.length - 1;
         for (let refresh = 0; refresh < 2; refresh++) {
           let credential: ResolvedCredential;
           try { credential = await resolveCredential(model.provider, candidate.id, refresh === 1, signal); }
           catch (error) {
-            if (refresh === 1 && index < candidates.length - 1 && !signal?.aborted) break;
+            const signIn = signal?.aborted ? undefined : await refusedSignIn(candidate);
+            if (signIn !== undefined) {
+              refused.push({ ...candidate, signIn });
+              if (more) break;
+              throw new Error(noAccountLeft(providerName, refused));
+            }
+            if (refresh === 1 && more && !signal?.aborted) break;
             throw error;
           }
           await pins.write(model.provider, { credentialId: candidate.id });
@@ -268,11 +309,18 @@ export async function createVaultModels(options: VaultModelsOptions): Promise<Va
           try { result = await invoke(credential, attempt); }
           finally { attempt.release(); }
           if (result.stopReason !== 'error') return result;
-          const policy = classifyAuthFailure(result.errorMessage ?? '', attempt.status);
-          if (signal?.aborted || policy === 'none') return result;
+          const message = result.errorMessage ?? '';
+          const policy = classifyAuthFailure(message, attempt.status);
+          const moved = refused.length ? `${refusedSignInNote(providerName, refused, candidate)}\n\n` : '';
+          if (signal?.aborted || policy === 'none') return moved ? { ...result, errorMessage: `${moved}${message}` } : result;
           if (policy === 'refresh' && refresh === 0 && candidate.type === 'oauth') continue;
-          await failed(candidate, policy, attempt, result.errorMessage ?? '');
-          if (index === candidates.length - 1) return result;
+          if (policy === 'refresh' && attempt.status === 401 && candidate.type === 'oauth') {
+            refused.push(await refusedRequest(candidate, message));
+            if (more) break;
+            return { ...result, errorMessage: noAccountLeft(providerName, refused) };
+          }
+          await failed(candidate, policy, attempt, message);
+          if (!more) return moved ? { ...result, errorMessage: `${moved}${message}` } : result;
           break;
         }
       }

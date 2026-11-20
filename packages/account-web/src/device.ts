@@ -51,22 +51,81 @@ const DB_NAME = 'gitspace-device';
 const STORE = 'device';
 const KEY = 'current';
 
-async function withStore<T>(mode: IDBTransactionMode, run: (store: IDBObjectStore) => IDBRequest<T>): Promise<T> {
-  const opened = Promise.withResolvers<IDBDatabase>();
-  const openRequest = indexedDB.open(DB_NAME, 1);
-  openRequest.onupgradeneeded = () => openRequest.result.createObjectStore(STORE);
-  openRequest.onsuccess = () => opened.resolve(openRequest.result);
-  openRequest.onerror = () => opened.reject(openRequest.error);
-  const database = await opened.promise;
-  const { promise, resolve, reject } = Promise.withResolvers<T>();
-  const request = run(database.transaction(STORE, mode).objectStore(STORE));
-  request.onsuccess = () => { database.close(); resolve(request.result); };
-  request.onerror = () => { database.close(); reject(request.error); };
-  return promise;
+/** How long IndexedDB may take to open and answer before this browser's identity counts as unreadable for now. */
+export const DEVICE_STORAGE_TIMEOUT_MS = 5_000;
+
+/** IndexedDB did not open or did not answer in time: whether this browser holds an identity is unknown, not "no". */
+export class DeviceStorageError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'DeviceStorageError';
+  }
 }
 
-export function loadDevice(): Promise<BrowserDevice | null> {
-  return withStore<BrowserDevice | undefined>('readonly', (store) => store.get(KEY)).then((device) => device ?? null).catch(() => null);
+const STORAGE_UNAVAILABLE = 'This browser does not let GitSpace store its sign-in key. Allow website data for this site, then try again.';
+const STORAGE_TIMED_OUT = 'This browser’s storage did not answer. Close other GitSpace tabs and try again; if it keeps happening, clear this site’s website data in your browser settings.';
+
+/** Runs one request on the device store. Opening fails or stalls past DEVICE_STORAGE_TIMEOUT_MS as DeviceStorageError;
+ * a failed request rejects with its own error. */
+async function withStore<T>(mode: IDBTransactionMode, run: (store: IDBObjectStore) => IDBRequest<T>): Promise<T> {
+  if (typeof indexedDB === 'undefined') throw new DeviceStorageError(STORAGE_UNAVAILABLE);
+  const { promise, resolve, reject } = Promise.withResolvers<T>();
+  const opened: { database?: IDBDatabase } = {};
+  let finished = false;
+  const timer = setTimeout(() => reject(new DeviceStorageError(STORAGE_TIMED_OUT)), DEVICE_STORAGE_TIMEOUT_MS);
+  try {
+    const openRequest = indexedDB.open(DB_NAME, 1);
+    openRequest.onupgradeneeded = () => openRequest.result.createObjectStore(STORE);
+    openRequest.onerror = () => reject(new DeviceStorageError(STORAGE_UNAVAILABLE));
+    openRequest.onsuccess = () => {
+      // An open that answers after the deadline is closed unused.
+      if (finished) { openRequest.result.close(); return; }
+      const database = openRequest.result;
+      opened.database = database;
+      try {
+        const request = run(database.transaction(STORE, mode).objectStore(STORE));
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      } catch (error) {
+        reject(error);
+      }
+    };
+  } catch {
+    reject(new DeviceStorageError(STORAGE_UNAVAILABLE));
+  }
+  try {
+    return await promise;
+  } finally {
+    finished = true;
+    clearTimeout(timer);
+    opened.database?.close();
+  }
+}
+
+const storedDeviceSchema = z.object({
+  deviceId: z.string().min(1), label: z.string(), publicKey: z.string(), enrolledAt: z.number(),
+  userId: z.string().min(1), enrollUrl: z.string().min(1), canDelegate: z.boolean(),
+  keyPair: z.object({ privateKey: z.instanceof(CryptoKey), publicKey: z.instanceof(CryptoKey) }),
+});
+
+/**
+ * This browser's enrolled device, or null when it holds none. A record that does not read back as a whole device
+ * with its keys is erased and answers null. Rejects with DeviceStorageError when IndexedDB does not open or answer.
+ */
+export async function loadDevice(): Promise<BrowserDevice | null> {
+  let stored: unknown;
+  try {
+    stored = await withStore<unknown>('readonly', (store) => store.get(KEY));
+  } catch (error) {
+    if (error instanceof DeviceStorageError) throw error;
+    stored = null;
+  }
+  if (stored === undefined) return null;
+  const device = storedDeviceSchema.safeParse(stored);
+  if (device.success) return device.data;
+  // A record left behind is read and erased again on the next load.
+  await clearDevice().catch(() => undefined);
+  return null;
 }
 
 export function clearDevice(): Promise<void> {

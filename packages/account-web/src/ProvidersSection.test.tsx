@@ -146,6 +146,14 @@ describe('ProvidersSection', () => {
     expect(card('openai-codex').textContent).toContain('1 of 3 accounts in use');
   });
 
+  it('marks an account whose sign-in the provider refused as out until it is signed in again', async () => {
+    const refused = account({ id: 'refused', label: 'refused@example.com', outReason: 'The provider refused its sign-in (HTTP 401, authentication_error)' });
+    await render({ providers: [provider({ ...codex, hasAuth: true, accounts: [refused, account({ id: 'working', label: 'working@example.com' })] })] });
+    expect(row('refused').textContent).toContain('The provider refused its sign-in (HTTP 401, authentication_error). Inference skips this account until it is signed in again.');
+    expect(row('refused').textContent).not.toContain('In use');
+    expect(card('openai-codex').textContent).toContain('1 of 2 accounts in use');
+  });
+
   it("acts on the account whose menu was used: turning it off or on, and removing it only after confirming", async () => {
     const onDisableAccount = vi.fn(async (): Promise<void> => undefined);
     const onEnableAccount = vi.fn(async (): Promise<void> => undefined);

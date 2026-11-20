@@ -79,7 +79,7 @@ export function GoalSurface({ overview, scope, controls, journalEntries, threads
   const workspace = scope?.kind === 'workspace' ? scope : null;
   const phase = workspace?.phase ?? goal?.phase ?? null;
   const graphs = useContext(ProjectGraphsContext);
-  const pullRequests = workspace ? graphs[workspace.projectId]?.pullRequests[workspace.id] ?? [] : [];
+  const pullRequests = workspace ? graphs[workspace.projectId]?.pullRequests?.[workspace.id] ?? [] : [];
   const staging = useComposerStaging();
   const blockActions = useMemo(() => workspaceBlockActions({ staging, setAcceptance: onSetAcceptance, openGuideSection: onOpenGuideSection }), [staging, onSetAcceptance, onOpenGuideSection]);
   const plan = controls?.plan ?? null;

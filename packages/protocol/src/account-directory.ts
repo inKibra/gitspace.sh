@@ -2,14 +2,16 @@ import { z } from 'zod';
 import type { InputOf } from 'result-rpc';
 import { streamCursorSchema, streamEventSchema } from '@gitspace/protocol-sync';
 import { cloudProjectOperationSchema, cloudProjectSummarySchema, cloudWorkspaceDefinitionSchema } from './project-authority.js';
-import { WorkspaceStatusSummarySchema } from '@gitspace/protocol-workspace';
+import { emptyRelations, WorkspaceRelationsSchema, WorkspaceStatusSummarySchema } from '@gitspace/protocol-workspace';
 import { FleetMachineViewCodec, SpacePlacementViewCodec, type SpacePlacementView } from './rpc-contract.js';
 
 export type FleetMachineDefinition = InputOf<typeof FleetMachineViewCodec>;
 export const accountDirectorySnapshotSchema = z.object({
   projects: z.array(cloudProjectSummarySchema),
-  /** `cloudRuntime`: the workspace lives in its cloud runtime (machines only cache it), so legacy placements do not describe it. */
-  workspaces: z.array(cloudWorkspaceDefinitionSchema.extend({ cloudRuntime: z.boolean().default(false) })),
+  /** `cloudRuntime`: the workspace lives in its cloud runtime (machines only cache it), so legacy placements do not describe it.
+   * `relations`: what it is stacked on, waits on and is related to, as its project holds them (empty in copies saved
+   * before the directory carried them). */
+  workspaces: z.array(cloudWorkspaceDefinitionSchema.extend({ cloudRuntime: z.boolean().default(false), relations: WorkspaceRelationsSchema.default(emptyRelations) })),
   placements: z.array(z.custom<SpacePlacementView>((value) => SpacePlacementViewCodec.decode(value).ok)),
   machines: z.array(z.custom<FleetMachineDefinition>((value) => FleetMachineViewCodec.decode(value).ok)),
   projectRevisions: z.record(z.string(), streamCursorSchema),

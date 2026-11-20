@@ -320,6 +320,49 @@ describe('Cloud inference credential authority', () => {
     expect((await vault.cloudResolveCredential({ profileId: 'default', credentialId: first.id })).credential).toMatchObject({ access: 'updated-access', orgId: 'org-a' });
   });
 
+  it('takes an account whose token refresh the provider refuses out until it is signed in again or a refresh succeeds', async () => {
+    const vault = env.CREDENTIALS.getByName(await seedVault([]));
+    let refused = true;
+    network.use(
+      http.post('https://platform.claude.com/v1/oauth/token', () => HttpResponse.json({
+        access_token: 'signed-in-access', refresh_token: 'signed-in-refresh', expires_in: 3600,
+        account: { uuid: 'person', email_address: 'person@example.com' }, organization: { uuid: 'org' },
+      })),
+      http.post('https://api.anthropic.com/v1/oauth/token', () => refused
+        ? HttpResponse.json({ error: 'invalid_grant', error_description: 'Refresh token revoked' }, { status: 400 })
+        : HttpResponse.json({ access_token: 'refreshed-access', refresh_token: 'rotated-refresh', expires_in: 3600 })),
+    );
+    async function login() {
+      const { flowId } = await vault.cloudLoginStart({ profileId: 'default', providerId: 'anthropic' });
+      const pending = await vault.cloudLoginEvents({ profileId: 'default', flowId });
+      const auth = pending.events.find(event => event.type === 'auth');
+      const prompt = pending.events.find(event => event.type === 'prompt');
+      if (!auth || !prompt) throw new Error('Login must expose consent and code entry');
+      await vault.cloudLoginRespond({ profileId: 'default', flowId, promptId: prompt.promptId, value: `code#${new URL(auth.url).searchParams.get('state')}` });
+      expect((await vault.cloudLoginEvents({ profileId: 'default', flowId })).events).toContainEqual(expect.objectContaining({ type: 'done', ok: true }));
+    }
+    await login();
+    const id = (await vault.cloudCredentialAccounts('default'))[0]!.id;
+    const state = async () => ({
+      signIn: (await vault.cloudCredentialAccounts('default'))[0]?.signIn ?? null,
+      row: (await vault.cloudProviders('default')).find(provider => provider.id === 'anthropic')!.accounts.find(account => account.id === id),
+    });
+    const refusedRefresh = () => runInDurableObject(vault, instance => expect(instance.cloudResolveCredential({ profileId: 'default', credentialId: id, forceRefresh: true })).rejects.toThrow());
+    await refusedRefresh();
+    expect(await state()).toMatchObject({ signIn: 'HTTP 400, invalid_grant', row: { outUntil: null, outReason: 'The provider refused its sign-in (HTTP 400, invalid_grant)' } });
+    expect(await orderedAccounts({ profileId: 'default', provider: 'anthropic', providerName: 'Anthropic', workspaceId: 'workspace', vault: selection(vault) }).catch((error: Error) => error.message))
+      .toBe('No Anthropic account could be used: person@example.com was refused (HTTP 400, invalid_grant). Sign it in again in Inference → Providers.');
+    // Signing the account in again ends the refusal.
+    await login();
+    expect(await state()).toMatchObject({ signIn: null, row: { outUntil: null, outReason: null } });
+    // So does a later refresh the provider accepts.
+    await refusedRefresh();
+    expect((await state()).signIn).toBe('HTTP 400, invalid_grant');
+    refused = false;
+    expect((await vault.cloudResolveCredential({ profileId: 'default', credentialId: id, forceRefresh: true })).credential).toMatchObject({ access: 'refreshed-access' });
+    expect(await state()).toMatchObject({ signIn: null, row: { outReason: null } });
+  });
+
   it('blocks new legacy Codex sign-ins without changing stored credentials', async () => {
     const vault = env.CREDENTIALS.getByName(await seedVault([{ id: 'kept', provider: 'openai-codex', access: 'kept-access', accountId: 'kept-account' }]));
     const before = await vault.cloudCredentialAccounts('default');

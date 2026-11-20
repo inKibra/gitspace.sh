@@ -1413,9 +1413,9 @@ export const ProviderAccountCodec = wire.object({
   label: wire.string,
   email: wire.nullable(wire.string),
   disabled: wire.boolean,
-  /** Inference skips this account until then (ISO time): a provider limit or failure cooldown, or a usage window that is used up. Null when it is usable now. */
+  /** Inference skips this account until then (ISO time): a provider limit or failure cooldown, or a usage window that is used up. Null when it is usable now, or when it is out until it is signed in again (`outReason` set). */
   outUntil: wire.nullable(wire.string),
-  /** Why it is skipped until `outUntil`. */
+  /** Why it is skipped: until `outUntil`, or, with `outUntil` null, until it is signed in again (its provider refused its sign-in). */
   outReason: wire.nullable(wire.string),
 });
 export type ProviderAccount = InputOf<typeof ProviderAccountCodec>;

@@ -47,7 +47,7 @@ import { useRuntimeLaunch } from './useRuntimeLaunch.js';
 import type { ResourceRequest } from './ResourceNavigation.js';
 import { loadDriveArtifact, loadInspectorResource } from './resource-content.js';
 import { artifactUploadRpcClient } from './artifact-upload-rpc.js';
-import { SynchronizationProvider, useAccountSettings, useAccountGitIdentity, useAccountRuntimeConfiguration, useAccountMachines, useAccountCloudImages, useAccountProjects, useEnvironmentSynchronization, useEventRefresh, useProjectChanges } from './SynchronizationProvider.js';
+import { SynchronizationProvider, useAccountDirectorySnapshot, useAccountSettings, useAccountGitIdentity, useAccountRuntimeConfiguration, useAccountMachines, useAccountCloudImages, useAccountProjects, useEnvironmentSynchronization, useEventRefresh, useProjectChanges } from './SynchronizationProvider.js';
 import { liveTicks, useLiveChanges } from './live-notices.js';
 import { accountLiveKey } from '@gitspace/protocol/live-notice';
 import { ProjectGraphsContext, useProjectGraphs } from './sidebar/project-graph.js';
@@ -473,7 +473,10 @@ function AccountFrame({ children }: { children: ReactNode }) {
   // A link naming the project's own id as its workspace opens the base space, which the shell selects as null.
   const live = route === 'agent' && runtimeSidebar?.selected?.projectId === projectId && runtimeSidebar.selected.workspaceId === (workspaceId === projectId ? null : workspaceId) ? runtimeSidebar : null;
   const operations = useAccountOperations();
-  const { graphs, readers: graphReaders, refresh: refreshGraph } = useProjectGraphs(projectValues.filter((project) => project.lifecycle !== 'archived' && project.lifecycle !== 'deleting').map((project) => project.id));
+  const graphProjects = useMemo(() => projectValues.filter((project) => project.lifecycle !== 'archived' && project.lifecycle !== 'deleting'), [projectValues]);
+  const directoryWorkspaces = useAccountDirectorySnapshot().value?.workspaces;
+  const graphWorkspaces = useMemo(() => directoryWorkspaces ?? [], [directoryWorkspaces]);
+  const { graphs, readers: graphReaders, refresh: refreshGraph } = useProjectGraphs(graphProjects, graphWorkspaces);
   const sidebarProjects: SidebarProject[] = projectValues.map((project) => ({
     id: project.id, name: project.name, lifecycle: project.lifecycle, remote: project.remote,
     ...directory[project.id], workspaces: directory[project.id]?.workspaces ?? [],
@@ -1167,7 +1170,8 @@ type DeviceGateState =
   | { status: 'loading' }
   | { status: 'enrolling' }
   | { status: 'enrolled' }
-  | { status: 'unenrolled'; error: string | null };
+  | { status: 'unenrolled'; error: string | null }
+  | { status: 'unavailable'; error: string };
 
 /** Reads what this browser saved of the account's shell and of the workspace the URL opens, before the first enrolled
  * render, so both paint before any request answers. */
@@ -1181,7 +1185,8 @@ function openSavedCopies(device: BrowserDevice): Promise<void> {
 /**
  * Nothing renders until this browser holds an enrolled device: `#enroll=`
  * redeems an invite, a stored device passes straight through, and a
- * revoked or expired device drops back to this screen.
+ * revoked or expired device drops back to this screen. Storage that fails or
+ * stalls ends the check with a retry instead.
  */
 function DeviceGate({ children }: { children: ReactNode }) {
   const [state, setState] = useState<DeviceGateState>({ status: 'loading' });
@@ -1244,25 +1249,35 @@ function DeviceGate({ children }: { children: ReactNode }) {
       enrolling.current = false;
     }
   };
+  const check = async (): Promise<void> => {
+    setState({ status: 'loading' });
+    try {
+      const device = await currentDevice();
+      if (device) await openSavedCopies(device);
+      setState(device ? { status: 'enrolled' } : { status: 'unenrolled', error: null });
+    } catch (error) {
+      setState({ status: 'unavailable', error: error instanceof Error ? error.message : 'This browser’s storage did not answer.' });
+    }
+  };
   useEffect(() => {
     if (!initialized.current) {
       initialized.current = true;
       const url = new URL(window.location.href);
       const token = new URLSearchParams(url.hash.slice(1)).get('enroll') ?? url.searchParams.get('enroll');
       if (token) void redeem(token);
-      else void currentDevice().then(async (device) => {
-        if (device) await openSavedCopies(device);
-        setState(device ? { status: 'enrolled' } : { status: 'unenrolled', error: null });
-      });
+      else void check();
     }
     const onRejected = (event: Event): void => {
       const code = event instanceof CustomEvent ? String(event.detail?.code ?? '') : '';
-      setState({ status: 'unenrolled', error: code === 'SIGNED_OUT' ? 'You signed out of this browser.' : 'This browser’s access ended. Use your recovery key or a new enrollment link to reconnect.' });
+      setState({ status: 'unenrolled', error: code === 'SIGNED_OUT' ? 'You signed out of this browser.' : 'This browser’s access ended. Sign in again to reconnect it.' });
     };
     window.addEventListener(DEVICE_REJECTED_EVENT, onRejected);
     return () => window.removeEventListener(DEVICE_REJECTED_EVENT, onRejected);
   }, []);
   if (state.status === 'enrolled') return <>{children}</>;
+  if (state.status === 'unavailable') {
+    return <main className="flex h-dvh items-center justify-center bg-background p-6"><EmptyState title="This browser could not be checked" description={state.error} action={<Button variant="primary" onClick={() => { void check(); }}>Try again</Button>} /></main>;
+  }
   if (state.status === 'loading' || state.status === 'enrolling') {
     return <main className="flex h-dvh items-center justify-center bg-background"><EmptyState icon={<ThinkingIndicator />} title={state.status === 'enrolling' ? 'Connecting this browser…' : 'Checking this browser…'} description="This browser gets its own revocable key. No local machine is required." /></main>;
   }

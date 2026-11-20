@@ -2,13 +2,15 @@ import { z } from 'zod';
 import { cloudProjectOperationSchema, cloudProjectSummarySchema, cloudWorkspaceDefinitionSchema, type CloudProjectOperation, type CloudWorkspaceDefinition } from '@gitspace/protocol/project-authority';
 import { accountDirectorySnapshotSchema, type AccountDirectorySnapshot } from '@gitspace/protocol/account-directory';
 import { streamCursorSchema } from '@gitspace/protocol-sync';
-import { SpaceAuthorityRecordSchema } from '@gitspace/protocol-workspace';
+import { emptyRelations, SpaceAuthorityRecordSchema, WorkspaceRelationsSchema, type WorkspaceRelations } from '@gitspace/protocol-workspace';
 import { RuntimeIdentitySchema } from '@gitspace/protocol-runtime';
 import type { CloudProjectSummary } from '@gitspace/protocol';
 import type { UserProjectIndexDO } from './project-authority.js';
 
 export const directoryPublicationSchema = z.discriminatedUnion('source', [
-  z.object({ source: z.literal('project'), cursor: streamCursorSchema, project: cloudProjectSummarySchema, workspaces: z.array(cloudWorkspaceDefinitionSchema), operations: z.array(cloudProjectOperationSchema).default([]) }),
+  z.object({ source: z.literal('project'), cursor: streamCursorSchema, project: cloudProjectSummarySchema, workspaces: z.array(cloudWorkspaceDefinitionSchema), operations: z.array(cloudProjectOperationSchema).default([]),
+    /** Each workspace's relations by workspace id; a workspace without a row has none. */
+    relations: z.record(z.string(), WorkspaceRelationsSchema) }),
   /** `runtime` is set once the space has cloud runtime state; such a workspace lives in the cloud and its legacy placement is ignored. */
   z.object({ source: z.literal('space'), cursor: streamCursorSchema, state: SpaceAuthorityRecordSchema.nullable(), runtime: RuntimeIdentitySchema.nullable().default(null) }),
   z.object({ source: z.literal('fleet'), cursor: streamCursorSchema, machines: accountDirectorySnapshotSchema.shape.machines }),
@@ -31,10 +33,14 @@ export class DirectoryPublisher {
   version(): number {
     return this.ctx.storage.sql.exec<{ cursor: number }>('SELECT cursor FROM directory_version WHERE id=1').toArray()[0]?.cursor ?? 0;
   }
+  /** This source's entry under a new version, newer than every entry it published before. */
+  next<Source extends DirectorySource>(source: Source): Source & { cursor: number } {
+    const cursor = streamCursorSchema.parse(this.ctx.storage.sql.exec<{ cursor: number }>('INSERT INTO directory_version(id,cursor) VALUES(1,1) ON CONFLICT(id) DO UPDATE SET cursor=cursor+1 RETURNING cursor').one().cursor);
+    return { ...source, cursor };
+  }
   /** After the source's change committed. */
   publish(source: DirectorySource): void {
-    const cursor = streamCursorSchema.parse(this.ctx.storage.sql.exec<{ cursor: number }>('INSERT INTO directory_version(id,cursor) VALUES(1,1) ON CONFLICT(id) DO UPDATE SET cursor=cursor+1 RETURNING cursor').one().cursor);
-    const publication: DirectoryPublication = { ...source, cursor };
+    const publication = this.next(source);
     // Never fails the source's change: the next change sends the whole entry again.
     this.ctx.waitUntil(Promise.resolve().then(() => (this.env.USER_PROJECTS as DurableObjectNamespace<UserProjectIndexDO>).getByName(this.env.ACCOUNT_ID).publishDirectory(publication))
       .then(() => undefined, (error: unknown) => console.error(JSON.stringify({ event: 'directory_publication_failed', source: source.source, message: error instanceof Error ? error.message : String(error) }))));
@@ -51,6 +57,10 @@ export class AccountDirectoryProjection {
     return this.storage.sql.exec('SELECT value FROM directory_metadata WHERE name=\'hydrated\'').toArray().length > 0;
   }
   finishHydration(): void { this.storage.sql.exec('INSERT OR IGNORE INTO directory_metadata(name,value) VALUES(\'hydrated\',1)'); }
+  /** Projects whose entry was stored before entries carried relations. */
+  projectsWithoutRelations(): string[] {
+    return this.storage.sql.exec<{ source_id: string }>("SELECT source_id FROM directory_sources WHERE source='project' AND json_extract(value_json,'$.relations') IS NULL").toArray().map((row) => row.source_id);
+  }
   apply(publication: DirectoryPublication): boolean {
     const id = publication.source === 'project' ? publication.project.id : publication.source === 'space' ? publication.state?.spaceId ?? publication.runtime?.workspaceId : 'fleet';
     if (id === undefined) return false;
@@ -65,6 +75,7 @@ export class AccountDirectoryProjection {
       .map((row) => JSON.parse(row.value_json) as DirectoryPublication);
     const definitions: CloudWorkspaceDefinition[] = [];
     const operations: CloudProjectOperation[] = [];
+    const relations: Record<string, WorkspaceRelations> = {};
     const projectRevisions: Record<string, number> = Object.fromEntries(visible.map((project) => [project.id, 0]));
     let machines: AccountDirectorySnapshot['machines'] = [];
     for (const source of sources) {
@@ -74,11 +85,13 @@ export class AccountDirectoryProjection {
         definitions.push(...source.workspaces.filter((workspace) => workspace.projectId === source.project.id));
         // Rows stored before `operations` existed decode without it.
         operations.push(...(source.operations ?? []));
+        // Rows stored before `relations` existed decode without it, until hydration reads their project again.
+        Object.assign(relations, source.relations);
       }
     }
     // Rows stored before `runtime` existed decode without it.
     const cloud = new Set<string>(sources.flatMap((source) => source.source === 'space' && source.runtime ? [source.runtime.workspaceId] : []));
-    const workspaces = definitions.map((workspace) => ({ ...workspace, cloudRuntime: cloud.has(workspace.id) }));
+    const workspaces = definitions.map((workspace) => ({ ...workspace, cloudRuntime: cloud.has(workspace.id), relations: relations[workspace.id] ?? emptyRelations() }));
     const bySpace = new Map(workspaces.map((workspace) => [workspace.id, workspace]));
     const byMachine = new Map(machines.map((machine) => [machine.id, machine]));
     const placements: AccountDirectorySnapshot['placements'] = [];

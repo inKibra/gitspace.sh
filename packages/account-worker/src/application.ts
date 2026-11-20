@@ -285,16 +285,21 @@ function accountLabel(id: string, account: SignedInAccount | null): string {
 const ACCOUNT_MODELS_TTL_MS = 6 * 3_600_000;
 /** How soon an account whose model list read failed is read again. */
 const ACCOUNT_MODELS_RETRY_MS = 5 * 60_000;
-type AccountHealthRow = { credential_id: string; cooldown_until: number; cooldown_reason: string | null; report_json: string | null };
-/** An account's latest usage observation, and until when inference skips it and why: the later of a failure's
- * cooldown and the reset of a usage window it has used up. */
-function accountHealth(row: AccountHealthRow | undefined, now: number): { usage?: UsageObservation; out: { until: number; reason: string } | null } {
-  if (!row) return { out: null };
+/** Token-endpoint statuses that refuse the grant itself (`invalid_grant`, `authentication_error`, `permission_error`):
+ * the account needs a new sign-in. */
+const SIGN_IN_REFUSALS: Readonly<Record<string, true>> = { 400: true, 401: true, 403: true };
+/** `signin_reason`: how the provider refused the account's sign-in (`HTTP 401, authentication_error`); inference skips
+ * it until it is signed in again or a token refresh succeeds. Absent from a table no write has migrated yet. */
+type AccountHealthRow = { credential_id: string; cooldown_until: number; cooldown_reason: string | null; report_json: string | null; signin_reason?: string | null };
+/** An account's latest usage observation, until when inference skips it and why: the later of a failure's cooldown and
+ * the reset of a usage window it has used up; and how the provider refused its sign-in, which has no end time. */
+function accountHealth(row: AccountHealthRow | undefined, now: number): { usage?: UsageObservation; out: { until: number; reason: string } | null; signIn: string | null } {
+  if (!row) return { out: null, signIn: null };
   const usage = row.report_json ? usageObservation(providerUsageReportSchema.parse(JSON.parse(row.report_json))) : undefined;
   const out = usage?.exhausted && usage.exhausted.until > row.cooldown_until
     ? { until: usage.exhausted.until, reason: `${usage.exhausted.label} usage limit reached` }
     : { until: row.cooldown_until, reason: row.cooldown_reason ?? 'The provider refused this account' };
-  return { ...(usage ? { usage } : {}), out: out.until > now ? out : null };
+  return { ...(usage ? { usage } : {}), out: out.until > now ? out : null, signIn: row.signin_reason ?? null };
 }
 
 
@@ -1769,6 +1774,7 @@ export class CredentialVaultDO extends BudgetedDurableObject {
     const table = scoped ? 'inference_credentials' : 'oauth_credentials';
     const revision = (this.credential(id, profileId)?.revision ?? 0) + 1;
     const sealed = await sealVaultCredential(credential, credentialProtocolBase64.decode(config.vault_key), id, revision);
+    if (scoped) this.ensureCloudAccountHealth();
     this.ctx.storage.transactionSync(() => {
       if (scoped !== this.inferenceCutover()) throw new Error('Credential scope migrated; retry through profile management');
       this.ctx.storage.sql.exec(`
@@ -1779,6 +1785,8 @@ export class CredentialVaultDO extends BudgetedDurableObject {
           expires_at = excluded.expires_at, state = 'active', updated_at = excluded.updated_at, account_json = excluded.account_json
           WHERE ${table}.profile_id = excluded.profile_id
       `, id, credential.provider, sealed, revision, credential.type === 'api_key' ? 0 : credential.expires, new Date().toISOString(), profileId, JSON.stringify(credentialAccount(credential)));
+      // A new sign-in (or key) for the account ends a refusal of its old one.
+      if (scoped) this.ctx.storage.sql.exec('UPDATE cloud_account_health SET signin_reason = NULL WHERE profile_id = ? AND credential_id = (SELECT CAST(rowid AS TEXT) FROM inference_credentials WHERE id = ?)', profileId, id);
       this.credentialsChanged(profileId);
     });
     return revision;
@@ -1817,13 +1825,14 @@ export class CredentialVaultDO extends BudgetedDurableObject {
       assignmentRevision: assignment.revision,
       catalogJson: stored?.rows_json ?? null,
       accounts: accounts.map(account => {
-        const { usage, out } = recorded.has('cloud_account_health') ? accountHealth(this.ctx.storage.sql.exec<AccountHealthRow>('SELECT credential_id, cooldown_until, cooldown_reason, report_json FROM cloud_account_health WHERE profile_id = ? AND credential_id = ?', assignment.profile_id, String(account.row_id)).toArray()[0], now) : { usage: undefined, out: null };
+        // `SELECT *`: a passive read never migrates, so the table may predate a column.
+        const { usage, out, signIn } = recorded.has('cloud_account_health') ? accountHealth(this.ctx.storage.sql.exec<AccountHealthRow>('SELECT * FROM cloud_account_health WHERE profile_id = ? AND credential_id = ?', assignment.profile_id, String(account.row_id)).toArray()[0], now) : { usage: undefined, out: null, signIn: null };
         const models = listed.get(String(account.row_id))?.map(model => model.id);
         return {
           id: String(account.row_id), provider: account.provider, revision: account.revision,
           type: account.expires_at === 0 ? 'api_key' : 'oauth',
           expiresAt: account.expires_at === 0 ? null : account.expires_at, identity: null,
-          ...(out ? { cooldownUntil: out.until } : {}), ...(usage ? { usage } : {}), ...(models ? { models } : {}),
+          ...(out ? { cooldownUntil: out.until } : {}), ...(usage ? { usage } : {}), ...(models ? { models } : {}), ...(signIn ? { signIn } : {}),
         };
       }),
     };
@@ -1851,9 +1860,9 @@ export class CredentialVaultDO extends BudgetedDurableObject {
     const now = Date.now();
     const result = await Promise.all(rows.filter(row => provider === undefined || row.provider === provider).map(async row => {
       const credential = await openVaultCredential(row, credentialProtocolBase64.decode(config.vault_key));
-      const { usage, out } = accountHealth(this.ctx.storage.sql.exec<AccountHealthRow>('SELECT credential_id, cooldown_until, cooldown_reason, report_json FROM cloud_account_health WHERE profile_id = ? AND credential_id = ?', profileId, String(row.row_id)).toArray()[0], now);
+      const { usage, out, signIn } = accountHealth(this.ctx.storage.sql.exec<AccountHealthRow>('SELECT credential_id, cooldown_until, cooldown_reason, report_json, signin_reason FROM cloud_account_health WHERE profile_id = ? AND credential_id = ?', profileId, String(row.row_id)).toArray()[0], now);
       const models = listed.get(String(row.row_id))?.map(model => model.id);
-      return { id: String(row.row_id), provider: row.provider, type: credential.type === 'api_key' ? 'api_key' as const : 'oauth' as const, revision: row.revision, expiresAt: credential.type === 'api_key' ? null : credential.expires, identity: credentialIdentity(credential), ...(out ? { cooldownUntil: out.until } : {}), ...(usage ? { usage } : {}), ...(models ? { models } : {}) };
+      return { id: String(row.row_id), provider: row.provider, type: credential.type === 'api_key' ? 'api_key' as const : 'oauth' as const, revision: row.revision, expiresAt: credential.type === 'api_key' ? null : credential.expires, identity: credentialIdentity(credential), label: accountLabel(String(row.row_id), credentialAccount(credential)), ...(out ? { cooldownUntil: out.until } : {}), ...(usage ? { usage } : {}), ...(models ? { models } : {}), ...(signIn ? { signIn } : {}) };
     }));
     this.assertProfileAccess(profileId);
     return result;
@@ -1892,7 +1901,7 @@ export class CredentialVaultDO extends BudgetedDurableObject {
     const config = this.config();
     if (!config) throw new Error('Vault is not configured');
     this.ensureCloudAccountHealth();
-    const health = new Map(this.ctx.storage.sql.exec<AccountHealthRow>('SELECT credential_id, cooldown_until, cooldown_reason, report_json FROM cloud_account_health WHERE profile_id = ?', profileId).toArray().map(row => [row.credential_id, row]));
+    const health = new Map(this.ctx.storage.sql.exec<AccountHealthRow>('SELECT credential_id, cooldown_until, cooldown_reason, report_json, signin_reason FROM cloud_account_health WHERE profile_id = ?', profileId).toArray().map(row => [row.credential_id, row]));
     const now = Date.now();
     const rows = this.ctx.storage.sql.exec<ProfileCredentialRow & { account_json: string | null }>('SELECT rowid AS row_id, id, provider, sealed_json, revision, expires_at, state, updated_at, account_json FROM inference_credentials WHERE profile_id = ? ORDER BY rowid', profileId).toArray();
     const accounts = await Promise.all(rows.map(async row => {
@@ -1917,8 +1926,10 @@ export class CredentialVaultDO extends BudgetedDurableObject {
         authKind: active.some(account => account.type === 'oauth') ? 'oauth' : active.length ? 'api_key' : 'none',
         hasAuth: active.length > 0, source: active.length ? 'Inference profile' : null, hasUsage: ['anthropic', 'openai-codex', 'google-antigravity'].includes(provider),
         accounts: owned.map(account => {
-          const { out } = accountHealth(health.get(account.id), now);
-          return { id: account.id, type: account.type, label: accountLabel(account.id, account), email: account.email, disabled: account.disabled, outUntil: out ? new Date(out.until).toISOString() : null, outReason: out?.reason ?? null };
+          const { out, signIn } = accountHealth(health.get(account.id), now);
+          // A refused sign-in has no end time: the account is out until it is signed in again.
+          return { id: account.id, type: account.type, label: accountLabel(account.id, account), email: account.email, disabled: account.disabled,
+            outUntil: !signIn && out ? new Date(out.until).toISOString() : null, outReason: signIn ? `The provider refused its sign-in (${signIn})` : out?.reason ?? null };
         }) };
     });
   }
@@ -1972,26 +1983,41 @@ export class CredentialVaultDO extends BudgetedDurableObject {
   private cloudAccountHealthReady = false;
   private ensureCloudAccountHealth(): void {
     if (this.cloudAccountHealthReady) return;
-    this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS cloud_account_health(profile_id TEXT NOT NULL, credential_id TEXT NOT NULL, cooldown_until INTEGER NOT NULL DEFAULT 0, observed_at INTEGER NOT NULL DEFAULT 0, report_json TEXT, error TEXT, cooldown_reason TEXT, PRIMARY KEY(profile_id, credential_id))');
-    // Health recorded before a cooldown kept its reason.
-    if (!this.ctx.storage.sql.exec<{ name: string }>('PRAGMA table_info(cloud_account_health)').toArray().some(column => column.name === 'cooldown_reason')) this.ctx.storage.sql.exec('ALTER TABLE cloud_account_health ADD COLUMN cooldown_reason TEXT');
+    this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS cloud_account_health(profile_id TEXT NOT NULL, credential_id TEXT NOT NULL, cooldown_until INTEGER NOT NULL DEFAULT 0, observed_at INTEGER NOT NULL DEFAULT 0, report_json TEXT, error TEXT, cooldown_reason TEXT, signin_reason TEXT, PRIMARY KEY(profile_id, credential_id))');
+    // Health recorded before a cooldown kept its reason, or before a refused sign-in was kept.
+    const columns = new Set(this.ctx.storage.sql.exec<{ name: string }>('PRAGMA table_info(cloud_account_health)').toArray().map(column => column.name));
+    if (!columns.has('cooldown_reason')) this.ctx.storage.sql.exec('ALTER TABLE cloud_account_health ADD COLUMN cooldown_reason TEXT');
+    if (!columns.has('signin_reason')) this.ctx.storage.sql.exec('ALTER TABLE cloud_account_health ADD COLUMN signin_reason TEXT');
     this.cloudAccountHealthReady = true;
   }
 
+  /** The provider refused the account's sign-in, as `reason` says: inference skips it until it is signed in again or a
+   * token refresh succeeds. */
+  private refuseSignIn(profileId: string, credentialId: string, reason: string): void {
+    this.ensureCloudAccountHealth();
+    this.ctx.storage.sql.exec('INSERT INTO cloud_account_health(profile_id, credential_id, signin_reason) VALUES (?, ?, ?) ON CONFLICT(profile_id, credential_id) DO UPDATE SET signin_reason = excluded.signin_reason', profileId, credentialId, reason.slice(0, 200) || 'refused');
+  }
+
   /** Takes an account out until the provider's reset when it named one, up to a week (a used-up weekly window), else
-   * for a short backoff; a used-up usage window keeps it out longer. Answers its label and when it is usable again. */
+   * for a short backoff; a used-up usage window keeps it out longer. A refused sign-in (`signIn`) keeps it out until it
+   * is signed in again (`until` Infinity). Answers its label and when it is usable again. */
   async cloudCredentialFailure(input: AccountFailure): Promise<{ label: string; until: number }> {
     await this.ensureInference();
     this.assertProfileAccess(input.profileId);
     this.ensureCloudAccountHealth();
     const now = Date.now();
+    const account = this.ctx.storage.sql.exec<{ account_json: string | null }>('SELECT account_json FROM inference_credentials WHERE profile_id = ? AND rowid = ?', input.profileId, Number(input.credentialId)).toArray()[0]?.account_json;
+    const label = accountLabel(input.credentialId, account ? SignedInAccountSchema.parse(JSON.parse(account)) : null);
+    if (input.kind === 'signIn') {
+      this.refuseSignIn(input.profileId, input.credentialId, input.reason);
+      return { label, until: Number.POSITIVE_INFINITY };
+    }
     const until = input.until === undefined ? now + (input.kind === 'rotate' ? 60_000 : 5_000) : Math.max(now + 1_000, Math.min(input.until, now + 7 * 24 * 3_600_000));
     const reason = input.reason.slice(0, 500) || (input.kind === 'rotate' ? 'The provider refused this account' : 'The provider rejected its sign-in');
     this.ctx.storage.sql.exec(`INSERT INTO cloud_account_health(profile_id, credential_id, cooldown_until, cooldown_reason) VALUES (?, ?, ?, ?) ON CONFLICT(profile_id, credential_id) DO UPDATE SET
       cooldown_reason = CASE WHEN excluded.cooldown_until >= cooldown_until THEN excluded.cooldown_reason ELSE cooldown_reason END, cooldown_until = MAX(cooldown_until, excluded.cooldown_until)`, input.profileId, input.credentialId, until, reason);
     const { out } = accountHealth(this.ctx.storage.sql.exec<AccountHealthRow>('SELECT credential_id, cooldown_until, cooldown_reason, report_json FROM cloud_account_health WHERE profile_id = ? AND credential_id = ?', input.profileId, input.credentialId).toArray()[0], now);
-    const account = this.ctx.storage.sql.exec<{ account_json: string | null }>('SELECT account_json FROM inference_credentials WHERE profile_id = ? AND rowid = ?', input.profileId, Number(input.credentialId)).toArray()[0]?.account_json;
-    return { label: accountLabel(input.credentialId, account ? SignedInAccountSchema.parse(JSON.parse(account)) : null), until: out?.until ?? until };
+    return { label, until: out?.until ?? until };
   }
 
   async cloudSetApiKey(input: { profileId: string; providerId: string; key: string }): Promise<void> {
@@ -2487,7 +2513,16 @@ export class CredentialVaultDO extends BudgetedDurableObject {
       const credential = await openVaultCredential(row, vaultKey);
       this.assertProfileAccess(profileId);
       if (credential.type === 'api_key') return;
-      const refreshed = isUpstreamOAuthProvider(credential.provider) ? await refreshUpstreamCredential(credential.provider, credential) : await refreshCredential(credential);
+      let refreshed: StoredOAuthCredential;
+      try { refreshed = isUpstreamOAuthProvider(credential.provider) ? await refreshUpstreamCredential(credential.provider, credential) : await refreshCredential(credential); }
+      catch (error) {
+        // A provider that answered and refused the grant needs a new sign-in (an upstream refusal names no status); any
+        // other failure may pass on retry. Only the status and the provider's error type are kept.
+        if (error instanceof ProviderRefreshError && error.kind === 'rejected' && (error.status === undefined || SIGN_IN_REFUSALS[String(error.status)])) {
+          this.refuseSignIn(profileId, String(rowId), error.status === undefined ? 'token refresh refused' : `HTTP ${error.status}${error.reason ? `, ${error.reason}` : ''}`);
+        }
+        throw error;
+      }
       const revision = row.revision + 1;
       const sealed = await sealVaultCredential(refreshed, vaultKey, row.id, revision);
       const changed = this.ctx.storage.sql.exec(
@@ -2496,6 +2531,8 @@ export class CredentialVaultDO extends BudgetedDurableObject {
       ).rowsWritten;
       if (changed !== 1) throw new Error('Credential changed during refresh');
       this.credentialsChanged(profileId);
+      this.ensureCloudAccountHealth();
+      this.ctx.storage.sql.exec('UPDATE cloud_account_health SET signin_reason = NULL WHERE profile_id = ? AND credential_id = ?', profileId, String(rowId));
       this.assertProfileAccess(profileId);
     });
   }

@@ -17,7 +17,8 @@ afterEach(() => vi.restoreAllMocks());
 const timestamp = '2026-09-01T00:00:00.000Z';
 const project: CloudProjectSummary = { id: 'directory-project', name: 'Directory', lifecycle: 'active', repositoryReference: null, baseBranch: 'main', revision: 1, remote: null, archivedAt: null, updatedAt: timestamp, role: null, source: null };
 const workspace: CloudWorkspaceDefinition = { id: 'directory-space', projectId: project.id, kind: 'worktree', name: 'Directory space', branch: 'feature', phase: 'code', sourceKind: 'branch', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, revision: 1, remote: null, archivedAt: null, createdAt: timestamp, updatedAt: timestamp };
-const source: DirectorySource = { source: 'project', project, workspaces: [workspace], operations: [] };
+const none = { dependsOn: [], relatedTo: [], stackedOn: null };
+const source: DirectorySource = { source: 'project', project, workspaces: [workspace], operations: [], relations: {} };
 const machine = { id: 'machine-a', label: 'Machine A', state: 'online' as const, desiredState: 'online' as const, kind: 'physical' as const, provider: 'physical' as const, rpcEndpoint: '/rpc', notes: '', lifecycleRevision: 1, operationId: null, error: null };
 
 async function browserDevice(rights: Partial<Pick<DeviceInvite, 'scope' | 'capabilities'>> = {}) {
@@ -71,7 +72,7 @@ describe('account directory projection', () => {
     expect(await index.publishDirectory({ ...source, cursor: 2 })).toBe(false);
     expect(await index.publishDirectory({ ...source, cursor: 0 })).toBe(false);
     expect(await index.directorySnapshot()).toMatchObject({ workspaces: [], projectRevisions: { [project.id]: 3 } });
-    expect(before.workspaces).toEqual([{ ...workspace, cloudRuntime: false }]);
+    expect(before.workspaces).toEqual([{ ...workspace, cloudRuntime: false, relations: none }]);
     await index.publishDirectory({ ...source, cursor: 4, project: { ...project, revision: 2, lifecycle: 'deleting' }, workspaces: [] });
     // Even an erroneously later source publication cannot bypass an account tombstone.
     await index.publishDirectory({ ...source, cursor: 5 });
@@ -95,6 +96,21 @@ describe('account directory projection', () => {
       restarted.putWorkspace({ ...workspace, expectedRevision: 0 });
     });
     await expect.poll(() => receiver.directorySnapshot()).toMatchObject({ projects: [{ id: project.id }], workspaces: [{ id: workspace.id }] });
+  });
+
+  it('carries each workspace\'s relations, and reads a project again once when its entry was stored before entries carried them', async () => {
+    const index = env.USER_PROJECTS.getByName(env.ACCOUNT_ID);
+    const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${project.id}`);
+    const member = { ...workspace, id: 'directory-member', name: 'Directory member' };
+    await authority.bootstrap({ ...project, createdBy: machine.id });
+    await authority.putWorkspace({ ...workspace, expectedRevision: 0 });
+    await authority.putWorkspace({ ...member, expectedRevision: 0 });
+    expect(await authority.setWorkspaceRelations(member.id, { dependsOn: [], relatedTo: [], stackedOn: workspace.id })).toMatchObject({ status: 'ok' });
+    const relations = async () => Object.fromEntries((await index.directorySnapshot()).workspaces.map((entry) => [entry.id, entry.relations]));
+    const stacked = { [workspace.id]: none, [member.id]: { ...none, stackedOn: workspace.id } };
+    await expect.poll(relations).toEqual(stacked);
+    await runInDurableObject(index, (_instance, state) => { state.storage.sql.exec("UPDATE directory_sources SET value_json=json_remove(value_json,'$.relations') WHERE source='project'"); });
+    expect(await relations()).toEqual(stacked);
   });
 
   it('continues a source version from its retired outbox, so the directory keeps accepting it', async () => {
@@ -168,7 +184,7 @@ describe('directory WebSocket authentication', () => {
     const messages = [await opened.events.next(), await opened.events.next()];
     expect(messages).toEqual(expect.arrayContaining([
       { type: 'message', value: { type: 'directory.projects', projects: [{ ...project, updatedAt: expect.any(String) }] } },
-      { type: 'message', value: { type: 'directory.project', projectId: project.id, revision: 1, workspaces: [{ ...workspace, cloudRuntime: false }], placements: [], operations: [] } },
+      { type: 'message', value: { type: 'directory.project', projectId: project.id, revision: 1, workspaces: [{ ...workspace, cloudRuntime: false, relations: none }], placements: [], operations: [] } },
     ]));
     await index.publishDirectory({ ...source, cursor: 2, workspaces: [] });
     // The project list did not change: only the project's slice is sent.

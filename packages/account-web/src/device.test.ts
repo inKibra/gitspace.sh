@@ -1,7 +1,8 @@
+import { IDBFactory } from 'fake-indexeddb';
 import { afterEach, expect, it, vi } from 'vitest';
 import { decodeSignedRpcHeader, RPC_DEVICE_HEADER } from '@gitspace/protocol/device-grant';
 import { SIGNED_REQUEST_MAX_AGE_MS } from '@gitspace/protocol/credential-vault';
-import { createDeviceSignedFetch, signDeviceRequest, type BrowserDevice } from './device.js';
+import { createDeviceSignedFetch, loadDevice, signDeviceRequest, type BrowserDevice } from './device.js';
 
 const keyPair = await crypto.subtle.generateKey('Ed25519', false, ['sign', 'verify']) as CryptoKeyPair;
 const device: BrowserDevice = {
@@ -63,4 +64,29 @@ it('re-signs once with the account clock and stamps later requests, including so
   expect(fetcher).toHaveBeenCalledTimes(3);
   const proof = decodeSignedRpcHeader(await signDeviceRequest(device, { method: 'GET', path: '/v1/directory/events', body: new Uint8Array() }));
   expect(Math.abs((proof?.timestamp ?? 0) - (Date.now() + skewMs))).toBeLessThan(SIGNED_REQUEST_MAX_AGE_MS);
+});
+
+it('erases a stored device that no longer reads back with its keys, and answers no device', async () => {
+  const storage = new IDBFactory();
+  vi.stubGlobal('indexedDB', storage);
+  const opening = storage.open('gitspace-device', 1);
+  opening.onupgradeneeded = () => opening.result.createObjectStore('device');
+  const opened = Promise.withResolvers<void>();
+  opening.onsuccess = () => opened.resolve();
+  await opened.promise;
+  const write = opening.result.transaction('device', 'readwrite');
+  write.objectStore('device').put({ ...device, keyPair: {} }, 'current');
+  const written = Promise.withResolvers<void>();
+  write.oncomplete = () => written.resolve();
+  await written.promise;
+  opening.result.close();
+
+  expect(await loadDevice()).toBeNull();
+  const reopened = storage.open('gitspace-device', 1);
+  const remaining = Promise.withResolvers<unknown>();
+  reopened.onsuccess = () => {
+    const read = reopened.result.transaction('device').objectStore('device').get('current');
+    read.onsuccess = () => { remaining.resolve(read.result); reopened.result.close(); };
+  };
+  expect(await remaining.promise).toBeUndefined();
 });
