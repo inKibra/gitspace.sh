@@ -245,15 +245,19 @@ person's decision (`operator.decide`); the project agent can mark the post's QA 
 
 ## 11. Where Ghosts and Chatter meet
 
-- **A ghost reads Chatter.** A ghost gets a fourth read tool, `chatter_read`, held to its project and, when the ghost
-  has an `until` bound, to posts before that time. By default it reads the posts of its own workspace and the replies to
-  them, so "what did this workspace tell the others, and what did they answer?" has evidence. It cites posts as chips
-  that open the post in the cut-out. Chatter's visibility applies: a ghost reads Chatter only if its asker can.
+- **A ghost reads Chatter.** A ghost gets a fourth read tool, `chatter_read`, held to its project and to posts before
+  the ghost's `asOf` time (when it started, or its `until` entry's time), as its drive is
+  ([GHOSTS-DESIGN.md §4.1](./GHOSTS-DESIGN.md#41-the-drive-as-of-a-point-in-time)). By default it reads the posts of its
+  own workspace and the replies to them, so "what did this workspace tell the others, and what did they answer?" has
+  evidence. It cites posts as chips that open the post in the cut-out. Chatter's visibility applies: a person's ghost
+  reads Chatter only if the person can; an agent's ghost (`ghost_ask`) only in the asking agent's own project.
 - **A ghost's draft posted to Chatter.** The draft card gains **Post to Chatter** when the draft is something for
   everyone (a finding, a workaround, a heads-up) rather than a request that one workspace act. It opens the Chatter
   composer with the draft and a suggested kind; the person sends it, as themselves. A draft that asks a workspace to
   act goes to that workspace's composer, or to the project agent's when the person wants it decided there, never to
   Chatter.
+- **An agent's ghost drafts too.** Asked by `ghost_ask` to act, a ghost returns its draft in the tool result. The
+  asking agent may post it with `chatter_post` like anything else it writes, and the hand-off check applies to it.
 - **From a Chatter post to a ghost.** A tooling post's reference names a workspace, conversation and entry, so the post
   offers "Ask a ghost about this": a ghost of that conversation about that entry.
 - Ghosts never post, never get a digest, and never count as listeners.
