@@ -96,21 +96,19 @@ column on the right of every workspace with a tab per ghost (the Inspector folds
 | Compaction summaries | A `pi.compaction` entry per compaction: `model` is the summary as a user message, `head` the first entry kept; older entries stay in storage. GitSpace writes it from the `CompactionTask` hook (summary up to 1 MB) | `@earendil-works/pi-durable` `CompactionEntry`, `runtime-core/src/harness.ts` (~line 250) |
 | Putting a draft in the composer | The composer the person already sends from; workspace creation for archived ones | `account-web` |
 
+Built since this doc was written (milestones 1–3): `history_search` takes `conversationId` (one conversation of the
+searched workspace); a compaction's transcript event and `history_read` carry `{ entryId, reason, head, summary }`
+(`compactionPayload`, `runtime-workspace-do/src/transcript.ts`; `head` is the first kept entry's ordinal, so the
+summarized entries are those before it, back to the previous compaction's `head`); the web transcript draws a
+compaction as "Compacted here · N earlier turns summarized" with the summary fetched on demand, its root marked
+`data-compaction="<entryId>"` for milestone 8; drive reads take `asOf` over `artifact_scope_history` (§4.1).
+
 What is missing:
 
-- **`history_search` can't be held to one conversation.** It takes `scope` and `workspaceId`, not `conversationId`
-  (`RuntimeHistorySearchArgumentsSchema`, `protocol-runtime/src/tool-arguments.ts`).
-- **A compaction is opaque to readers.** Its transcript event carries only `{ entryId }`
-  (`transcript.ts`, `entryEvents`), so `history_read` returns neither the summary nor `head`, and the web transcript
-  draws nothing for it (no `compaction` handling in `account-web/src`). There is no compaction timeline today.
 - **Inference is admitted per workspace conversation.** `runtime-inference.ts` `active(conversationId)` reads the
   admission from the workspace object's storage; a person's ghost has no conversation there (an agent's ghost uses the
   asking conversation's, §5.1).
 - **No home for a memory-only chat.** Nothing in the account worker runs a model loop that is never stored.
-- **The drive has no history.** Old manifests and blobs stay in the tenant store while the workspace exists, but
-  `artifact_scopes` holds only each scope's current generation, so nothing can say which generation was current at a
-  given time. Deleting a workspace deletes its row (`project-authority.ts` ~line 1688); deleting the project, every row
-  (~line 1802).
 
 ## 4. Data model and storage
 

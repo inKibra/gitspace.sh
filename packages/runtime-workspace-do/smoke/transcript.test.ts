@@ -143,6 +143,31 @@ test('the project agent\'s workspace board shows as a notice inside the person\'
   });
 });
 
+test('a compaction shows where it happened, counting the turns before the first entry it kept, with its summary', async () => {
+  await fixture(async (_harness, storage, root) => {
+    const say = (text: string, timestamp: number) => root.commit(async tx => {
+      const entry = await input(tx, root, [{ role: 'user', content: text, timestamp }]);
+      await tx.appendEntry(root.id, { kind: 'pi.assistant', model: [assistant([{ type: 'text', text: `Done: ${text}` }], timestamp + 1)] });
+      return entry;
+    }, context);
+    await say('Move the bucket.', 1);
+    await say('Rename it.', 3);
+    const kept = await say('Tag it.', 5);
+    const reader = createTranscriptReader(storage, none);
+    const request = { generation: null, before: null, after: null, around: null };
+    expect((await reader.page(root.id, request)).rows.some(row => row.item.type === 'interruption' && row.item.reason === 'compacted')).toBe(false);
+    const summary = '## Goal\nMove the bucket, rename it and tag it.';
+    const compaction = await root.commit(tx => tx.appendEntry(root.id, { kind: 'pi.compaction', head: kept.id, data: { reason: 'threshold' }, model: [{ role: 'user', content: [{ type: 'text', text: `The conversation history before this point was compacted into the following summary:\n\n<summary>\n${summary}\n</summary>` }], timestamp: 7 }] }), context);
+    await say('Thanks.', 8);
+    const { rows } = await reader.page(root.id, request);
+    expect(rows.map(row => row.item.type === 'message' ? `${row.item.role}: ${row.item.text}` : row.item.type === 'interruption' ? `${row.item.title}: ${row.item.detail}` : row.item.type)).toEqual([
+      'user: Move the bucket.', 'assistant: Done: Move the bucket.', 'user: Rename it.', 'assistant: Done: Rename it.', 'user: Tag it.', 'assistant: Done: Tag it.',
+      'Compacted here: 2 earlier turns summarized', 'user: Thanks.', 'assistant: Done: Thanks.',
+    ]);
+    expect(rows[6]!.item).toMatchObject({ type: 'interruption', reason: 'compacted', entryId: String(compaction.id), summarizedTurns: 2, body: summary });
+  });
+});
+
 test('a retained rule\'s instruction and a rewind report land inside the running turn as notices; only an input opens a turn', async () => {
   await fixture(async (_harness, storage, root) => {
     await root.commit(async tx => {
@@ -431,4 +456,18 @@ test('a message shows a drive file it embeds at the version it had when stored: 
       { role: 'assistant', text: `Blue: ![dot](${dot}), and ![gone](drive://workspace/check/gone.svg).`, pins: { [dot]: blue } },
     ]);
   } finally { await runtime.harness.close(context); }
+});
+
+test('a compaction reads back as its summary, why it ran and head, the first entry it kept; the entries it summarized stay readable', async () => {
+  await fixture(async (_harness, storage, root) => {
+    await turn(root, 1, 0);
+    const kept = await root.commit(tx => input(tx, root, [{ role: 'user', content: 'prompt 2', timestamp: 2 }]), context);
+    const summary = '## Goal\nRename the bucket.\n\n<summary> stays as written inside it.';
+    // As pi places it: the summary wrapped for the model, `head` the first entry the new context keeps.
+    const compaction = await root.commit(tx => tx.appendEntry(root.id, { kind: 'pi.compaction', head: kept.id, data: { reason: 'threshold' }, model: [{ role: 'user', content: [{ type: 'text', text: `The conversation history before this point was compacted into the following summary:\n\n<summary>\n${summary}\n</summary>` }], timestamp: 3 }] }), context);
+    const events = RuntimeTranscriptSchema.parse(await (await transcriptResponse(storage, root, none)).json());
+    expect(events.find(event => event.kind === 'compaction')).toEqual({ sessionId: String(root.id), ordinal: Number(compaction.id) * 1024, kind: 'compaction', createdAt: new Date(3).toISOString(), payload: { entryId: String(compaction.id), reason: 'threshold', head: Number(kept.id) * 1024, summary } });
+    const summarized = RuntimeTranscriptSchema.parse(await (await transcriptResponse(storage, root, none, 'json', { before: Number(kept.id) * 1024 })).json());
+    expect(summarized.map(event => event.payload.message)).toEqual([{ role: 'user', content: 'prompt 1', timestamp: 1 }, assistant([{ type: 'text', text: 'answer 1' }], 1)]);
+  });
 });

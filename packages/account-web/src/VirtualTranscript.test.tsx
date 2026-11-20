@@ -453,6 +453,34 @@ it('draws workspace reports as one-line rows that stack tightly, link to their w
   expect([location.pathname, location.searchParams.get('project'), location.searchParams.get('workspace')]).toEqual(['/', 'project-a', 'space-1']);
 });
 
+it('draws a compaction as a row where it happened and reads its whole summary only once opened; no compaction, no row', async () => {
+  const message = (ordinal: number, role: 'user' | 'assistant', text: string): TranscriptRow => ({
+    id: `message-${ordinal}`, ordinal, turnId: `turn-${ordinal > 3 ? 2 : 1}`, turnStatus: 'done', truncated: false, contentBytes: 100, item: { id: `message-${ordinal}`, type: 'message', role, text },
+  });
+  const summary = `## Goal\nMove the bucket.\n\n${'Kept detail. '.repeat(40)}The last line of the summary.`;
+  const full = { id: 'compact', type: 'interruption', reason: 'compacted', title: 'Compacted here', detail: '2 earlier turns summarized', recovered: true, entryId: '42', summarizedTurns: 2, body: summary } satisfies TranscriptItem;
+  const compaction: TranscriptRow = { id: 'compact', ordinal: 3, turnId: 'turn-1', turnStatus: 'done', truncated: true, contentBytes: 40_000, item: { ...full, body: summary.slice(0, 40) } };
+  const loaded = Promise.withResolvers<TranscriptContentPage>();
+  const content = vi.fn<TranscriptHistory['content']>(() => loaded.promise);
+  await render(historyFor([message(1, 'user', 'Move the bucket.'), message(2, 'assistant', 'Moved.'), compaction, message(4, 'user', 'Thanks.')], { content }));
+  expect([...container.querySelectorAll('[data-transcript-row]')].map((node) => node.getAttribute('data-transcript-row'))).toEqual(['message-1', 'message-2', 'compact', 'message-4']);
+  const row = container.querySelector<HTMLElement>('[data-transcript-row="compact"] [data-compaction="42"]')!;
+  expect(row.textContent).toBe('Compacted here · 2 earlier turns summarized');
+  expect(row.querySelector('[role="region"]')).toBeNull();
+  expect(content).not.toHaveBeenCalled();
+  await act(() => row.querySelector<HTMLButtonElement>('button[aria-expanded="false"]')!.click());
+  expect(content.mock.calls.map(([rowId]) => rowId)).toEqual(['compact']);
+  expect(container.querySelector('[data-transcript-row="compact"] [role="status"]')?.textContent).toBe('Loading content…');
+  const serialized = JSON.stringify(full);
+  await act(async () => { loaded.resolve({ text: serialized, offset: 0, nextOffset: null, totalCharacters: serialized.length }); await loaded.promise; });
+  const region = container.querySelector('[data-transcript-row="compact"] [data-compaction="42"] [role="region"]');
+  expect(region?.textContent).toContain('The last line of the summary.');
+  expect(container.querySelector('[data-transcript-row="compact"] button')?.getAttribute('aria-expanded')).toBe('true');
+
+  await render(historyFor([message(1, 'user', 'Move the bucket.'), message(2, 'assistant', 'Moved.')]));
+  expect(container.querySelector('[data-compaction]')).toBeNull();
+});
+
 it('draws consecutive tool calls as one group and reads complete content only for the selected call', async () => {
   const call = (index: number): TranscriptRow => ({
     id: `call-${index}`, ordinal: index, turnId: 'turn-1', turnStatus: 'done', truncated: true, contentBytes: 400,

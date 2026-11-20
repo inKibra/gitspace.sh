@@ -9,7 +9,7 @@ import {
 import type { TranscriptEvent } from '@gitspace/protocol/transcript';
 import { canonicalDriveResourceUrl, createResourcePreview, parseResourceUri, resourceMediaType } from '@gitspace/protocol/resource-uri';
 import { streamBytes } from '@gitspace/protocol-workspace';
-import type { ProjectAuthorityDO, UserProjectIndexDO } from './project-authority.js';
+import type { ArtifactScopeAt, ProjectAuthorityDO, UserProjectIndexDO } from './project-authority.js';
 import type { SpaceAuthorityDO } from './space-authority.js';
 import type { SpaceAuthorityRecord } from '@gitspace/protocol-workspace';
 import type { SpaceContextDO } from './space-context.js';
@@ -97,6 +97,9 @@ export class InspectorCloudArtifacts {
   /** Parsed manifests by scope, generation and hash: a manifest never changes under its hash, so every read of one
    * drive object (157 capture records, say) parses it once. */
   private readonly manifests = new Map<string, Promise<ArtifactManifest['entries']>>();
+  /** Scopes as they were at a time, by workspace and time: every read of one drive at one time in this object reads
+   * the same generation, even a time still to come. */
+  private readonly scopesAt = new Map<string, Promise<ArtifactScopeAt>>();
   readonly files: DriveFiles;
   constructor(private readonly env: Env, private readonly userId: string, private readonly source: InspectorCloudContext) {
     this.store = tenantStore(env);
@@ -154,11 +157,34 @@ export class InspectorCloudArtifacts {
     return { spaceId, path };
   }
 
-  private async resolve(url: string) {
+  /** The scope a drive URL is in, with the path in it: the current generation, or with `asOf` the one current then. */
+  private async resolve(url: string, asOf?: string) {
     const { spaceId, path } = this.target(url);
+    if (asOf !== undefined) return { scope: (await this.scopeAtTime(spaceId, asOf)).scope, path };
     const scope = (await this.source.authority.listArtifactScopes()).find((candidate) => candidate.workspaceId === spaceId);
     if (!scope) throw new Error('Artifact scope does not exist');
     return { scope, path };
+  }
+
+  private scopeAtTime(spaceId: string, asOf: string): Promise<ArtifactScopeAt> {
+    const key = `${spaceId}\n${asOf}`;
+    const cached = this.scopesAt.get(key);
+    if (cached) return cached;
+    const read = this.source.authority.artifactScopeAt(spaceId, asOf).then((at) => {
+      if (!at) throw new Error('Artifact scope does not exist');
+      return at;
+    });
+    this.scopesAt.set(key, read);
+    read.catch(() => this.scopesAt.delete(key));
+    return read;
+  }
+
+  /** The generation of the drive a drive URL is in that was current at `asOf` (ISO time), and when that drive's
+   * history starts if `asOf` is before it (`ProjectAuthorityDO.artifactScopeAt`). Reads with the same `asOf` read it. */
+  async scopeAt(url: string, asOf: string): Promise<ArtifactScopeAt> {
+    const resource = parseResourceUri(url);
+    if (resource?.kind !== 'drive' || !resource.mount) throw new Error('Inspector artifacts require a canonical drive resource URI');
+    return this.scopeAtTime(this.target(resource.url).spaceId, asOf);
   }
 
   /** The workspace's committed scope, or the empty generation-0 scope its first commit creates. */
@@ -192,12 +218,12 @@ export class InspectorCloudArtifacts {
     return createResourcePreview(url, bytes, mediaType);
   }
 
-  /** The stored version a drive URL names: its current one, or the exact `hash` of an earlier one (found under its
-   * digest: an earlier streamed version is named only by the manifest that held it). */
-  private async version(url: string, hash?: string | null) {
+  /** The stored version a drive URL names: its current one, the one current at `asOf`, or the exact `hash` of an
+   * earlier one (found under its digest: an earlier streamed version is named only by the manifest that held it). */
+  private async version(url: string, hash?: string | null, asOf?: string) {
     const resource = parseResourceUri(url);
     if (resource?.kind !== 'drive' || !resource.mount) throw new Error('Inspector artifacts require a canonical drive resource URI');
-    const resolved = await this.resolve(resource.url);
+    const resolved = await this.resolve(resource.url, asOf);
     const current = (await this.entries(resolved.scope)).find((candidate) => candidate.path === resolved.path);
     const entry = hash && current?.blobHash !== hash ? { blobHash: hash, mediaType: current?.mediaType ?? null, size: undefined } : current;
     if (!entry) throw new Error('Artifact does not exist');
@@ -226,9 +252,9 @@ export class InspectorCloudArtifacts {
 
   /** A raster image file as one of `workspaceId`'s conversation images, without reading it: the stored object itself
    * when it is in the workspace's scope under its digest, else a copy there (a project file, or one streamed before
-   * its digest was known). Null for any other file. */
-  async conversationImage(url: string, workspaceId: string): Promise<{ sha256: string; size: number; mimeType: string } | null> {
-    const { scope, entry, mediaType } = await this.version(url);
+   * its digest was known). Null for any other file. With `asOf`, the file as it was then. */
+  async conversationImage(url: string, workspaceId: string, asOf?: string): Promise<{ sha256: string; size: number; mimeType: string } | null> {
+    const { scope, entry, mediaType } = await this.version(url, null, asOf);
     if (!mediaType?.startsWith('image/') || mediaType === 'image/svg+xml') return null;
     const target = `space:${workspaceId}`;
     const object = 'object' in entry ? entry.object : undefined;
@@ -238,9 +264,9 @@ export class InspectorCloudArtifacts {
     return { sha256: stored.blobHash.slice('sha256:'.length), size: stored.size, mimeType: mediaType };
   }
 
-  /** A drive file's stored bytes, at most 16 MiB, and its media type. */
-  async bytes(url: string, hash?: string | null): Promise<{ bytes: Uint8Array<ArrayBuffer>; mediaType: string | null }> {
-    const { scope, entry, mediaType } = await this.version(url, hash);
+  /** A drive file's stored bytes, at most 16 MiB, and its media type; with `asOf`, as the file was then. */
+  async bytes(url: string, hash?: string | null, asOf?: string): Promise<{ bytes: Uint8Array<ArrayBuffer>; mediaType: string | null }> {
+    const { scope, entry, mediaType } = await this.version(url, hash, asOf);
     const bytes = await this.readObject(scope.id, entry, 16 * 1024 * 1024);
     return { bytes, mediaType };
   }

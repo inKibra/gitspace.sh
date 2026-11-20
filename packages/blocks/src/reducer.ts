@@ -442,7 +442,10 @@ export class TranscriptProjector {
     }
     if (event.kind === 'session_compact' || event.kind === 'compaction') {
       const turn = this.#ensureTurn(event);
-      this.#write({ id: `${turn.id}:compact:${event.ordinal}`, type: 'interruption', reason: 'compacted', title: 'Context compacted', recovered: true, ...createdAt(event) });
+      // The reader counts the turns before the compaction's head (`summarizedTurns`); the summary shows on demand.
+      const { entryId, summary, summarizedTurns } = event.payload;
+      const count = typeof summarizedTurns === 'number' ? { summarizedTurns, detail: `${summarizedTurns} earlier ${summarizedTurns === 1 ? 'turn' : 'turns'} summarized` } : {};
+      this.#write({ id: `${turn.id}:compact:${event.ordinal}`, type: 'interruption', reason: 'compacted', title: 'Compacted here', recovered: true, ...count, ...(typeof entryId === 'string' ? { entryId } : {}), ...(typeof summary === 'string' && summary ? { body: summary } : {}), ...createdAt(event) });
       return;
     }
     if (event.kind === 'message_start') {

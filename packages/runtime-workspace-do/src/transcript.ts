@@ -94,7 +94,7 @@ export function entryEvents(entry: EntryRecord, executorResult?: ExecutorResultR
     }
     if (entry.kind === WORKSPACE_BOARD) return { ordinal: base + index, kind: 'message_end', payload: { message: { role: 'custom', customType: WORKSPACE_BOARD, display: true, title: 'Workspace board', content: source.content }, entryId: String(entry.id) }, createdAt: new Date(source.timestamp).toISOString() };
     if (entry.kind === WORKSPACE_REPORT_ENTRY) return { ordinal: base + index, kind: 'message_end', payload: { message: workspaceReportMessage(entry), entryId: String(entry.id) }, createdAt: new Date(source.timestamp).toISOString() };
-    if (entry.kind === COMPACTION) return { ordinal: base + index, kind: 'compaction', payload: { entryId: String(entry.id) }, createdAt: new Date(source.timestamp).toISOString() };
+    if (entry.kind === COMPACTION) return { ordinal: base + index, kind: 'compaction', payload: compactionPayload(entry, source), createdAt: new Date(source.timestamp).toISOString() };
     // A failed model attempt (pi retries it, or the turn ends with its error) shows as one notice: its partial reply was
     // never answered and its tool calls never ran, so they would otherwise show as running for good.
     if (source.role === 'assistant' && source.stopReason === 'error') return { ordinal: base + index, kind: 'message_end', payload: { message: { role: 'custom', customType: MACHINE_NOTICE, display: true, title: 'Model request failed', content: source.errorMessage ?? 'The model request ended with an error' }, entryId: String(entry.id) }, createdAt: new Date(source.timestamp).toISOString() };
@@ -110,6 +110,19 @@ export function entryEvents(entry: EntryRecord, executorResult?: ExecutorResultR
     const pins = pinsOf?.(source);
     return { ordinal: base + index, kind: 'message_end', payload: { message, entryId: String(entry.id), ...(corrected.length ? { corrected } : {}), ...(pins ? { pins } : {}) }, createdAt: new Date(message.timestamp).toISOString() };
   });
+}
+
+/** Pi wraps a compaction's summary for the model: a sentence, then the summary between these tags. */
+const SUMMARY_OPEN = '<summary>\n';
+const SUMMARY_CLOSE = '\n</summary>';
+/** A compaction as history reads it: the summary without pi's wrapper, why it ran, and `head`, the ordinal of the first
+ * entry it kept (the entries before it are the ones the summary replaced; they stay in storage). */
+function compactionPayload(entry: EntryRecord, source: Message) {
+  const text = typeof source.content === 'string' ? source.content : source.content.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n');
+  const open = text.indexOf(SUMMARY_OPEN);
+  const summary = open >= 0 && text.endsWith(SUMMARY_CLOSE) ? text.slice(open + SUMMARY_OPEN.length, -SUMMARY_CLOSE.length) : text;
+  const reason = typeof entry.data === 'object' && entry.data !== null && !Array.isArray(entry.data) && typeof entry.data.reason === 'string' ? entry.data.reason : null;
+  return { entryId: String(entry.id), reason, head: entry.head === undefined ? null : Number(entry.head) * ENTRY_ORDINALS, summary };
 }
 
 /** A workspace turn report as the custom message the transcript draws as a row; its data carries the report. */
@@ -382,7 +395,12 @@ export function createTranscriptReader(storage: Storage, withdrawn: WithdrawnNot
       // A person's message pins under its request id, a reply under its model message's timestamp.
       const input = openers.requests[String(entry.id)];
       const pinsOf = (message: Message) => message.role === 'user' ? (input === undefined ? undefined : openers.media.inputs[input]) : message.role === 'assistant' ? openers.media.replies[String(message.timestamp)] : undefined;
-      for (const event of entryEvents(entry, executorResult, withdrawn, correction, pinsOf)) projector.apply({ ...(opens ? event : inTurn(event, entry)), sessionId });
+      for (const event of entryEvents(entry, executorResult, withdrawn, correction, pinsOf)) {
+        const shown = opens ? event : inTurn(event, entry);
+        // A compaction's row counts the turns opened before its head: those its summary replaced.
+        const head = event.kind === 'compaction' ? event.payload.head : undefined;
+        projector.apply({ ...shown, ...(typeof head === 'number' ? { payload: { ...shown.payload, summarizedTurns: openers.ids.filter(id => id * ENTRY_ORDINALS < head).length } } : {}), sessionId });
+      }
       const notice = noticeEvent(entry);
       if (notice) projector.apply({ ...notice, sessionId });
     }

@@ -417,8 +417,10 @@ function TranscriptWindow({ history, transport, onAnswer, inline = false, viewKe
   // A group keeps its state under its first row; one whose first row changed (older calls loaded) finds its members'.
   const shown = [...rendered.values()].sort((a, b) => a.row.ordinal - b.row.ordinal).map((entry) => ({ ...entry, state: interactions.current.get(entry.row.id)?.state
     ?? (entry.row.tools ? entry.row.rows.map((member) => interactions.current.get(member.id)?.state).find((state) => state !== undefined) : undefined) ?? EMPTY_STATE }));
-  // A group loads complete content only for its selected call; closed groups and other calls draw their previews.
-  const needed = shown.flatMap(({ row, state }) => !row.tools ? row.rows : state.open ? row.rows.filter((member) => member.item.id === state.selectedCall) : []);
+  // A group loads complete content only for its selected call; closed groups and other calls draw their previews. A
+  // compaction row loads its whole summary only once opened.
+  const needed = shown.flatMap(({ row, state }) => !row.tools ? row.rows.filter((member) => state.open || member.item.type !== 'interruption' || member.item.reason !== 'compacted')
+    : state.open ? row.rows.filter((member) => member.item.id === state.selectedCall) : []);
   useLayoutEffect(() => {
     contentCache.setNeeded(needed, (id, offset, signal) => latest.current.content(id, offset, signal));
   });
@@ -436,10 +438,12 @@ function TranscriptWindow({ history, transport, onAnswer, inline = false, viewKe
     } else {
       const member = row.rows[0]!;
       const complete = member.truncated ? contentCache.get(member) : { item: member.item };
+      // A compaction row draws its preview while its summary is not loaded.
+      const item = complete.item ?? (member.item.type === 'interruption' && member.item.reason === 'compacted' ? member.item : undefined);
       body = <>
-        {complete.item ? <TranscriptItemView item={complete.item} active={row.turnStatus === 'running'} state={state} onStateChange={(patch) => onStateChange(row.id, patch)} onAnswer={onAnswer}
-          renderExecutionHistory={inline ? undefined : (block, executionState, onChange) => <ExecutionHistory key={block.executionId} block={block} parent={history} state={executionState} onStateChange={onChange} onAnswer={onAnswer} />} />
-          : !complete.error ? <p role="status" className="py-4 text-body text-muted-foreground">Loading content…</p> : null}
+        {item ? <TranscriptItemView item={item} active={row.turnStatus === 'running'} state={state} onStateChange={(patch) => onStateChange(row.id, patch)} onAnswer={onAnswer}
+          renderExecutionHistory={inline ? undefined : (block, executionState, onChange) => <ExecutionHistory key={block.executionId} block={block} parent={history} state={executionState} onStateChange={onChange} onAnswer={onAnswer} />} /> : null}
+        {!complete.item && !complete.error && (!item || state.open) ? <p role="status" className="py-4 text-body text-muted-foreground">Loading content…</p> : null}
         {complete.error ? <div role="alert" className="mt-2 text-body text-destructive">{complete.error}<Button variant="ghost" onClick={() => contentCache.retry(member)}>Retry content</Button></div> : null}
       </>;
     }

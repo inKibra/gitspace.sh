@@ -185,3 +185,27 @@ export function NoticeRow({ item }: { item: InterruptionBlock }) {
     <ItemTime at={item.at} className="mt-px" />
   </div>;
 }
+
+/** Where a compaction summarized the conversation, as a rule across the transcript: how many earlier turns its summary
+ * stands for, the summary unfolding underneath when clicked. `data-compaction` names the compaction's Pi entry, the
+ * point in time a ghost asked from this row starts at (GHOSTS-DESIGN.md §9, milestone 8). */
+export function CompactionRow({ item, state, onStateChange }: { item: InterruptionBlock } & ItemInteractionProps) {
+  const [localOpen, setLocalOpen] = useState(false);
+  const open = state?.open ?? localOpen;
+  const label = item.detail ? `${item.title} · ${item.detail}` : item.title;
+  const Chevron = open ? ChevronDown : ChevronRight;
+  return <div data-compaction={item.entryId ?? ''} className="min-w-0 text-caption text-muted-foreground">
+    <div className="flex min-h-6 min-w-0 items-center gap-2">
+      <span aria-hidden className="h-px min-w-4 flex-1 bg-border" />
+      {item.body ? <button
+        type="button"
+        className="flex min-w-0 items-center gap-1 outline-none hover:text-foreground focus-visible:ring-1 focus-visible:ring-[color:var(--focus-ring,#6B97FF)]"
+        aria-expanded={open}
+        onClick={() => { setLocalOpen(!open); onStateChange?.({ open: !open }); }}
+      ><Chevron width={14} height={14} strokeWidth={1.5} className="shrink-0" /><span className="min-w-0 truncate">{label}</span></button> : <span className="min-w-0 truncate">{label}</span>}
+      <ItemTime at={item.at} />
+      <span aria-hidden className="h-px min-w-4 flex-1 bg-border" />
+    </div>
+    {open && item.body ? <div role="region" aria-label="Compaction summary" className="mt-2 max-h-96 overflow-auto border-l-2 border-border pl-3 text-body text-foreground [overflow-wrap:anywhere]"><GitSpaceMarkdown>{item.body}</GitSpaceMarkdown></div> : null}
+  </div>;
+}

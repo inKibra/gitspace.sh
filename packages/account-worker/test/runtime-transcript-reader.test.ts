@@ -156,3 +156,13 @@ test('history page count limits continue at the next available ordinal across ga
   const final = await readRuntimeHistory(new Response(source), RuntimeHistoryReadArgumentsSchema.parse({ conversationId: 'pi', offset: 15, limit: 2 }), 'workspace');
   expect(final).toEqual({ mode: 'page', items: [{ type: 'event', event: events[2] }], nextOffset: null });
 });
+
+test('a text-only history page keeps a compaction whole, its summary and head, beside the text of the messages', async () => {
+  const compaction = { sessionId: 'pi', ordinal: 3072, kind: 'compaction', createdAt: '2026-10-09T00:00:03.000Z', payload: { entryId: '3', reason: 'threshold', head: 2048, summary: '## Goal\nRename the bucket.' } };
+  const events = [
+    { sessionId: 'pi', ordinal: 1024, kind: 'message_end', createdAt: '2026-10-09T00:00:01.000Z', payload: { message: { role: 'assistant', content: [{ type: 'thinking', thinking: 'hm' }, { type: 'text', text: 'Renamed.' }] } } },
+    compaction,
+  ];
+  const page = await readRuntimeHistory(new Response(events.map(event => JSON.stringify(event)).join('\n')), RuntimeHistoryReadArgumentsSchema.parse({ textOnly: true }), 'workspace');
+  expect(page).toEqual({ mode: 'page', items: [{ type: 'event', event: { ...events[0], payload: { message: { role: 'assistant', content: 'Renamed.' } } } }, { type: 'event', event: compaction }], nextOffset: null });
+});

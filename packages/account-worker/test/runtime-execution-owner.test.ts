@@ -9,6 +9,8 @@ import { credentialProtocolBase64 } from '@gitspace/protocol';
 import { ArtifactsCodeStore, createToolResultStore, createWorkspaceRuntime, type WorkspaceRuntime, type WorkspaceRuntimeOptions } from '@gitspace/runtime-workspace-do';
 import { z } from 'zod';
 import { createRuntimeServices } from '../src/runtime-services.js';
+import { InspectorCloudArtifacts, readInspectorContext } from '../src/account-inspector-data.js';
+import type { ProjectAuthorityDO } from '../src/project-authority.js';
 import { SpaceAuthorityDO } from '../src/space-authority.js';
 import { createDispatchSelector } from '../src/runtime-dispatch-selection.js';
 import { executorCapabilities } from '../src/runtime-attachments.js';
@@ -797,4 +799,36 @@ test('the project agent\'s board lists the project stack by stack in the sidebar
       } finally { await runtime.harness.close(BACKGROUND_CONTEXT); }
     });
   }
+});
+
+test('an agent reads a drive file as the drive held it at a time, and before the drive\'s recorded history its oldest version, told where that history starts', async () => {
+  const projectId = `drive-history-${crypto.randomUUID()}`, workspaceId = `${projectId}-worker`;
+  await env.CREDENTIALS.getByName(env.ACCOUNT_ID).bootstrap({ userId: env.ACCOUNT_ID, rootPublicKey: env.AUTH_PUBLIC_KEY, vaultKey: credentialProtocolBase64.encode(crypto.getRandomValues(new Uint8Array(32))) });
+  const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`);
+  const created = await authority.bootstrap({ id: projectId, name: projectId, repositoryReference: null, baseBranch: 'main', createdBy: 'test' });
+  await authority.setProjectLifecycle(created.revision, 'active');
+  await authority.putWorkspace({ id: workspaceId, projectId, kind: 'worktree', name: 'Plans', branch: 'plans', phase: 'code', sourceKind: 'branch', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
+  const drive = new InspectorCloudArtifacts(env, env.ACCOUNT_ID, await readInspectorContext(env, env.ACCOUNT_ID, workspaceId, projectId));
+  const start = Date.now();
+  const at = (offset: number) => new Date(start + offset).toISOString();
+  vi.useFakeTimers({ toFake: ['Date'] });
+  try {
+    vi.setSystemTime(start + 60_000);
+    await drive.write('drive://workspace/plan.md', { bytes: new TextEncoder().encode('plan one') });
+    // As if written before drive history was recorded.
+    await runInDurableObject(authority, (_instance: ProjectAuthorityDO, state) => { state.storage.sql.exec('DELETE FROM artifact_scope_history'); });
+    vi.setSystemTime(start + 120_000);
+    await drive.write('drive://workspace/plan.md', { bytes: new TextEncoder().encode('plan two') });
+  } finally { vi.useRealTimers(); }
+  await runInDurableObject(env.SPACE_AUTHORITY.getByName(`drive-history:${crypto.randomUUID()}`), async (_instance, ctx) => {
+    const { runtime, invoke, text } = await ownerFixture(ctx, RuntimeIdentitySchema.parse({ projectId, workspaceId }));
+    try {
+      expect(text(await invoke('read', { path: 'drive://workspace/plan.md', asOf: at(90_000) }))).toBe(`The drive as of ${at(90_000)}: generation 1, committed ${at(60_000)}.\nplan one`);
+      expect(text(await invoke('read', { path: 'drive://workspace/plan.md', asOf: at(150_000) }))).toBe(`The drive as of ${at(150_000)}: generation 2, committed ${at(120_000)}.\nplan two`);
+      expect(text(await invoke('read', { path: 'drive://workspace/plan.md', asOf: at(30_000) }))).toBe(`The drive as of ${at(30_000)}: the drive's history starts at ${at(60_000)}; this is the oldest version recorded, generation 1.\nplan one`);
+      expect(text(await invoke('read', { path: 'drive://workspace/plan.md' }))).toBe('plan two');
+      const refused = await invoke('read', { path: 'hello.txt', asOf: at(30_000) });
+      expect([refused.status, text(refused)]).toEqual(['failed', expect.stringContaining('asOf reads drive:// paths only')]);
+    } finally { await runtime.harness.close(BACKGROUND_CONTEXT); }
+  });
 });

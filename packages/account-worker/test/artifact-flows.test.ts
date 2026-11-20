@@ -247,6 +247,56 @@ describe('user artifact flows', () => {
     expect(stored?.customMetadata).toEqual({ scope: `space:${workspaceId}`, sha256: written.hash, size: String(bytes.byteLength) });
   });
 
+  it('reads a drive file as the drive held it at a time, a file since removed included, and before the drive\'s history its oldest version', async () => {
+    const { authority, workspaceId, projectId } = await fixture();
+    const artifacts = new InspectorCloudArtifacts(env, env.ACCOUNT_ID, await readInspectorContext(env, env.ACCOUNT_ID, workspaceId, projectId));
+    const write = (path: string, content: string) => artifacts.write(`drive://workspace/${path}`, { bytes: new TextEncoder().encode(content) });
+    const start = Date.now();
+    const at = (offset: number) => new Date(start + offset).toISOString();
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(start + 60_000);
+      await write('notes.md', 'first');
+      await write('old.md', 'removed later');
+      vi.setSystemTime(start + 120_000);
+      await write('notes.md', 'second');
+      await artifacts.delete(['drive://workspace/old.md']);
+    } finally { vi.useRealTimers(); }
+    const read = async (path: string, asOf?: string) => new TextDecoder().decode((await artifacts.bytes(`drive://workspace/${path}`, null, asOf)).bytes);
+
+    expect(await read('notes.md', at(90_000))).toBe('first');
+    expect(await read('old.md', at(90_000))).toBe('removed later');
+    expect(await artifacts.scopeAt('drive://workspace/notes.md', at(90_000))).toEqual({ scope: { id: `space:${workspaceId}`, workspaceId, generation: 2, manifestHash: expect.stringMatching(/^sha256:/u), updatedAt: at(60_000) }, historyStartsAt: null });
+    // The same time with an offset.
+    expect(await read('notes.md', new Date(start + 90_000 + 3_600_000).toISOString().replace('Z', '+01:00'))).toBe('first');
+    expect(await read('notes.md', at(120_000))).toBe('second');
+    expect(await read('notes.md', at(150_000))).toBe('second');
+    expect(await read('notes.md')).toBe('second');
+    await expect(read('old.md', at(150_000))).rejects.toThrow('Artifact does not exist');
+    await expect(read('old.md')).rejects.toThrow('Artifact does not exist');
+
+    // Before its first write the drive was empty, since its workspace was created; before that its history has not begun.
+    const created = (await authority.listWorkspaces()).find((workspace) => workspace.id === workspaceId)!.createdAt;
+    expect(await artifacts.scopeAt('drive://workspace/notes.md', at(30_000))).toMatchObject({ scope: { generation: 0, manifestHash: null, updatedAt: created }, historyStartsAt: null });
+    expect(await artifacts.scopeAt('drive://workspace/notes.md', '2000-01-01T00:00:00Z')).toMatchObject({ scope: { generation: 0, manifestHash: null }, historyStartsAt: created });
+    await expect(read('notes.md', '2000-01-01T00:00:00Z')).rejects.toThrow('Artifact does not exist');
+  });
+
+  it('deletes a drive\'s history with its workspace, and every drive\'s with the project', async () => {
+    const { authority, workspaceId, projectId, publish } = await fixture();
+    await publish(workspaceId, 1, [{ path: 'a.md', content: 'one' }]);
+    await publish(workspaceId, 2, [{ path: 'a.md', content: 'two' }]);
+    await publish(projectId, 1, [{ path: 'shared.md', content: 'project' }]);
+    const generations = (scopeId: string) => runInDurableObject(authority, (_instance: ProjectAuthorityDO, state) => state.storage.sql.exec<{ generation: number }>('SELECT generation FROM artifact_scope_history WHERE scope_id=? ORDER BY generation', scopeId).toArray().map((row) => row.generation));
+    expect(await generations(`space:${workspaceId}`)).toEqual([0, 1, 2]);
+    expect(await generations(`space:${projectId}`)).toEqual([0, 1]);
+    expect(await authority.removeWorkspace(workspaceId)).toBe(true);
+    expect(await generations(`space:${workspaceId}`)).toEqual([]);
+    expect(await generations(`space:${projectId}`)).toEqual([0, 1]);
+    await authority.deleteProject((await authority.getProject())!.revision);
+    expect(await generations(`space:${projectId}`)).toEqual([]);
+  });
+
   it('deletes files only from the space’s own drive, keeping the others and when each was written', async () => {
     const { client, workspaceId, projectId, publish } = await fixture();
     await publish(projectId, 1, [{ path: 'shared.md', content: 'project file' }]);

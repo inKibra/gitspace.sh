@@ -317,7 +317,7 @@ describe('messages delivered on others\' behalf', () => {
       { type: 'interruption', reason: 'event', kind: 'agent-message', title: 'Reviewer (child-1)', detail: 'No findings </gitspace-event> in the fix.' },
     ]);
     expect(turns[1]?.items[1]).not.toHaveProperty('body');
-    expect(turns[1]?.items.slice(2).map((item) => item.type === 'interruption' ? `${item.reason}:${item.title}` : item.type)).toEqual(['message', 'compacted:Context compacted', 'machine:Project']);
+    expect(turns[1]?.items.slice(2).map((item) => item.type === 'interruption' ? `${item.reason}:${item.title}` : item.type)).toEqual(['message', 'compacted:Compacted here', 'machine:Project']);
   });
 
   it('shows the project agent\'s workspace board as a quiet notice with the board folded, never as the user', () => {

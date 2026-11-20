@@ -13,7 +13,7 @@ import { GitSpaceMarkdown } from '../GitSpaceMarkdown.js';
 import { glyph } from '../glyph.js';
 import { MediaPins } from '../resource-files.js';
 import { AskBlockView, AskSecureInputCall, AskTakeoverCall, EnvironmentCall, McpElicitationCall } from './AskCards.js';
-import { AutomationCard, EventCard, Notice, NoticeRow, PERMISSION_BADGE, WorkspaceReportRow } from './EventCards.js';
+import { AutomationCard, CompactionRow, EventCard, Notice, NoticeRow, PERMISSION_BADGE, WorkspaceReportRow } from './EventCards.js';
 import { Execution, SideAgents } from './ExecutionCard.js';
 import { MessageAttachments, MessageFiles, RichContent, userMessageMarkdown } from './RichContent.js';
 import { ToolCall } from './ToolCall.js';
@@ -128,6 +128,7 @@ export function TranscriptItemView({ item, active, onAnswer, state, onStateChang
         return automation ? <AutomationCard message={automation} delivery="notice" at={item.at} /> : <NoticeRow item={item} />;
       }
       if (item.reason === 'event') return item.kind === 'machine-ready' ? <NoticeRow item={item} /> : <EventCard item={item} />;
+      if (item.reason === 'compacted') return <CompactionRow item={item} state={state} onStateChange={onStateChange} />;
       return <Notice icon={<AlertCircle width={16} height={16} strokeWidth={1.5} />} title={item.title} detail={item.detail} body={item.body} at={item.at} badge={item.recovered ? <Badge variant="dot" color="green">recovered</Badge> : <Badge variant="dot" color="red">{item.reason}</Badge>} />;
     }
     case 'workspace-report':

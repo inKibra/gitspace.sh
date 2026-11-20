@@ -32,3 +32,18 @@ test('a judge that cannot answer leaves the matches ranked by words, and says so
   expect(found).toMatchObject({ judged: false, judgeError: expect.stringContaining('not valid JSON') });
   expect(found.results.map(result => [result.ordinal, result.relevance])).toEqual([[1024, null]]);
 });
+
+test('a search given a conversation finds only that conversation\'s entries, and refuses one the workspace does not have', async () => {
+  const said: Readonly<Record<string, readonly string[]>> = { '1': ['The bucket is renamed.'], '2': ['A subagent renamed the bucket too.', 'Unrelated.'] };
+  const conversations = (conversationId?: string): HistorySearchSource => ({
+    workspaceIds: ['mailbox'],
+    ...(conversationId === undefined ? {} : { conversationId }),
+    conversations: async () => Object.keys(said),
+    async *events(_workspaceId, conversation) { yield* (said[conversation] ?? []).map((text, index) => ({ ordinal: (index + 1) * 1024, payload: { message: { role: 'assistant', content: text } }, createdAt: new Date(Date.UTC(2026, 10, 9, 0, index)).toISOString() })).reverse(); },
+  });
+  const everything = async (_state: string, questions: Record<string, string>) => Object.fromEntries(Object.keys(questions).map(id => [id, 1]));
+  const found = (source: HistorySearchSource) => searchHistory('bucket renamed', source, everything).then(page => page.results.map(result => [result.conversationId, result.ordinal]));
+  expect(await found(conversations())).toEqual([['1', 1024], ['2', 1024]]);
+  expect(await found(conversations('2'))).toEqual([['2', 1024]]);
+  await expect(found(conversations('9'))).rejects.toThrow('Conversation 9 is not in workspace mailbox');
+});

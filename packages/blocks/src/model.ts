@@ -145,9 +145,13 @@ export const interruptionBlockSchema = base.extend({
   kind: z.string().optional(),
   title: z.string(),
   detail: z.string().optional(),
-  /** The whole message when `detail` shows only its start. */
+  /** The whole message when `detail` shows only its start; a compaction's summary. */
   body: z.string().optional(),
   recovered: z.boolean().optional(),
+  /** A compaction's Pi entry. */
+  entryId: z.string().optional(),
+  /** A compaction's count of the conversation's turns before the first entry it kept: the turns its summary stands for. */
+  summarizedTurns: z.number().int().nonnegative().optional(),
   at,
 });
 

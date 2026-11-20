@@ -6,7 +6,8 @@ import { LifecycleRunRequestSchema, LifecycleMutationSchema, ServiceTokenRequest
 import { DaemonSnapshotSchema, DaemonStartSpecSchema } from '@gitspace/supervisor/protocol';
 
 const path = z.string().min(1);
-export const RuntimeReadArgumentsSchema = z.object({ path: path.describe('File to read: a working-copy path, a drive://, skill://, rule:// or result:// reference, or an absolute /tmp path on the attached machine.'), offset: z.number().int().positive().optional().describe('First line to read, one-based.'), limit: z.number().int().positive().optional().describe('Most lines to read.') });
+export const RuntimeReadArgumentsSchema = z.object({ path: path.describe('File to read: a working-copy path, a drive://, skill://, rule:// or result:// reference, or an absolute /tmp path on the attached machine.'), offset: z.number().int().positive().optional().describe('First line to read, one-based.'), limit: z.number().int().positive().optional().describe('Most lines to read.'), asOf: z.iso.datetime({ offset: true }).optional().describe('With a drive:// path: read the file as the drive held it at this ISO time (e.g. 2026-11-20T09:14:00Z).') })
+  .refine(args => args.asOf === undefined || args.path.startsWith('drive://'), { message: 'asOf reads drive:// paths only', path: ['asOf'] });
 /** One line describing the change; it becomes the message of the change's edit-history commit. */
 const message = z.string().trim().min(1).max(500).optional().describe('One line saying why, recorded in the workspace edit history.');
 export const RuntimeWriteArgumentsSchema = z.object({ path: path.describe('File to create or replace: a working-copy path, a drive:// URL this session may write, or an absolute /tmp path on the attached machine.'), content: z.string().describe('The file\'s whole new content.'), message });
@@ -183,8 +184,9 @@ export const RuntimeHistoryReadArgumentsSchema = z.union([
 ]);
 export type RuntimeHistoryReadArguments = z.infer<typeof RuntimeHistoryReadArgumentsSchema>;
 /** `query`: words, all of which rank a match higher, and "quoted phrases", each of which a match must contain exactly.
- * `workspaceId` searches that one workspace of the project; `scope: 'project'` every workspace. */
-export const RuntimeHistorySearchArgumentsSchema = z.object({ query: path.describe('Words, each ranking a match higher, and "quoted phrases", each of which a match must contain exactly.'), scope: z.enum(['workspace', 'project']).default('workspace').describe('workspace (the default) or project: every workspace of the project.'), workspaceId: path.optional().describe('One other workspace of this project to search.'), cursor: z.string().max(512).optional().describe('The previous call\'s cursor, to search older history.') });
+ * `workspaceId` searches that one workspace of the project; `scope: 'project'` every workspace. `conversationId` keeps
+ * the search to one conversation of the searched workspace, so it can't go with `scope: 'project'` alone. */
+export const RuntimeHistorySearchArgumentsSchema = z.object({ query: path.describe('Words, each ranking a match higher, and "quoted phrases", each of which a match must contain exactly.'), scope: z.enum(['workspace', 'project']).default('workspace').describe('workspace (the default) or project: every workspace of the project.'), workspaceId: path.optional().describe('One other workspace of this project to search.'), conversationId: path.optional().describe('Search only this conversation of the searched workspace (this one, or workspaceId\'s); not with scope=project.'), cursor: z.string().max(512).optional().describe('The previous call\'s cursor, to search older history.') });
 export const RuntimeWebSearchArgumentsSchema = z.object({ query: z.string().min(1).max(1024).describe('What to search for.'), limit: z.number().int().min(1).max(10).optional().describe('How many results, 1 to 10 (default 5).') });
 export const RuntimeWebFetchArgumentsSchema = z.object({
   url: z.string().min(1).max(2000).describe('The http(s) URL to read.'),

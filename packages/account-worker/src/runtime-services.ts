@@ -83,17 +83,24 @@ const completed = (input: Pick<Invocation, 'requestId' | 'attemptId'>, value: un
 const interrupted = (input: Pick<Invocation, 'requestId' | 'attemptId'>, text: string): RuntimeToolResult => ({ requestId: input.requestId, attemptId: input.attemptId, status: 'interrupted', content: [{ type: 'text', text }] });
 const failed = (input: Pick<Invocation, 'requestId' | 'attemptId'>, error: unknown): RuntimeToolResult => ({ requestId: input.requestId, attemptId: input.attemptId, status: 'failed', content: [{ type: 'text', text: message(error) }], error: { code: 'HOST_OPERATION_FAILED', message: message(error) } });
 /** A cloud artifact as tool content: raster images as images, named by reference without being read here, documents as
- * pages of Markdown, text as pages of text (after any line selector in the URL), anything else as its metadata. */
-async function artifactContent(input: Pick<Invocation, 'requestId' | 'attemptId'>, url: string, artifacts: InspectorCloudArtifacts, workspaceId: string, documentMarkdown: DocumentMarkdown, range: { offset?: number; limit?: number } = {}): Promise<RuntimeToolResult> {
-  const image = await artifacts.conversationImage(url, workspaceId);
-  if (image) return { requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'image', mimeType: image.mimeType, data: imageReference({ workspaceId, size: image.size, width: 0, height: 0, sha256: image.sha256 }) }] };
-  const { bytes, mediaType } = await artifacts.bytes(url);
-  const page = (text: string): RuntimeToolResult => ({ requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: textPage(text, range.offset, range.limit) }] });
+ * pages of Markdown, text as pages of text (after any line selector in the URL), anything else as its metadata. With
+ * `asOf`, the file as the drive held it then, after a line naming the generation read and, for a time before the
+ * drive's history, where that history starts. */
+async function artifactContent(input: Pick<Invocation, 'requestId' | 'attemptId'>, url: string, artifacts: InspectorCloudArtifacts, workspaceId: string, documentMarkdown: DocumentMarkdown, read: { offset?: number; limit?: number; asOf?: string } = {}): Promise<RuntimeToolResult> {
+  const at = read.asOf === undefined ? null : await artifacts.scopeAt(url, read.asOf);
+  const version: RuntimeToolResult['content'] = at === null ? [] : [{ type: 'text', text: at.historyStartsAt === null
+    ? `The drive as of ${read.asOf}: generation ${at.scope.generation}, committed ${at.scope.updatedAt}.`
+    : `The drive as of ${read.asOf}: the drive's history starts at ${at.historyStartsAt}; this is the oldest version recorded, generation ${at.scope.generation}.` }];
+  const result = (content: RuntimeToolResult['content']): RuntimeToolResult => ({ requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [...version, ...content] });
+  const image = await artifacts.conversationImage(url, workspaceId, read.asOf);
+  if (image) return result([{ type: 'image', mimeType: image.mimeType, data: imageReference({ workspaceId, size: image.size, width: 0, height: 0, sha256: image.sha256 }) }]);
+  const { bytes, mediaType } = await artifacts.bytes(url, null, read.asOf);
+  const page = (text: string) => result([{ type: 'text', text: textPage(text, read.offset, read.limit) }]);
   const resource = parseResourceUri(url);
   const document = await documentMarkdown(decodeURIComponent(resource?.kind === 'drive' ? resource.path.split('/').at(-1) ?? url : url), bytes);
   if (document !== null) return page(document);
   let text: string;
-  try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch { return completed(input, { url, mediaType, size: bytes.byteLength }); }
+  try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch { return result([{ type: 'text', text: JSON.stringify({ url, mediaType, size: bytes.byteLength }) }]); }
   return page(resource ? selectResourceText(text, resource.selector) : text);
 }
 const machineTools: Record<string, true | undefined> = { bash: true, ast_grep: true, ast_edit: true, ast_resolve: true, proc: true, lifecycle: true, checkpoint_code: true, merge: true };
@@ -931,11 +938,13 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
         }
         const request = RuntimeHistorySearchArgumentsSchema.parse(args);
         if (request.workspaceId !== undefined) await requireProjectWorkspace(request.workspaceId);
+        if (request.conversationId !== undefined && request.workspaceId === undefined && request.scope === 'project') throw new Error('conversationId searches one workspace: pass its workspaceId, or leave scope as workspace for this one');
         const workspaceIds = request.workspaceId !== undefined ? [request.workspaceId]
           : request.scope === 'workspace' ? [identity.workspaceId]
           : [...new Set([identity.projectId, ...(await authority().listWorkspaces()).map(workspace => workspace.id)])];
         return completed(input, await searchHistory(request.query, {
           workspaceIds,
+          ...(request.conversationId === undefined ? {} : { conversationId: request.conversationId }),
           async conversations(workspaceId) {
             const snapshot = workspaceId === identity.workspaceId ? await options.runtime().snapshot() : RuntimeSnapshotSchema.parse(await (await env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${workspaceId}`).runtimeSnapshot(RuntimeIdentitySchema.parse({ projectId: identity.projectId, workspaceId }))).json());
             return snapshot.conversations.map(conversation => conversation.id);

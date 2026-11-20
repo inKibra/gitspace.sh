@@ -120,8 +120,9 @@ export async function readRuntimeHistory(response: Response, request: RuntimeHis
     }
     if (!backward && raw.ordinal < request.offset) continue;
     if (request.role !== undefined && messageRole(raw) !== request.role) continue;
-    // Text only is what was said: tool output is left out unless its role was asked for.
-    const event = !request.textOnly ? raw : messageRole(raw) === 'toolResult' && request.role !== 'toolResult' ? null : textEvent(raw);
+    // Text only is what was said: tool output is left out unless its role was asked for. A compaction is its summary's
+    // text, so it stays.
+    const event = !request.textOnly || raw.kind === 'compaction' ? raw : messageRole(raw) === 'toolResult' && request.role !== 'toolResult' ? null : textEvent(raw);
     if (event === null) continue;
     if (items.length >= request.limit) return resume(event.ordinal);
     const text = JSON.stringify(event);

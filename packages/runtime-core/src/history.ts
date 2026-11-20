@@ -11,6 +11,8 @@ export type RuntimeTranscriptRange = z.infer<typeof RuntimeTranscriptRangeSchema
 export type HistoryEvent = { ordinal: number; payload: Record<string, unknown>; createdAt: string };
 export type HistorySearchSource = {
   workspaceIds: readonly string[];
+  /** Search only this conversation; it must be one of each searched workspace's `conversations`. */
+  conversationId?: string;
   conversations(workspaceId: string): Promise<readonly string[]>;
   /** Newest-first events of one conversation with ordinals below `before`. */
   events(workspaceId: string, conversationId: string, before: number | undefined): AsyncIterable<HistoryEvent>;
@@ -45,7 +47,9 @@ export async function searchHistory(query: string, source: HistorySearchSource, 
   let position: Position = cursor ? HistorySearchCursorSchema.parse(JSON.parse(cursor)) : { workspace: 0, conversation: 0 };
   scan: for (; position.workspace < source.workspaceIds.length; position = { workspace: position.workspace + 1, conversation: 0 }) {
     const workspaceId = source.workspaceIds[position.workspace]!;
-    const conversations = await source.conversations(workspaceId);
+    const listed = await source.conversations(workspaceId);
+    if (source.conversationId !== undefined && !listed.includes(source.conversationId)) throw new Error(`Conversation ${source.conversationId} is not in workspace ${workspaceId}`);
+    const conversations = source.conversationId === undefined ? listed : [source.conversationId];
     for (; position.conversation < conversations.length; position = { workspace: position.workspace, conversation: position.conversation + 1 }) {
       const conversationId = conversations[position.conversation]!;
       for await (const event of source.events(workspaceId, conversationId, position.before)) {
