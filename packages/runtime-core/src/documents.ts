@@ -1,4 +1,4 @@
-import type { RuntimeLifecycleApprovalQuestion, RuntimePlanStep, RuntimeQuestionClosed, RuntimeQuestionTool, RuntimeSecureInputQuestion, RuntimeTakeoverQuestion, RuntimeTodoItem } from '@gitspace/protocol-runtime';
+import type { RuntimeLifecycleApprovalQuestion, RuntimeMcpElicitationQuestion, RuntimeMcpElicitationRequest, RuntimeMcpElicitResult, RuntimeMcpTaskReference, RuntimePlanStep, RuntimeQuestionClosed, RuntimeQuestionTool, RuntimeSecureInputQuestion, RuntimeTakeoverQuestion, RuntimeTodoItem } from '@gitspace/protocol-runtime';
 import { defineDoc, type CheckpointInfo } from '@earendil-works/pi-durable';
 import type { JsonValue } from '@earendil-works/chord/json';
 import type { RuntimeAttachment } from '@gitspace/protocol-runtime';
@@ -26,12 +26,29 @@ export const PlanDoc = defineDoc<{ text: string; status: 'draft' | 'proposed' | 
 /** Questions for the user: the agent's required block asks (kind `ask`; older conversations also hold questions from
  * a removed `ask` tool), plan and machine approvals, the project agent's batch of answers (`tool.name`
  * `space_workspace`), ask_takeover cards (`takeover`), the lifecycle approval cards an `environment` run posts
- * (`lifecycle-approval`), and ask_secure_input requests (`secure-input`). No call waits on one: asking ends the agent's
- * turn, and answering or closing it delivers the conversation's next input (`questions.ts`). `answeredBy`: the project
- * agent or the workspace's stack head answered a plain ask in the person's place; absent, a person answered. `closed`:
- * it closed unanswered and takes no answer. */
-export type Question = { id: string; conversationId: string; kind: 'ask' | 'approval' | 'takeover' | 'lifecycle-approval' | 'secure-input'; prompt: string; choices: string[]; answer: JsonValue | null; askedAt?: string; answeredAt?: string; answeredBy?: AskAnswerer; closed?: RuntimeQuestionClosed; tool?: RuntimeQuestionTool; takeover?: RuntimeTakeoverQuestion; lifecycle?: RuntimeLifecycleApprovalQuestion; secureInput?: RuntimeSecureInputQuestion };
+ * (`lifecycle-approval`), ask_secure_input requests (`secure-input`), and requests for input from people's MCP servers
+ * (`mcp-elicitation`). No call waits on one past a short window: asking ends the agent's turn, and answering or closing
+ * it delivers the conversation's next input (`questions.ts`; an MCP server's, through the call GitSpace continues,
+ * `mcp-elicitation.ts`). `answeredBy`: the project agent or the workspace's stack head answered in the person's place,
+ * or an MCP client did; absent, a person answered. `closed`: it closed unanswered and takes no answer. */
+export type Question = { id: string; conversationId: string; kind: 'ask' | 'approval' | 'takeover' | 'lifecycle-approval' | 'secure-input' | 'mcp-elicitation'; prompt: string; choices: string[]; answer: JsonValue | null; askedAt?: string; answeredAt?: string; answeredBy?: AskAnswerer; closed?: RuntimeQuestionClosed; tool?: RuntimeQuestionTool; takeover?: RuntimeTakeoverQuestion; lifecycle?: RuntimeLifecycleApprovalQuestion; secureInput?: RuntimeSecureInputQuestion; mcpElicitation?: RuntimeMcpElicitationQuestion };
 export const QuestionsDoc = defineDoc<{ items: Question[] }>({ kind: 'gitspace.questions', version: 1, scope: 'session', initial: () => ({ items: [] }), checkpointWhen: boundedReplay });
+/** A stored answer a continued MCP call gives a server's request again: the request (and, task-scoped, its input key)
+ * and what the server receives. */
+export type McpReplay = { request: RuntimeMcpElicitationRequest; inputId: string | null; result: RuntimeMcpElicitResult };
+/** An `mcp-elicitation` question's state: `live` while the call that asked waits on it (MCP_ELICITATION_WINDOW_MS), then
+ * `paused` (its call, `call`, continues once it is answered). `result`: the answer, until the call takes it. */
+export type McpAsked = { state: 'live' | 'paused'; call: string | null; inputId: string | null; result?: RuntimeMcpElicitResult };
+/**
+ * A cloud MCP call that went on without a person (`mcp-elicitation.ts`), by id: the conversation and the agent's call
+ * (`callId`) it came from, when it paused (`at`), the event its result is delivered under, the connection and tool, the
+ * arguments it is called again with, the server's task it follows (`task`), the questions it waits for (`waits`), the
+ * answers it replays, values of secret-looking answers redacted from what the agent hears (`secrets`), and `result`
+ * (the text delivered next). `delivered` keeps only what run tracking reads (`runOf`).
+ */
+export type McpCall = { conversationId: string; callId: string; at: string; event: string; connectionId: string; connection: string; tool: string; args: JsonValue; task: RuntimeMcpTaskReference | null; waits: string[]; replay: McpReplay[]; secrets: string[]; state: 'waiting' | 'continuing' | 'delivered'; result?: string };
+/** Never shown: answers (secret-looking ones too) and arguments stay here, not in the questions. */
+export const McpElicitationsDoc = defineDoc<{ asked: Record<string, McpAsked>; calls: Record<string, McpCall> }>({ kind: 'gitspace.mcp-elicitations', version: 1, scope: 'session', initial: () => ({ asked: {}, calls: {} }), checkpointWhen: boundedReplay });
 /** The newest entry whose replies' required block asks are posted as questions (`repairBlockAsks`), session-wide; null
  * until the workspace's first open sets it to its newest entry. `replied`: by conversation, the newest entry it held when
  * the person last wrote to it (`closeRepliedQuestions`); a block ask in a reply up to that entry was replied to before

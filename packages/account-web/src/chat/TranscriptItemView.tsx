@@ -12,12 +12,11 @@ import { MessageBlockDocument } from '../blocks/BlockDocument.js';
 import { GitSpaceMarkdown } from '../GitSpaceMarkdown.js';
 import { glyph } from '../glyph.js';
 import { MediaPins } from '../resource-files.js';
-import { AskBlockView, AskSecureInputCall, AskTakeoverCall, EnvironmentCall } from './AskCards.js';
+import { AskBlockView, AskSecureInputCall, AskTakeoverCall, EnvironmentCall, McpElicitationCall } from './AskCards.js';
 import { AutomationCard, EventCard, Notice, NoticeRow, PERMISSION_BADGE, WorkspaceReportRow } from './EventCards.js';
 import { Execution, SideAgents } from './ExecutionCard.js';
 import { MessageAttachments, MessageFiles, RichContent, userMessageMarkdown } from './RichContent.js';
 import { ToolCall } from './ToolCall.js';
-import { ToolGroup } from './ToolGroup.js';
 import { AgentMessageActions } from './staging.js';
 import type { TurnTranscriptProps } from './TurnTranscript.js';
 import { fullTime, ItemTime } from './time.js';
@@ -108,12 +107,13 @@ export function TranscriptItemView({ item, active, onAnswer, state, onStateChang
     case 'thinking':
       return <ThinkingBlock active={active} text={item.text} state={state} onStateChange={onStateChange} />;
     case 'tool-call':
-      // A custom message the runtime recorded as a call keeps its own block; any other single call is a group of one.
+      // A custom message the runtime recorded as a call keeps its own block; any other single call is a group of one,
+      // followed by the cards of the requests an MCP server paused it for.
       return item.id.includes(':custom:') ? <ToolCall block={item} state={state} onStateChange={onStateChange} />
         : item.tool === 'ask_takeover' ? <AskTakeoverCall block={item} state={state} onStateChange={onStateChange} />
         : item.tool === 'ask_secure_input' ? <AskSecureInputCall block={item} state={state} onStateChange={onStateChange} />
         : item.tool === 'environment' ? <EnvironmentCall block={item} state={state} onStateChange={onStateChange} />
-        : <ToolGroup calls={[{ block: item, complete: true }]} state={state} onStateChange={onStateChange} />;
+        : <McpElicitationCall block={item} state={state} onStateChange={onStateChange} />;
     case 'execution':
       return <Execution block={item} state={state} onStateChange={onStateChange} renderHistory={renderExecutionHistory} />;
     case 'ask':

@@ -6,8 +6,8 @@ import { AssistantEntry, GenerationTask, LiveDoc, ToolResultEntry, UserEntry } f
 import { appendNotice, CacheNoticesDoc } from './notices.js';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { diffRevisions } from '@earendil-works/chord/delta';
-import { createRuntimeHarness, createConversationTools, AgentDefinitionContextDoc, BlockCorrectionsDoc, BlockFixEntry, CommentLookupDoc, MediaPinsDoc, StagedCommentsDoc, SubagentRunQueueDoc, commentWindow, correctedReply, type SubagentMetadata, ProcessExitsDoc, QuestionsDoc, WorkspaceDoc, answerPlan, closeRepliedQuestions, expireSecureInputs, questionRefusal, recordMachineReconnection, recordProcessExit, replyQuestion, secureInputOpen, settleSecureInput, type PlanDecision, type QuestionClosure, type ToolServices, type RuntimeHarnessOptions } from '@gitspace/runtime-core';
-import { RuntimeApprovalAnswerSchema, RuntimeLifecycleApprovalAnswerSchema, RuntimeSnapshotSchema, RuntimeWatchEventSchema, RuntimeToolResultSchema, WORKSPACE_TOOL_RESULTS_MAX_BYTES, questionState, receiptDigest, type RuntimeToolResult, type RuntimeSnapshot, type RuntimeWatchEvent, type RuntimeSubmitInput, type RuntimeCancelInput, type RuntimeAnswerInput, type RuntimeGitCheckpoint, type RuntimeWorkspaceStatus } from '@gitspace/protocol-runtime';
+import { createRuntimeHarness, createConversationTools, AgentDefinitionContextDoc, BlockCorrectionsDoc, BlockFixEntry, CommentLookupDoc, MediaPinsDoc, StagedCommentsDoc, SubagentRunQueueDoc, commentWindow, correctedReply, type SubagentMetadata, ProcessExitsDoc, QuestionsDoc, WorkspaceDoc, answerMcpElicitation, answerPlan, closeRepliedQuestions, expireMcpElicitations, expireSecureInputs, mcpElicitationResult, questionRefusal, recordMachineReconnection, recordProcessExit, replyQuestion, secureInputOpen, settleSecureInput, type PlanDecision, type QuestionClosure, type ToolServices, type RuntimeHarnessOptions } from '@gitspace/runtime-core';
+import { RuntimeApprovalAnswerSchema, RuntimeLifecycleApprovalAnswerSchema, RuntimeSnapshotSchema, RuntimeWatchEventSchema, RuntimeToolResultSchema, WORKSPACE_TOOL_RESULTS_MAX_BYTES, questionState, receiptDigest, type RuntimeMcpElicitationForm, type RuntimeToolResult, type RuntimeSnapshot, type RuntimeWatchEvent, type RuntimeSubmitInput, type RuntimeCancelInput, type RuntimeAnswerInput, type RuntimeGitCheckpoint, type RuntimeWorkspaceStatus } from '@gitspace/protocol-runtime';
 import type { CommentsDocument } from '@gitspace/protocol-runtime/comments';
 import { DurableObjectSqliteDatabase } from './sqlite.js';
 import { AttachmentStore, isAttachmentOnline, isAttachmentReady, type AttachmentServices } from './attachments.js';
@@ -48,19 +48,22 @@ export type RuntimeTurnItem = { role: 'user' | 'assistant' | 'tool'; text: strin
 /** `historyFrom`: for a submission, the history ordinal from which its input and everything after it are read. */
 export type RuntimeAccepted = { accepted: true; cursor: number; conversationId?: string; historyFrom?: number };
 /** An open question as the project agent sees it. `kind` tells a plan approval (`propose_plan`) from a tool action's
- * approval; `why` says why a person decides it, null for a plain ask the project agent may answer. */
-export type ProjectQuestion = { id: string; conversation: string; kind: ProjectQuestionKind; prompt: string; choices: string[]; answerable: boolean; why: string | null };
+ * approval; `why` says why a person decides it, null for a question the project agent may answer: a plain ask, or an
+ * MCP server's form that does not look like it asks for a secret (`form`: its fields; answered with them as one JSON
+ * object written as the answer, or Decline or Cancel). */
+export type ProjectQuestion = { id: string; conversation: string; kind: ProjectQuestionKind; prompt: string; choices: string[]; answerable: boolean; why: string | null; form?: RuntimeMcpElicitationForm };
 /** What became of one answer the project agent delivered: the question took it, or it was no longer open (`reason`). */
 export type ProjectAnswerOutcome = { delivered: true } | { delivered: false; reason: string };
-type ProjectQuestionKind = 'ask' | 'plan-approval' | 'tool-approval' | 'lifecycle-approval' | 'takeover' | 'secure-input';
+type ProjectQuestionKind = 'ask' | 'plan-approval' | 'tool-approval' | 'lifecycle-approval' | 'takeover' | 'secure-input' | 'mcp-elicitation';
 const PERSON_DECIDES: Record<Exclude<ProjectQuestionKind, 'ask'>, string> = {
   'plan-approval': 'A person approves this: approving or rejecting a plan is their decision.',
   'tool-approval': 'A person approves this: the agent asked a person to allow a tool action.',
   'lifecycle-approval': 'A person approves this: lifecycle scripts run only once a person allows them.',
   takeover: 'A person answers this: it asks them to take over a browser tab.',
   'secure-input': 'A person answers this: it asks for a secret only a person types, on GitSpace\'s secure-input page.',
+  'mcp-elicitation': 'A person answers this: the MCP server sends them to a page, or its form looks like it asks for a secret.',
 };
-function projectQuestionKind(question: { kind: 'ask' | 'approval' | 'takeover' | 'lifecycle-approval' | 'secure-input'; tool?: unknown }): ProjectQuestionKind {
+function projectQuestionKind(question: { kind: 'ask' | 'approval' | 'takeover' | 'lifecycle-approval' | 'secure-input' | 'mcp-elicitation'; tool?: unknown }): ProjectQuestionKind {
   if (question.kind === 'approval') return question.tool === undefined ? 'plan-approval' : 'tool-approval';
   return question.kind;
 }
@@ -798,7 +801,10 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
       return questions.filter(item => questionState(item) === 'open').map((item): ProjectQuestion => {
         const kind = projectQuestionKind(item);
         const conversation = item.conversationId === rootId ? 'main' : conversationViews.get(item.conversationId)?.subagent?.name ?? item.conversationId;
-        return { id: item.id, conversation, kind, prompt: item.prompt, choices: item.choices, answerable: kind === 'ask', why: kind === 'ask' ? null : PERSON_DECIDES[kind] };
+        const card = item.mcpElicitation;
+        // An MCP server's form is answered in a person's place unless it looks like it asks for a secret.
+        const form = card?.request.mode === 'form' && !card.secretLooking ? card.request.requestedSchema : undefined;
+        return { id: item.id, conversation, kind, prompt: item.prompt, choices: item.choices, answerable: kind === 'ask' || form !== undefined, why: kind === 'ask' || form ? null : PERSON_DECIDES[kind], ...form ? { form } : {} };
       });
     },
     async projectAnswer(input) {
@@ -809,19 +815,22 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
         // A delivery retried after the first one landed finds its own answer.
         const by = input.by.by === 'stack-head' ? input.by.workspaceId : input.by.by;
         const answeredBy = current.answeredBy?.by === 'stack-head' ? current.answeredBy.workspaceId : current.answeredBy?.by;
-        if (answeredBy === by && JSON.stringify(current.answer) === JSON.stringify(answer)) return { delivered: true };
+        if (answeredBy === by && (current.kind === 'mcp-elicitation' || JSON.stringify(current.answer) === JSON.stringify(answer))) return { delivered: true };
         return { delivered: false, reason: questionRefusal(current) };
       }
       const at = new Date().toISOString();
-      await runtime.lifecycle.closeQuestion(input.questionId, async question => {
+      await runtime.lifecycle.closeQuestion(input.questionId, async (question, tx) => {
         const kind = projectQuestionKind(question);
-        if (kind !== 'ask') throw new Error(`Question ${input.questionId} is a ${kind}, not a plain question. ${PERSON_DECIDES[kind]} Only plain questions (ask) are answered in a person's place.`);
+        const answeredBy = { ...input.by, at, for: input.for };
+        // `mcpElicitationResult` refuses what an agent may not answer: a link, or a form that looks like it asks for a secret.
+        if (kind === 'mcp-elicitation') return { closure: await answerMcpElicitation(tx, question, mcpElicitationResult(question, input.answers, { by: 'agent', answeredBy }), { by: 'agent', answeredBy }), value: undefined };
+        if (kind !== 'ask') throw new Error(`Question ${input.questionId} is a ${kind}, not a plain question. ${PERSON_DECIDES[kind]} Only plain questions (ask) and MCP servers' forms are answered in a person's place.`);
         const stray = input.answers.find(item => item.id !== question.id);
         if (stray) throw new Error(`Each answer's id is the question's id, ${question.id}; ${stray.id} is not`);
         const unknown = question.choices.length > 0 ? input.answers.flatMap(item => item.selectedOptions).filter(option => !question.choices.includes(option)) : [];
         if (unknown.length > 0) throw new Error(`${unknown.join(', ')} ${unknown.length === 1 ? 'is not one of its choices' : 'are not its choices'}: ${question.choices.join(', ')}`);
         if (input.answers.every(item => item.selectedOptions.length === 0 && !item.customInput?.trim())) throw new Error('An answer selects a choice or writes customInput');
-        return { closure: { answer, answeredBy: { ...input.by, at, for: input.for } }, value: undefined };
+        return { closure: { answer, answeredBy }, value: undefined };
       });
       publish(); await line;
       return { delivered: true };
@@ -912,6 +921,7 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
       const decision = await runtime.lifecycle.closeQuestion(input.questionId, async (question, tx, conversationId): Promise<{ closure: QuestionClosure; value: PlanDecision | null }> => {
         if (question.kind === 'takeover') throw new Error('A take-over request is answered on its card: Not now, or Take over and then Resume agent');
         if (question.kind === 'secure-input') throw new Error('A secure-input request is answered on its secure-input page, or declined on its card');
+        if (question.kind === 'mcp-elicitation') throw new Error('An MCP server\'s request is answered on its card (answerAsk), or by the project agent');
         if (question.kind === 'approval' && !actor.canApprove) throw new Error('Human approval capability required');
         // The account approves the card's scripts as the person before it records their answer here.
         if (question.kind === 'lifecycle-approval') {
@@ -954,9 +964,10 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
         const recovering = marks.stage('conversation recovery', `${sizes.conversations} conversations, lifecycle documents ${megabytes(sizes.lifecycle)}`);
         try { await runtime.lifecycle.recover(); } finally { recovering.end(); }
         harness.resume();
-        // Secure-input requests nobody answered in time close as expired; the next one to expire wakes the workspace.
-        const expiring = await expireSecureInputs(harness, runtime.lifecycle, Date.now());
-        if (expiring !== null) await options.schedule(expiring);
+        // Secure-input requests and MCP servers' questions nobody answered in time close as expired; the next one to
+        // expire wakes the workspace.
+        const expiring = [await expireSecureInputs(harness, runtime.lifecycle, Date.now()), await expireMcpElicitations(harness, runtime.lifecycle, Date.now())].filter(at => at !== null);
+        if (expiring.length > 0) await options.schedule(Math.min(...expiring));
         if (messageDecisions) options.waitUntil(messageDecisions.retry(async (conversationId, requestId) => {
           const id = await history.conversation(conversationId).catch(() => undefined);
           return id === undefined ? undefined : await storage.submissionByRequest(id, requestId, BACKGROUND_CONTEXT) ?? undefined;

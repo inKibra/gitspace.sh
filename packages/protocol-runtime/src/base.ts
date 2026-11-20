@@ -5,6 +5,7 @@ import { GitLfsRestoredSchema } from '@gitspace/protocol-workspace';
 import { RuntimeGitCheckpointSchema } from './git-checkpoint.js';
 import { RuntimeTakeoverQuestionSchema } from './browser-takeover.js';
 import { RuntimeSecureInputQuestionSchema } from './secure-input.js';
+import { RuntimeMcpHandoffSchema, RuntimeMcpElicitationQuestionSchema } from './mcp-elicitation.js';
 import { RuntimeLifecycleApprovalQuestionSchema } from './lifecycle-approval.js';
 import { askAnswererSchema } from '@gitspace/blocks';
 
@@ -19,7 +20,9 @@ export const RuntimeToolDispatchSchema = z.object({ version: z.literal(1), ...id
 export const RuntimeBrowserExecutionSchema = z.strictObject({ pairingId: z.string().uuid(), name: z.string().min(1).max(128) });
 export type RuntimeBrowserExecution = z.infer<typeof RuntimeBrowserExecutionSchema>;
 const result = { requestId: z.string().min(1), attemptId: z.string().min(1), content: z.array(RuntimeContentSchema), browser: RuntimeBrowserExecutionSchema.optional() };
-export const RuntimeToolResultSchema = z.discriminatedUnion('status', [z.object({ ...result, status: z.literal('completed') }), z.object({ ...result, status: z.literal('failed'), error: z.object({ code: z.string(), message: z.string() }) }), z.object({ ...result, status: z.literal('interrupted') })]);
+/** `mcpTask`: a cloud MCP call ended while the server's task runs on; the host handed it off and follows it
+ * (`mcp-elicitation.ts`). */
+export const RuntimeToolResultSchema = z.discriminatedUnion('status', [z.object({ ...result, status: z.literal('completed'), mcpTask: RuntimeMcpHandoffSchema.optional() }), z.object({ ...result, status: z.literal('failed'), error: z.object({ code: z.string(), message: z.string() }) }), z.object({ ...result, status: z.literal('interrupted') })]);
 /** A process control's failure code when the process's machine has no attachment left in its workspace: the control
  * cannot reach the process, which may still run there. */
 export const PROCESS_MACHINE_DETACHED = 'machine_detached';
@@ -45,7 +48,8 @@ export const RuntimeConversationSchema = z.object({ id: z.string(), parentId: z.
 export const RuntimeTaskSchema = z.object({ id: z.string(), kind: z.string(), conversationId: z.string().nullable(), parentId: z.string().nullable(), background: z.boolean(), state: z.enum(['pending', 'running', 'waiting', 'completed', 'failed', 'interrupted']), machineId: RuntimeMachineIdSchema.nullable(), result: RuntimeJsonSchema.nullable() });
 /** A machine-attach approval names the machine it attaches, and the project agent's batch of answers names
  * `space_workspace`; a `takeover` question is an ask_takeover card; a `lifecycle-approval` question is the card an
- * agent's `environment` run posts; a `secure-input` question is an ask_secure_input request (`secureInput`). */
+ * agent's `environment` run posts; a `secure-input` question is an ask_secure_input request (`secureInput`); an
+ * `mcp-elicitation` question is a request for input from a person's MCP server (`mcpElicitation`). */
 export const RuntimeQuestionToolSchema = z.object({ name: z.string(), args: RuntimeJsonSchema });
 export type RuntimeQuestionTool = z.infer<typeof RuntimeQuestionToolSchema>;
 /** Why a question closed without an answer: the person dismissed it, a person stopped or reset its conversation, it
@@ -56,7 +60,7 @@ export type RuntimeQuestionClosed = z.infer<typeof RuntimeQuestionClosedSchema>;
 /** A question for the person. Asking it ends the asking agent's turn; its answer, or its dismissal, is that
  * conversation's next input. `askedAt` is absent on questions asked before it was recorded; `answeredAt` on ones
  * answered before it was. `answeredBy`: the project agent or the workspace's stack head answered in the person's place. */
-export const RuntimeQuestionSchema = z.object({ id: z.string(), conversationId: z.string(), kind: z.enum(['ask', 'approval', 'takeover', 'lifecycle-approval', 'secure-input']), prompt: z.string(), choices: z.array(z.string()), answer: RuntimeJsonSchema.nullable(), askedAt: z.iso.datetime().optional(), answeredAt: z.iso.datetime().optional(), answeredBy: askAnswererSchema.optional(), closed: RuntimeQuestionClosedSchema.optional(), tool: RuntimeQuestionToolSchema.optional(), takeover: RuntimeTakeoverQuestionSchema.optional(), lifecycle: RuntimeLifecycleApprovalQuestionSchema.optional(), secureInput: RuntimeSecureInputQuestionSchema.optional() });
+export const RuntimeQuestionSchema = z.object({ id: z.string(), conversationId: z.string(), kind: z.enum(['ask', 'approval', 'takeover', 'lifecycle-approval', 'secure-input', 'mcp-elicitation']), prompt: z.string(), choices: z.array(z.string()), answer: RuntimeJsonSchema.nullable(), askedAt: z.iso.datetime().optional(), answeredAt: z.iso.datetime().optional(), answeredBy: askAnswererSchema.optional(), closed: RuntimeQuestionClosedSchema.optional(), tool: RuntimeQuestionToolSchema.optional(), takeover: RuntimeTakeoverQuestionSchema.optional(), lifecycle: RuntimeLifecycleApprovalQuestionSchema.optional(), secureInput: RuntimeSecureInputQuestionSchema.optional(), mcpElicitation: RuntimeMcpElicitationQuestionSchema.optional() });
 export type RuntimeQuestion = z.infer<typeof RuntimeQuestionSchema>;
 /** `open` until answered or closed; only an open question waits on a person, and only an open one takes an answer. */
 export function questionState(question: Pick<RuntimeQuestion, 'answer' | 'closed'>): 'open' | 'answered' | 'closed' {

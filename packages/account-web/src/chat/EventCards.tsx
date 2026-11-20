@@ -1,7 +1,7 @@
 import type { TranscriptItem, WorkspaceReportBlock } from '@gitspace/blocks';
 import { automationEventCount, type AutomationMessage, type AutomationMessageEvent } from '@gitspace/protocol/automations-contract';
 import { Button, badgeColors, useShape } from '@gitspace/ui';
-import { ArrowUpRight, ChevronDown, ChevronRight, Globe02, MessageChatCircle, MessageQuestionCircle, Terminal, Users01, Zap } from '@untitledui/icons';
+import { ArrowUpRight, ChevronDown, ChevronRight, Globe02, MessageChatCircle, MessageQuestionCircle, Server01, Terminal, Users01, Zap } from '@untitledui/icons';
 import { useState, type CSSProperties, type ReactNode } from 'react';
 import { GitSpaceMarkdown } from '../GitSpaceMarkdown.js';
 import { automationsUrl, navigateProductUrl, setProductRoute } from '../routes.js';
@@ -142,6 +142,7 @@ const EVENT_KIND: Record<string, { tone: string; icon: ReactNode; kind: (source:
   'agent-message': { tone: badgeColors.indigo, icon: <Users01 {...ICON} />, kind: (source) => <>Message from {source}</> },
   workspace: { tone: badgeColors.teal, icon: <MessageChatCircle {...ICON} />, kind: (source) => <>Message from workspace {source}</> },
   'command-completed': { tone: badgeColors.gray, icon: <Terminal {...ICON} />, kind: (source) => <>{source} finished</> },
+  'mcp-result': { tone: badgeColors.gray, icon: <Server01 {...ICON} />, kind: (source) => <>{source} finished</> },
   'process-exited': { tone: badgeColors.gray, icon: <Terminal {...ICON} />, kind: () => 'Process exited' },
   'browser-taken': { tone: badgeColors.blue, icon: <Globe02 {...ICON} />, kind: (source) => source },
   'browser-handback': { tone: badgeColors.blue, icon: <Globe02 {...ICON} />, kind: (source) => source },
@@ -149,10 +150,12 @@ const EVENT_KIND: Record<string, { tone: string; icon: ReactNode; kind: (source:
   'page-comment': { tone: badgeColors.blue, icon: <Globe02 {...ICON} />, kind: (source) => source },
   question: { tone: badgeColors.orange, icon: <MessageQuestionCircle {...ICON} />, kind: (source) => <>Question · {source}</> },
 };
+/** Events whose card also names their sender under the kind. */
+const SOURCED_EVENT: Record<string, true> = { 'process-exited': true, 'command-completed': true, 'mcp-result': true };
 
 /** What GitSpace delivered to the agent on someone else's behalf: a subagent's or workspace's message, a finished
- * background command, an exited process, a browser event. A message whose first line heads a JSON value shows the line
- * and the value as a tree. */
+ * background command, an exited process, a browser event, the result of an MCP call a person answered a request for. A
+ * message whose first line heads a JSON value shows the line and the value as a tree. */
 export function EventCard({ item }: { item: InterruptionBlock }) {
   const text = item.body ?? item.detail ?? '';
   const [head = '', ...rest] = text.split('\n');
@@ -160,7 +163,7 @@ export function EventCard({ item }: { item: InterruptionBlock }) {
   try { value = rest.length ? JSON.parse(rest.join('\n')) : null; } catch { value = null; }
   const structured = value !== null && typeof value === 'object' && isJsonValue(value) ? value : null;
   const style = EVENT_KIND[item.kind ?? ''] ?? { tone: badgeColors.violet, icon: <Zap {...ICON} />, kind: (source: string) => source };
-  return <div data-event={item.kind ?? 'event'}><OriginCard tone={style.tone} icon={style.icon} kind={style.kind(item.title)} source={item.kind === 'process-exited' || item.kind === 'command-completed' ? item.title : undefined}
+  return <div data-event={item.kind ?? 'event'}><OriginCard tone={style.tone} icon={style.icon} kind={style.kind(item.title)} source={SOURCED_EVENT[item.kind ?? ''] ? item.title : undefined}
     footer={<><span className="ml-auto pr-1">Delivered to the agent</span><ItemTime at={item.at} className="pr-1" /></>}>
     {structured ? <>{head ? <p className="[overflow-wrap:anywhere]">{head}</p> : null}<Disclosure label="Details"><JsonTree value={structured} name={item.kind ?? 'event'} /></Disclosure></> : <FoldedMarkdown text={text} />}
   </OriginCard></div>;

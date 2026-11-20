@@ -6,12 +6,14 @@ import { PROCESS_MACHINE_DETACHED, RuntimeBashCommandArgumentsSchema, RuntimeBas
 import { z } from 'zod';
 import { DaemonResponseSchema, DaemonSnapshotSchema, type DaemonSnapshot } from '@gitspace/supervisor/protocol';
 import type { OperationalServices } from './tasks.js';
-import { ConversationLifecycleDoc, handleEvents } from './conversation-lifecycle.js';
+import { ConversationLifecycleDoc, handleEvents, type ConversationEvent } from './conversation-lifecycle.js';
 import { watchSteer } from './steer.js';
 import { commandResult, type FinishedRun } from './block-runs.js';
 
+/** `deliverConversationEvent`: a job's completion, a process's exit, or a continued MCP call's result
+ * (`mcp-elicitation.ts`), as its conversation's next input. */
 export type JobServices = OperationalServices & {
-  deliverConversationEvent(input: { conversationId: string; requestId: string; kind: 'command-completed' | 'process-exited'; text: string; payload?: JsonValue }): Promise<void>;
+  deliverConversationEvent(input: ConversationEvent): Promise<void>;
 };
 
 /** `foreground`: the call that started the job waits for it, so the job runs at once, and its completion is a message

@@ -37,6 +37,7 @@
     "@gitspace/runtime-workspace-do": "workspace:*",
     "@modelcontextprotocol/client": "2.4.0",
     "@modelcontextprotocol/core": "2.4.0",
+    "@modelcontextprotocol/ext-tasks": "0.2.3",
     "@noble/curves": "^2.2.0",
     "agents": "0.33.0",
     "better-result": "3.0.1",

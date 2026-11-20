@@ -1,11 +1,11 @@
-import { SdkErrorCode, SdkHttpError, UnauthorizedError, type Client } from '@modelcontextprotocol/client';
+import { SdkErrorCode, SdkHttpError, UnauthorizedError } from '@modelcontextprotocol/client';
 import { z } from 'zod';
-import { RuntimeMcpDiscoverArgumentsSchema, RuntimeMcpInvokeArgumentsSchema, RuntimeJsonSchema, discoveredMcpTools } from '@gitspace/protocol-runtime';
+import { RuntimeMcpDiscoverArgumentsSchema, RuntimeMcpInvokeArgumentsSchema, RuntimeMcpTaskReferenceSchema, RuntimeJsonSchema, discoveredMcpTools, type RuntimeMcpElicit, type RuntimeMcpHandoff, type RuntimeMcpTaskReference } from '@gitspace/protocol-runtime';
 import type { UserMcpConnectionsDO } from './local-mcp.js';
 import type { ProjectSecretsDO } from './project-secrets.js';
 import type { CredentialVaultDO } from './application.js';
 import { ComposioPluginGateway } from './composio-plugins.js';
-import { connectMcp, mcpServerIdentity } from './mcp-client.js';
+import { callMcpTool, connectMcp, mcpServerIdentity, type McpConnection } from './mcp-client.js';
 import { mcpBackgroundAuth } from './mcp-oauth.js';
 import type { RuntimeIdentity } from './runtime-services.js';
 type RuntimeJson = z.infer<typeof RuntimeJsonSchema>;
@@ -30,12 +30,14 @@ export function createCloudRuntimeMcp(env: Env, identity: RuntimeIdentity) {
     if (!workspace) throw new Error('MCP workspace is unavailable');
     const scope = workspace.kind === 'base' ? null : identity.workspaceId;
     if (!connection?.enabled || !grant?.enabled || (scope === null ? !grant.projectSpaceEnabled : !grant.workspacesEnabled)) throw new Error('MCP connection is not granted to this workspace');
-    return { connection, scope };
+    return { connection, scope, workspace };
   }
-  async function execute(raw: RuntimeJson, invoke: boolean, signal?: AbortSignal): Promise<RuntimeJson> {
+  /** A discovery's tools, or an invocation's result; `handoff`: the server's task runs on, handed off (`callMcpTool`).
+   * `mcp`: how an invocation asks the workspace for input, or resumes a handed-off task (`mcp-elicitation.ts`). */
+  async function execute(raw: RuntimeJson, invoke: boolean, signal?: AbortSignal, mcp?: { elicit?: RuntimeMcpElicit; task?: RuntimeMcpTaskReference }): Promise<{ value: RuntimeJson; handoff: RuntimeMcpHandoff | null }> {
     const invocation = invoke ? RuntimeMcpInvokeArgumentsSchema.parse(raw) : null;
     const args = invocation ?? RuntimeMcpDiscoverArgumentsSchema.options[1].parse(raw);
-    const { connection, scope } = await admitted(args.connectionId);
+    const { connection, scope, workspace } = await admitted(args.connectionId);
     if (connection.transport.type === 'stdio') throw new Error('Stdio MCP requires an assigned machine effect');
     let headers: Record<string, string>;
     let url: string;
@@ -73,10 +75,11 @@ export function createCloudRuntimeMcp(env: Env, identity: RuntimeIdentity) {
         // A concurrent configuration revision wins over this transport observation.
       }
     };
-    let client: Client | undefined;
+    let opened: McpConnection | undefined;
     try {
       signal?.throwIfAborted();
-      client = await connectMcp({ type, url, headers, ...(authProvider ? { authProvider } : {}), timeout, ...(signal ? { signal } : {}) });
+      opened = await connectMcp({ type, url, headers, ...(authProvider ? { authProvider } : {}), timeout, ...(signal ? { signal } : {}) });
+      const { client } = opened;
       const tools = [];
       let cursor: string | undefined;
       do {
@@ -84,15 +87,19 @@ export function createCloudRuntimeMcp(env: Env, identity: RuntimeIdentity) {
         tools.push(...page.tools);
         cursor = page.nextCursor;
       } while (cursor);
-      await observe('ready', null, mcpServerIdentity(client));
-      if (invocation === null) return redacted(discoveredMcpTools(tools.map(tool => ({ ...tool, connectionId: connection.id, connectionLabel: connection.label })), args.name), secrets);
+      const server = mcpServerIdentity(client);
+      await observe('ready', null, server);
+      if (invocation === null) return { value: redacted(discoveredMcpTools(tools.map(tool => ({ ...tool, connectionId: connection.id, connectionLabel: connection.label })), args.name), secrets), handoff: null };
       if (!tools.some(tool => tool.name === invocation.name)) throw new Error('MCP tool is not exposed by the granted connection');
       const latest = await admitted(connection.id);
       if (JSON.stringify(latest.connection.transport) !== JSON.stringify(connection.transport)) throw new Error('MCP configuration changed before invocation');
       await audit('started');
-      const result = await client.callTool({ name: invocation.name, arguments: invocation.arguments ?? {} }, { timeout, signal });
-      await audit(result.isError ? 'failed' : 'succeeded');
-      return redacted(result, secrets);
+      // A server's task is followed by its connection and URL: a task handed off resumes only on the same server.
+      const outcome = await callMcpTool(opened, { endpoint: { connectionId: connection.id, url }, name: invocation.name, arguments: invocation.arguments ?? {}, task: mcp?.task ?? null, timeout, ...(signal ? { signal } : {}), source: { connection: connection.label, server, workspace: workspace.name }, elicit: mcp?.elicit ?? null });
+      if (outcome.kind === 'handoff') return { value: { task: outcome.reference.taskId, status: outcome.status }, handoff: { reference: RuntimeMcpTaskReferenceSchema.parse(outcome.reference), connection: connection.label, status: outcome.status } };
+      const failed = outcome.result !== null && typeof outcome.result === 'object' && !Array.isArray(outcome.result) && outcome.result.isError === true;
+      await audit(failed ? 'failed' : 'succeeded');
+      return { value: redacted(outcome.result, secrets), handoff: null };
     } catch (error) {
       if (invoke) await audit(signal?.aborted ? 'canceled' : 'failed');
       // The SSE transport reports a 401 that survived re-authorization as an HTTP authentication error.
@@ -103,18 +110,18 @@ export function createCloudRuntimeMcp(env: Env, identity: RuntimeIdentity) {
       const message = String(redacted(error instanceof Error ? error.message : String(error), secrets));
       await observe('failed', message.slice(0, 1024));
       throw new Error(message);
-    } finally { await client?.close(); }
+    } finally { await opened?.client.close(); }
   }
   return {
     async isStdio(raw: RuntimeJson): Promise<boolean> { return (await admitted(request.parse(raw).connectionId)).connection.transport.type === 'stdio'; },
     async discover(args: RuntimeJson, signal?: AbortSignal): Promise<RuntimeJson> {
       const parsed = RuntimeMcpDiscoverArgumentsSchema.parse(args);
-      if ('connectionId' in parsed) return execute(parsed, false, signal);
+      if ('connectionId' in parsed) return (await execute(parsed, false, signal)).value;
       const [all, grants, workspace] = await Promise.all([connections().list(env.ACCOUNT_ID), authority().listMcpGrants(), authority().getWorkspace(identity.workspaceId)]);
       if (!workspace) throw new Error('MCP workspace is unavailable');
       return RuntimeJsonSchema.parse(all.filter(connection => connection.enabled && grants.some(grant => grant.connectionId === connection.id && grant.enabled && (workspace.kind === 'base' ? grant.projectSpaceEnabled : grant.workspacesEnabled))).map(connection => ({ connectionId: connection.id, label: connection.label, transport: connection.transport.type, machineId: connection.target.kind === 'machine' ? connection.target.machineId : null })));
     },
-    invoke: (args: RuntimeJson, signal?: AbortSignal) => execute(args, true, signal),
+    invoke: (args: RuntimeJson, signal?: AbortSignal, mcp?: { elicit?: RuntimeMcpElicit; task?: RuntimeMcpTaskReference }) => execute(args, true, signal, mcp),
   };
 }
 

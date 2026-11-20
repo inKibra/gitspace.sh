@@ -22,7 +22,7 @@ async function legacyOnly(request: Request): Promise<Response> {
 describe('GitSpace\'s MCP client against people\'s servers', () => {
   it('falls back to the 2025 handshake with a 2025-only server and calls its tools', async () => {
     const methods: string[] = [];
-    const client = await connectMcp({ type: 'http', url: 'https://legacy.test/mcp', timeout: 5_000, fetch: async (input, init) => {
+    const { client } = await connectMcp({ type: 'http', url: 'https://legacy.test/mcp', timeout: 5_000, fetch: async (input, init) => {
       const request = new Request(input, init);
       if (request.method === 'POST') methods.push(String((await request.clone().json()).method));
       return legacyOnly(request);
@@ -40,7 +40,7 @@ describe('GitSpace\'s MCP client against people\'s servers', () => {
   it('negotiates 2026-07-28 with a server that serves it and calls its tools', async () => {
     const handler = createMcpHandler(() => echoServer('modern-echo'));
     const methods: string[] = [];
-    const client = await connectMcp({ type: 'http', url: 'https://modern.test/mcp', timeout: 5_000, fetch: async (input, init) => {
+    const { client } = await connectMcp({ type: 'http', url: 'https://modern.test/mcp', timeout: 5_000, fetch: async (input, init) => {
       const request = new Request(input, init);
       if (request.method === 'POST') methods.push(String((await request.clone().json()).method));
       return handler.fetch(request);

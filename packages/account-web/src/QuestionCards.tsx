@@ -3,10 +3,10 @@ import type { RuntimeAnswerInput, RuntimeQuestion, RuntimeQuestionClosed, Runtim
 import type { RuntimeSessionCommand, RuntimeSessionResult } from '@gitspace/protocol-runtime/session-controls';
 
 /** What a transcript needs to show the question cards agents post (ask and propose_plan cards, ask_takeover,
- * ask_secure_input, an `environment` run's lifecycle approval, and the approvals above the composer): the workspace's
- * questions (each card finds its own and shows its state), the conversation's session commands (an ask's answer,
- * Dismiss, the take-over actions, a secure input's Decline), an approval's or lifecycle approval's answer, and the Watch
- * dialog for a cloud tab. */
+ * ask_secure_input, an `environment` run's lifecycle approval, the requests a person's MCP server makes during a call,
+ * and the approvals above the composer): the workspace's questions (each card finds its own and shows its state), the
+ * conversation's session commands (an ask's answer, Dismiss, the take-over actions, a secure input's Decline, an MCP
+ * request's answer), an approval's or lifecycle approval's answer, and the Watch dialog for a cloud tab. */
 export interface QuestionCards {
   questions: readonly RuntimeQuestion[];
   request(command: RuntimeSessionCommand): Promise<RuntimeSessionResult>;
@@ -17,7 +17,8 @@ export interface QuestionCards {
   watch(card: RuntimeTakeoverQuestion, onClose: () => void): ReactNode;
 }
 /** Absent outside a cloud workspace's transcript: ask_takeover, ask_secure_input and environment calls then show as
- * plain tool calls, and ask cards answer through the transcript's `onAnswer`. */
+ * plain tool calls, a call an MCP server paused shows without its request cards, and ask cards answer through the
+ * transcript's `onAnswer`. */
 export const QuestionCardsContext = createContext<QuestionCards | null>(null);
 
 /** What a card that closed unanswered says about why. */

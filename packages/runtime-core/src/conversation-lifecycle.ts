@@ -8,13 +8,16 @@ import { RuntimeJsonSchema, WAIT_MAX_MS, questionState } from '@gitspace/protoco
 import { QuestionsDoc, boundedReplay, type Question } from './documents.js';
 import { formatConversationEvents } from '@gitspace/blocks';
 import { noteTakeoverEvent } from './takeover.js';
-import { closeConversationQuestions, questionRefusal, settleQuestion, type QuestionClosure } from './questions.js';
+import { answerQuestion, closeConversationQuestions, questionRefusal, settleQuestion, type QuestionClosure } from './questions.js';
+import { continueMcpCall, type McpCallTask } from './mcp-elicitation.js';
 
 /** `browser-taken` and `browser-handback`: you took a tab the agent was using, or handed one back (docs/APERTURE-DESIGN.md §7.2).
  * `capture-replay`: you asked from your Chrome's saved-capture card for a capture's steps to be replayed (§11).
  * `page-comment`: a person commented on a page or replied in one of the workspace's comment threads (§9).
- * `question`: a question the conversation asked was answered or dismissed (`questions.ts`). */
-export const ConversationEventSchema = z.object({ conversationId: z.string(), requestId: z.string(), kind: z.enum(['agent-message', 'command-completed', 'process-exited', 'machine-ready', 'workspace', 'browser-taken', 'browser-handback', 'capture-replay', 'page-comment', 'question']), sender: z.object({ id: z.string(), name: z.string() }).optional(), text: z.string(), payload: RuntimeJsonSchema.optional() });
+ * `question`: a question the conversation asked was answered or dismissed (`questions.ts`).
+ * `mcp-result`: an MCP call GitSpace continued after the agent's turn (its server's questions answered, or its task
+ * followed) finished (`mcp-elicitation.ts`). */
+export const ConversationEventSchema = z.object({ conversationId: z.string(), requestId: z.string(), kind: z.enum(['agent-message', 'command-completed', 'process-exited', 'machine-ready', 'workspace', 'browser-taken', 'browser-handback', 'capture-replay', 'page-comment', 'question', 'mcp-result']), sender: z.object({ id: z.string(), name: z.string() }).optional(), text: z.string(), payload: RuntimeJsonSchema.optional() });
 export type ConversationEvent = z.infer<typeof ConversationEventSchema>;
 /** How the transcript labels each delivered event. */
 const EVENT_SOURCE: Record<ConversationEvent['kind'], (event: ConversationEvent) => string> = {
@@ -28,6 +31,7 @@ const EVENT_SOURCE: Record<ConversationEvent['kind'], (event: ConversationEvent)
   'capture-replay': event => event.sender?.name ?? 'Browser',
   'page-comment': event => event.sender ? `Comment by ${event.sender.name}` : 'Page comment',
   question: event => event.sender?.name ?? 'Question',
+  'mcp-result': event => event.sender?.name ?? 'MCP server',
 };
 /** An event the conversation has not had yet: neither placed as its input nor returned by a wait. */
 type StoredEvent = {
@@ -95,10 +99,13 @@ export type ConversationLifecycle = {
    * and applies that model and its effort. */
   admit(conversationId: ConversationId, requestId: string): Promise<void>;
 };
+/** `mcpCallTask`: the registered McpCall task, which continues an MCP call once an `mcp-elicitation` question it waits
+ * on is answered; a host without it refuses such answers. */
 export type ConversationLifecycleOptions = {
   harness: Harness; storage: Storage; admitInference: RuntimeHarnessOptions['admitInference'];
   configureModel(id: ConversationId, model: ModelRef): Promise<void>;
   report(error: unknown): void;
+  mcpCallTask?: McpCallTask;
 };
 export function createConversationLifecycle(options: ConversationLifecycleOptions): ConversationLifecycle {
   const { harness, storage } = options;
@@ -390,7 +397,13 @@ export function createConversationLifecycle(options: ConversationLifecycleOption
           if (!question) throw new Error(`Question ${questionId} is not one this workspace's agents asked`);
           if (questionState(question) !== 'open') throw new Error(questionRefusal(question));
           const settled = await settle(question, tx, conversation.id);
-          await recordEvent(tx, conversation.id, await settleQuestion(tx, conversation.id, question, settled.closure));
+          // An MCP server's question is answered to the call that asked: that call's result, not the answer, is what the
+          // conversation hears next (`mcp-elicitation.ts`).
+          if (question.kind === 'mcp-elicitation' && !('dismissed' in settled.closure)) {
+            if (!options.mcpCallTask) throw new Error('This workspace cannot continue MCP calls');
+            await answerQuestion(tx, question, settled.closure);
+            await continueMcpCall(tx, question.id, options.mcpCallTask);
+          } else await recordEvent(tx, conversation.id, await settleQuestion(tx, conversation.id, question, settled.closure));
           return settled.value;
         }, context);
         // The answer is recorded with its event: a turn that cannot start now (its admission fails) is reported, and

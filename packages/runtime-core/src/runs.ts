@@ -3,7 +3,7 @@ import type { Conversation, EntryId, Harness, Storage, SubmissionRecord } from '
 import { openerAt, piSessionId, providerErrorText, turnRowId, PI_ENTRY_ORDINALS } from '@gitspace/blocks';
 import { questionState } from '@gitspace/protocol-runtime';
 import type { RuntimeRun } from '@gitspace/protocol-runtime/session-controls';
-import { QuestionsDoc, type Question } from './documents.js';
+import { McpElicitationsDoc, QuestionsDoc, type Question } from './documents.js';
 import { transcriptInputs } from './transcript-rows.js';
 
 /** Why an input ended without an answer, by pi's reason, as the chat says it; a reason missing here is said as it is. */
@@ -35,18 +35,24 @@ async function inputTime(storage: Storage, conversation: Conversation, requestId
 export async function runOf(harness: Harness, storage: Storage, target: Conversation, requestId: string, context: Context): Promise<RuntimeRun> {
   const conversationId = String(target.id);
   const questions = ((await harness.snapshot(QuestionsDoc, context))?.items ?? []).filter(question => question.conversationId === conversationId);
+  const calls = Object.values((await harness.snapshot(McpElicitationsDoc, context))?.calls ?? {}).filter(call => call.conversationId === conversationId);
   const blockAsks = `block-ask:${piSessionId(conversationId)}:turn:`;
   let inputs: { openers: number[]; requests: Record<string, string> } | undefined;
   /** Questions the run's turns asked that are still open, newest last. */
   const waiting: Question[] = [];
   let current = requestId;
-  // Each step follows the event of a distinct closed question, so the walk ends.
-  for (let step = 0; step <= questions.length; step++) {
+  // Each step follows the event of a distinct closed question or continued MCP call, so the walk ends.
+  for (let step = 0; step <= questions.length + calls.length; step++) {
     const record: SubmissionRecord | undefined = await storage.submissionByRequest(target.id, current, context);
     const run = { conversationId, requestId: current, text: null, question: null };
     if (record?.type !== 'input') return { ...run, state: step === 0 ? 'missing' : 'queued' };
     if (record.status === 'queued') return { ...run, state: 'queued' };
-    if (record.status === 'placed') return { ...run, state: 'running' };
+    if (record.status === 'placed') {
+      // A turn's MCP call waits a short while on its server's question before going on without it: the run waits on it.
+      const since = await inputTime(storage, target, current, context);
+      const live = questions.filter(question => question.kind === 'mcp-elicitation' && questionState(question) === 'open' && since !== undefined && question.askedAt !== undefined && Date.parse(question.askedAt) >= since).at(-1);
+      return live ? { ...run, state: 'waiting', question: live } : { ...run, state: 'running' };
+    }
     if (record.status === 'unanswered') {
       const why = typeof record.detail === 'string' ? providerErrorText(record.detail) : UNANSWERED_INPUT[record.reason] ?? record.reason;
       return { ...run, state: STOPPED[record.reason] ? 'stopped' : 'failed', text: why };
@@ -60,11 +66,10 @@ export async function runOf(harness: Harness, storage: Storage, target: Conversa
       ? question.id.startsWith(`block-ask:${turn}`)
       : question.askedAt !== undefined && from !== undefined && Date.parse(question.askedAt) >= from && (until === undefined || Date.parse(question.askedAt) < until));
     for (const question of asked) if (questionState(question) === 'open' && !waiting.includes(question)) waiting.push(question);
-    // The latest turn an answer started: placed furthest on, or not placed yet.
+    // The latest turn an answer, or a continued MCP call's result, started: placed furthest on, or not placed yet.
     let continued: { requestId: string; at: number } | undefined;
-    for (const question of asked) {
-      if (questionState(question) === 'open') continue;
-      const event = `question-closed:${question.id}`;
+    const inTurn = calls.filter(call => from !== undefined && Date.parse(call.at) >= from && (until === undefined || Date.parse(call.at) < until));
+    for (const event of [...asked.filter(question => questionState(question) !== 'open').map(question => `question-closed:${question.id}`), ...inTurn.map(call => call.event)]) {
       const answered = await storage.submissionByRequest(target.id, event, context);
       if (answered?.type !== 'input') continue;
       const at = answered.entry === undefined ? Number.POSITIVE_INFINITY : Number(answered.entry);
@@ -72,6 +77,8 @@ export async function runOf(harness: Harness, storage: Storage, target: Conversa
     }
     if (continued) { current = continued.requestId; continue; }
     const open = waiting.at(-1);
+    // An MCP call the turn made goes on after it (`mcp-elicitation.ts`): the run runs until its result is delivered.
+    if (!open && inTurn.some(call => call.state !== 'delivered')) return { ...run, state: 'running' };
     return { ...run, state: open ? 'waiting' : 'finished', text: await replyText(storage, target, record.answer, context) || null, question: open ?? null };
   }
   throw new Error(`Run ${requestId} follows more answered questions than the conversation has`);

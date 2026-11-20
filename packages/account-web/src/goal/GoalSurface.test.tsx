@@ -6,7 +6,7 @@ import type { GoalRequirement, JournalEntryView } from '@gitspace/protocol';
 import type { SessionControlView } from '@gitspace/protocol-runtime/session-controls';
 import { GoalSurface, type GoalSurfaceProps } from '../inspector/GoalSurface.js';
 import { formatDate } from '../inspector/inspector-shared.js';
-import type { RuntimeQuestion } from '@gitspace/protocol-runtime';
+import type { RuntimeMcpElicitationQuestion, RuntimeQuestion } from '@gitspace/protocol-runtime';
 import { QuestionCardsContext, type QuestionCards } from '../QuestionCards.js';
 
 const at = '2026-03-02T09:30:00.000Z';
@@ -93,6 +93,22 @@ describe('Goal tab', () => {
     expect(container.textContent).not.toContain('https://shop.example');
     const link = [...container.querySelectorAll('a')].find(anchor => anchor.textContent === 'Asks for a secret for https://github.com');
     expect(link?.getAttribute('href')).toBe(`https://acme.gitspace.sh/secure-input/${requestId}`);
+  });
+
+  it('an open MCP server request needs you as what the connection asks, cut short, naming a link\'s host; an answered one does not', async () => {
+    const mcp: Omit<RuntimeMcpElicitationQuestion, 'host' | 'request'> = { connectionId: 'conn-1', connection: 'Linear', server: 'mcp.linear.app', workspace: 'checkout-fix', tool: 'create_issue', secretLooking: false, scope: 'request', taskId: null, callId: 'call-1', askedAt: at, expiresAt: at };
+    const asked = (id: string, mcpElicitation: RuntimeMcpElicitationQuestion, answer: RuntimeQuestion['answer'] = null): RuntimeQuestion => ({ id, conversationId: 'main', kind: 'mcp-elicitation', prompt: `Linear asks: ${mcpElicitation.request.message}`, choices: ['Decline', 'Cancel'], answer, mcpElicitation });
+    const long = `Which team should own the issue about the checkout timeout that customers see after paying? Pick one.`;
+    const cards: QuestionCards = { questions: [
+      asked('question:form', { ...mcp, host: null, request: { mode: 'form', message: long, requestedSchema: { type: 'object', properties: { team: { type: 'string' } } } } }),
+      asked('question:url', { ...mcp, host: 'linear.app', request: { mode: 'url', message: 'Authorize GitSpace', url: 'https://linear.app/oauth/authorize?x=1' } }),
+      asked('question:done', { ...mcp, host: null, request: { mode: 'form', message: 'Pick a label', requestedSchema: { type: 'object', properties: {} } } }, { action: 'decline' }),
+    ], request: unexpected, answer: unexpected, watch: () => null };
+    await act(async () => root.render(<QuestionCardsContext.Provider value={cards}><GoalSurface {...props} /></QuestionCardsContext.Provider>));
+    const entries = [...container.querySelectorAll('[data-needs-mcp-elicitation]')].map(entry => entry.textContent);
+    expect(entries).toEqual([`Linear asks: ${long.slice(0, 79)}…`, 'Linear asks: Authorize GitSpace (opens linear.app)']);
+    expect(container.textContent).toContain('Needs you: Linear asks:');
+    expect(container.textContent).not.toContain('Pick a label');
   });
 
   it('accepts a requirement with evidence to check, shows who accepted one and when, and reopens it', async () => {

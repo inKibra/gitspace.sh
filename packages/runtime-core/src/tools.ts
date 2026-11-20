@@ -4,7 +4,7 @@ import { z } from 'zod';
 import type { JsonValue } from '@earendil-works/chord/json';
 import { BACKGROUND_CONTEXT, withAbortSignal, type Context } from '@earendil-works/chord/context';
 import * as Arguments from '@gitspace/protocol-runtime/tool-arguments';
-import { LIFECYCLE_APPROVAL_CHOICES, RuntimeContentSchema, RuntimeJsonSchema, RuntimeToolResultSchema, RuntimeBrowserToolArgumentsSchema, RuntimeAskSecureInputArgumentsSchema, RuntimeAskTakeoverArgumentsSchema, RuntimeFullOutputDetailsSchema, RuntimeProposePlanArgumentsSchema, RuntimeTodoArgumentsSchema, SECURE_INPUT_CHOICES, TAKEOVER_CHOICES, TOOL_RESULT_MAX_BYTES, receiptDigest, type RuntimeAskSecureInputArguments, type RuntimeAskTakeoverArguments, type RuntimeBrowserApprovalCard, type RuntimeLifecycleApprovalRequest, type RuntimePlanStep, type RuntimeSecureInputQuestion, type RuntimeTakeoverTab, type RuntimeToolResult, type WorkspaceBoardRow } from '@gitspace/protocol-runtime';
+import { LIFECYCLE_APPROVAL_CHOICES, MCP_ELICITATION_WINDOW_MS, RuntimeContentSchema, RuntimeJsonSchema, RuntimeToolResultSchema, RuntimeBrowserToolArgumentsSchema, RuntimeAskSecureInputArgumentsSchema, RuntimeAskTakeoverArgumentsSchema, RuntimeFullOutputDetailsSchema, RuntimeProposePlanArgumentsSchema, RuntimeTodoArgumentsSchema, SECURE_INPUT_CHOICES, TAKEOVER_CHOICES, TOOL_RESULT_MAX_BYTES, receiptDigest, type RuntimeAskSecureInputArguments, type RuntimeAskTakeoverArguments, type RuntimeBrowserApprovalCard, type RuntimeLifecycleApprovalRequest, type RuntimeMcpElicit, type RuntimeMcpTaskReference, type RuntimePlanStep, type RuntimeSecureInputQuestion, type RuntimeTakeoverTab, type RuntimeToolResult, type WorkspaceBoardRow } from '@gitspace/protocol-runtime';
 import { appendJournalEntryInputSchema, attachRequirementEvidenceInputSchema, changeGuideAgentDraftSchema, endJournalPhaseInputSchema, goalAgentDraftSchema, markGuideSectionReadInputSchema, putChangeGuideInputSchema, putGoalInputSchema, putRubricInputSchema, putWorkflowInputSchema, reviewAnchorContextSchema, rubricAgentDraftSchema, startJournalPhaseInputSchema, workflowAgentDraftSchema, RuntimeWorkspaceArgumentsSchema, RuntimeAutomationsArgumentsSchema } from '@gitspace/protocol/inspector-contract';
 import { mapBlockColours, validateMarkdownBlocks } from '@gitspace/protocol/gitspace-ui';
 import { PlanDoc, QuestionsDoc, TodosDoc } from './documents.js';
@@ -15,6 +15,7 @@ import { AgentDefinitionContextDoc, MAX_RUNNING_SUBAGENTS } from './subagent-sta
 import { isSubagentToolCallAllowed } from '@gitspace/protocol-runtime';
 import { admitToolImages, imageLimits } from './inference/image-limits.js';
 import { postQuestion, questionPosted } from './questions.js';
+import { createMcpCallTask, mcpElicitations, recordMcpCall, redactSecrets } from './mcp-elicitation.js';
 import { watchSteer } from './steer.js';
 import { CODEMODE_CHILD_OUTPUT_LIMITS, keepWholeOutput, TOOL_OUTPUT_LIMITS, type ToolResultStore } from './tool-results.js';
 import { declareTool, inputJsonSchema, toolCatalog, type ToolDeclarationSource } from './tool-declarations.js';
@@ -45,8 +46,11 @@ function scriptContent(value: JsonValue | undefined): z.infer<typeof RuntimeCont
   return Array.isArray(value) ? z.array(RuntimeContentSchema).parse(value) : [RuntimeContentSchema.parse(value)];
 }
 export type ToolServices = {
-  /** `codemodeTools` runs a script's tool call; `codemodeDescribe` answers its `tools.describe(name, op)`. */
-  invoke(input: { tool: string; args: JsonValue; conversationId: string; taskId: string; requestId: string; attemptId: string; replay: 'safe' | 'unsafe'; signal?: AbortSignal; codemodeTools?: (input: CodemodeToolCall) => Promise<CodemodeToolOutcome>; codemodeDescribe?: (name: string | null, op: string | null) => Promise<string> }): Promise<RuntimeToolResult>;
+  /** `codemodeTools` runs a script's tool call; `codemodeDescribe` answers its `tools.describe(name, op)`. An
+   * `mcp_invoke` call takes `mcpElicit`, which asks the workspace for each request its server makes for input, and
+   * `mcpTask`, a handed-off task of the server it resumes instead of calling the tool (`mcp-elicitation.ts`); neither
+   * comes from a model's arguments. */
+  invoke(input: { tool: string; args: JsonValue; conversationId: string; taskId: string; requestId: string; attemptId: string; replay: 'safe' | 'unsafe'; signal?: AbortSignal; codemodeTools?: (input: CodemodeToolCall) => Promise<CodemodeToolOutcome>; codemodeDescribe?: (name: string | null, op: string | null) => Promise<string>; mcpElicit?: RuntimeMcpElicit; mcpTask?: RuntimeMcpTaskReference }): Promise<RuntimeToolResult>;
   prepareBrowser(input: Parameters<ToolServices['invoke']>[0]): Promise<RuntimeBrowserApprovalCard>;
   instructions(conversationId: string, context: Context): Promise<string>;
   /** Throws before any approval question when an effect cannot run (e.g. a machine tool with no machine attached). */
@@ -58,6 +62,9 @@ export type ToolServices = {
    * the tab, as its card shows it, and the page a person answers it on; throws why it cannot be asked (no such tab, a
    * tab elsewhere than `origin`, an extension too old). Absent on a host without browsers. */
   secureInput?(input: { conversationId: string; questionId: string; callId: string; args: RuntimeAskSecureInputArguments }): Promise<RuntimeSecureInputQuestion>;
+  /** How long an MCP call waits on a server's question before going on without it; MCP_ELICITATION_WINDOW_MS when
+   * absent (tests shorten it). */
+  mcpElicitationWindowMs?: number;
   /** The executions an `environment` runPhase or runChecks call would run that no approval names; null when there are
    * none or the call runs nothing. */
   lifecycleApproval(input: Parameters<ToolServices['invoke']>[0]): Promise<RuntimeLifecycleApprovalRequest | null>;
@@ -270,6 +277,8 @@ const RecordedAskTakeoverArgumentsSchema = RuntimeAskTakeoverArgumentsSchema.ext
 
 export function createRuntimeTools(services: ToolServices, operations: JobServices, abortTask: Harness['abortTask']): ToolRegistration[] {
   const jobs = createJobTool(operations, abortTask);
+  // Calls a server paused for input continue as this task once answered (`mcp-elicitation.ts`).
+  const mcpCallTask = createMcpCallTask({ invoke: services.invoke, deliver: operations.deliverConversationEvent, wakeAt: operations.wakeAt, windowMs: services.mcpElicitationWindowMs ?? MCP_ELICITATION_WINDOW_MS });
   // One queue per conversation, shared by every registered mutator and every tool round.
   // Safe reads never join it; a failed/aborted mutation always releases its successor.
   const mutations = new Map<string, Promise<void>>();
@@ -333,6 +342,8 @@ export function createRuntimeTools(services: ToolServices, operations: JobServic
         // A script's calls are nested calls: each its own tool task, owned by this call, its result returned here and
         // never an entry. `calls` lists them for the transcript, which shows them on this call.
         const calls: Arguments.RuntimeCodemodeCall[] = [];
+        // MCP calls of the script that went on without a person (`recordMcpCall`): the script's turn ends after it.
+        const continued: string[] = [];
         const codemodeTools = async (input: CodemodeToolCall): Promise<CodemodeToolOutcome> => {
           const shown = { tool: input.tool, args: JSON.stringify(input.args).slice(0, Arguments.CODEMODE_CALL_TEXT) };
           const index = calls.push({ ...shown, status: 'running' }) - 1;
@@ -351,6 +362,8 @@ export function createRuntimeTools(services: ToolServices, operations: JobServic
             // A call that was admitted may have run.
             return { status: 'interrupted', error: error instanceof Error ? error.message : String(error) };
           }
+          const mcpCall = Reflect.get(Object(result.details), 'mcpCall');
+          if (typeof mcpCall === 'string') continued.push(mcpCall);
           // A child's images reach the script as references, its bytes never loaded here: the script passes them on to a
           // tool or model as they are, and reads one's bytes with images.read.
           const content = scriptContent(result.structuredOutput);
@@ -383,6 +396,10 @@ export function createRuntimeTools(services: ToolServices, operations: JobServic
         // holding the call (and the machine request) until it ends.
         let result: RuntimeToolResult;
         const proc = name === 'proc' ? Arguments.RuntimeProcArgumentsSchema.parse(args) : null;
+        // A server's requests for input during an MCP call are asked here, each as a question (`mcp-elicitation.ts`).
+        const mcpArgs = name === 'mcp_invoke' ? Arguments.RuntimeMcpInvokeArgumentsSchema.parse(args) : null;
+        const topCallId = api.callId.split('/')[0] ?? api.callId;
+        const mcp = mcpArgs ? mcpElicitations({ store: { commit: change => api.commit(change, context), observer: api, context }, conversationId: String(api.conversationId), callId: topCallId, connectionId: mcpArgs.connectionId, tool: mcpArgs.name, child: child?.name ?? null, replay: [], secrets: [], windowMs: services.mcpElicitationWindowMs ?? MCP_ELICITATION_WINDOW_MS, wakeAt: operations.wakeAt }) : null;
         if (name === 'bash') result = await jobs.foreground(args, api, context);
         else if (proc?.op === 'wait') {
           // A process wait holds the round as a command does: a message waiting to steer the conversation ends it, and
@@ -398,15 +415,29 @@ export function createRuntimeTools(services: ToolServices, operations: JobServic
             }
           } finally { await steer.stop(); }
           result = await invoked;
-        } else result = await services.invoke({ ...invocation, ...(name === 'codemode' ? { codemodeTools, codemodeDescribe } : {}) });
+        } else result = await services.invoke({ ...invocation, ...(name === 'codemode' ? { codemodeTools, codemodeDescribe } : {}), ...(mcp ? { mcpElicit: mcp.elicit } : {}) });
         if (name === 'proc') await watchProcessExit(operations, args, result, api, context);
-        const content = result.content.length > 0 || result.status === 'completed' ? result.content : [{ type: 'text' as const, text: result.status === 'failed' ? result.error.message : 'The command was interrupted before it returned output; its outcome is unknown.' }];
+        // A call that went on without a person is recorded and continued later; its result is the conversation's next
+        // input, so the turn ends here.
+        const handoff = result.status === 'completed' ? result.mcpTask ?? null : null;
+        const server = mcp?.state.source?.connection ?? handoff?.connection ?? 'The MCP server';
+        const mcpCall = mcpArgs && mcp && (handoff || mcp.state.paused.length > 0) ? await api.commit(tx => recordMcpCall(tx, mcpCallTask, { id: null, conversationId: String(api.conversationId), callId: topCallId, connectionId: mcpArgs.connectionId, connection: server, tool: mcpArgs.name, args, answered: mcp.state.answered, paused: mcp.state.paused, secrets: mcp.state.secrets, handoff }), context) : null;
+        const paused = mcp?.state.paused ?? [];
+        const declined = mcp?.state.declined ?? [];
+        const notes = [
+          ...declined.length ? [`GitSpace declined ${server}'s request${declined.length === 1 ? '' : 's'} for input (${declined.map(message => `"${message.slice(0, 200)}"`).join(', ')}): a subagent's MCP calls ask no person. Tell your parent agent what the server needs.`] : [],
+          ...mcpCall ? [`${server} ${paused.length ? `asked for input (question${paused.length === 1 ? '' : 's'} ${paused.join(', ')}) and nobody answered within ${MCP_ELICITATION_WINDOW_MS / 1000} s, so GitSpace went on without the answer${handoff ? ' and handed off its task' : ' (it answered cancel; the result above is that attempt\'s)'}` : `runs this call as its task ${handoff?.reference.taskId ?? ''}${handoff?.status ? ` (${handoff.status})` : ''}`}. GitSpace continues the call once ${paused.length ? 'it is answered, giving the server the answer' : 'the task finishes'}; its result is your next input. Your turn ends here: do not call it again for this.`] : [],
+          ...continued.length ? [`${continued.length === 1 ? 'An MCP call' : `${continued.length} MCP calls`} of this script went on without a person (see their results); GitSpace continues ${continued.length === 1 ? 'it' : 'them'}, and the results are your next input. Your turn ends here.`] : [],
+        ];
+        // Values a person typed into a secret-looking form never reach the agent, even when the server repeats them.
+        const secrets = mcp?.state.secrets ?? [];
+        const content = [...(result.content.length > 0 || result.status === 'completed' ? result.content : [{ type: 'text' as const, text: result.status === 'failed' ? result.error.message : 'The command was interrupted before it returned output; its outcome is unknown.' }]).map(item => item.type === 'text' && secrets.length ? { ...item, text: redactSecrets(item.text, secrets) } : item), ...notes.map(text => ({ type: 'text' as const, text }))];
         // An image the conversation's model cannot take never enters history: every later request would resend it. One
         // it can take enters as a reference to its stored bytes.
         const ref = content.some(item => item.type === 'image') ? (await api.agent(context)).model : undefined;
         const admitted = ref === undefined ? content : admitToolImages(content, imageLimits(api.models.getModel(ref.provider, ref.modelId)));
         const output = await Promise.all(admitted.map(item => item.type === 'image' ? services.images.store(item) : item));
-        return { output, isError: result.status !== 'completed', details: { executorStatus: result.status, ...(result.browser ? { browser: result.browser } : {}), ...(name === 'codemode' ? { calls } : {}), executorResultReference: { attemptId: result.attemptId, sha256: await receiptDigest(result) } } };
+        return { output, isError: result.status !== 'completed', details: { executorStatus: result.status, ...(result.browser ? { browser: result.browser } : {}), ...(name === 'codemode' ? { calls } : {}), ...(mcpCall ? { mcpCall } : {}), executorResultReference: { attemptId: result.attemptId, sha256: await receiptDigest(result) } }, ...(mcpCall || continued.length > 0 ? { control: { terminate: true } } : {}) };
       };
       const result = await (safe || name === 'codemode' ? run() : serialized(String(api.conversationId), run));
       // A codemode child's task is owned by the codemode call's tool task, a model-issued call's by its generation.

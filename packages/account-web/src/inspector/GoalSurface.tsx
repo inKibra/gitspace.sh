@@ -93,8 +93,11 @@ export function GoalSurface({ overview, scope, controls, journalEntries, threads
     ...controls?.pendingAsk ? ['answer the agent’s question'] : [],
     ...toAccept ? [`accept ${toAccept} requirement${toAccept === 1 ? '' : 's'} with evidence to check`] : [],
   ];
-  // A secret an agent asks for is typed only on its secure-input page, which each one links to.
-  const secrets = useContext(QuestionCardsContext)?.questions.flatMap((question) => question.kind === 'secure-input' && question.secureInput && questionState(question) === 'open' ? [question.secureInput] : []) ?? [];
+  // A secret an agent asks for is typed only on its secure-input page, which each one links to; an MCP server's request
+  // is answered on its card in the chat.
+  const questions = useContext(QuestionCardsContext)?.questions.filter((question) => questionState(question) === 'open') ?? [];
+  const secrets = questions.flatMap((question) => question.kind === 'secure-input' && question.secureInput ? [question.secureInput] : []);
+  const elicitations = questions.flatMap((question) => question.kind === 'mcp-elicitation' && question.mcpElicitation ? [{ id: question.id, card: question.mcpElicitation }] : []);
   const entries = journalEntries.length ? journalEntries : overview.journal.recent;
   const done = [
     ...plan?.steps.length ? [`${stepsDone} of ${plan.steps.length} plan steps`] : [],
@@ -123,9 +126,10 @@ export function GoalSurface({ overview, scope, controls, journalEntries, threads
         {pullRequests.length ? <PrChips pulls={pullRequests} full /> : workspace ? <span className="text-caption text-muted-foreground">no PR</span> : null}
       </div>
       {done.length ? <p className="text-body text-foreground">Done: {done.join(', ')}.</p> : null}
-      <p className="text-body text-foreground"><span className="font-medium">Needs you:</span> {needsYou.length || secrets.length ? <>
+      <p className="text-body text-foreground"><span className="font-medium">Needs you:</span> {needsYou.length || secrets.length || elicitations.length ? <>
         {needsYou.join(' · ')}
         {secrets.map((secret, index) => <Fragment key={secret.requestId}>{needsYou.length || index ? ' · ' : null}<a href={secret.url} target="_blank" rel="noopener" className="underline underline-offset-2 [overflow-wrap:anywhere]">Asks for a secret for <span className="font-mono">{secret.origin}</span></a></Fragment>)}
+        {elicitations.map(({ id, card }, index) => <Fragment key={id}>{needsYou.length || secrets.length || index ? ' · ' : null}<span className="[overflow-wrap:anywhere]" data-needs-mcp-elicitation>{card.connection} asks: {card.request.message.length > 80 ? `${card.request.message.slice(0, 79)}…` : card.request.message}{card.request.mode === 'url' ? ` (opens ${card.host})` : null}</span></Fragment>)}
       </> : 'nothing right now'}</p>
     </section>
 

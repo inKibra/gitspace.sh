@@ -14,7 +14,9 @@ import { sessionControlsExtension, SessionControlsDoc } from './session-controls
 import { createBackgroundAgentTask, createSubagentReplyExtension } from './background-agents.js';
 import { createRetainedRulesExtension, type RetainedRuleServices } from './retained-rules.js';
 import { createJobTask, createProcessExitTask, type JobServices } from './jobs.js';
+import { createMcpCallTask } from './mcp-elicitation.js';
 import { RuntimeBrowserArgumentsSchema, RuntimeBrowserChromesArgumentsSchema, RuntimeBrowserCommentsArgumentsSchema, RuntimeChildAgentsArgumentsSchema, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
+import { MCP_ELICITATION_WINDOW_MS } from '@gitspace/protocol-runtime';
 import { RuntimeBrowserCapturesArgumentsSchema, RuntimeBrowserCaptureArgumentsSchema, RuntimeBrowserReplayArgumentsSchema } from '@gitspace/protocol-runtime';
 import type { ModelSelectionIntent } from '@gitspace/protocol-runtime/session-controls';
 import { z } from 'zod';
@@ -155,6 +157,8 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
   const deliver: ConversationLifecycle['deliver'] = async input => (await lifecycleReady.promise).deliver(input);
   const jobs: JobServices = { ...options.operations, deliverConversationEvent: deliver };
   const backgroundAgentTask = createBackgroundAgentTask(deliver);
+  // MCP calls a server paused for input, continued once answered (`mcp-elicitation.ts`).
+  const mcpCallTask = createMcpCallTask({ invoke: options.tools.invoke, deliver, wakeAt: options.operations.wakeAt, windowMs: options.tools.mcpElicitationWindowMs ?? MCP_ELICITATION_WINDOW_MS });
   const tools: ToolRegistration[] = [...createRuntimeTools(options.tools, jobs, (id, context) => harness.abortTask(id, context)), fixBlockTool];
   // The current version of each drive file a message embeds (media-pins.ts). A failed catalog read leaves the message
   // without pins, showing its files as they are now, and is reported: pinning never holds up a message.
@@ -169,7 +173,7 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
   // heads a stack.
   const { projectBoard, stackBoard } = options.tools;
   const board: TurnBoard | null = projectBoard ? { kind: 'project', read: projectBoard } : stackBoard ? { kind: 'stack', read: stackBoard } : null;
-  const extension = defineExtension({ name: 'gitspace', tools, tasks: [...createOperationalTasks(options.operations), backgroundAgentTask, createJobTask(jobs), createProcessExitTask(jobs)], sections: [{ key: 'gitspace', async render(input, context) {
+  const extension = defineExtension({ name: 'gitspace', tools, tasks: [...createOperationalTasks(options.operations), backgroundAgentTask, createJobTask(jobs), createProcessExitTask(jobs), mcpCallTask], sections: [{ key: 'gitspace', async render(input, context) {
     const workspace = await input.read.snapshot(WorkspaceDoc, context);
     const child = (await input.read.snapshot(AgentDefinitionContextDoc, input.conversationId, context))?.child;
     const extra = await options.tools.instructions(String(input.conversationId), context);
@@ -372,7 +376,7 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
     const selected = child ? offered.filter(tool => child.tools.includes(tool.name === BROWSER_TOOL_NAME ? 'browser' : tool.name)) : offered;
     await conversation.configure({ model: { provider: model.provider, modelId: model.modelId }, tools: selected, modelTools: child ? null : codeOnly, extensions: child ? { add: [childExtension] } : { remove: [childExtension] } }, BACKGROUND_CONTEXT);
   };
-  const lifecycle = createConversationLifecycle({ harness, storage: options.storage, admitInference: options.admitInference, configureModel, report: options.onReport });
+  const lifecycle = createConversationLifecycle({ harness, storage: options.storage, admitInference: options.admitInference, configureModel, report: options.onReport, mcpCallTask });
   lifecycleReady.resolve(lifecycle);
   await harness.commit(async tx => {
     const workspace = await tx.doc(WorkspaceDoc);

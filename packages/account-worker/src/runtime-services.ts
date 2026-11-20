@@ -693,7 +693,10 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
       if (input.tool === 'mcp_discover' || input.tool === 'mcp_invoke') {
         const args = object.parse(input.args);
         if (typeof args.connectionId === 'string' && await mcp.isStdio(input.args)) return executeMachine(input);
-        return completed(input, input.tool === 'mcp_discover' ? await mcp.discover(input.args, input.signal) : await mcp.invoke(input.args, input.signal));
+        if (input.tool === 'mcp_discover') return completed(input, await mcp.discover(input.args, input.signal));
+        // A server's requests for input go to the workspace (`mcpElicit`); a handed-off task is resumed (`mcpTask`).
+        const invoked = await mcp.invoke(input.args, input.signal, { ...(input.mcpElicit ? { elicit: input.mcpElicit } : {}), ...(input.mcpTask ? { task: input.mcpTask } : {}) });
+        return { ...completed(input, invoked.value), ...(invoked.handoff ? { mcpTask: invoked.handoff } : {}) };
       }
       if (input.tool === 'read') {
         const args = RuntimeReadArgumentsSchema.parse(input.args);

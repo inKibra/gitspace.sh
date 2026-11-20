@@ -138,7 +138,7 @@ export async function completeMcpSignIn(env: Env, connection: McpConnection, cod
   if (transport.headers.length > 0) return { status: 'offline', message: 'Signed in. It connects when an agent first uses it.', serverVersion: null };
   let client: Client | undefined;
   try {
-    client = await connectMcp({ type: transport.type, url: transport.url, authProvider: signIn, timeout: connection.timeoutMs });
+    ({ client } = await connectMcp({ type: transport.type, url: transport.url, authProvider: signIn, timeout: connection.timeoutMs }));
     await client.listTools({}, { timeout: connection.timeoutMs });
     return { status: 'ready', message: null, serverVersion: mcpServerIdentity(client) };
   } catch (error) {

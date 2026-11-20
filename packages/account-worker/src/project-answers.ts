@@ -39,7 +39,7 @@ export async function proposeProjectAnswers(input: { runtime: WorkspaceRuntime; 
     const { name, questions } = await input.workspace(proposed.workspaceId);
     const question = questions.find(item => item.id === proposed.questionId);
     if (!question) throw new Error(`Question ${proposed.questionId} is not open in workspace ${name}; space_workspace questions { workspaceId: "${proposed.workspaceId}" } lists the open ones`);
-    if (!question.answerable) throw new Error(`Question ${proposed.questionId} in workspace ${name} is a ${question.kind}. ${question.why ?? ''} Only plain questions (ask) are answered in a person's place.`);
+    if (!question.answerable) throw new Error(`Question ${proposed.questionId} in workspace ${name} is a ${question.kind}. ${question.why ?? ''} Answered in a person's place are plain questions (ask), and MCP servers' forms that do not look like they ask for a secret (answer with the form's fields as one JSON object); never a server's link, nor a form that looks like it asks for a secret.`);
     let answer: PendingAskAnswer;
     if (typeof proposed.answer === 'string') answer = question.choices.includes(proposed.answer) ? { id: question.id, selectedOptions: [proposed.answer], customInput: null } : { id: question.id, selectedOptions: [], customInput: proposed.answer };
     else {

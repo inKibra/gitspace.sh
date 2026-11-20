@@ -12,6 +12,7 @@ import { LifecycleApprovalCard } from '../LifecycleApprovalCard.js';
 import { CLOSED_REASON, QuestionCardsContext } from '../QuestionCards.js';
 import { TakeoverCard } from '../TakeoverCard.js';
 import { SecureInputCard } from '../SecureInputCard.js';
+import { McpElicitationCard } from '../McpElicitationCard.js';
 import { ToolGroup } from './ToolGroup.js';
 import type { ItemInteractionProps, TranscriptItemState } from './TranscriptItemView.js';
 import type { TurnTranscriptProps } from './TurnTranscript.js';
@@ -246,6 +247,15 @@ export function AskSecureInputCall({ block, state, onStateChange }: { block: Too
   const cards = useContext(QuestionCardsContext);
   const question = cards?.questions.find(item => item.kind === 'secure-input' && item.secureInput?.callId === block.toolCallId);
   return cards && question?.secureInput ? <SecureInputCard question={question} card={question.secureInput} cards={cards} /> : <ToolGroup calls={[{ block, complete: true }]} state={state} onStateChange={onStateChange} />;
+}
+
+/** A tool call a person's MCP server paused for input (the script's codemode call, or a direct MCP call) shows as the
+ * call it is, followed by a card for each of the server's requests, in the order the server asked. */
+export function McpElicitationCall({ block, state, onStateChange }: { block: ToolCallBlock } & ItemInteractionProps) {
+  const cards = useContext(QuestionCardsContext);
+  const asked = cards?.questions.filter(item => item.kind === 'mcp-elicitation' && item.mcpElicitation?.callId === block.toolCallId).toSorted((left, right) => (left.mcpElicitation?.askedAt ?? '').localeCompare(right.mcpElicitation?.askedAt ?? '')) ?? [];
+  const call = <ToolGroup calls={[{ block, complete: true }]} state={state} onStateChange={onStateChange} />;
+  return cards && asked.length ? <div className="flex min-w-0 flex-col gap-2">{call}{asked.map(question => question.mcpElicitation ? <McpElicitationCard key={question.id} question={question} card={question.mcpElicitation} cards={cards} /> : null)}</div> : call;
 }
 
 /** An `environment` call that waits, or waited, on a lifecycle approval card shows the card above the call. */

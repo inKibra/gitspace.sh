@@ -21,7 +21,8 @@
     "./image-reference": "./src/image-reference.ts",
     "./chat-attachments": "./src/chat-attachments.ts",
     "./comments": "./src/comments.ts",
-    "./secure-input": "./src/secure-input.ts"
+    "./secure-input": "./src/secure-input.ts",
+    "./mcp-elicitation": "./src/mcp-elicitation.ts"
   },
   "scripts": {
     "typecheck": "tsgo --noEmit -p tsconfig.json && tsgo --noEmit -p tsconfig.test.json",

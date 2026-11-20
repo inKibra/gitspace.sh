@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { decodeApiKey, deviceProtocolBase64 } from '@gitspace/protocol/device-grant';
 import { RuntimeRunSchema, type RuntimeRun } from '@gitspace/protocol-runtime/session-controls';
 import { SECURE_INPUT_CHOICES, type RuntimeSecureInputKind } from '@gitspace/protocol-runtime/secure-input';
+import { MCP_ELICITATION_CHOICES, RuntimeMcpElicitationContentSchema, mcpElicitationIssues, type RuntimeMcpElicitationQuestion } from '@gitspace/protocol-runtime/mcp-elicitation';
 
 /** The MCP Tasks extension (https://tasks.extensions.modelcontextprotocol.io/specification/2026-07-28/tasks). */
 export const TASKS_EXTENSION = 'io.modelcontextprotocol/tasks';
@@ -112,9 +113,17 @@ export function createGitSpaceTasks(options: { key: string; capabilities: readon
   }
   /** Whether this caller may answer `run`'s question through a form: a plain question, a grant that decides as the
    * person, and a client that takes form elicitations on this request. A secure-input request never is: its value is
-   * typed only on GitSpace's secure-input page. */
+   * typed only on GitSpace's secure-input page. An `mcp-elicitation` question follows `passesThrough` instead. */
   function answerable(run: RuntimeRun, ctx: ServerContext): boolean {
     return run.question?.kind === 'ask' && options.capabilities.includes('operator.decide') && elicitationModes(ctx).form;
+  }
+  /** Whether an `mcp-elicitation` question goes to this client as its own elicitation: a grant with operator.decide
+   * (answering decides as the person; GitSpace's RPC refuses `answerAsk` without it) and, for a form that does not look
+   * like it asks for a secret, a client that takes form elicitations; for a link, one that takes URL elicitations. A
+   * secret-looking form is answered only by a person in GitSpace. */
+  function passesThrough(card: RuntimeMcpElicitationQuestion, ctx: ServerContext): boolean {
+    if (!options.capabilities.includes('operator.decide')) return false;
+    return card.request.mode === 'url' ? elicitationModes(ctx).url : !card.secretLooking && elicitationModes(ctx).form;
   }
   function inputRequest(question: NonNullable<RuntimeRun['question']>) {
     const properties = {
@@ -155,6 +164,22 @@ export function createGitSpaceTasks(options: { key: string; capabilities: readon
             return { ...task, pollIntervalMs: POLL_PERSON_MS, status: 'input_required', statusMessage: `The agent asks for ${asked}: ${secure.purpose}`, inputRequests: { [question.id]: inputRequired.elicitUrl({ message, url: secure.url }) } };
           }
           return { ...task, pollIntervalMs: POLL_PERSON_MS, status: 'working', statusMessage: `Waiting in GitSpace for a person to enter ${asked} (secure-input request ${question.id}: ${secure.purpose}) at ${secure.url}; this client did not declare URL elicitation.` };
+        }
+        const card = question.kind === 'mcp-elicitation' ? question.mcpElicitation : undefined;
+        if (card) {
+          // The server's own request, passed through unchanged but for the message naming who asks.
+          const prefix = `${card.connection} (an MCP server in workspace ${card.workspace}) asks`;
+          if (passesThrough(card, ctx)) {
+            const request = card.request.mode === 'url'
+              ? inputRequired.elicitUrl({ message: `${prefix}: ${card.request.message} (this page belongs to ${card.connection}, not GitSpace)`, url: card.request.url })
+              : { method: 'elicitation/create', params: { mode: 'form', message: `${prefix}: ${card.request.message}`, requestedSchema: card.request.requestedSchema } };
+            return { ...task, pollIntervalMs: POLL_PERSON_MS, status: 'input_required', statusMessage: `${prefix}: ${card.request.message}`, inputRequests: { [question.id]: request } };
+          }
+          const at = card.request.mode === 'url' ? ` at ${card.request.url}` : '';
+          const why = card.request.mode === 'form' && card.secretLooking ? 'it looks like it asks for a secret, so only a person answers it in GitSpace'
+            : !options.capabilities.includes('operator.decide') ? 'this MCP access is not granted operator.decide'
+            : card.request.mode === 'url' ? 'this client did not declare URL elicitation' : 'this client did not declare form elicitation';
+          return { ...task, pollIntervalMs: POLL_PERSON_MS, status: 'working', statusMessage: `Waiting in GitSpace for a person to answer ${card.connection}'s question "${card.request.message}" (question ${question.id})${at}; ${why}.` };
         }
         if (answerable(run, ctx)) return { ...task, pollIntervalMs: POLL_PERSON_MS, status: 'input_required', statusMessage: `The agent asks: ${question.prompt}`, inputRequests: { [question.id]: inputRequest(question) } };
         const why = question.kind !== 'ask' ? 'only a person answers it in GitSpace' : !options.capabilities.includes('operator.decide') ? 'this MCP access is not granted operator.decide' : 'this client did not declare form elicitation';
@@ -219,6 +244,22 @@ export function createGitSpaceTasks(options: { key: string; capabilities: readon
           const response = elicitationModes(ctx).url && question.secureInput ? inputResponse(ctx.mcpReq.inputResponses, question.id) : null;
           if (response?.kind !== 'elicit' || response.action === 'accept' || !options.capabilities.includes('operator.decide')) return {};
           await answerAsk(handle, question.id, [SECURE_INPUT_CHOICES.decline], null, ctx.mcpReq.signal);
+          return {};
+        }
+        const card = question.kind === 'mcp-elicitation' ? question.mcpElicitation : undefined;
+        if (card) {
+          // Answered only where it was passed through: never a secret-looking form, never a link to a client without URL elicitation.
+          const response = passesThrough(card, ctx) ? inputResponse(ctx.mcpReq.inputResponses, question.id) : null;
+          if (response?.kind !== 'elicit') return {};
+          if (response.action === 'decline') await answerAsk(handle, question.id, [MCP_ELICITATION_CHOICES.decline], null, ctx.mcpReq.signal);
+          else if (response.action === 'cancel') await answerAsk(handle, question.id, [MCP_ELICITATION_CHOICES.cancel], null, ctx.mcpReq.signal);
+          else if (card.request.mode === 'url') await answerAsk(handle, question.id, [MCP_ELICITATION_CHOICES.done], null, ctx.mcpReq.signal);
+          else {
+            const content = RuntimeMcpElicitationContentSchema.safeParse(response.content ?? {});
+            const issues = content.success ? mcpElicitationIssues(card.request.requestedSchema, content.data) : ['the content is not an object of strings, numbers, booleans or string lists'];
+            if (!content.success || issues.length > 0) throw new ProtocolError(ProtocolErrorCode.InvalidParams, `The answer to question ${question.id} does not fit ${card.connection}'s form: ${issues.join('; ')}`);
+            await answerAsk(handle, question.id, [], JSON.stringify(content.data), ctx.mcpReq.signal);
+          }
           return {};
         }
         const response = answerable(run, ctx) ? inputResponse(ctx.mcpReq.inputResponses, question.id) : null;

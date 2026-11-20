@@ -95,7 +95,13 @@ export async function executeMcpStdio(options: McpStdioOperation): Promise<McpSt
   // The 2025 `initialize` handshake, without a `server/discover` probe: every operation spawns its own server process,
   // and the SDK's sibling-process probe is only for its own `StdioClientTransport`. Probing in place here would spend the
   // one child on a request some servers (rmcp's) exit on, and stall servers that never answer it for the probe timeout.
-  const client = new Client({ name: 'gitspace-machine', version: '1.0.0' }, { capabilities: {} });
+  // A server on a machine may ask for input; nobody is asked yet: each request is declined, and the result says so.
+  const client = new Client({ name: 'gitspace-machine', version: '1.0.0' }, { capabilities: { elicitation: { form: {}, url: {} } } });
+  const declined: string[] = [];
+  client.setRequestHandler('elicitation/create', async request => {
+    declined.push(request.params.message);
+    return { action: 'decline' };
+  });
   try {
     await client.connect(transport, { timeout: options.timeoutMs, signal });
     const server = client.getServerVersion();
@@ -111,7 +117,9 @@ export async function executeMcpStdio(options: McpStdioOperation): Promise<McpSt
     if (!options.name || !tools.some(tool => tool.name === options.name)) throw new Error('MCP tool is unavailable');
     await options.authorize();
     signal.throwIfAborted();
-    return { value: await client.callTool({ name: options.name, arguments: options.arguments ?? {} }, { signal, timeout: options.timeoutMs }), serverVersion };
+    const result = await client.callTool({ name: options.name, arguments: options.arguments ?? {} }, { signal, timeout: options.timeoutMs });
+    const note = `GitSpace declined this server's request${declined.length === 1 ? '' : 's'} for input (${declined.map(message => `"${message.slice(0, 200)}"`).join(', ')}): requests for input from MCP servers on a machine are not shown to people yet. A network (cloud) connection to the server asks the person.`;
+    return { value: declined.length ? { ...result, content: [...result.content, { type: 'text', text: note }] } : result, serverVersion };
   } finally {
     try { await client.close(); } finally { await transport.close(); }
   }

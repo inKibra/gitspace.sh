@@ -7,7 +7,7 @@ import type { SentAnswer } from '@gitspace/protocol-runtime/comments';
 import { PendingAskAnswerSchema } from '@gitspace/protocol-runtime/session-controls';
 import { askAnswererName, openerAt, piMessageRowId, type AskAnswerer } from '@gitspace/blocks';
 import { blockAskQuestionId, requiredBlockAsks } from '@gitspace/protocol/gitspace-ui';
-import { BlockAsksDoc, QuestionsDoc, StagedCommentsDoc, WorkspaceDoc, type Question } from './documents.js';
+import { BlockAsksDoc, McpElicitationsDoc, QuestionsDoc, StagedCommentsDoc, WorkspaceDoc, type Question } from './documents.js';
 import { turnOpeners } from './transcript-rows.js';
 import { answerPlan, withdrawPlan, type PlanDecision } from './plan.js';
 import type { ConversationEvent } from './conversation-lifecycle.js';
@@ -191,22 +191,27 @@ function dismissalText(question: Question): string {
   return `The user dismissed your question (question ${question.id}) without answering it.\nQuestion: ${shownPrompt(question.prompt)}${after}`;
 }
 
+/** Records `closure`'s answer on `question`, which is open, in `tx`. */
+export async function answerQuestion(tx: Tx, question: Question, closure: Exclude<QuestionClosure, { dismissed: true }>): Promise<void> {
+  question.answer = closure.answer;
+  question.answeredAt = new Date().toISOString();
+  if (closure.answeredBy) question.answeredBy = closure.answeredBy;
+  await dropStagedAnswers(tx, [question.id]);
+}
+
 /** Closes `question`, which is open, as `closure` in `tx`, and returns the event its conversation (`conversationId`)
  * hears next. A dismissed proposal is withdrawn (`withdrawPlan`); an answered one's plan is the caller's (`answerPlan`). */
 export async function settleQuestion(tx: Tx, conversationId: ConversationId, question: Question, closure: QuestionClosure): Promise<ConversationEvent> {
-  const at = new Date().toISOString();
   let text: string;
   if ('dismissed' in closure) {
-    question.closed = { reason: 'dismissed', at };
+    question.closed = { reason: 'dismissed', at: new Date().toISOString() };
     if (question.kind === 'approval') await withdrawPlan(tx, conversationId, question.id);
     text = dismissalText(question);
+    await dropStagedAnswers(tx, [question.id]);
   } else {
-    question.answer = closure.answer;
-    question.answeredAt = at;
-    if (closure.answeredBy) question.answeredBy = closure.answeredBy;
+    await answerQuestion(tx, question, closure);
     text = closure.text ?? answerText(question, closure.answer, closure.answeredBy);
   }
-  await dropStagedAnswers(tx, [question.id]);
   const answerer = question.answeredBy;
   const sender = !answerer ? { id: 'user', name: 'The user' }
     : answerer.by === 'project-agent' ? { id: 'project-agent', name: `Project agent for ${answerer.for ?? 'the user'}` }
@@ -229,6 +234,7 @@ export async function closeConversationQuestions(tx: Tx, conversations: Readonly
     if (question.kind === 'approval') await withdrawPlan(tx, id, question.id);
   }
   await dropStagedAnswers(tx, closed);
+  await dropMcpElicitations(tx, closed);
 }
 
 /**
@@ -253,6 +259,7 @@ export async function closeRepliedQuestions(tx: Tx, conversationId: Conversation
   }
   if (latest !== undefined) asks.replied = { ...asks.replied, [String(conversationId)]: Number(latest) };
   await dropStagedAnswers(tx, closed);
+  await dropMcpElicitations(tx, closed);
 }
 
 /** A question that closed or was answered takes no staged answer: one staged for it leaves the staged answers. */
@@ -260,6 +267,18 @@ async function dropStagedAnswers(tx: Tx, ids: readonly string[]): Promise<void> 
   if (ids.length === 0) return;
   const staged = await tx.doc(StagedCommentsDoc);
   if (staged.answers?.some(item => ids.includes(item.questionId))) staged.answers = staged.answers.filter(item => !ids.includes(item.questionId));
+}
+
+/** A closed `mcp-elicitation` question takes no answer: the MCP call waiting on it ends without being continued, and a
+ * call still waiting live on it answers `cancel` (`mcp-elicitation.ts`). */
+async function dropMcpElicitations(tx: Tx, ids: readonly string[]): Promise<void> {
+  if (ids.length === 0) return;
+  const doc = await tx.doc(McpElicitationsDoc);
+  for (const id of ids) {
+    const call = doc.asked[id]?.call;
+    if (call) delete doc.calls[call];
+    delete doc.asked[id];
+  }
 }
 
 /**

@@ -14,6 +14,7 @@ export * from './browser-watch.js';
 export * from './dictation.js';
 export * from './browser-takeover.js';
 export * from './secure-input.js';
+export * from './mcp-elicitation.js';
 export * from './lifecycle-approval.js';
 export * from './browser-capture-tracks.js';
 export * from './browser-capture-rules.js';

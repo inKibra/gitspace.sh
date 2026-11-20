@@ -82,9 +82,11 @@ export function runtimeCloudProcedures(env: Env, userId: string, deviceId: strin
       const { authority, device } = await requireRuntimeAccess(env, userId, deviceId, input, read ? 'rpc.read' : 'session.prompt');
       if (['setWorkspacePhase', 'saveAgentDefinition', 'reloadSettings', 'instructionsChanged', 'inferenceChanged'].includes(input.command.type)
         && !deviceCanAdminister(device, 'account.admin')) throw new Error('This session command requires account administration');
-      // Only an API client (an MCP access's device) answers as an MCP client; a person's browser answers as the person.
+      // Only an API client (an MCP access's device) answers as an MCP client, and it always does: a person answers as
+      // themselves only from their browser, which is what a question only a person may answer requires.
       if (input.command.type === 'answerAsk' && input.command.answeredBy === 'mcp-client' && device.kind !== 'client') throw new Error('Only an API client answers as an MCP client');
-      return ok(RuntimeSessionResultSchema.parse(await (await authority.runtimeSession(input, { deviceId, canApprove: deviceHasCapability(device, 'operator.decide') && deviceCanAdminister(device, 'account.admin') })).json()));
+      const command = input.command.type === 'answerAsk' && device.kind === 'client' ? { ...input.command, answeredBy: 'mcp-client' as const } : input.command;
+      return ok(RuntimeSessionResultSchema.parse(await (await authority.runtimeSession({ ...input, command }, { deviceId, canApprove: deviceHasCapability(device, 'operator.decide') && deviceCanAdminister(device, 'account.admin') })).json()));
     } catch (error) { return err(errors.OperationFailed({ operation: 'control cloud session', message: message(error) })); }
   }));
   const services = server.implement(runtimeServicesContract).handler(observed('runtime.services', async ({ input, errors }) => {

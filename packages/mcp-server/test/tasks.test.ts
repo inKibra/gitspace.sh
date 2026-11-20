@@ -26,6 +26,18 @@ const secureQuestion = {
     purpose: 'Sign in to GitHub as octocat', expiresAt: new Date(Date.now() + 900_000).toISOString(), callId: 'call-1', askedAt: new Date().toISOString(),
   },
 };
+const SERVER_URL = 'https://billing.example.com/authorize?session=abc';
+const FORM = { type: 'object' as const, properties: { region: { type: 'string' as const, title: 'Region', enum: ['eu', 'us'] }, seats: { type: 'integer' as const, minimum: 1 } }, required: ['region'] };
+/** An `mcp-elicitation` question: the Billing connection's server, called by the agent in workspace "workspace", asks `request`. */
+const mcpQuestion = (id: string, request: { mode: 'form'; message: string; requestedSchema: typeof FORM } | { mode: 'url'; message: string; url: string }, secretLooking = false) => ({
+  id, conversationId: 'conversation', kind: 'mcp-elicitation' as const, prompt: `Billing asks: ${request.message}`, choices: request.mode === 'url' ? ['Done', 'Decline', 'Cancel'] : ['Decline', 'Cancel'], answer: null,
+  mcpElicitation: {
+    connectionId: 'conn-billing', connection: 'Billing', server: 'billing-server 1.0', workspace: 'workspace', tool: 'create_invoice', request, host: request.mode === 'url' ? 'billing.example.com' : null,
+    secretLooking, scope: 'request' as const, taskId: null, callId: 'call-9', askedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 900_000).toISOString(),
+  },
+});
+const formQuestion = mcpQuestion('q-form', { mode: 'form', message: 'Which region and how many seats?', requestedSchema: FORM });
+const PREFIX = 'Billing (an MCP server in workspace workspace) asks';
 
 /** An MCP endpoint as the account worker serves it. */
 interface McpEndpoint { fetch(request: Request): Promise<Response> }
@@ -88,7 +100,7 @@ async function connect(handler: McpEndpoint, options: ClientOptions = {}) {
 
 /** A 2026-07-28 client that declares the Tasks extension, and the elicitation capability `elicitation` (form unless
  * given; none when null). */
-function tasksClient(handler: McpEndpoint, elicitation: { form?: object; url?: object } | null = { form: {} }) {
+function tasksClient(handler: McpEndpoint, elicitation: { form?: Record<string, never>; url?: Record<string, never> } | null = { form: {} }) {
   return connect(handler, { versionNegotiation: { mode: 'auto' }, capabilities: { extensions: { [TASKS]: {} }, ...(elicitation ? { elicitation } : {}) } });
 }
 /** The `answerAsk` commands the workspace took. */
@@ -298,6 +310,92 @@ describe('GitSpace MCP server on SDK v2', () => {
         expect(answers(backend)).toEqual([]);
       } finally { await client.close(); }
     }
+  });
+
+  test('a non-secret server form passes through to a deciding form client; a valid answer is sent as its JSON, and the task follows the retry to the final reply', async () => {
+    const backend = workspace();
+    const handler = mcp(backend);
+    const started = await startTask(handler, 'gitspace_runtime_submit', { ...identity, requestId: 'invoice', text: 'Make an invoice' });
+    const taskId = z.string().parse(started.taskId);
+    backend.move('invoice', { state: 'waiting', question: formQuestion });
+    const client = await tasksClient(handler);
+    try {
+      expect(await getTask(client, taskId)).toMatchObject({ status: 'input_required', inputRequests: { [formQuestion.id]: { method: 'elicitation/create', params: { mode: 'form', message: `${PREFIX}: Which region and how many seats?`, requestedSchema: FORM } } } });
+
+      // Content outside the server's form is refused and nothing reaches the workspace.
+      const error = await client.request({ method: 'tasks/update', params: { taskId, inputResponses: { [formQuestion.id]: { action: 'accept', content: { seats: 3, color: 'red' } } } } }, z.looseObject({})).catch((failure: unknown) => failure);
+      expect(error).toMatchObject({ code: -32602, message: expect.stringContaining('region is required') });
+      expect(answers(backend)).toEqual([]);
+
+      await client.request({ method: 'tasks/update', params: { taskId, inputResponses: { [formQuestion.id]: { action: 'accept', content: { region: 'eu', seats: 3 } } } } }, z.looseObject({}));
+      expect(answers(backend)).toEqual([{ type: 'answerAsk', id: formQuestion.id, answers: [{ id: formQuestion.id, selectedOptions: [], customInput: JSON.stringify({ region: 'eu', seats: 3 }) }], answeredBy: 'mcp-client' }]);
+      // The host retries the server call: the run reads running, then finishes with the agent's reply.
+      expect(await getTask(client, taskId)).toMatchObject({ status: 'working' });
+      backend.move('invoice', { state: 'finished', text: 'Invoice created in eu for 3 seats.' });
+      expect(await getTask(client, taskId)).toMatchObject({ status: 'completed', result: { content: [{ type: 'text', text: 'Invoice created in eu for 3 seats.' }] } });
+    } finally { await client.close(); }
+  });
+
+  test('a secret-looking server form stays in GitSpace even for a deciding form client, and an answer to it is ignored', async () => {
+    const backend = workspace();
+    const handler = mcp(backend);
+    const started = await startTask(handler, 'gitspace_runtime_submit', { ...identity, requestId: 'key', text: 'Connect billing' });
+    const taskId = z.string().parse(started.taskId);
+    const secret = mcpQuestion('q-key', { mode: 'form', message: 'Your API key?', requestedSchema: FORM }, true);
+    backend.move('key', { state: 'waiting', question: secret });
+    const client = await tasksClient(handler, { form: {}, url: {} });
+    try {
+      const waiting = await getTask(client, taskId);
+      expect(waiting).toMatchObject({ status: 'working', statusMessage: 'Waiting in GitSpace for a person to answer Billing\'s question "Your API key?" (question q-key); it looks like it asks for a secret, so only a person answers it in GitSpace.' });
+      expect(waiting.inputRequests).toBeUndefined();
+      await client.request({ method: 'tasks/update', params: { taskId, inputResponses: { [secret.id]: { action: 'accept', content: { region: 'eu' } } } } }, z.looseObject({}));
+      await client.request({ method: 'tasks/update', params: { taskId, inputResponses: { [secret.id]: { action: 'decline' } } } }, z.looseObject({}));
+      expect(answers(backend)).toEqual([]);
+    } finally { await client.close(); }
+  });
+
+  test('a server link passes through as the server\'s own URL to a URL client; accept is Done and decline is Decline', async () => {
+    const backend = workspace();
+    const handler = mcp(backend);
+    const link = mcpQuestion('q-link', { mode: 'url', message: 'Authorize billing', url: SERVER_URL });
+    const client = await tasksClient(handler, { url: {} });
+    try {
+      for (const [requestId, action, choice] of [['link-1', 'accept', 'Done'], ['link-2', 'decline', 'Decline']] as const) {
+        const taskId = z.string().parse((await startTask(handler, 'gitspace_runtime_submit', { ...identity, requestId, text: 'Bill' })).taskId);
+        backend.move(requestId, { state: 'waiting', question: { ...link, id: `${link.id}-${requestId}` } });
+        const id = `${link.id}-${requestId}`;
+        expect(await getTask(client, taskId)).toMatchObject({ status: 'input_required', inputRequests: { [id]: { method: 'elicitation/create', params: { mode: 'url', url: SERVER_URL, message: `${PREFIX}: Authorize billing (this page belongs to Billing, not GitSpace)` } } } });
+        await client.request({ method: 'tasks/update', params: { taskId, inputResponses: { [id]: { action } } } }, z.looseObject({}));
+        expect(answers(backend).at(-1)).toEqual({ type: 'answerAsk', id, answers: [{ id, selectedOptions: [choice], customInput: null }], answeredBy: 'mcp-client' });
+      }
+    } finally { await client.close(); }
+  });
+
+  test('a server question waits in GitSpace, named, for a client without decide, without form elicitation, or without URL elicitation', async () => {
+    const backend = workspace();
+    const key = keyFor('owner');
+    const started = await startTask(mcp(backend, key), 'gitspace_runtime_submit', { ...identity, requestId: 'invoice', text: 'Make an invoice' });
+    const taskId = z.string().parse(started.taskId);
+    backend.move('invoice', { state: 'waiting', question: formQuestion });
+    const cases = [
+      { handler: mcp(backend, key, capabilities.filter(capability => capability !== 'operator.decide')), elicitation: { form: {} }, why: 'this MCP access is not granted operator.decide' },
+      { handler: mcp(backend, key), elicitation: { url: {} }, why: 'this client did not declare form elicitation' },
+    ];
+    for (const { handler, elicitation, why } of cases) {
+      const client = await tasksClient(handler, elicitation);
+      try {
+        expect(await getTask(client, taskId)).toMatchObject({ status: 'working', statusMessage: `Waiting in GitSpace for a person to answer Billing's question "Which region and how many seats?" (question q-form); ${why}.` });
+        await client.request({ method: 'tasks/update', params: { taskId, inputResponses: { [formQuestion.id]: { action: 'accept', content: { region: 'eu' } } } } }, z.looseObject({}));
+        expect(answers(backend)).toEqual([]);
+      } finally { await client.close(); }
+    }
+    backend.move('invoice', { question: mcpQuestion('q-link', { mode: 'url', message: 'Authorize billing', url: SERVER_URL }) });
+    const client = await tasksClient(mcp(backend, key));
+    try {
+      expect(await getTask(client, taskId)).toMatchObject({ status: 'working', statusMessage: `Waiting in GitSpace for a person to answer Billing's question "Authorize billing" (question q-link) at ${SERVER_URL}; this client did not declare URL elicitation.` });
+      await client.request({ method: 'tasks/update', params: { taskId, inputResponses: { 'q-link': { action: 'accept' } } } }, z.looseObject({}));
+      expect(answers(backend)).toEqual([]);
+    } finally { await client.close(); }
   });
 
   test('tasks methods from a client that did not declare Tasks are refused as a missing capability', async () => {

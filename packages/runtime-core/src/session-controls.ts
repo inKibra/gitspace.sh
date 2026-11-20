@@ -15,6 +15,7 @@ import { RuntimeBrowserCaptureShareSchema, type RuntimeBrowserCaptureShare } fro
 import { BUILT_IN_AGENT_DEFINITIONS } from './builtin-agents.js';
 import type { ConversationLifecycle } from './conversation-lifecycle.js';
 import { answerFromMessage, closeConversationQuestions, closeRepliedQuestions, type QuestionClosure } from './questions.js';
+import { answerMcpElicitation, mcpElicitationResult, type McpElicitationAnswerer } from './mcp-elicitation.js';
 import { AgentDefinitionContextDoc } from './subagent-state.js';
 import { modelRoleThinkingSchema, parseModelRoleSelector } from '@gitspace/protocol/inference';
 import { answersMessage, commentsMessage } from '@gitspace/protocol-runtime/comments';
@@ -424,15 +425,25 @@ export function createSessionControls(services: SessionControlServices) {
       }
       case 'answerAsk': await services.lifecycle.closeQuestion(command.id, async (question, tx, conversationId) => {
         if (question.conversationId !== String(target.id)) throw new Error(`Question ${command.id} belongs to another conversation`);
+        // An MCP server's question is answered to its server (`mcp-elicitation.ts`): by a person on a signed-in device,
+        // or an MCP client they use; it replies to nothing else the conversation asked.
+        if (question.kind === 'mcp-elicitation') {
+          if (deviceId === undefined) throw new Error(`Question ${question.id} is answered by a person, or by their MCP client`);
+          const at = new Date().toISOString();
+          const answerer: McpElicitationAnswerer = command.answeredBy === 'mcp-client' ? { by: 'mcp-client', answeredBy: { by: 'mcp-client', at } } : { by: 'person' };
+          return { closure: await answerMcpElicitation(tx, question, mcpElicitationResult(question, command.answers, answerer), answerer), value: undefined };
+        }
         const closure = askClosure(question, command.answers);
         if (command.answeredBy === 'mcp-client') closure.answeredBy = { by: 'mcp-client', at: new Date().toISOString() };
         // A person's answer (one sent from a device) also replies to the conversation's other open questions.
         if (deviceId !== undefined) await closeRepliedQuestions(tx, conversationId, [question.id]);
         return { closure, value: undefined };
       }); break;
-      case 'dismissQuestion': await services.lifecycle.closeQuestion(command.id, async question => {
+      // Dismissing an MCP server's question cancels its request: the server gets `cancel`.
+      case 'dismissQuestion': await services.lifecycle.closeQuestion(command.id, async (question, tx) => {
         if (question.conversationId !== String(target.id)) throw new Error(`Question ${command.id} belongs to another conversation`);
         if (question.takeover?.holder === 'you') throw new Error('You hold this tab: hand it back with Resume agent');
+        if (question.kind === 'mcp-elicitation') return { closure: await answerMcpElicitation(tx, question, { action: 'cancel' }, { by: 'person' }), value: undefined };
         return { closure: { dismissed: true }, value: undefined };
       }); break;
       case 'stop': await services.lifecycle.stop(String(target.id)); break;
