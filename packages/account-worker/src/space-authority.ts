@@ -47,9 +47,8 @@ import { RetainedLfsSnapshotSchema } from './git-lfs-retention.js';
 import { LifecycleRunRequestSchema, LifecycleRunSchema, environmentFailure, type EnvironmentFailure, type LifecycleActor, type LifecycleMutation, type LifecycleRun, type LifecycleRunLog, type LifecycleState } from '@gitspace/protocol-environment';
 import { forwardPosition } from './cloud-stack-status.js';
 import { originAccess, originReadCredentials } from './origin-access.js';
-import { BudgetedDurableObject } from './storage-quarantine.js';
+import { BudgetedDurableObject, WORKER_VERSION, type ReleaseRestart } from './storage-quarantine.js';
 import { createRuntimeStarts, RuntimeStartWaiting, START_SETTLE_MS, type RuntimeStarts } from './runtime-starts.js';
-import { WORKER_VERSION } from './tenant-releases.js';
 const PortableLfsRetentionSchema = RetainedLfsSnapshotSchema.extend({ publicationId: z.string().optional() });
 /** A legacy LFS retention that keeps failing stays pending (its objects stay retained) and stops retrying here. */
 const PORTABLE_LFS_MAX_ATTEMPTS = 12;
@@ -461,22 +460,20 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
   }
 
   /**
-   * A release went live. Cloudflare keeps a resident instance on the code it started with and swaps it minutes later
-   * whatever it is doing then, cutting off turns started meanwhile; an older instance restarts on the new code now
-   * when nothing is running, otherwise as soon as its running work ends.
+   * A release went live. An older instance restarts on the new code now when nothing is running, otherwise as soon as
+   * its running work ends, so Cloudflare's own swap (at most five minutes after the upload, whatever the object is
+   * doing then) cuts off no turn started meanwhile.
    */
-  async restartForRelease(version: string): Promise<'current' | 'restarting' | 'when-idle'> {
+  override async restartForRelease(version: string): Promise<ReleaseRestart> {
     if (WORKER_VERSION === undefined || version === WORKER_VERSION) return 'current';
     // A second release while this one waits replaces the version it restarts for, not the wait.
     this.releaseRestart = { version, since: this.releaseRestart?.since ?? Date.now(), checking: this.releaseRestart?.checking ?? false };
     const restart = this.releaseRestart;
     const restartWhenIdle = async (): Promise<boolean> => {
       if (await this.running()) return false;
-      console.info(JSON.stringify({ event: 'release_restart', workspaceId: this.get()?.spaceId ?? this.cloudRuntime?.workspaceId ?? null, from: WORKER_VERSION, to: restart.version, waitedMs: Date.now() - restart.since }));
-      // A restart on purpose is no failed start. The abort waits for the write to be stored: one right after it loses it.
+      // A restart on purpose is no failed start.
       try { this.starts.ended(); } catch { /* storage is paused */ }
-      // After this call has answered, so the release sees the outcome.
-      setTimeout(() => { void this.ctx.storage.sync().catch(() => {}).then(() => this.ctx.abort(`Restarting on release ${restart.version}`)); }, 0);
+      this.abortForRelease(restart.version, Date.now() - restart.since);
       return true;
     };
     if (await restartWhenIdle()) return 'restarting';

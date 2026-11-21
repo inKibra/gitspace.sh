@@ -28,14 +28,9 @@ import type { FleetCatalogDO } from './fleet-catalog.js';
 import type { CredentialVaultDO } from './application.js';
 import { GITSPACE_SOURCE_REPOSITORY } from '@gitspace/protocol/project-authority';
 import { notifyMachines } from './machine-notices.js';
-import { deployReleaseWorker, restartSpacesForRelease } from './release-worker.js';
+import { deployReleaseWorker, restartObjectsForRelease } from './release-worker.js';
 import type { WorkerSwap } from './tenant-platform.js';
-import { BudgetedDurableObject } from './storage-quarantine.js';
-
-declare const GITSPACE_WORKER_SHA: string | undefined;
-
-/** Build stamp injected by `Bun.build({ define })`; channel/dev builds carry none. */
-export const WORKER_VERSION: string | undefined = typeof GITSPACE_WORKER_SHA === 'string' ? GITSPACE_WORKER_SHA : undefined;
+import { BudgetedDurableObject, WORKER_VERSION } from './storage-quarantine.js';
 
 /** The builder name of a launch the account runs itself (Back to default, a published release): no machine builds it. */
 export const ACCOUNT_LAUNCHER = 'account';
@@ -377,8 +372,9 @@ export class TenantReleasesDO extends BudgetedDurableObject {
     this.ctx.waitUntil((async () => {
       const outcome = await deployReleaseWorker(this.env, this.env.ACCOUNT_ID, launched.record);
       const record = await this.setWorkerStatus(sha, outcome) ?? launched.record;
-      if (outcome.status === 'applied') await restartSpacesForRelease(this.env, this.env.ACCOUNT_ID, sha);
       this.finishLaunch(record, targets);
+      // Last: this object restarts too when it runs older code.
+      if (outcome.status === 'applied') await restartObjectsForRelease(this.env, this.env.ACCOUNT_ID, sha);
     })().catch((error: unknown) => {
       // Storage refuses an instance the swap replaced; the new Worker certifies the launch (`certifyOwnLaunch`).
       console.warn(JSON.stringify({ event: 'held_launch_ended', sha, message: error instanceof Error ? error.message : String(error) }));

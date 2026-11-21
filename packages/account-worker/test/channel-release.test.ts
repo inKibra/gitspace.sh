@@ -1,4 +1,4 @@
-import { expect, it, vi } from 'vitest';
+import { beforeAll, expect, it, vi } from 'vitest';
 import { env } from 'cloudflare:test';
 import { HttpResponse, http } from 'msw';
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
@@ -10,6 +10,11 @@ import worker from '../src/index.js';
 import { launchPublishedRelease } from '../src/application.js';
 import { network } from './network.js';
 import { tenantRootPrivateKey } from './setup.js';
+import { BudgetedDurableObject } from '../src/storage-quarantine.js';
+
+// The fixture platform swaps no code: every object already runs the code under test, so none restarts for a launch
+// (`release-rollout.test.ts` covers the restart).
+beforeAll(() => { vi.spyOn(BudgetedDurableObject.prototype, 'restartForRelease').mockResolvedValue('current'); });
 
 const machineSigningPrivateKey = Uint8Array.from({ length: 32 }, (_, index) => index + 101);
 const encoder = new TextEncoder();

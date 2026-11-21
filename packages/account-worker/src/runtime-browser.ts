@@ -25,6 +25,7 @@ import type { RuntimeBrowserToolArguments } from '@gitspace/protocol-runtime';
 import { capturesText, readCaptureSummary, replayPreface, replayRun, saveCaptureSkill } from './browser-capture-agent.js';
 import { localhostPort, localhostRefusal, machineBrowserNote, type WorkspaceServiceUrl } from './workspace-service-urls.js';
 import { driveAddress } from './workspace-drive.js';
+import { acrossRelease } from './release-worker.js';
 // Browser powers and Everything (`browser-powers.ts`).
 import { BROWSER_HEAP_ON_CHROME, BROWSER_POWERS_UPDATE, browserGrantPower, browserPowerRefusal, browserStorageSiteRefusal, type BrowserEverything, type BrowserPower } from '@gitspace/protocol-runtime';
 export interface RuntimeBrowserAuthority {
@@ -746,7 +747,9 @@ export function createRuntimeBrowserAuthority(options: RuntimeBrowserAuthorityOp
       ...(args.selector === undefined ? { ref: args.ref } : { selector: args.selector }), kind: args.kind, purpose: args.purpose,
       expiresAt: new Date(now + SECURE_INPUT_TTL_MS).toISOString(), callId: input.callId, askedAt: new Date(now).toISOString(),
     };
-    await env.CREDENTIALS.getByName(env.ACCOUNT_ID).secureInputRecord({ id, ...identity, conversationId: input.conversationId, questionId: input.questionId, request });
+    // Right after a release the vault can still run code without this method.
+    const credentials = env.CREDENTIALS;
+    await acrossRelease(async () => credentials.getByName(env.ACCOUNT_ID).secureInputRecord({ id, ...identity, conversationId: input.conversationId, questionId: input.questionId, request }));
     return request;
   }
   return { prepare, execute, manage, takeoverTab, secureInput, waitForHandback: (target, signal) => waitForHandback(identity.workspaceId, target, async () => await holder(target) !== undefined, signal) };

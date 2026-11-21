@@ -140,7 +140,7 @@ import { tenantPlatformJson, tenantProvider, tenantWorkerVersion } from './tenan
 import { accountDistributionResponse } from './distribution.js';
 import { admitPortableRelease } from './portable-release.js';
 import { CHANNEL_PREFIX, publishedRelease, publishedStageInput, releaseFile } from './channel.js';
-import { deployReleaseWorker, restartSpacesForRelease } from './release-worker.js';
+import { acrossRelease, deployReleaseWorker, ReleaseUpdatingError, restartObjectsForRelease } from './release-worker.js';
 import { refreshProjectRemote } from './project-remote.js';
 import { forwardTunnelRequest, tunnelTarget } from './relay-request.js';
 import { accountAccessResponse, accountStatus, activeAccount, authorizeControl } from './account-access.js';
@@ -160,10 +160,9 @@ import {
   machineAppliedInputSchema,
   machineChannelAppliedInputSchema,
   ReleaseNotFoundError,
-  WORKER_VERSION,
   type LaunchResult,
 } from './tenant-releases.js';
-import { BudgetedDurableObject } from './storage-quarantine.js';
+import { BudgetedDurableObject, WORKER_VERSION } from './storage-quarantine.js';
 import { isStorageQuarantined, WORKSPACE_PAUSED_CODE } from '@gitspace/protocol/storage-breaker';
 
 // Pi's variable-specifier Bedrock import cannot run inside a Worker bundle.
@@ -2855,8 +2854,8 @@ async function launchRelease(env: Env, userId: string, payload: Record<string, u
   if (launched.record.status.worker !== 'pending') { await releases.finishLaunch(launched.record, input.targets); return launched; }
   const outcome = await deployReleaseWorker(env, userId, launched.record);
   const record = await releases.setWorkerStatus(input.sha, outcome) ?? launched.record;
-  if (outcome.status === 'applied') await restartSpacesForRelease(env, userId, input.sha);
   await releases.finishLaunch(record, input.targets);
+  if (outcome.status === 'applied') await restartObjectsForRelease(env, userId, input.sha);
   return { ...launched, record };
 }
 
@@ -3795,19 +3794,21 @@ const worker = {
         if (account.status === 'error') return accountAccessResponse(account)!;
         const handle = accountHandleForHostname(url.hostname);
         if (handle && handle !== account.value.handle) return Response.json(publicError('ACCOUNT_HOST_MISMATCH', 'Request does not belong to this account hostname'), { status: 403, headers });
-        const vault = credentialVault(env, env.ACCOUNT_ID);
+        // A fresh stub per attempt: one that saw an error can stay broken.
+        const vault = () => credentialVault(env, env.ACCOUNT_ID);
         if (passkeyRoute) {
           if (request.headers.get('x-gitspace-user') !== env.ACCOUNT_ID) throw new Error('Account identity is invalid');
-          const result = await vault.passkeyRequest({
+          const result = await acrossRelease(async () => vault().passkeyRequest({
             operation: z.enum(['list', 'challenge', 'register', 'revoke']).parse(passkeyRoute[1]), header: request.headers.get(RPC_DEVICE_HEADER), stepUp: request.headers.get(STEP_UP_HEADER),
             target: `${url.pathname}${url.search}`, body, accountName: url.hostname,
-          });
+          }));
           return Response.json(result, { status: result.status === 'ok' ? 200 : 403, headers });
         }
         const input: unknown = JSON.parse(new TextDecoder().decode(body));
-        const result = passkeySignInRoute?.[1] === 'options' ? await vault.passkeySignInOptions(input) : await vault.passkeySignIn(input);
+        const result = await acrossRelease(async () => passkeySignInRoute?.[1] === 'options' ? vault().passkeySignInOptions(input) : vault().passkeySignIn(input));
         return Response.json(result, { status: result.status === 'ok' ? 200 : 400, headers });
       } catch (error) {
+        if (error instanceof ReleaseUpdatingError) return Response.json(publicError('RELEASE_UPDATING', error.message), { status: 503, headers });
         return Response.json(publicError('INVALID_PASSKEY_REQUEST', error instanceof Error ? error.message : 'Invalid passkey request'), { status: 400, headers });
       }
     }

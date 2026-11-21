@@ -30,7 +30,7 @@ import { remoteDefaultBranch } from './cloud-project.js';
 import { createRuntimeImages } from './runtime-images.js';
 import { inferenceWorkerRunner } from './inference-runner.js';
 import { journalMessageDecisions } from './message-decisions.js';
-import { WORKER_VERSION } from './tenant-releases.js';
+import { WORKER_VERSION } from './storage-quarantine.js';
 
 /** The project repository every workspace forks: a scratch repository with an initial commit, or the origin's history,
  * imported natively from a public origin or streamed with installation-token reads from a covered one. */

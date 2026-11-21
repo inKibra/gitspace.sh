@@ -164,6 +164,46 @@ Worker before that answer arrived. A record from before this has neither. The RP
 it passes, so both are listed there too. There is no alert path from the platform to an account's Needs you; the status
 field and the warn log are the warning.
 
+## Rollout and Durable Objects
+
+The platform swaps an account's Worker with one Workers for Platforms script upload (`uploadScript` in
+`platform/src/deployer.ts`); its metadata sets no `code_update_strategy`, so Cloudflare's default applies. Since
+2026-10-30 that default is **deferred** with a 300 s `max_delay`
+([Durable Objects code updates](https://developers.cloudflare.com/durable-objects/deployments/durable-objects-code-updates/)):
+an object that is not running starts on the new code at its next request, but an object that is active during the
+upload keeps serving every request on its old code until it hibernates or for at most 300 s, then resets. Objects with
+steady traffic (the vault, the relay, the directory, project objects) rarely hibernate, so for up to five minutes a
+Worker on the new code calls objects on the old one. A method the release added answers `TypeError: The RPC receiver
+does not implement the method "<name>"`, and an old method answers in its old shape. Cloudflare documents this
+([known issues, Code updates](https://developers.cloudflare.com/durable-objects/platform/known-issues/#code-updates)):
+keep calls between the Worker and its objects compatible across a code update. Before 2026-10-30 an upload reset
+active objects at once.
+
+The upload metadata could set `code_update_strategy: { mode: 'immediate' }` and reset every active object at the
+swap. It is not set: it cuts off every running agent turn at once, which the workspace objects avoid by restarting
+only when idle. Instead:
+
+- **Restart on release.** Every account Durable Object class (`BudgetedDurableObject` in
+  `account-worker/src/storage-quarantine.ts`) has `restartForRelease(version)`: an object whose build stamp
+  (`WORKER_VERSION`) differs restarts after answering (`ctx.storage.sync()`, then `ctx.abort()`) and its next request
+  starts it on the new code. Workspace objects (`SpaceAuthorityDO`) restart once nothing runs in them. After the
+  platform reports a swap applied, the account (`restartObjectsForRelease` in `release-worker.ts`, from both launch
+  paths, after the launch is finished) tells its account-level objects, each project's authority and automations
+  object and each workspace object, then the release object last. An object that was not running starts on the new
+  code to answer and stays. A request in flight in a restarting object fails, as at Cloudflare's own reset. The call
+  runs on the code that applied the release, so the restart covers releases applied by code that has it: the release
+  that adds it is still served stale for up to five minutes.
+- **Calls to new methods.** A request that calls a method a recent release added to another object goes through
+  `acrossRelease` (`release-worker.ts`): "does not implement the method" ran nothing, so it is retried after 0.25, 0.5,
+  1 and 2 s, then fails with "GitSpace is finishing an update. Try again in a minute." (`ReleaseUpdatingError`; the
+  passkey routes answer 503 `RELEASE_UPDATING`). Used for the vault's `passkeyRequest`, `passkeySignInOptions`,
+  `passkeySignIn` and `secureInputRecord`. A read that a request does not need goes off the request path instead, as
+  the directory's relations backfill does (SIMPLIFICATION 315).
+
+Objects not told of a release (browser sessions, workspace contexts, hosted routes) still take Cloudflare's own update,
+within five minutes. The logs show the rollout: `release_restart` per restarted object (class, name, from, to,
+waitedMs), `release_restarts` with the count of each answer, `rpc_receiver_outdated` per refused call.
+
 ## What leaves the platform
 
 - `/v1/default-releases/*` and `defaultFrontendResponse`.

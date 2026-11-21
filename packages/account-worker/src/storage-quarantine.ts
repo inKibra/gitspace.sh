@@ -6,6 +6,15 @@ import { storageIncidentsInspectContract, storageIncidentsListContract, storageI
 import { err, ok } from 'result-rpc';
 import { serverRpc } from 'result-rpc/server';
 
+declare const GITSPACE_WORKER_SHA: string | undefined;
+
+/** Build stamp injected by `Bun.build({ define })`; channel/dev builds carry none. */
+export const WORKER_VERSION: string | undefined = typeof GITSPACE_WORKER_SHA === 'string' ? GITSPACE_WORKER_SHA : undefined;
+
+/** What an object answers when told a release went live: it already runs it, it restarts on it now, or (a workspace
+ * object with running work) it restarts once that work ends. */
+export type ReleaseRestart = 'current' | 'restarting' | 'when-idle';
+
 /** Something the account should know about one Durable Object's storage: it quarantined itself or was quarantined
  * (`quarantine`), or the platform's watchdog found it past one of its alert thresholds (`alert`). */
 export const StorageIncidentReportSchema = z.object({
@@ -61,6 +70,24 @@ export abstract class BudgetedDurableObject extends DurableObject<Env> {
   storageBreakerStatus(): StorageBreakerStatus { return this.#breaker.status(); }
   quarantineStorage(reason: string): StorageBreakerStatus { return this.#breaker.quarantine(reason); }
   resumeStorage(): StorageBreakerStatus { return this.#breaker.resume(); }
+
+  /**
+   * A release went live. Cloudflare keeps an object that is active during an upload on the code it started with until
+   * it hibernates or for at most five minutes (deferred code updates), so callers on the new code reach methods it
+   * lacks. An object on older code restarts: its next request starts it on the new code.
+   */
+  async restartForRelease(version: string): Promise<ReleaseRestart> {
+    if (WORKER_VERSION === undefined || version === WORKER_VERSION) return 'current';
+    this.abortForRelease(version, 0);
+    return 'restarting';
+  }
+
+  /** Restarts this object after the current call has answered, so the release sees the outcome. The abort waits for
+   * written storage: one right after a write loses it. */
+  protected abortForRelease(version: string, waitedMs: number): void {
+    console.info(JSON.stringify({ event: 'release_restart', ...this.#identity, from: WORKER_VERSION, to: version, waitedMs }));
+    setTimeout(() => { void this.ctx.storage.sync().catch(() => {}).then(() => this.ctx.abort(`Restarting on release ${version}`)); }, 0);
+  }
 
   /** Pauses this object and lists it on the account's Monitoring page: the object's own decision, or an operator's. */
   pauseStorage(reason: string): StorageBreakerStatus {

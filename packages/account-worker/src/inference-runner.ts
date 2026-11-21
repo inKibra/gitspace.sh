@@ -1,7 +1,7 @@
 import { attemptEvents, type AttemptRunner } from '@gitspace/runtime-core/inference';
 import type { Inference } from '@gitspace/inference-worker/worker';
 import { INFERENCE_WORKER_SOURCE, INFERENCE_WORKER_WASM } from './generated/inference-worker.js';
-import { WORKER_VERSION } from './tenant-releases.js';
+import { WORKER_VERSION } from './storage-quarantine.js';
 
 /** The tenant's own compatibility date (`wrangler.jsonc`): the inference worker ships in the same release. */
 const COMPATIBILITY_DATE = '2026-08-27';
