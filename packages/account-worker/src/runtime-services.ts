@@ -6,8 +6,7 @@ import { LifecycleMutationSchema, approvedBrowserSites, projectEnvironmentState,
 import type { WorkspaceEnvironment } from './space-environment.js';
 import { lifecycleApprovalRequest } from './lifecycle-approval-card.js';
 import type { DocumentMarkdown } from './document-markdown.js';
-import { GITSPACE_SOURCE_REPOSITORY } from '@gitspace/protocol/project-authority';
-import { RuntimeQaItemSchema, type RuntimeQaActionInput, type RuntimeQaItem } from '@gitspace/protocol-runtime/workspace-controls';
+import { appendRuntimeQa } from './runtime-qa.js';
 import { ArtifactsCodeStore, artifactsWorkspaceRepository, readCurrentCheckpoint, textPage, snapshotEntries, hasSnapshotConflictMarkers, readSnapshotText, resolveSnapshotConflictText, CloudPublicationUncertain, isAttachmentOnline, isAttachmentReady, type WorkspaceRuntime, type WorkspaceRuntimeOptions } from '@gitspace/runtime-workspace-do';
 import { RuntimeAgentLifecycleRunArgumentsSchema, RuntimeGenerateImageArgumentsSchema, RuntimeLifecycleDispatchArgumentsSchema, RuntimeEnvironmentArgumentsSchema, RuntimeMachinesArgumentsSchema, RuntimeSpaceArtifactsArgumentsSchema, RuntimeDriveTransferStoredSchema, RuntimeSpacePhaseArgumentsSchema, RuntimeReadArgumentsSchema, RuntimeWriteArgumentsSchema, RuntimeEditArgumentsSchema, RuntimeReportIssueArgumentsSchema, RuntimeHistoryReadArgumentsSchema, RuntimeHistorySearchArgumentsSchema, RuntimeWebFetchArgumentsSchema, RuntimeWebSearchArgumentsSchema } from '@gitspace/protocol-runtime';
 import { fetchWeb, renderWebFetchPage, windowWebFetchPage } from 'agents/webfetch';
@@ -48,7 +47,6 @@ import { QuestionsDoc, postQuestion } from '@gitspace/runtime-core';
 import { proposeProjectAnswers } from './project-answers.js';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 
-import { projectEventSchema } from '@gitspace/protocol/project-authority';
 export type RuntimeIdentity = Pick<RuntimeSnapshot, 'projectId' | 'workspaceId'>;
 type Invocation = Parameters<WorkspaceRuntimeOptions['tools']['invoke']>[0];
 type Operation = Parameters<WorkspaceRuntimeOptions['operations']['execute']>[0];
@@ -86,7 +84,7 @@ const failed = (input: Pick<Invocation, 'requestId' | 'attemptId'>, error: unkno
  * pages of Markdown, text as pages of text (after any line selector in the URL), anything else as its metadata. With
  * `asOf`, the file as the drive held it then, after a line naming the generation read and, for a time before the
  * drive's history, where that history starts. */
-async function artifactContent(input: Pick<Invocation, 'requestId' | 'attemptId'>, url: string, artifacts: InspectorCloudArtifacts, workspaceId: string, documentMarkdown: DocumentMarkdown, read: { offset?: number; limit?: number; asOf?: string } = {}): Promise<RuntimeToolResult> {
+export async function artifactContent(input: Pick<Invocation, 'requestId' | 'attemptId'>, url: string, artifacts: InspectorCloudArtifacts, workspaceId: string, documentMarkdown: DocumentMarkdown, read: { offset?: number; limit?: number; asOf?: string } = {}): Promise<RuntimeToolResult> {
   const at = read.asOf === undefined ? null : await artifacts.scopeAt(url, read.asOf);
   const version: RuntimeToolResult['content'] = at === null ? [] : [{ type: 'text', text: at.historyStartsAt === null
     ? `The drive as of ${read.asOf}: generation ${at.scope.generation}, committed ${at.scope.updatedAt}.`
@@ -108,112 +106,8 @@ machineTools.browser = true;
 /** Exact search is ripgrep on a machine checkout; the cloud answers code_search from its index instead. */
 const GREP_REQUIRES_MACHINE = 'grep runs on an attached machine; use code_search, or attach a machine';
 
-/** QA is written to the existing project event authority; nothing is sent externally. */
-export async function appendRuntimeQa(env: Env, identity: RuntimeIdentity, id: string, report: z.infer<typeof RuntimeReportIssueArgumentsSchema>) {
-  const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`);
-  const item = RuntimeQaItemSchema.parse({ id, title: report.message.split('\n')[0]!.slice(0, 160), description: report.message, historyRef: report.reference ?? `history://${identity.workspaceId}`, tool: report.tool ?? null, model: report.model ?? 'unattributed', runtimeVersion: 'pi-1.0', state: 'open', duplicateOf: null, createdAt: new Date().toISOString() });
-  const event = projectEventSchema.parse(await (await authority.appendEvent({ eventId: `qa:${id}`, scope: 'workspace', entity: 'qa', entityId: id, revision: 1, operation: 'created', payload: { item, workspaceId: identity.workspaceId } })).json());
-  return RuntimeQaItemSchema.parse(event.payload.item);
-}
-/** QA events read per page; the project authority caps every entity page at this size. */
-const QA_EVENT_PAGE = 500;
 /** Characters of a workspace's latest reply `space_workspace list` and `status` show: all a report keeps. */
 const REPLY_SHOWN = 280;
-const QaEventPayloadSchema = z.object({ item: RuntimeQaItemSchema, workspaceId: z.string().optional() });
-/** A workspace's QA inbox: the items its own runtime and agents reported. */
-export function createRuntimeQaServices(env: Env, identity: RuntimeIdentity) {
-  // A stub per call: one that saw an error, such as the project object resetting for a release, stays broken.
-  const authority = () => env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`);
-  // QA items are loaded from the project once per runtime; snapshot rebuilds reuse them instead of calling the
-  // project object each time.
-  const items = new Map<string, z.infer<typeof RuntimeQaItemSchema>>();
-  /** Automatic reports being written, so two failures at once still file one item. */
-  const reporting = new Set<string>();
-  let applied = 0;
-  let reading: Promise<void> | undefined;
-  function list(): Promise<z.infer<typeof RuntimeQaItemSchema>[]> {
-    if (reading) return reading.then(() => [...items.values()]);
-    reading = (async () => {
-      for (;;) {
-        const events = z.array(projectEventSchema).parse(await authority().listEntityEvents('qa', applied, QA_EVENT_PAGE));
-        for (const event of events) {
-          applied = Math.max(applied, event.offset);
-          if (event.entity !== 'qa') continue;
-          const payload = QaEventPayloadSchema.parse(event.payload);
-          if (payload.workspaceId === identity.workspaceId) items.set(payload.item.id, payload.item);
-        }
-        if (events.length < QA_EVENT_PAGE) break;
-      }
-      // Automatic reports used to file one item per occurrence (a process watch, every 5 s, while its machine was
-      // offline): open copies of an earlier open item are merged into it, once.
-      const canonical = new Map<string, string>();
-      const merged: z.infer<typeof RuntimeQaItemSchema>[] = [];
-      for (const item of items.values()) {
-        if (item.state !== 'open') continue;
-        const key = `${item.historyRef}\n${item.title}`;
-        const first = canonical.get(key);
-        if (first === undefined) canonical.set(key, item.id);
-        else merged.push({ ...item, state: 'merged', duplicateOf: first });
-      }
-      if (!merged.length) return;
-      await authority().appendEvents(merged.map(item => ({ scope: 'workspace', entity: 'qa', entityId: item.id, revision: 1, operation: 'updated', payload: { item, workspaceId: identity.workspaceId } })));
-      for (const item of merged) items.set(item.id, item);
-    })().catch(error => { reading = undefined; throw error; });
-    return reading.then(() => [...items.values()]);
-  }
-  return {
-    list,
-    /** A runtime failure becomes a QA item unless the same failure is already open. */
-    async report(message: string): Promise<void> {
-      const title = message.split('\n')[0]!.slice(0, 160);
-      const historyRef = `history://${identity.workspaceId}`;
-      if (reporting.has(title) || (await list()).some(item => item.state === 'open' && item.title === title && item.historyRef === historyRef)) return;
-      reporting.add(title);
-      try { const item = await appendRuntimeQa(env, identity, crypto.randomUUID(), { message }); items.set(item.id, item); }
-      finally { reporting.delete(title); }
-    },
-    async act(input: RuntimeQaActionInput, actor: { deviceId: string; canApprove: boolean }): Promise<{ shareDraft?: string }> {
-      const current = await list();
-      const item = current.find(candidate => candidate.id === input.itemId);
-      if (!item) throw new Error('QA item does not belong to this workspace');
-      const { action } = input;
-      if (action.kind === 'share') {
-        const reference = action.target === 'gitspace' ? GITSPACE_SOURCE_REPOSITORY : (await authority().getProject())?.repositoryReference;
-        if (!reference) throw new Error('Project has no canonical repository');
-        const repository = new URL(reference.replace(/^git@github\.com:/u, 'https://github.com/').replace(/\.git$/u, ''));
-        if (repository.hostname !== 'github.com' || !/^\/[^/]+\/[^/]+\/?$/u.test(repository.pathname)) throw new Error('Issue drafts require a canonical GitHub repository');
-        const url = new URL(`${repository.pathname.replace(/\/$/u, '')}/issues/new`, 'https://github.com');
-        url.searchParams.set('title', item.title);
-        url.searchParams.set('body', action.redactedExcerpt);
-        // A draft is not a delivery receipt. Keep the local item open until an
-        // authorized integration can prove that an external issue was created.
-        return { shareDraft: url.toString() };
-      }
-      let next: RuntimeQaItem;
-      switch (action.kind) {
-        case 'dismiss': next = { ...item, state: 'dismissed', duplicateOf: null }; break;
-        case 'merge': {
-          const target = current.find(candidate => candidate.id === action.targetId);
-          if (!target || target.id === item.id || target.state === 'merged') throw new Error('Duplicate target must be a distinct canonical QA item');
-          next = { ...item, state: 'merged', duplicateOf: target.id };
-          break;
-        }
-        case 'fixed': next = { ...item, state: 'fixed', duplicateOf: null, fixedIn: action.commit }; break;
-        case 'file': {
-          if (item.state === 'merged') throw new Error('File the issue this one was merged into instead');
-          // The account copy is written first and keyed by the item, so a retry after a failed event rewrites it.
-          const filed = await env.ACCOUNT_STATE.getByName('account').fileIssue({ id: item.id, projectId: identity.projectId, workspaceId: identity.workspaceId, title: item.title, excerpt: action.excerpt, tool: item.tool, model: item.model, historyRef: item.historyRef, createdAt: item.createdAt, filedAt: new Date().toISOString(), filedBy: actor.deviceId });
-          next = { ...item, filedAt: filed.filedAt };
-          break;
-        }
-      }
-      await authority().appendEvent({ scope: 'workspace', entity: 'qa', entityId: item.id, revision: 1, operation: 'updated', payload: { item: next, workspaceId: identity.workspaceId, actorId: actor.deviceId } });
-      // Snapshots read the loaded items, not the project, so the change shows without a new runtime.
-      items.set(item.id, next);
-      return {};
-    },
-  };
-}
 
 /** First in every main agent's instructions. Models follow written rules literally, so nothing GitSpace or a repository
  * says may read as a reason to refuse the user; GitSpace's real limits are enforced by its tools, not by prompt text. */
@@ -756,7 +650,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
         const images = args.images ? await Promise.all(args.images.map(image => options.images.load(image))) : undefined;
         return { requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: await options.generateImage({ ...input, args: { ...args, ...(images ? { images } : {}) } }) };
       }
-      if (input.tool === 'report_issue') return completed(input, await appendRuntimeQa(env, identity, input.attemptId, RuntimeReportIssueArgumentsSchema.parse(input.args)));
+      if (input.tool === 'report_issue') return completed(input, appendRuntimeQa(ctx.storage, identity, input.attemptId, RuntimeReportIssueArgumentsSchema.parse(input.args)));
       if (runtimeSpaceToolNames.includes(input.tool)) return completed(input, await invokeRuntimeSpaceTool(env, identity, input));
       if (input.tool === 'space_workspace') {
         const args = RuntimeWorkspaceArgumentsSchema.parse(input.args);

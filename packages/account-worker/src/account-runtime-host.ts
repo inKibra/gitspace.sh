@@ -6,9 +6,10 @@ import { workersAiDictation } from './dictation.js';
 import { ArtifactsCodeStore, artifactsWorkspaceRepository, createWorkspaceRuntime, ExecutorNotConnected, type AttachmentServices, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
 import type { RuntimeAttachment, RuntimeGitCheckpoint } from '@gitspace/protocol-runtime';
 import { forwardTunnelRequest } from './relay-request.js';
-import { createRuntimeServices, createRuntimeQaServices, type RuntimeIdentity } from './runtime-services.js';
+import { createRuntimeServices, type RuntimeIdentity } from './runtime-services.js';
+import { createRuntimeQaServices } from './runtime-qa.js';
 import { workspaceBrowsersDocument } from './runtime-browser.js';
-import { createCloudRuntimeInference } from './runtime-inference.js';
+import { createCloudRuntimeInference, historyJudgment } from './runtime-inference.js';
 import { z } from 'zod';
 import { parseRuntimeSettings, RUNTIME_SETTING_DEFAULTS, type CloudProjectSummary } from '@gitspace/protocol';
 import { createRuntimeRuleServices } from './runtime-instructions.js';
@@ -104,16 +105,7 @@ export async function createAccountWorkspaceRuntime(
   const inference = await createCloudRuntimeInference(ctx, env, identity, retrying, inferenceWorkerRunner(ctx, env, identity.workspaceId));
   const configuration = await env.USER_SETTINGS.getByName(env.ACCOUNT_ID).getRuntime();
   const settings = { ...RUNTIME_SETTING_DEFAULTS, ...parseRuntimeSettings(JSON.parse(configuration.content || '{}')) };
-  const judge = async (conversationId: string, state: string, questions: Record<string, string>) => {
-    const answers = z.record(z.string(), z.object({ bool: z.number().min(0).max(1) })).parse(await inference.modelHelper({ conversationId, operation: 'judge', args: { state, questions: Object.fromEntries(Object.entries(questions).map(([id, instructions]) => [id, { type: 'bool', instructions }])) } }));
-    const scores: Record<string, number> = {};
-    for (const id of Object.keys(questions)) {
-      const answer = answers[id];
-      if (!answer) throw new Error(`Judge omitted question ${id}`);
-      scores[id] = answer.bool;
-    }
-    return scores;
-  };
+  const judge = (conversationId: string, state: string, questions: Record<string, string>) => historyJudgment(args => inference.modelHelper({ conversationId, operation: 'judge', args }), state, questions);
   const code = new ArtifactsCodeStore(env.ARTIFACTS, ctx.storage);
   const repository = artifactsWorkspaceRepository(identity.workspaceId);
   const ref = runtimeWorkspaceCodeRef(env, identity, () => metadata().branch);
@@ -140,7 +132,9 @@ export async function createAccountWorkspaceRuntime(
     return runtime;
   } });
   const lfs = await createAccountGitLfsStore(env, env.ACCOUNT_ID, identity.projectId, `runtime:${identity.workspaceId}`);
-  const qa = createRuntimeQaServices(env, identity);
+  // QA items are in this object's storage; the project's copy, until its move reaches this workspace, is read in the
+  // background and shown by a later snapshot.
+  const qa = createRuntimeQaServices(ctx.storage, env, identity, { waitUntil: promise => waitUntil('qa project copy', promise), changed: () => runtime?.publish() });
   // A watched turn reports to the workspace that started it, the project's base or a stack's head; the report wakes that
   // workspace through its own alarm, never inline (`WorkspaceRuntime.workspaceReport`).
   const watch = projectWatchHooks(ctx.storage, identity, (report, onDone, to) => waitUntil('project report', env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${to}`).runtimeWorkspaceReport({ projectId: identity.projectId, workspaceId: to }, report, onDone).catch((error: unknown) => console.error('Workspace report was not sent', { workspaceId: identity.workspaceId, to, error }))));
@@ -231,7 +225,7 @@ export async function createAccountWorkspaceRuntime(
     schedule,
     qa,
     browsers: () => workspaceBrowsersDocument(ctx.storage),
-    onReport: error => { waitUntil('qa report', qa.report(error instanceof Error ? error.message : String(error))); },
+    onReport: error => { qa.report(error instanceof Error ? error.message : String(error)); },
     attachments: {
       seal: (secret, scope) => env.CREDENTIALS.getByName(env.ACCOUNT_ID).sealRuntimeGrant(secret, scope),
       open: (ciphertext, scope) => env.CREDENTIALS.getByName(env.ACCOUNT_ID).openRuntimeGrant(ciphertext, scope),

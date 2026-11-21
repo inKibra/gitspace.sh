@@ -1,6 +1,6 @@
 import { accountStatus } from './account-access.js';
 import { DEVICE_AUTHORITY_UNAVAILABLE, DEVICE_AUTHORITY_UNAVAILABLE_MESSAGE, deviceAuthority, withDeviceAuthority } from './device-authority.js';
-import { appendRuntimeQa } from './runtime-services.js';
+import { acrossRelease } from './release-worker.js';
 import { machineProtocolInputSchema } from '@gitspace/protocol/deployment';
 import {
   RELAY_HEARTBEAT_LEASE_MS,
@@ -618,7 +618,8 @@ export class UserRelayDO extends BudgetedDurableObject {
       await this.scheduleAlarm();
       console.error(JSON.stringify({ event: 'relay_presence_gave_up', machineId, connected, failures, message, workspaces: unreached.map(workspace => workspace.workspaceId) }));
       const text = `GitSpace could not record that machine ${machineId} is ${connected ? 'online' : 'offline'} in this workspace after ${failures} tries over about 10 minutes (${message}). It shows the old state until the machine next connects or disconnects.`;
-      await Promise.all(unreached.map(workspace => appendRuntimeQa(this.env, RuntimeIdentitySchema.parse(workspace), crypto.randomUUID(), { message: text }).catch((qaError: unknown) => {
+      // The workspace keeps its own QA items; right after a release it may still run code without this method.
+      await Promise.all(unreached.map(workspace => acrossRelease(() => this.env.SPACE_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${workspace.workspaceId}`).runtimeQaReport(RuntimeIdentitySchema.parse(workspace), text)).catch((qaError: unknown) => {
         console.error(JSON.stringify({ event: 'relay_presence_report_failed', machineId, workspaceId: workspace.workspaceId, message: qaError instanceof Error ? qaError.message : String(qaError) }));
       })));
     }

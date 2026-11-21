@@ -20,7 +20,7 @@ import { questionState, type RuntimeSecureFillResult } from '@gitspace/protocol-
 import { approvedBrowserSites, browserOriginMatches } from '@gitspace/protocol-environment';
 import { secureFillTab, type SecureInputRecord } from './secure-input.js';
 import { createAccountWorkspaceRuntime, ensureProjectCodeRepository } from './account-runtime-host.js';
-import { createRuntimeQaServices } from './runtime-services.js';
+import { createRuntimeQaServices, importRuntimeQa, type RuntimeQaMovedItem } from './runtime-qa.js';
 import { RuntimeSessionInputSchema, type PendingAskAnswer } from '@gitspace/protocol-runtime/session-controls';
 import { RuntimeTranscriptRangeSchema } from '@gitspace/runtime-core/history';
 import { RuntimeDraftSaveInputSchema } from '@gitspace/protocol-runtime/draft';
@@ -1143,6 +1143,29 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     return (await this.getRuntime(input)).qa(input, actor);
   }
 
+  /** The workspace this object holds, or none yet; another workspace's identity is refused. */
+  private async ownIdentity(raw: unknown) {
+    const identity = RuntimeIdentitySchema.parse(raw);
+    const stored = await this.ctx.storage.get('runtime.identity');
+    if (stored !== undefined && RuntimeIdentitySchema.parse(stored).workspaceId !== identity.workspaceId) throw new Error('Runtime actor identity mismatch');
+    return identity;
+  }
+
+  /** A failure reported from outside the runtime (the relay could not record a machine's presence here): a QA item of
+   * this workspace unless the same failure is open. An open runtime shows it at once. */
+  async runtimeQaReport(raw: unknown, message: string): Promise<void> {
+    createRuntimeQaServices(this.ctx.storage, this.env, await this.ownIdentity(raw)).report(message);
+    void this.runtime?.then(runtime => { runtime.publish(); }, () => {});
+  }
+
+  /** QA items the project object kept for this workspace, sent by its move (`ProjectAuthorityDO` alarm). Writes storage
+   * only: it never opens the runtime, and an open one shows them at once. */
+  async runtimeQaImport(raw: unknown, items: RuntimeQaMovedItem[], done: boolean): Promise<void> {
+    await this.ownIdentity(raw);
+    importRuntimeQa(this.ctx.storage, items, done);
+    void this.runtime?.then(runtime => { runtime.publish(); }, () => {});
+  }
+
   async runtimeSnapshotCommit(raw: unknown) {
     const input = RuntimeSnapshotCommitInputSchema.parse(raw);
     // The failing step is logged with the error: callers see only its message, often the runtime's bare "internal error".
@@ -1389,8 +1412,7 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
           await this.scheduleAlarm('lfs', Date.now() + Math.min(3_600_000, 1_000 * 2 ** row.attempts));
           return;
         }
-        await createRuntimeQaServices(this.env, RuntimeIdentitySchema.parse({ projectId: state.projectId, workspaceId: state.spaceId })).report(`LFS retention of snapshot ${row.snapshot_id} stopped retrying after ${row.attempts + 1} failures: ${message}. Its LFS objects stay retained.`)
-          .catch((reported: unknown) => console.error(JSON.stringify({ event: 'portable_lfs_report_failed', snapshotId: row.snapshot_id, message: reported instanceof Error ? reported.message : String(reported) })));
+        createRuntimeQaServices(this.ctx.storage, this.env, RuntimeIdentitySchema.parse({ projectId: state.projectId, workspaceId: state.spaceId })).report(`LFS retention of snapshot ${row.snapshot_id} stopped retrying after ${row.attempts + 1} failures: ${message}. Its LFS objects stay retained.`);
       }
     }
     await this.scheduleAlarm('lfs', null);
