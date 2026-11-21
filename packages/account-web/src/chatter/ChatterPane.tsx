@@ -87,7 +87,7 @@ export function ChatterPane({ projectName, workspaceCount, state, active, error,
 
   if (collapsed) {
     return <button type="button" onClick={() => { setFollowing(true); onCollapsed(false); }} aria-label={`Open Chatter${unread.length ? `, ${unread.length} unread` : ''}`}
-      className="pointer-events-auto absolute bottom-[calc(var(--composer-overlay-height,0px)+0.5rem)] left-4 z-30 flex h-11 w-[272px] max-w-[calc(100%-2rem)] items-center gap-2 rounded-2xl border border-border bg-background/90 px-3 text-left shadow-[0_12px_40px_-14px_rgba(0,0,0,0.35)] backdrop-blur-md hover:bg-background">
+      className="pointer-events-auto absolute bottom-5 left-4 z-30 flex h-11 w-[272px] max-w-[calc(100%-2rem)] items-center gap-2 rounded-2xl border border-border bg-background/90 px-3 text-left shadow-[0_12px_40px_-14px_rgba(0,0,0,0.35)] backdrop-blur-md hover:bg-background">
       <StatusDot color="green" />
       <span className="text-[13px] font-semibold">Chatter</span>
       {unread.length ? <span data-unread className="flex h-[18px] min-w-[18px] items-center justify-center rounded-full px-1.5 text-[10.5px] font-semibold tabular-nums text-white" style={{ background: unreadTooling ? badgeColors.rose : badgeColors.blue }}>{unread.length}</span> : null}
@@ -96,7 +96,7 @@ export function ChatterPane({ projectName, workspaceCount, state, active, error,
     </button>;
   }
 
-  return <section aria-label="Chatter" className="pointer-events-auto absolute bottom-[calc(var(--composer-overlay-height,0px)+0.5rem)] left-4 z-30 flex h-[min(560px,calc(100%-var(--composer-overlay-height,0px)-1.5rem))] w-[392px] max-w-[calc(100%-2rem)] flex-col overflow-hidden rounded-2xl border border-border bg-background/[0.94] shadow-[0_16px_48px_-16px_rgba(0,0,0,0.4)] backdrop-blur-md">
+  return <section aria-label="Chatter" className="pointer-events-auto absolute bottom-4 left-4 z-30 flex h-[min(600px,calc(100%-2rem))] w-[392px] max-w-[calc(100%-2rem)] flex-col overflow-hidden rounded-2xl border border-border bg-background/[0.94] shadow-[0_16px_48px_-16px_rgba(0,0,0,0.4)] backdrop-blur-md">
     <header className="flex h-11 shrink-0 items-center gap-2 border-b border-border pl-3 pr-1.5">
       <StatusDot color="green" />
       <span className="text-[13px] font-semibold">Chatter</span>
