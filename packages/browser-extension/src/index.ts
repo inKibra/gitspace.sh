@@ -32,7 +32,7 @@ export function extensionFiles(accountUrl: string): Record<string, string> {
     'offscreen.js': OFFSCREEN_SOURCE,
     'page.js': PAGE_SCRIPT,
     'offscreen.html': '<!doctype html><html><head><meta charset="utf-8"><title>GitSpace recorder</title></head><body><script src="offscreen.js"></script></body></html>',
-    'manifest.json': JSON.stringify({ manifest_version: 3, name: 'GitSpace Browser Relay', version: '5.14.0', minimum_chrome_version: '124', permissions: ['debugger', 'scripting', 'tabs', 'tabGroups', 'alarms', 'storage', 'downloads', 'tabCapture', 'offscreen', 'favicon'], host_permissions: ['<all_urls>', `${origin}/*`], background: { service_worker: 'background.js' }, action: { default_popup: 'popup.html', default_title: 'GitSpace' } }),
+    'manifest.json': JSON.stringify({ manifest_version: 3, name: 'GitSpace Browser Relay', version: '5.15.0', minimum_chrome_version: '124', permissions: ['debugger', 'scripting', 'tabs', 'tabGroups', 'alarms', 'storage', 'downloads', 'tabCapture', 'offscreen', 'favicon'], host_permissions: ['<all_urls>', `${origin}/*`], background: { service_worker: 'background.js' }, action: { default_popup: 'popup.html', default_title: 'GitSpace' } }),
   };
   const build = createHash('sha256').update(JSON.stringify(files)).digest('hex').slice(0, 32);
   files['background.js'] = `const GITSPACE_EXTENSION_BUILD = ${JSON.stringify(build)};\n${files['background.js']}`;

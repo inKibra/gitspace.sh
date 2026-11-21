@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, setSystemTime } from 'bun:test';
+import type { Element } from 'happy-dom';
 import { browserBase64, type RuntimeBrowserArguments } from '@gitspace/protocol-runtime';
 import { command, installed, settle } from './installed.js';
 
@@ -141,7 +142,7 @@ describe('the in-page overlay on a tab the agent uses', () => {
     await chrome.execute({ operation: 'open', attemptId, grant: chrome.grant, targetId: 'target-1' });
     // The overlay draws after the tab is open, without holding up the script.
     await settle();
-    expect(chrome.overlays('target-1')).toEqual([{ show: { mode: 'run', workspace: 'Checkout', agent: 'main', doing: 'Running a script', capture: 'none', recording: null, comments: false, everything: null }, pointers: [], report: false }]);
+    expect(chrome.overlays('target-1')).toEqual([{ show: { mode: 'run', workspace: 'Checkout', agent: 'main', doing: 'Running a script', capture: 'none', recording: null, comments: false, everything: null }, pointers: [], report: false, place: null }]);
     let cursor: unknown;
     chrome.answer(({ method }) => { if (method === 'Input.dispatchMouseEvent') cursor = chrome.overlays('target-1').at(-1)?.cursor; return undefined; });
     await chrome.execute(command(attemptId, 'target-1', 'Input.dispatchMouseEvent', { type: 'mousePressed', x: 40, y: 60, button: 'left', clickCount: 1 }));
@@ -185,6 +186,41 @@ describe('the in-page overlay on a tab the agent uses', () => {
     await settle();
     await expect(chrome.execute(command(attemptId, 'target-1', 'Runtime.evaluate', { expression: '2' }))).rejects.toThrow('You stopped this script');
     expect(chrome.detached).toEqual(['target-1']);
+  });
+
+  it('keeps where you put its toolbar and whether you hid it for the tab: the next page there draws it so, with Stop one click away while hidden, and so does a worker started again', async () => {
+    const chrome = await installed();
+    const attemptId = await chrome.begin();
+    await chrome.execute({ operation: 'open', attemptId, grant: chrome.grant, targetId: 'target-1' });
+    await settle();
+    const part = (tabId: number, title: string) => [...chrome.page(tabId).roots[0]?.querySelectorAll(`[title="${title}"]`) ?? []].find(element => element instanceof chrome.page(tabId).window.HTMLElement);
+    // Drawn: neither it nor anything holding it is display: none.
+    const shown = (tabId: number, title: string) => {
+      for (let element: Element | null | undefined = part(tabId, title); element; element = element.parentElement) if (element instanceof chrome.page(tabId).window.HTMLElement && element.style.display === 'none') return false;
+      return part(tabId, title) !== undefined;
+    };
+    const hide = part(1, 'Hide the GitSpace toolbar');
+    if (!(hide instanceof chrome.page(1).window.HTMLElement)) throw new Error('No Hide');
+    hide.click();
+    await settle();
+    // Another page in the tab: a new document, which the extension draws on as you left it.
+    await chrome.navigate(1, 'https://app.example/cart');
+    expect(chrome.overlays('target-1').at(-1)).toMatchObject({ show: { mode: 'run' }, place: { at: null, hidden: true } });
+    expect([shown(1, 'Hide the GitSpace toolbar'), shown(1, 'Show the GitSpace toolbar')]).toEqual([false, true]);
+    // What the page world says is a place, or nothing is kept.
+    expect(await (await chrome.fromPage(1, 'place {"at":{"x":2,"y":0},"hidden":false}')).reply).toEqual({ error: 'The toolbar said no place' });
+    // Chrome stops the worker; the one it starts keeps the place too.
+    await chrome.restart();
+    const again = await chrome.begin();
+    await chrome.execute({ operation: 'open', attemptId: again, grant: chrome.grant, targetId: 'target-1' });
+    await settle();
+    expect(chrome.overlays('target-1').at(-1)).toMatchObject({ place: { at: null, hidden: true } });
+    const stop = part(1, 'Show the GitSpace toolbar')?.querySelector('button');
+    if (!stop) throw new Error('No Stop on the pill');
+    expect(stop.textContent).toBe('Stop');
+    stop.click();
+    await settle();
+    await expect(chrome.execute(command(again, 'target-1', 'Runtime.evaluate', { expression: '1' }))).rejects.toThrow('You stopped this script');
   });
 });
 

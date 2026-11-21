@@ -10,12 +10,18 @@
  * tab's shares, and the comment tool (`comments.ts`). It draws nothing for your own pointer: while a share shows it to
  * its viewers, it says where it is instead (`report`), and each viewer draws it.
  *
+ * You drag the toolbar by its handle (mouse, pen or touch) anywhere in the tab, and it stays within the tab as the tab
+ * changes size. Hide folds it into a small pill at the tab's edge nearest it, which shows it again with one click;
+ * while the agent acts the pill has Stop, and the frame and the agent's cursor show as ever. Each change sends
+ * `place {"at":{"x":…,"y":…}|null,"hidden":…}` (`OverlayPlace`), which the extension keeps for the tab and gives back
+ * in every command, so a new document in the tab draws the toolbar where you left it.
+ *
  * A fixed function the extension runs in its own isolated world, the content-script world of `page.js` (`page.ts`;
  * `chrome.scripting.executeScript`), never in the page's. The overlay leaves the page and what the agent reads alone:
  * a closed shadow root under an `aria-hidden` host marked `data-gitspace-overlay` (which the screenshot mask hides),
  * styled inline only (no stylesheet a page's CSP could refuse), nothing in the tab order, and pointer-transparent
- * except the toolbar while your own pointer is over it and the comment tool while it is on, so an agent's clicks and
- * hit tests reach the page. It tells the extension through `__gitspaceSend` (`page.ts`, a runtime message from this
+ * except the toolbar or its pill while your own pointer is over it (a finger's touch there is theirs) and the comment
+ * tool while it is on, so an agent's clicks and hit tests reach the page. It tells the extension through `__gitspaceSend` (`page.ts`, a runtime message from this
  * world, which no page script reaches; it answers a promise of the extension's reply): its buttons send `stop`,
  * `capture`, `captureStop`, `takeover`, `resume` or `everythingEnd`, and the comment tool `comment <what> <json>`; while
  * the agent acts (`run`, `step`), each trusted pointer or key press on the page (not on the toolbar, and not while you
@@ -26,10 +32,12 @@
  * One argument: `{ show?: { mode: 'run' | 'step' | 'capture' | 'you' | 'idle', workspace, agent, doing,
  * capture: 'none' | 'ready' | 'recording', recording: { startedAt, sound, tracks } | null, comments, everything } | null, comment?:
  * CommentView | null, cursor?: { x, y, type }, pointers?: [{ id, name, color, x, y }], report?: boolean, conceal?:
- * boolean, remove?: true }`. `agent` and `doing` (what it is doing) may be null; in `you`, `agent` is the paused agent;
+ * boolean, place?: OverlayPlace | null, remove?: true }`. `agent` and `doing` (what it is doing) may be null; in `you`, `agent` is the paused agent;
  * `comments` says the account takes comments (Comment shows); `everything` is when Everything ends (an ISO time) while the
  * workspace's agent has it, else null (End now shows beside its time left). `show` installs the overlay where the document lacks it
  * (after a navigation) and refreshes it; `show: null` hides the toolbar, frame and cursor, leaving the pointers.
+ * `place` is where the extension kept the toolbar for the tab (null: its own spot, shown); an overlay takes the first
+ * it is given, and after that its own.
  * `comment` is the comment tool (`CommentView`, `comments.ts`): a view turns it on or redraws it, null takes it away; a
  * command without `comment` leaves it as it is. `pointers` (x and y are fractions of the viewport) is everyone pointing
  * now: each glides to its new place, eased, and one left out leaves; they install the overlay too, as `report` and
@@ -83,14 +91,22 @@ export const browserOverlayFunction = `function(command) {
     guard.observe(document.documentElement, { childList: true });
     const font = 'font-family:Inter,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;letter-spacing:0;-webkit-font-smoothing:antialiased;';
     const frame = make('div', 'position:fixed;inset:0;pointer-events:none;opacity:0;transition:opacity .4s ease', root);
-    // The toolbar: mark or REC, who and what, then its buttons.
+    // The toolbar: the handle you drag it by, mark or REC, who and what, then its buttons and Hide.
     const bar = make('div', font + 'position:fixed;left:50%;bottom:16px;transform:translateX(-50%);display:none;align-items:center;gap:10px;max-width:calc(100vw - 32px);box-sizing:border-box;padding:8px 12px;border-radius:16px;border:1px solid #e5e5e5;background:#fff;color:#262626;font-size:13px;line-height:20px;pointer-events:none;user-select:none;white-space:nowrap', root);
+    const grip = make('span', 'flex:none;display:flex;align-items:center;justify-content:center;width:14px;height:28px;margin:0 -4px 0 -6px;border-radius:6px;color:#a3a3a3;cursor:grab;touch-action:none', bar);
+    const gripDots = svg(grip, '8', '14', '0 0 8 14', 'display:block');
+    for (const [cx, cy] of [[2, 2], [6, 2], [2, 7], [6, 7], [2, 12], [6, 12]]) { const dot = document.createElementNS(svgns, 'circle'); dot.setAttribute('cx', String(cx)); dot.setAttribute('cy', String(cy)); dot.setAttribute('r', '1.25'); dot.setAttribute('fill', 'currentColor'); gripDots.appendChild(dot); }
     const logo = make('span', 'position:relative;flex:none;width:22px;height:22px', bar);
-    const mark = svg(logo, '22', '22', '0 0 512 512', 'display:block;border-radius:6px');
     const gradient = (id, y1, y2, to) => { const g = document.createElementNS(svgns, 'linearGradient'); g.setAttribute('id', id); g.setAttribute('x1', '0'); g.setAttribute('x2', '0'); g.setAttribute('y1', y1); g.setAttribute('y2', y2); g.setAttribute('gradientUnits', 'userSpaceOnUse'); for (const [offset, color] of [['0', '#037935'], ['1', to]]) { const stop = document.createElementNS(svgns, 'stop'); stop.setAttribute('offset', offset); stop.setAttribute('stop-color', color); g.appendChild(stop); } return g; };
-    const defs = document.createElementNS(svgns, 'defs'); defs.append(gradient('gs-chevron', '85', '381', '#05e063'), gradient('gs-line', '398', '426', '#06c958')); mark.appendChild(defs);
-    path(mark, { d: 'M85 106 213 233 85 360', fill: 'none', stroke: 'url(#gs-chevron)', 'stroke-width': '42', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' });
-    path(mark, { d: 'M256 405H426', stroke: 'url(#gs-line)', 'stroke-width': '42', 'stroke-linecap': 'round' });
+    // The GitSpace mark, in the toolbar and in the pill it hides into: each with gradients of its own (\`name\`), since
+    // Chrome paints none from an svg whose toolbar is hidden.
+    const markIn = (parent, size, radius, name) => {
+      const el = svg(parent, size, size, '0 0 512 512', 'display:block;border-radius:' + radius);
+      const defs = document.createElementNS(svgns, 'defs'); defs.append(gradient(name + '-chevron', '85', '381', '#05e063'), gradient(name + '-line', '398', '426', '#06c958')); el.appendChild(defs);
+      path(el, { d: 'M85 106 213 233 85 360', fill: 'none', stroke: 'url(#' + name + '-chevron)', 'stroke-width': '42', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' });
+      path(el, { d: 'M256 405H426', stroke: 'url(#' + name + '-line)', 'stroke-width': '42', 'stroke-linecap': 'round' });
+    };
+    markIn(logo, '22', '6px', 'gs-bar');
     const logoDot = make('span', 'position:absolute;right:-2px;bottom:-2px;width:10px;height:10px;box-sizing:border-box;border-radius:50%;border:2px solid #fff;background:' + BLUE, logo);
     pulse(logoDot);
     const recDot = make('span', 'flex:none;width:12px;height:12px;border-radius:50%;display:none;background:' + RED, bar);
@@ -134,6 +150,21 @@ export const browserOverlayFunction = `function(command) {
     resume.textContent = 'Resume agent';
     paint(resume, true);
     resume.style.background = BLUE; resume.style.border = '1px solid ' + BLUE;
+    // Hide: the toolbar folds into a pill at the edge of the tab nearest it.
+    const hide = button();
+    hide.title = 'Hide the GitSpace toolbar';
+    hide.style.padding = '6px'; hide.style.color = '#737373';
+    path(svg(hide, '14', '14', '0 0 24 24', 'display:block;flex:none'), { d: 'M5 12h14', fill: 'none', stroke: 'currentColor', 'stroke-width': '2', 'stroke-linecap': 'round' });
+    // The toolbar hidden: a pill with the mark (a blue dot while the agent acts, a red one while a capture records) that
+    // shows the toolbar again, and Stop while the agent acts.
+    const pill = make('div', font + 'position:fixed;left:50%;bottom:16px;transform:translateX(-50%);display:none;align-items:center;gap:4px;box-sizing:border-box;padding:3px;border-radius:999px;border:1px solid #e5e5e5;background:#fff;color:#262626;font-size:12px;line-height:16px;pointer-events:none;user-select:none;white-space:nowrap;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.16)', root);
+    pill.title = 'Show the GitSpace toolbar';
+    const pillLogo = make('span', 'position:relative;flex:none;display:flex;align-items:center;justify-content:center;width:26px;height:26px', pill);
+    markIn(pillLogo, '18', '5px', 'gs-pill');
+    const pillDot = make('span', 'position:absolute;right:0;bottom:0;width:9px;height:9px;box-sizing:border-box;border-radius:50%;border:2px solid #fff;display:none', pillLogo);
+    pulse(pillDot);
+    const pillStop = make('button', 'all:unset;' + font + 'flex:none;display:none;align-items:center;box-sizing:border-box;padding:3px 10px;border-radius:999px;font-size:12px;line-height:16px;font-weight:500;cursor:pointer;background:#171717;color:#fff;border:1px solid #171717', pill);
+    pillStop.type = 'button'; pillStop.tabIndex = -1; pillStop.textContent = 'Stop';
     const cursor = make('div', 'position:fixed;left:0;top:0;pointer-events:none;opacity:0;transition:opacity .4s ease;will-change:transform', root);
     const labelCss = font + 'position:absolute;left:16px;top:20px;padding:2px 6px;border-radius:6px;color:#fff;font-size:11px;line-height:16px;font-weight:500;white-space:nowrap;box-shadow:0 1px 3px rgba(0,0,0,.1),0 1px 2px -1px rgba(0,0,0,.1)';
     // An arrow with a white outline: the agent's cursor, and each person's pointer.
@@ -220,26 +251,106 @@ export const browserOverlayFunction = `function(command) {
       const wait = state.reportedAt + 100 - Date.now();
       if (wait <= 0) tell(); else state.reportTimer = setTimeout(tell, wait);
     };
-    // Your own pointer over the toolbar makes it clickable; the agent's pointer (each point it is about to use) never
-    // does, and is not reported.
+    // Whether a point is within a box, or \`pad\` px of it.
+    const within = (box, x, y, pad) => x >= box.left - pad && x <= box.right + pad && y >= box.top - pad && y <= box.bottom + pad;
+    // The toolbar or the pill, whichever shows, at a point.
+    const controlAt = (x, y, pad) => [bar, pill].find(element => element.style.display !== 'none' && within(element.getBoundingClientRect(), x, y, pad));
+    // Your own pointer over the toolbar or the pill makes them clickable; the agent's pointer (each point it is about to
+    // use) never does, and is not reported. While you drag the toolbar it stays yours.
     const hover = event => {
       if (gone()) return;
-      const box = bar.getBoundingClientRect();
-      const inside = event.clientX >= box.left - 4 && event.clientX <= box.right + 4 && event.clientY >= box.top - 4 && event.clientY <= box.bottom + 4;
       const agent = state.target && Math.abs(event.clientX - state.target[0]) < 1 && Math.abs(event.clientY - state.target[1]) < 1;
-      bar.style.pointerEvents = inside && !agent ? 'auto' : 'none';
+      if (!dragging) bar.style.pointerEvents = pill.style.pointerEvents = controlAt(event.clientX, event.clientY, 4) && !agent ? 'auto' : 'none';
       if (!agent) report({ x: Math.min(1, Math.max(0, event.clientX / innerWidth)), y: Math.min(1, Math.max(0, event.clientY / innerHeight)) });
     };
     const leave = event => { if (gone()) return; if (event.type === 'visibilitychange' ? document.visibilityState === 'hidden' : !event.relatedTarget) report(null); };
     document.addEventListener('mousemove', hover, { capture: true, passive: true });
     document.addEventListener('mouseout', leave, { capture: true, passive: true });
     document.addEventListener('visibilitychange', leave);
-    // Nothing on the toolbar reaches the page, and pressing it never moves focus out of the page.
-    for (const type of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'dblclick', 'contextmenu']) bar.addEventListener(type, event => { event.stopPropagation(); if (type !== 'click') event.preventDefault(); });
+    // Nothing on the toolbar or the pill reaches the page, and pressing them never moves focus out of the page.
+    for (const control of [bar, pill]) for (const type of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'dblclick', 'contextmenu']) control.addEventListener(type, event => { event.stopPropagation(); if (type !== 'click') event.preventDefault(); });
     const press = command => { send(command).catch(() => {}); };
     stop.addEventListener('click', () => { press('stop'); what.textContent = 'Stopping…'; });
     takeOver.addEventListener('click', () => { press('takeover'); what.textContent = 'Taking over…'; });
     resume.addEventListener('click', () => { press('resume'); what.textContent = 'Resuming…'; });
+    // Where you put the toolbar and whether you hid it, which the extension keeps for the tab and gives back with each
+    // command (\`place\`): \`at\` is null at its own spot (bottom centre), else how far across and down the tab's free space
+    // it sits (0 to 1), so it keeps to the same side or corner whatever the size of the tab and its own. \`known\` once
+    // the extension said or you moved or hid it here; what the extension says after that changes nothing.
+    const layout = { at: null, hidden: false, known: false };
+    const EDGE = 8;
+    const viewport = () => ({ width: document.documentElement.clientWidth || innerWidth, height: document.documentElement.clientHeight || innerHeight });
+    const clamp = (value, low, high) => Math.min(Math.max(low, value), Math.max(low, high));
+    const fraction = (offset, room) => room > 0 ? Math.min(1, Math.max(0, offset / room)) : .5;
+    // Puts the toolbar or the pill at \`at\`, kept \`EDGE\` px within the tab; at its own spot without one.
+    const settle = (element, at, bottom) => {
+      if (!at) { element.style.left = '50%'; element.style.top = 'auto'; element.style.bottom = bottom + 'px'; element.style.transform = 'translateX(-50%)'; return; }
+      const { width, height } = viewport(), box = element.getBoundingClientRect();
+      element.style.transform = 'none'; element.style.bottom = 'auto';
+      element.style.left = EDGE + at.x * Math.max(0, width - box.width - 2 * EDGE) + 'px';
+      element.style.top = EDGE + at.y * Math.max(0, height - box.height - 2 * EDGE) + 'px';
+    };
+    // The pill goes to the edge of the tab nearest the toolbar, in line with it.
+    const edgeOf = at => Math.min(at.y, 1 - at.y) <= Math.min(at.x, 1 - at.x) ? { x: at.x, y: at.y < .5 ? 0 : 1 } : { x: at.x < .5 ? 0 : 1, y: at.y };
+    // What you changed here: drawn at once, then the extension keeps it for the tab.
+    const keep = () => { layout.known = true; placeBar(); send('place ' + JSON.stringify({ at: layout.at, hidden: layout.hidden })).catch(() => {}); };
+    hide.addEventListener('click', () => { layout.hidden = true; keep(); });
+    pill.addEventListener('click', event => { if (event.composedPath().includes(pillStop)) return; layout.hidden = false; keep(); });
+    pillStop.addEventListener('click', () => { press('stop'); pillStop.textContent = 'Stopping…'; });
+    // Dragging the toolbar by its handle, with a mouse, a pen or a finger: it follows the pointer, kept within the tab,
+    // and stays where you let go. The page hears none of that pointer's events meanwhile.
+    let dragging = null;
+    const begin = event => {
+      const box = bar.getBoundingClientRect();
+      dragging = { id: event.pointerId, dx: event.clientX - box.left, dy: event.clientY - box.top, width: box.width, height: box.height, left: box.left, top: box.top };
+      grip.style.cursor = 'grabbing';
+    };
+    grip.addEventListener('pointerdown', event => { if (!event.isTrusted || event.button !== 0 || dragging) return; try { grip.setPointerCapture(event.pointerId); } catch {} begin(event); });
+    // A finger lands on the page beneath the toolbar (it lets pointers through until a mouse is over it): a touch within
+    // the toolbar or the pill is theirs. They take the tap that follows, the handle drags, and the page, and \`take\`, never
+    // hear of it. \`held\`: the pointer id of such a finger while it is down.
+    let held = null;
+    const touched = event => {
+      if (gone() || !event.isTrusted || event.pointerType !== 'touch' || event.composedPath().includes(host)) return;
+      const control = controlAt(event.clientX, event.clientY, 0);
+      if (!control) return;
+      event.stopImmediatePropagation(); event.preventDefault();
+      held = event.pointerId;
+      bar.style.pointerEvents = pill.style.pointerEvents = 'auto';
+      if (control === bar && !dragging && within(grip.getBoundingClientRect(), event.clientX, event.clientY, 6)) begin(event);
+    };
+    const follow = event => {
+      if (gone() || !event.isTrusted) return;
+      if (event.pointerId === held) event.stopImmediatePropagation();
+      if (!dragging || event.pointerId !== dragging.id) return;
+      event.stopImmediatePropagation();
+      const { width, height } = viewport();
+      if (event.type !== 'pointercancel') {
+        dragging.left = clamp(event.clientX - dragging.dx, EDGE, width - dragging.width - EDGE);
+        dragging.top = clamp(event.clientY - dragging.dy, EDGE, height - dragging.height - EDGE);
+        bar.style.transform = 'none'; bar.style.bottom = 'auto'; bar.style.left = dragging.left + 'px'; bar.style.top = dragging.top + 'px';
+      }
+      if (event.type === 'pointermove') return;
+      const { left, top, width: wide, height: tall } = dragging;
+      dragging = null; grip.style.cursor = 'grab';
+      layout.at = { x: fraction(left - EDGE, width - wide - 2 * EDGE), y: fraction(top - EDGE, height - tall - 2 * EDGE) };
+      keep();
+    };
+    // The finger's touch events: the page never hears them, nor scrolls under a toolbar you drag.
+    const touching = event => {
+      if (held === null) return;
+      event.stopImmediatePropagation();
+      if (dragging && event.cancelable) event.preventDefault();
+      if ((event.type === 'touchend' || event.type === 'touchcancel') && !event.touches.length) held = null;
+    };
+    const TOUCHES = ['touchstart', 'touchmove', 'touchend', 'touchcancel'], FOLLOWED = ['pointermove', 'pointerup', 'pointercancel'];
+    // Before \`take\`, so a finger on the toolbar never takes the tab.
+    addEventListener('pointerdown', touched, { capture: true });
+    for (const type of FOLLOWED) addEventListener(type, follow, { capture: true });
+    for (const type of TOUCHES) addEventListener(type, touching, { capture: true, passive: false });
+    // A tab that changed size keeps the toolbar and the pill within it.
+    const refit = () => placeBar();
+    addEventListener('resize', refit, { passive: true });
     // Your pointer or key press on the page while the agent acts there takes the tab; one on the toolbar does not, and
     // a page's own events (not trusted) never do.
     const take = event => { if (gone()) return; if (event.isTrusted && (state.mode === 'run' || state.mode === 'step') && !comments.on() && !event.composedPath().includes(host)) press('take'); };
@@ -550,8 +661,22 @@ export const browserOverlayFunction = `function(command) {
     // (its extension is gone) leaves.
     const expire = () => { state.expiry = setTimeout(expire, 75000); send('refresh').catch(() => overlay.dispose()); };
     // The toolbar shows while something uses the tab, unless a capture's own bar (\`capture-tracks.ts\`) or the comment
-    // tool's strip takes its place.
-    const placeBar = () => { bar.style.display = state.mode !== null && !(state.mode === 'capture' && state.tracked) && !comments.strip() ? 'flex' : 'none'; };
+    // tool's strip takes its place; hidden, the pill shows in its stead. Each goes where you put the toolbar, else at its
+    // own spot: bottom centre, above a capture's bar while one records steps.
+    const placeBar = () => {
+      const shown = state.mode !== null && !(state.mode === 'capture' && state.tracked) && !comments.strip();
+      const acting = state.mode === 'run' || state.mode === 'step', recording = state.capture === 'recording';
+      bar.style.display = shown && !layout.hidden ? 'flex' : 'none';
+      pill.style.display = shown && layout.hidden ? 'flex' : 'none';
+      pillStop.style.display = acting ? 'inline-flex' : 'none';
+      if (!acting) pillStop.textContent = 'Stop';
+      pillDot.style.display = acting || recording ? '' : 'none';
+      pillDot.style.background = recording ? RED : BLUE;
+      pill.style.boxShadow = '0 4px 14px rgba(0,0,0,.16)' + (acting || recording ? ', 0 0 0 1px ' + (recording ? RED : BLUE) + '55' : '');
+      const bottom = state.tracked ? 76 : 16;
+      if (!dragging) settle(bar, layout.at, bottom);
+      settle(pill, layout.at && edgeOf(layout.at), bottom);
+    };
     const show = next => {
       state.mode = next.mode; state.capture = next.capture;
       const capturing = next.mode === 'capture', yours = next.mode === 'you', idle = next.mode === 'idle', recording = next.capture === 'recording' && next.recording ? next.recording : null;
@@ -560,8 +685,6 @@ export const browserOverlayFunction = `function(command) {
       const tracked = recording?.tracks === true;
       state.tracked = tracked;
       const tone = recording ? RED : BLUE;
-      placeBar();
-      bar.style.bottom = tracked ? '76px' : '16px';
       bar.style.boxShadow = '0 10px 30px rgba(0,0,0,.18)' + (yours && !recording ? '' : ', 0 0 0 1px ' + tone + '55');
       frame.style.boxShadow = yours && !recording ? 'inset 0 0 0 2px #a3a3a3' : 'inset 0 0 0 3px ' + tone + ', inset 0 0 ' + (recording ? '22px ' + tone + '40' : '26px ' + tone + '55');
       frame.style.opacity = next.mode === 'run' || next.mode === 'step' || yours || recording ? '1' : '0';
@@ -627,10 +750,13 @@ export const browserOverlayFunction = `function(command) {
         state.everything = setTimeout(left, ms % 60000 || 60000);
       };
       left();
+      placeBar();
     };
     overlay = {
       apply(next) {
         if (next.show !== undefined || next.pointers || next.report || next.comment) { clearTimeout(state.expiry); state.expiry = setTimeout(expire, 75000); if (!host.isConnected) document.documentElement.appendChild(host); }
+        // Where the extension kept the toolbar for this tab, taken once: by a new document (after a navigation, say).
+        if (next.place !== undefined && !layout.known) { layout.known = true; if (next.place) { layout.at = next.place.at; layout.hidden = next.place.hidden; } placeBar(); }
         if (next.show) show(next.show);
         if (next.comment !== undefined) comments.apply(next.comment);
         if (next.show === null) { state.mode = null; clearInterval(state.clock); placeBar(); frame.style.opacity = '0'; cursor.style.opacity = '0'; }
@@ -648,6 +774,10 @@ export const browserOverlayFunction = `function(command) {
         document.removeEventListener('visibilitychange', leave);
         removeEventListener('pointerdown', take, { capture: true });
         removeEventListener('keydown', take, { capture: true });
+        removeEventListener('pointerdown', touched, { capture: true });
+        for (const type of FOLLOWED) removeEventListener(type, follow, { capture: true });
+        for (const type of TOUCHES) removeEventListener(type, touching, { capture: true });
+        removeEventListener('resize', refit);
         comments.dispose();
         host.remove(); delete globalThis[key];
       },
@@ -658,6 +788,24 @@ export const browserOverlayFunction = `function(command) {
   overlay.apply(command);
   return true;
 }`;
+
+/** Where you put a tab's toolbar and whether you hid it: `at` is null at its own spot (bottom centre), else how far
+ * across and down the tab's free space it sits, each from 0 to 1. */
+export type OverlayPlace = { at: { x: number; y: number } | null; hidden: boolean };
+/** How an overlay's message about its place begins: `place <OverlayPlace as JSON>`. */
+export const OVERLAY_PLACE = 'place ';
+const placeFraction = (value: unknown): value is number => typeof value === 'number' && value >= 0 && value <= 1;
+/** The place an overlay's `place` message says; null when it says none. */
+export function overlayPlace(payload: string): OverlayPlace | null {
+  if (!payload.startsWith(OVERLAY_PLACE)) return null;
+  let value: unknown;
+  try { value = JSON.parse(payload.slice(OVERLAY_PLACE.length)); } catch { return null; }
+  if (typeof value !== 'object' || value === null || !('hidden' in value) || typeof value.hidden !== 'boolean' || !('at' in value)) return null;
+  const at = value.at;
+  if (at === null) return { at: null, hidden: value.hidden };
+  if (typeof at !== 'object' || !('x' in at) || !('y' in at) || !placeFraction(at.x) || !placeFraction(at.y)) return null;
+  return { at: { x: at.x, y: at.y }, hidden: value.hidden };
+}
 
 /** In any world of the page (the DOM is all of theirs): the element the comment tool marked with number `seq`
  * (`data-gitspace-pick`, for `comment hover` and `comment pick`), for the extension to read; null when none has it. */

@@ -132,9 +132,9 @@ describe('a share of a tab on your Chrome', () => {
     const shareId = crypto.randomUUID();
     await chrome.ask({ operation: 'shareWatch', shareId, targetId: 'target-9', maxWidth: 800, maxHeight: 600 });
     await chrome.fromRelay({ operation: 'sharePointers', shareId, pointers: [{ viewerId: 'ann', name: 'Ann', color: '#e5484d', at: { x: 0.5, y: 0.25 } }, { viewerId: 'bob', name: 'Bob', color: '#0090ff', at: { x: 0.1, y: 0.9 } }] });
-    expect(chrome.overlays('target-9').at(-1)).toEqual({ show: null, pointers: [{ id: `${shareId}:ann`, name: 'Ann', color: '#e5484d', x: 0.5, y: 0.25 }, { id: `${shareId}:bob`, name: 'Bob', color: '#0090ff', x: 0.1, y: 0.9 }], report: false });
+    expect(chrome.overlays('target-9').at(-1)).toEqual({ show: null, pointers: [{ id: `${shareId}:ann`, name: 'Ann', color: '#e5484d', x: 0.5, y: 0.25 }, { id: `${shareId}:bob`, name: 'Bob', color: '#0090ff', x: 0.1, y: 0.9 }], report: false, place: null });
     await chrome.fromRelay({ operation: 'sharePointers', shareId, pointers: [{ viewerId: 'bob', name: 'Bob', color: '#0090ff', at: { x: 0.2, y: 0.8 } }] });
-    expect(chrome.overlays('target-9').at(-1)).toEqual({ show: null, pointers: [{ id: `${shareId}:bob`, name: 'Bob', color: '#0090ff', x: 0.2, y: 0.8 }], report: false });
+    expect(chrome.overlays('target-9').at(-1)).toEqual({ show: null, pointers: [{ id: `${shareId}:bob`, name: 'Bob', color: '#0090ff', x: 0.2, y: 0.8 }], report: false, place: null });
     await chrome.fromRelay({ operation: 'sharePointers', shareId, pointers: [] });
     expect(chrome.overlays('target-9').at(-1)).toEqual({ remove: true });
     // Notices get no answer.
@@ -149,7 +149,7 @@ describe('a share of a tab on your Chrome', () => {
     await chrome.ask({ operation: 'shareWatch', shareId, targetId: 'target-9', maxWidth: 800, maxHeight: 600 });
     expect(chrome.pageScripts).toEqual([]);
     await chrome.ask({ operation: 'shareWatch', shareId, targetId: 'target-9', maxWidth: 800, maxHeight: 600, reportPointer: true });
-    expect(chrome.overlays('target-9').at(-1)).toEqual({ show: null, pointers: [], report: true });
+    expect(chrome.overlays('target-9').at(-1)).toEqual({ show: null, pointers: [], report: true, place: null });
     await pointer('pointer {"x":0.5,"y":0.25}');
     // A frame of the page other than its main one is not the overlay's.
     await pointer('pointer {"x":0.9,"y":0.9}', 3);

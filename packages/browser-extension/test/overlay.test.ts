@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'bun:test';
-import { Window, type Element, type ShadowRoot } from 'happy-dom';
+import { Window, type Element, type HTMLElement, type ShadowRoot } from 'happy-dom';
 import { browserScreenshotPrepareFunction, browserScreenshotRestoreFunction } from '@gitspace/runtime-machine/browser-screenshot';
 import { browserCaptureBarFunction } from '../src/capture-tracks.js';
 import { browserOverlayFunction } from '../src/overlay.js';
@@ -89,16 +89,16 @@ describe('the in-page overlay', () => {
   it('Capture starts a capture where the account saves them; while it records, REC shows and Stop capture ends it', () => {
     const { roots, sent: presses, call } = page();
     const buttons = () => [...roots[0]?.querySelectorAll('button') ?? []];
-    const shown = () => buttons().filter(visible).map(button => button.textContent);
+    const shown = () => buttons().filter(visible).map(button => button.textContent || button.title);
     call(browserOverlayFunction, { show: { ...show.show, capture: 'none' } });
-    expect(shown()).toEqual(['Take over', 'Stop']);
+    expect(shown()).toEqual(['Take over', 'Stop', 'Hide the GitSpace toolbar']);
     call(browserOverlayFunction, show);
-    expect(shown()).toEqual(['Capture', 'Take over', 'Stop']);
+    expect(shown()).toEqual(['Capture', 'Take over', 'Stop', 'Hide the GitSpace toolbar']);
     buttons().find(button => button.textContent === 'Capture')?.click();
     call(browserOverlayFunction, { show: { ...show.show, mode: 'capture', agent: null, doing: null, capture: 'recording', recording: { startedAt: Date.now(), sound: true } } });
     expect(roots[0]?.textContent).toContain('REC');
     // Recording alone, the agent's Stop is not offered.
-    expect(shown()).toEqual(['Stop capture']);
+    expect(shown()).toEqual(['Stop capture', 'Hide the GitSpace toolbar']);
     buttons().find(button => button.textContent === 'Stop capture')?.click();
     expect(presses).toEqual(['capture', 'captureStop']);
   });
@@ -139,10 +139,11 @@ describe('the in-page overlay', () => {
     expect(roots[0]?.textContent).toContain('main is paused · it sees your changes when it resumes');
     expect(roots[0]?.textContent).not.toContain('Clicking');
     const shown = [...roots[0]?.querySelectorAll('button') ?? []].filter(visible);
-    expect(shown.map(button => button.textContent)).toEqual(['Capture', 'Resume agent']);
-    expect(shown.at(-1)?.style.background).toBe('#1a73e8');
+    expect(shown.map(button => button.textContent || button.title)).toEqual(['Capture', 'Resume agent', 'Hide the GitSpace toolbar']);
+    const resume = shown.find(button => button.textContent === 'Resume agent');
+    expect(resume?.style.background).toBe('#1a73e8');
     expect([...roots[0]?.children ?? []].some(element => element instanceof window.HTMLElement && element.style.boxShadow === 'inset 0 0 0 2px #a3a3a3' && element.style.opacity === '1')).toBe(true);
-    shown.at(-1)?.click();
+    resume?.click();
     expect(presses).toEqual(['resume']);
   });
 
@@ -244,5 +245,149 @@ describe('the in-page overlay', () => {
     mouse('mousemove', 512, 384);
     elapse();
     expect(reports).toHaveLength(3);
+  });
+});
+
+/** The toolbar's parts in the overlay's shadow root, each with the box Chrome would lay out (happy-dom lays out
+ * nothing): the toolbar 600×40 and the pill 100×32 where their styles put them in the tab, the handle 14 px wide 6 px
+ * into the toolbar. At its own spot (bottom centre of a 1024×768 tab) the toolbar spans x 212–812 and y 712–752. */
+function toolbar(window: Window, root: ShadowRoot | undefined) {
+  const element = (found: Element | null | undefined) => { if (!(found instanceof window.HTMLElement)) throw new Error('No such part of the toolbar'); return found; };
+  const hide = element(root?.querySelector('[title="Hide the GitSpace toolbar"]'));
+  const bar = element(hide.parentElement);
+  const grip = element(bar.firstElementChild);
+  const pill = element(root?.querySelector('[title="Show the GitSpace toolbar"]'));
+  const pillStop = element(pill.querySelector('button'));
+  const box = (part: HTMLElement, width: number, height: number) => {
+    const centred = part.style.transform.startsWith('translateX');
+    const left = centred ? window.innerWidth / 2 - width / 2 : Number.parseFloat(part.style.left);
+    const top = centred ? window.innerHeight - Number.parseFloat(part.style.bottom) - height : Number.parseFloat(part.style.top);
+    return { left, top, right: left + width, bottom: top + height, width, height, x: left, y: top };
+  };
+  Object.assign(bar, { getBoundingClientRect: () => box(bar, 600, 40) });
+  Object.assign(pill, { getBoundingClientRect: () => box(pill, 100, 32) });
+  Object.assign(grip, { getBoundingClientRect: () => { const at = box(bar, 600, 40); return { ...at, left: at.left + 6, right: at.left + 20, width: 14, x: at.left + 6 }; } });
+  return { bar, grip, hide, pill, pillStop };
+}
+/** Your pointer as Chrome reports it (trusted): a mouse, or a finger. */
+function pointer(window: Window, target: Element, type: string, x: number, y: number, pointerType = 'mouse') {
+  const event = new window.PointerEvent(type, { bubbles: true, composed: true, cancelable: true, clientX: x, clientY: y, button: 0, pointerId: pointerType === 'touch' ? 2 : 1, pointerType });
+  Object.defineProperty(event, 'isTrusted', { value: true });
+  target.dispatchEvent(event);
+}
+/** A finger's touch event, as Chrome sends it after the pointer event; answers whether its default (scrolling the page)
+ * was prevented. */
+function touch(window: Window, target: Element, type: string) {
+  const event = new window.TouchEvent(type, { bubbles: true, composed: true, cancelable: true, touches: [] });
+  target.dispatchEvent(event);
+  return event.defaultPrevented;
+}
+
+describe('moving and hiding the toolbar', () => {
+  it('drags by its handle anywhere in the tab, never past its edges, keeps to its side as the tab changes size, and tells the extension where; the page hears none of it', () => {
+    const { window, roots, sent, call } = page();
+    const heard: string[] = [];
+    for (const type of ['pointerdown', 'pointermove', 'pointerup']) window.document.addEventListener(type, () => { heard.push(type); });
+    call(browserOverlayFunction, { ...show, place: null });
+    const { bar, grip } = toolbar(window, roots[0]);
+    const body = window.document.body;
+    // Taken 8 px into the toolbar and 18 px down.
+    pointer(window, grip, 'pointerdown', 220, 730);
+    pointer(window, body, 'pointermove', -400, -400);
+    expect([bar.style.left, bar.style.top]).toEqual(['8px', '8px']);
+    pointer(window, body, 'pointermove', 5000, 5000);
+    expect([bar.style.left, bar.style.top]).toEqual(['416px', '720px']);
+    pointer(window, body, 'pointermove', 400, 300);
+    expect([bar.style.left, bar.style.top]).toEqual(['392px', '282px']);
+    expect(sent).toEqual([]);
+    pointer(window, body, 'pointerup', 1000, 760);
+    expect(sent).toEqual(['place {"at":{"x":1,"y":1},"hidden":false}']);
+    expect(heard).toEqual([]);
+    // In the bottom-right corner of a smaller tab, and at its left edge in a tab narrower than itself.
+    window.happyDOM.setViewport({ width: 800, height: 600 });
+    expect([bar.style.left, bar.style.top]).toEqual(['192px', '552px']);
+    window.happyDOM.setViewport({ width: 500, height: 600 });
+    expect([bar.style.left, bar.style.top]).toEqual(['8px', '552px']);
+  });
+
+  it('Hide folds it into a pill at the tab’s edge nearest it, which one click opens again; while the agent acts, its cursor and frame still show and the pill has Stop', () => {
+    const { window, roots, sent, call } = page();
+    call(browserOverlayFunction, { ...show, place: null });
+    const { bar, hide, pill, pillStop } = toolbar(window, roots[0]);
+    hide.click();
+    expect([visible(bar), visible(pill), visible(pillStop)]).toEqual([false, true, true]);
+    expect(sent).toEqual(['place {"at":null,"hidden":true}']);
+    // At the toolbar's own spot, bottom centre.
+    expect([pill.style.transform, pill.style.bottom]).toEqual(['translateX(-50%)', '16px']);
+    call(browserOverlayFunction, { cursor: { x: 300, y: 200, type: 'mouseMoved' } });
+    const shown = [...roots[0]?.children ?? []].filter(element => element instanceof window.HTMLElement && element.style.opacity === '1');
+    expect(shown.map(element => element.textContent)).toEqual(['', 'main']);
+    pillStop.click();
+    expect(sent.at(-1)).toBe('stop');
+    expect(pillStop.textContent).toBe('Stopping…');
+    expect(visible(bar)).toBe(false);
+    // Nothing acting, no Stop; a click on the pill opens the toolbar.
+    call(browserOverlayFunction, { show: { ...show.show, mode: 'idle', agent: null, doing: null } });
+    expect([visible(pill), visible(pillStop)]).toEqual([true, false]);
+    pill.click();
+    expect([visible(bar), visible(pill)]).toEqual([true, false]);
+    expect(sent.at(-1)).toBe('place {"at":null,"hidden":false}');
+    // Dragged an eighth of the way across and three quarters down, it hides to the left edge, three quarters down.
+    call(browserOverlayFunction, show);
+    pointer(window, toolbar(window, roots[0]).grip, 'pointerdown', 220, 730);
+    pointer(window, window.document.body, 'pointerup', 67, 560);
+    expect(sent.at(-1)).toBe('place {"at":{"x":0.125,"y":0.75},"hidden":false}');
+    hide.click();
+    expect([pill.style.left, pill.style.top]).toEqual(['8px', '548px']);
+  });
+
+  it('takes a finger too: a touch on it is never the page’s and never takes the tab, and its handle drags it without scrolling the page', () => {
+    const { window, roots, sent, call } = page();
+    const heard: string[] = [];
+    for (const type of ['pointerdown', 'pointermove', 'pointerup', 'touchstart', 'touchmove', 'touchend']) window.document.addEventListener(type, () => { heard.push(type); });
+    call(browserOverlayFunction, { ...show, place: null });
+    const { bar } = toolbar(window, roots[0]);
+    const body = window.document.body;
+    // A tap on the toolbar lands on the page beneath it (the toolbar lets pointers through until one is over it); the
+    // toolbar takes it, so the tap's click reaches its button.
+    pointer(window, body, 'pointerdown', 700, 730, 'touch');
+    expect(bar.style.pointerEvents).toBe('auto');
+    expect(touch(window, body, 'touchstart')).toBe(false);
+    pointer(window, body, 'pointerup', 700, 730, 'touch');
+    touch(window, body, 'touchend');
+    expect(sent).toEqual([]);
+    expect(heard).toEqual([]);
+    // Elsewhere on the page, a finger is yours and takes the tab while the agent acts.
+    pointer(window, body, 'pointerdown', 100, 100, 'touch');
+    pointer(window, body, 'pointerup', 100, 100, 'touch');
+    expect(sent).toEqual(['take']);
+    expect(heard).toEqual(['pointerdown', 'pointerup']);
+    // On the handle, the finger drags the toolbar, 10 px into it and 18 px down; the page never scrolls under it.
+    pointer(window, body, 'pointerdown', 222, 730, 'touch');
+    expect(touch(window, body, 'touchstart')).toBe(true);
+    pointer(window, body, 'pointermove', 322, 130, 'touch');
+    expect(touch(window, body, 'touchmove')).toBe(true);
+    pointer(window, body, 'pointerup', 322, 130, 'touch');
+    touch(window, body, 'touchend');
+    expect([bar.style.left, bar.style.top]).toEqual(['312px', '112px']);
+    expect(JSON.parse(sent.at(-1)?.replace(/^place /, '') ?? '')).toEqual({ at: { x: 304 / 408, y: 104 / 712 }, hidden: false });
+    expect(heard).toEqual(['pointerdown', 'pointerup']);
+  });
+
+  it('takes the place the extension kept for the tab once, as a new document of the tab does, and its own after that', () => {
+    const { window, roots, call } = page();
+    call(browserOverlayFunction, { ...show, place: { at: { x: 0, y: 0 }, hidden: false } });
+    const { bar } = toolbar(window, roots[0]);
+    call(browserOverlayFunction, { ...show, place: { at: { x: 1, y: 1 }, hidden: true } });
+    expect(visible(bar)).toBe(true);
+    expect([bar.style.left, bar.style.top]).toEqual(['8px', '8px']);
+    // A new document of the tab (after a navigation), drawn where you left the toolbar: hidden at the bottom-right
+    // corner, with Stop while the agent acts.
+    const next = page();
+    next.call(browserOverlayFunction, { ...show, place: { at: { x: 1, y: 1 }, hidden: true } });
+    const drawn = toolbar(next.window, next.roots[0]);
+    next.call(browserOverlayFunction, show);
+    expect([visible(drawn.bar), visible(drawn.pill), visible(drawn.pillStop)]).toEqual([false, true, true]);
+    expect([drawn.pill.style.left, drawn.pill.style.top]).toEqual(['916px', '728px']);
   });
 });

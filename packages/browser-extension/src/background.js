@@ -9,7 +9,7 @@ import { verifyRelayAuthorization } from './authorization.ts';
 import { groupTitle, RUN_LOG_LIMIT, runLogEntry } from './runs.ts';
 import { clickedName, NAMED_KEYS, scriptActivity, stepActivity } from './activity.ts';
 import { drawToolbarIcon, TOOLBAR_TONE } from './icon.ts';
-import { browserPickedElementFunction } from './overlay.ts';
+import { browserPickedElementFunction, OVERLAY_PLACE, overlayPlace } from './overlay.ts';
 import { ChromeComments, commentRequest } from './comments.ts';
 import { base64Bytes, downloadBlobReadFunction, inputFilesChunkFunction, inputFilesPrepareFunction, inputFilesSetFunction } from './page-files.ts';
 import { SHARE_EXPIRIES_MINUTES, shareRequest, shareTargetFunction } from './share.ts';
@@ -525,6 +525,20 @@ function overlayMode(channel) {
  * this worker draws there.
  */
 const pages = new Map();
+/**
+ * Where you put each tab's toolbar and whether you hid it (`OverlayPlace`, from its overlay's `place` message), by tab
+ * id, kept in `chrome.storage.session` (`overlayPlaces`): every command to the tab's overlay carries it, so a new
+ * document in the tab (after a navigation, on any site) and a worker started again draw the toolbar where you left it.
+ * A tab keeps its own, as each tab's toolbar is about that tab; a closed tab's goes with it.
+ */
+const overlayPlaces = chrome.storage.session.get('overlayPlaces').then(saved => new Map(Object.entries(saved.overlayPlaces ?? {}).map(([tabId, place]) => [Number(tabId), place])));
+/** Keeps tab `tabId`'s place (`place`), or forgets it (null). */
+async function keepOverlayPlace(tabId, place) {
+  const places = await overlayPlaces;
+  if (place) places.set(tabId, place);
+  else if (!places.delete(tabId)) return;
+  await chrome.storage.session.set({ overlayPlaces: Object.fromEntries(places) });
+}
 /** Page steps of one tab, by target id: they run in order, each within `OVERLAY_STEP_MS`; a failed one fails nothing
  * else. */
 const pageSteps = new Map();
@@ -590,7 +604,7 @@ function overlay(targetId, extra = {}) {
     // The comment tool goes along while it is on; it goes away only when it is turned off (`comment: null` in
     // `extra`), so a page in comment mode that this worker does not know of (it started again since) keeps it.
     pages.set(targetId, { tabId, shownAt: Date.now() });
-    await pageCall(tabId, 'overlay', { show, ...(commenting ? { comment: commenting } : {}), pointers, report, ...extra });
+    await pageCall(tabId, 'overlay', { show, ...(commenting ? { comment: commenting } : {}), pointers, report, place: (await overlayPlaces).get(tabId) ?? null, ...extra });
     await captureTracks.draw(targetId);
   });
 }
@@ -1955,19 +1969,20 @@ chrome.tabs.onUpdated.addListener((tabId, change, tab) => {
   // Another page: the comment tool lists its threads.
   else if (change.url) for (const { targetId } of kept) comments.navigated(targetId);
 });
-// A tab that closed shows nothing: its toolbar, comment tool and capture card go with it.
+// A tab that closed shows nothing: its toolbar, comment tool and capture card go with it, and where you put its toolbar.
 chrome.tabs.onRemoved.addListener(tabId => {
   for (const [targetId, entry] of toolbarTabs) if (entry.tabId === tabId) { toolbarTabs.delete(targetId); comments.stop(targetId, false); }
   for (const [targetId, page] of pages) if (page.tabId === tabId) { pages.delete(targetId); captureTracks.forget(targetId); }
+  void keepOverlayPlace(tabId, null).catch(() => {});
 });
 /**
  * A message from the page world of one of this extension's tabs (`page.ts`; only this extension's own world of a tab's
  * main frame sends them, which no page script reaches): the overlay's buttons and your input there (`overlayButton`),
- * your pointer over a watched tab (`sharerPointer`), the comment tool (`comment …`), a capture's recorder and bar, and
- * `refresh` from an overlay nothing refreshed for a while. Each tells this worker enough on its own, should it have
- * started again since it drew there: the comment tool turns comment mode on again (`ChromeComments.message`), and
- * `refresh` draws the overlay of the tab as this worker sees it (the toolbar of the tab's workspace group, say), or
- * removes it when there is nothing to show.
+ * where you put its toolbar (`place`, kept for the tab), your pointer over a watched tab (`sharerPointer`), the comment
+ * tool (`comment …`), a capture's recorder and bar, and `refresh` from an overlay nothing refreshed for a while. Each
+ * tells this worker enough on its own, should it have started again since it drew there: the comment tool turns comment
+ * mode on again (`ChromeComments.message`), and `refresh` draws the overlay of the tab as this worker sees it (the
+ * toolbar of the tab's workspace group, say), or removes it when there is nothing to show.
  */
 async function pageMessage(tabId, payload) {
   const target = (await targets()).find(entry => entry.tabId === tabId);
@@ -1979,6 +1994,11 @@ async function pageMessage(tabId, payload) {
     await overlay(target.id);
     if (!pages.has(target.id)) await pageStep(target.id, () => pageCall(tabId, 'overlay', { remove: true }));
   } else if (payload.startsWith(SHARER_POINTER)) sharerPointer(target.id, payload);
+  else if (payload.startsWith(OVERLAY_PLACE)) {
+    const place = overlayPlace(payload);
+    if (!place) throw new Error('The toolbar said no place');
+    await keepOverlayPlace(tabId, place);
+  }
   else if (payload.startsWith(COMMENT_CALL)) await comments.message(target.id, payload);
   else if (!captureTracks.message(target.id, payload)) await overlayButton(target.id, tabId, payload);
 }

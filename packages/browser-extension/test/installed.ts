@@ -107,6 +107,8 @@ export async function installed(options: { local?: Record<string, unknown>; live
   /** The tab in front, which the popup is about. */
   let activeTabId = 1;
   const local = new Map<string, unknown>(Object.entries(options.local ?? {}));
+  /** `chrome.storage.session`: kept while Chrome runs, across service worker restarts. */
+  const session = new Map<string, unknown>([['browserEpoch', 'epoch']]);
   const alarms = new Map<string, { when?: number; periodInMinutes?: number }>();
   const titles: string[] = [];
   const detached: string[] = [];
@@ -380,7 +382,10 @@ export async function installed(options: { local?: Record<string, unknown>; live
         set: async (values: Record<string, unknown>) => { for (const [key, value] of Object.entries(values)) local.set(key, value); },
         remove: async (keys: string | string[]) => { for (const key of Array.isArray(keys) ? keys : [keys]) local.delete(key); },
       },
-      session: { get: async () => ({ browserEpoch: 'epoch' }), set: async () => {} },
+      session: {
+        get: async (keys: string | string[]) => Object.fromEntries((Array.isArray(keys) ? keys : [keys]).filter(key => session.has(key)).map(key => [key, session.get(key)])),
+        set: async (values: Record<string, unknown>) => { for (const [key, value] of Object.entries(values)) session.set(key, value); },
+      },
     },
     debugger: {
       getTargets: async () => [...tabs.values()].map(tab => ({ id: `target-${tab.id}`, tabId: tab.id, type: 'page', title: 'Page', url: tab.url })),
@@ -564,6 +569,11 @@ export async function installed(options: { local?: Record<string, unknown>; live
     for (const listener of tabUpdated) listener(tabId, change, tab);
     await settle();
   };
+  /** The tab goes to `url`: a new document (nothing an extension drew on the last one), then Chrome reports it loaded. */
+  const navigate = async (tabId: number, url: string) => {
+    pages.delete(tabId);
+    await updateTab(tabId, { url, status: 'complete' });
+  };
   /** You close a tab: Chrome removes it and its page, and the debugger leaves it. */
   const closeTab = async (tabId: number) => {
     tabs.delete(tabId);
@@ -612,7 +622,7 @@ export async function installed(options: { local?: Record<string, unknown>; live
     grant, tabs, group, groups, titles, detached, attached, commands, sentCommands, overlays, pageScripts, fromPage, page: pageOf, sent, local, alarms, sockets, toolbar, focused, focusedWindows, ungrouped, removed, opened, stored: state,
     requests, uploads, uploaded, files, shares, pairingCodes, folder, favicons, hold, authorizedAsRequired, downloadCalls, download, recorders, streamIds, captureGrants, offscreenCreated, isOffscreenOpen: () => offscreenOpen,
     commentThreads, commentRequests, workspaces, workspaceRequests, pairingId,
-    execute, authorize, begin, signGrant, preview, popup, pageEvent, alarm, relay, fromRelay, ask, updateTab, closeTab, openPopup, advance, waitFor, restart,
+    execute, authorize, begin, signGrant, preview, popup, pageEvent, alarm, relay, fromRelay, ask, updateTab, navigate, closeTab, openPopup, advance, waitFor, restart,
     /** You bring a tab to the front of its window, as Chrome reports it (`chrome.tabs.onActivated`). */
     activate: (tabId: number) => { activeTabId = tabId; for (const listener of tabActivated) listener({ tabId, windowId: tabs.get(tabId)?.windowId ?? 1 }); },
     answer: (respond: (command: DebuggerCommand) => unknown) => { answer = respond; },

@@ -78,7 +78,7 @@ describe('the in-page comment tool', () => {
     const tab = page();
     tab.call(browserOverlayFunction, idle);
     expect(tab.root().textContent).toContain('GitSpace · Checkout · idle');
-    expect(tab.buttons().map(button => button.textContent)).toEqual(['Comment', 'Capture']);
+    expect(tab.buttons().map(button => button.textContent || button.title)).toEqual(['Comment', 'Capture', 'Hide the GitSpace toolbar']);
     tab.button('Comment').click();
     expect(tab.calls).toEqual(['comment on']);
     // Esc means nothing to the tool before it is on: the page has it.
@@ -97,7 +97,7 @@ describe('the in-page comment tool', () => {
     // Off at once, before the extension says so: no layer, pins or strip, and the toolbar is back.
     expect(visible(tab.layer())).toBe(false);
     expect(tab.pins()).toEqual([]);
-    expect(tab.buttons().map(button => button.textContent)).toEqual(['Comment', 'Capture']);
+    expect(tab.buttons().map(button => button.textContent || button.title)).toEqual(['Comment', 'Capture', 'Hide the GitSpace toolbar']);
     // A view of the comment mode you closed, drawn before the extension heard of it, does not open it again; the
     // extension turning it on again does.
     tab.call(browserOverlayFunction, { comment: view() });
@@ -110,7 +110,7 @@ describe('the in-page comment tool', () => {
     expect(visible(tab.layer())).toBe(false);
     // Without an account that takes comments, there is no Comment.
     tab.call(browserOverlayFunction, { show: { ...idle.show, comments: false } });
-    expect(tab.buttons().map(button => button.textContent)).toEqual(['Capture']);
+    expect(tab.buttons().map(button => button.textContent || button.title)).toEqual(['Capture', 'Hide the GitSpace toolbar']);
   });
 
   it('a click anchors to the element under it and a drag to an area, with the element holding it; the page sees neither', () => {
