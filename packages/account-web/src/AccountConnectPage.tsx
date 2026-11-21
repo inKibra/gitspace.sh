@@ -4,6 +4,7 @@ import { accountHandleFromUrl } from './browser-enrollment.js';
 import type { BrowserDevice } from './device.js';
 import { passkeysSupported, preparePasskeySignIn } from './passkeys.js';
 import { stepUpErrorMessage, TAP, useRenewing } from './StepUpPrompt.js';
+import { STANDALONE_PAGE } from './standalonePage.js';
 
 /** Signs this browser in with a passkey: the sign-in is prepared ahead (and renewed before it expires) so the click runs
  * WebAuthn straight away, as Safari requires. */
@@ -36,8 +37,8 @@ export function AccountConnectPage({ error, onRecover, onEnroll, onPasskeySignIn
   const [handle, setHandle] = useState(inferredHandle ?? '');
   const [recoveryKey, setRecoveryKey] = useState('');
   const [pasted, setPasted] = useState('');
-  return <main className="flex min-h-dvh items-center justify-center bg-background p-6 text-foreground antialiased">
-    <div className="flex w-full max-w-lg flex-col gap-6">
+  return <main className={`${STANDALONE_PAGE} items-center p-6 pb-[max(1.5rem,env(safe-area-inset-bottom))]`}>
+    <div className="my-auto flex w-full max-w-lg flex-col gap-6">
       <header className="flex flex-col gap-2">
         <p className="text-caption font-medium text-muted-foreground">{inferredHandle ? `${inferredHandle}.gitspace.sh` : 'GitSpace account'}</p>
         <h1 className="text-title font-semibold [text-wrap:balance]">Connect this browser{inferredHandle ? ` to ${inferredHandle}` : ''}</h1>

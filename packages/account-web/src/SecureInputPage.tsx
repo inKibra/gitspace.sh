@@ -7,6 +7,7 @@ import { createDeviceSignedFetch, DeviceRejectedError, loadDevice } from './devi
 import type { StepUp } from './passkeys.js';
 import { StepUpPrompt, stepUpErrorMessage, TAP, useStepUp } from './StepUpPrompt.js';
 import { SECURE_INPUT_KIND_LABEL } from './SecureInputCard.js';
+import { STANDALONE_PAGE } from './standalonePage.js';
 
 const signedFetch = createDeviceSignedFetch(loadDevice, code => { throw new DeviceRejectedError(code); });
 const ErrorSchema = z.object({ status: z.literal('error'), error: z.object({ code: z.string().optional(), message: z.string() }) });
@@ -114,8 +115,8 @@ export function SecureInputPage({ id }: { id: string }) {
     void send({ op: 'submit', id, value: typed, save }, proof);
   }
   const seconds = Math.max(0, Math.ceil(left / 1000));
-  return <main className="flex min-h-dvh justify-center bg-background p-4 text-foreground antialiased sm:items-center sm:p-6">
-    <Card className="w-full max-w-lg">
+  return <main className={`${STANDALONE_PAGE} items-center p-4 pb-[max(1rem,env(safe-area-inset-bottom))] sm:p-6`}>
+    <Card className="w-full max-w-lg shrink-0 sm:my-auto">
       <CardHeader>
         <CardTitle>Enter a secret for an agent</CardTitle>
         <CardDescription>{request ? `Workspace ${request.workspace}` : 'GitSpace secure input'}</CardDescription>

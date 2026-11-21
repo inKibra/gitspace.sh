@@ -10,6 +10,7 @@ import { API_CLIENT_CAPABILITIES, API_CLIENT_TTLS } from './api-client-options.j
 import { createDeviceSignedFetch, DeviceRejectedError, loadDevice, prepareApiClientInvite } from './device.js';
 import type { StepUp } from './passkeys.js';
 import { StepUpPrompt, stepUpErrorMessage, TAP, useStepUp } from './StepUpPrompt.js';
+import { STANDALONE_PAGE } from './standalonePage.js';
 
 const signedFetch = createDeviceSignedFetch(loadDevice, code => { throw new DeviceRejectedError(code); });
 
@@ -120,8 +121,8 @@ export function OAuthConsentPage({ requestId, projects }: { requestId: string; p
     }
   }
 
-  return <main className="flex min-h-dvh justify-center bg-background p-4 text-foreground antialiased sm:items-center sm:p-6">
-    <Card className="w-full max-w-xl">
+  return <main className={`${STANDALONE_PAGE} items-center p-4 pb-[max(1rem,env(safe-area-inset-bottom))] sm:p-6`}>
+    <Card className="w-full max-w-xl shrink-0 overflow-clip sm:my-auto">
       <CardHeader>
         <CardTitle>{view ? `Allow ${view.client.name} to use your GitSpace?` : 'Connect an app to GitSpace'}</CardTitle>
         <CardDescription>An app asks to use your GitSpace account through MCP. It gets only what you allow here, and you can revoke it in Settings → Connections → MCP.</CardDescription>
@@ -184,7 +185,7 @@ export function OAuthConsentPage({ requestId, projects }: { requestId: string; p
                   {challenge && !recovered ? <StepUpPrompt stepUp={challenge} recoveryOnly onProof={proof => setRecovery({ stepUp: challenge, proof })} /> : null}
                 </section> : null}
                 {error ? <p role="alert" className="text-caption text-destructive [overflow-wrap:anywhere]">{error}</p> : null}
-                <div className="flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
+                <div className="sticky bottom-0 flex flex-col-reverse gap-3 border-t border-border bg-background py-3 sm:flex-row sm:justify-end" data-oauth-decision>
                   <Button type="button" variant="secondary" className={TAP} disabled={busy} onClick={() => { void decide(false); }}>Deny</Button>
                   <Button type="button" variant="primary" className={TAP} disabled={busy || !canAllow} loading={busy} onClick={() => { void decide(true); }}>Allow</Button>
                 </div>
