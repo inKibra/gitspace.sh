@@ -15,9 +15,12 @@ import {
   verifyRpcDigestSignature,
   decodeApiKey,
   scopeContains,
+  scopeAllowsWorkspace,
+  deviceScopeSchema,
   deviceCanAdminister,
   type DeviceCapability,
   type DeviceGrantRecord,
+  type DeviceScope,
 } from '../src/device-grant.js';
 
 const rootPrivate = new Uint8Array(32).fill(7);
@@ -108,10 +111,32 @@ describe('device grants', () => {
     expect(inputWithinScope({ kind: 'workspace', workspaceId: 'ws-a' }, { workspaceId: 'ws-b' })).toBe(false);
   });
 
+  it('confines a several-project grant to exactly its projects', () => {
+    const scope: DeviceScope = { kind: 'projects', projectIds: ['project-a', 'project-b'] };
+    const projects: Readonly<Record<string, string>> = { 'ws-a': 'project-a', 'ws-b': 'project-b', 'ws-c': 'project-c' };
+    const projectOf = (workspaceId: string) => projects[workspaceId] ?? null;
+    expect(inputWithinScope(scope, { projectId: 'project-a' })).toBe(true);
+    expect(inputWithinScope(scope, { projectId: 'project-b', workspaceId: 'ws-b' }, projectOf)).toBe(true);
+    expect(inputWithinScope(scope, { projectId: 'project-c' })).toBe(false);
+    expect(inputWithinScope(scope, { workspaceId: 'ws-c' }, projectOf)).toBe(false);
+    expect(inputWithinScope(scope, { projectId: 'project-a', target: { workspaceId: 'ws-c' } }, projectOf)).toBe(false);
+    expect(inputWithinScope(scope, { sessionId: 'session-c' }, projectOf, () => ({ projectId: 'project-c', workspaceId: 'ws-c' }))).toBe(false);
+    expect(inputWithinScope(scope, {})).toBe(false);
+    expect(scopeAllowsWorkspace(scope, 'project-a', 'ws-a')).toBe(true);
+    expect(scopeAllowsWorkspace(scope, 'project-b', 'anything')).toBe(true);
+    expect(scopeAllowsWorkspace(scope, 'project-c', 'ws-c')).toBe(false);
+    expect(scopeAllowsWorkspace({ kind: 'project', projectId: 'project-a' }, 'project-b', 'ws-b')).toBe(false);
+    expect(scopeAllowsWorkspace({ kind: 'workspace', workspaceId: 'ws-a' }, 'project-a', 'ws-b')).toBe(false);
+    expect(scopeAllowsWorkspace({ kind: 'user' }, 'project-c', 'ws-c')).toBe(true);
+    // One project is `project`; repeats are refused.
+    expect(deviceScopeSchema.safeParse({ kind: 'projects', projectIds: ['project-a'] }).success).toBe(false);
+    expect(deviceScopeSchema.safeParse({ kind: 'projects', projectIds: ['project-a', 'project-a'] }).success).toBe(false);
+  });
+
   it('verifies delegated grants through their issuer and caps them by the issuer', () => {
     const browser = record();
     const clientPrivate = new Uint8Array(32).fill(11);
-    const mint = (capabilities: DeviceCapability[], scope: { kind: 'user' } | { kind: 'project'; projectId: string } = { kind: 'project', projectId: 'p1' }): DeviceGrantRecord => {
+    const mint = (capabilities: DeviceCapability[], scope: DeviceScope = { kind: 'project', projectId: 'p1' }): DeviceGrantRecord => {
       const invite = signDeviceInvite({
         version: 1, userId: 'user-a', inviteId: '33333333-3333-4333-8333-333333333333', kind: 'client', label: 'CI', scope, capabilities, canDelegate: false,
         issuedAt: NOW, expiresAt: NOW + 60_000, grantTtlMs: 86_400_000, enrollUrl: 'https://control.example',
@@ -138,6 +163,8 @@ describe('device grants', () => {
     expect(verifyDeviceGrantRecord(mint(['rpc.read', 'fleet.control']), rootPublic, NOW + 2, resolve(browser))).toBeNull();
     const nonDelegating = { ...browser, invite: signDeviceInvite({ ...browser.invite.invite, canDelegate: false }, rootPrivate) };
     expect(verifyDeviceGrantRecord(mint(['rpc.read']), rootPublic, NOW + 2, resolve(nonDelegating))).toBeNull();
+    // A browser hands a client several projects.
+    expect(verifyDeviceGrantRecord(mint(['rpc.read'], { kind: 'projects', projectIds: ['p1', 'p2'] }), rootPublic, NOW + 2, resolve(browser))).toMatchObject({ scope: { kind: 'projects', projectIds: ['p1', 'p2'] } });
   });
 
   it('contains delegated scopes', () => {
@@ -146,6 +173,14 @@ describe('device grants', () => {
     expect(scopeContains({ kind: 'project', projectId: 'p' }, { kind: 'workspace', workspaceId: 'w' })).toBe(false);
     expect(scopeContains({ kind: 'project', projectId: 'p' }, { kind: 'user' })).toBe(false);
     expect(scopeContains({ kind: 'workspace', workspaceId: 'w' }, { kind: 'workspace', workspaceId: 'w' })).toBe(true);
+    const several: DeviceScope = { kind: 'projects', projectIds: ['p', 'q'] };
+    expect(scopeContains({ kind: 'user' }, several)).toBe(true);
+    expect(scopeContains(several, { kind: 'project', projectId: 'q' })).toBe(true);
+    expect(scopeContains(several, { kind: 'projects', projectIds: ['q', 'p'] })).toBe(true);
+    expect(scopeContains(several, { kind: 'project', projectId: 'r' })).toBe(false);
+    expect(scopeContains(several, { kind: 'projects', projectIds: ['p', 'r'] })).toBe(false);
+    expect(scopeContains(several, { kind: 'user' })).toBe(false);
+    expect(scopeContains({ kind: 'project', projectId: 'p' }, several)).toBe(false);
   });
 
   it('rejects malformed keys and keys without account routing identity', () => {

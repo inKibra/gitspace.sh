@@ -31,6 +31,7 @@
     "./guide-walkthrough": "./src/guide-walkthrough.ts",
     "./mcp-contract": "./src/mcp-contract.ts",
     "./mcp-access": "./src/mcp-access.ts",
+    "./mcp-authorization": "./src/mcp-authorization.ts",
     "./skills-contract": "./src/skills-contract.ts",
     "./project-authority": "./src/project-authority.ts",
     "./rpc-contract": "./src/rpc-contract.ts",

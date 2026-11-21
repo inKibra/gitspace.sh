@@ -1,4 +1,4 @@
-import { deviceCanAdminister, deviceHasCapability, type DeviceCapability, type GitSpaceRpcContext } from '@gitspace/protocol';
+import { deviceCanAdminister, deviceHasCapability, scopeAllowsWorkspace, type DeviceCapability, type GitSpaceRpcContext } from '@gitspace/protocol';
 import {
   runtimeSnapshotContract, runtimeSubmitContract, runtimeCancelContract,
   runtimeAnswerContract, runtimeWatchContract, runtimeSessionContract,
@@ -27,8 +27,7 @@ export async function requireRuntimeAccess(
   if (!view) throw new Error(DEVICE_AUTHORITY_UNAVAILABLE_MESSAGE);
   const device = view.device(deviceId, Date.now());
   if (!device || !device.capabilities.includes(capability)) throw new Error('Runtime authorization has expired or lacks permission');
-  if (device.scope.kind === 'project' && device.scope.projectId !== input.projectId) throw new Error('Workspace is outside the device project scope');
-  if (device.scope.kind === 'workspace' && device.scope.workspaceId !== input.workspaceId) throw new Error('Workspace is outside the device workspace scope');
+  if (!scopeAllowsWorkspace(device.scope, input.projectId, input.workspaceId)) throw new Error('Workspace is outside the device scope');
   return { device, ...await requireWorkspaceAccess(env, userId, input, capability !== 'rpc.read') };
 }
 

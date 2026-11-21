@@ -70,12 +70,13 @@ The browser sends the action with header `x-gitspace-step-up` (`STEP_UP_HEADER`)
 | `browser-invitation.create` | the invite id | registering a browser invitation link |
 | `secure-input.open` | the secure-input request id | `view` on `/api/secure-input` |
 | `secure-input.answer` | the secure-input request id | `submit` and `useSaved` (`decline` needs none) |
+| `mcp-oauth.grant` | the OAuth authorization request id | allowing an MCP client Decide as you, Account administration, Lifecycle control, Device management or Deployment on the OAuth consent page; spent in the same vault transaction that records the grant (docs/GITSPACE-MCP-CAPABILITY-MATRIX.md, "Connect with OAuth") |
 
-OAuth consent adds a purpose (for example `oauth.grant`, target: the authorization request id) to `passkeyCeremonyPurposeSchema` and calls `consumeStepUp` before issuing a grant with powerful scopes.
+`MCP_OAUTH_STEP_UP_CAPABILITIES` (`protocol/src/mcp-authorization.ts`) lists the permissions that need it; other permissions need only the signed-in browser.
 
 ### Bootstrap
 
-An account with no active passkey may enroll its first passkey and create browser invitations with no step-up (`required: false`); every other purpose still needs one, which only the recovery key can give until a passkey is enrolled. Secure input therefore needs an enrolled passkey (or the recovery key).
+An account with no active passkey may enroll its first passkey and create browser invitations with no step-up (`required: false`); every other purpose still needs one, which only the recovery key can give until a passkey is enrolled. Secure input and granting an MCP client powerful permissions therefore need an enrolled passkey (or the recovery key).
 
 ## Passkey sign-in
 

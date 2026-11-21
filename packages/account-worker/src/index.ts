@@ -1157,6 +1157,12 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === '/mcp') return handleMcpRequest(request, env, (signed) => application.fetch(signed, env));
+    if (url.origin === new URL(env.ACCOUNT_URL).origin
+      && (url.pathname.startsWith('/.well-known/oauth-') || url.pathname.startsWith('/oauth/') || url.pathname.startsWith('/v1/mcp-oauth/'))) {
+      // OAuth for `/mcp` loads on its own routes; the Worker's startup stays free of it.
+      const { serveMcpAuthorization } = await import('./mcp-authorization.js');
+      return serveMcpAuthorization(request, env, (page) => application.fetch(page, env));
+    }
     if (url.pathname === '/v1/accounts/bootstrap' || url.pathname === '/v1/accounts/recover') {
       const cors = { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'POST, OPTIONS', 'access-control-allow-headers': 'authorization, content-type', 'cache-control': 'private, no-store' };
       if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });

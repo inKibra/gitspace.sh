@@ -3,7 +3,7 @@ import { CfWorkerJsonSchemaValidator } from '@modelcontextprotocol/server/valida
 import { createGitSpaceClient, type GitSpaceClient } from '@gitspace/protocol/client';
 import { gitspaceContract } from '@gitspace/protocol/rpc-contract';
 import { accountRpcAuthority, rpcCallTarget } from '@gitspace/protocol/account-rpc';
-import { OPERATOR_QA_ACTIONS, OPERATOR_SESSION_COMMANDS, requiredCapability, requiredAdministrativeCapability, requiresImageSelectionControl, requiresOperatorDecision } from '@gitspace/protocol/device-grant';
+import { OPERATOR_QA_ACTIONS, OPERATOR_SESSION_COMMANDS, requiredCapability, requiredAdministrativeCapability, requiresImageSelectionControl, requiresOperatorDecision, type DeviceScope } from '@gitspace/protocol/device-grant';
 import { procedureJsonRepresentation } from '@gitspace/protocol/json-representation';
 import { DEFAULT_SKILLS } from '@gitspace/protocol/default-skills';
 import { reviewedAnnotations } from './annotations.js';
@@ -16,7 +16,7 @@ export interface GitSpaceMcpOptions {
   key: string;
   fetch?: typeof globalThis.fetch;
   capabilities: readonly string[];
-  scope: { kind: 'user' } | { kind: 'project'; projectId: string } | { kind: 'workspace'; workspaceId: string };
+  scope: DeviceScope;
 }
 type RpcCall = (input: unknown, options: { signal: AbortSignal; timeoutMs: number; retry: false }) => Promise<RpcResult>;
 /** The remaining subscriptions are finite downloads, exposed only through their `*Page`/`page` query tool. */

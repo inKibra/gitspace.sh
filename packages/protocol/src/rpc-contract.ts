@@ -18,6 +18,7 @@ import {
 import { AgentFailureSchema, AgentIncidentChangeSchema, type AgentFailure, type AgentIncidentChange } from '@gitspace/protocol-agent';
 import { SpaceAuthorityRecordSchema, StackRestackSchema, WorkspaceFailureSchema, WorkspaceRelationsSchema, WorkspacePhaseSchema, WorkspaceStatusSummarySchema, type SpaceAuthorityRecord, type StackRestack, type WorkspaceFailure, type WorkspaceRelations, type WorkspacePhase, type WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
 import { z } from 'zod';
+import type { DeviceScope } from './device-grant.js';
 import { CloudImageChoiceCodec, CloudImageSelectionCodec, CloudImageStateCodec } from './cloud-image.js';
 import { StreamCursorCodec, streamCodec } from './stream-codec.js';
 import { TranscriptChunkCodec, TranscriptPageCodec, TranscriptContentPageCodec, TranscriptPageRequestFields, TranscriptContentRequestFields } from './transcript.js';
@@ -566,7 +567,7 @@ export interface GitSpaceRpcCaller {
   deviceId: string;
   kind: 'browser' | 'client';
   label: string;
-  scope: { kind: 'user' } | { kind: 'project'; projectId: string } | { kind: 'workspace'; workspaceId: string };
+  scope: DeviceScope;
   capabilities: readonly string[];
 }
 export interface GitSpaceRpcContext { caller?: GitSpaceRpcCaller }

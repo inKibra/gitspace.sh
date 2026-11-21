@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { deviceCapabilitySchema, deviceScopeSchema, signedDeviceInviteSchema } from './device-grant.js';
+import { mcpOAuthClientViewSchema } from './mcp-authorization.js';
 
 /** Browser-only credential setup, deliberately outside the MCP/RPC tool catalog. An account has any number of MCP
  * connections, each its own client device with its own bearer token, scope and capabilities. */
@@ -19,6 +20,9 @@ export const mcpConnectionViewSchema = z.object({
   expiresAt: z.number().nullable(),
   createdAt: z.string(),
   updatedAt: z.string(),
+  /** A connection an MCP client made through OAuth: who it is and where its authorization went. Null for a token
+   * connection added in Settings (and from a vault that predates OAuth). Rotating does not apply to it. */
+  oauth: z.object({ client: mcpOAuthClientViewSchema, redirectHost: z.string() }).strict().nullable().default(null),
 }).strict();
 export const mcpAccessViewSchema = z.object({
   /** Advances with every change to any connection. */

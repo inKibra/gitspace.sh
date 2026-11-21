@@ -5,6 +5,7 @@ import { cloudImageOperationActive, cloudImageOperationCancellable, cloudImageSe
 import { rpcErrors } from '@gitspace/protocol/rpc-contract';
 import type { MachineDiscardConfirmation, MachineDiscardRequired } from '@gitspace/protocol/machine-discard';
 import type { ApiClientDraft } from './device.js';
+import { API_CLIENT_CAPABILITIES, API_CLIENT_TTLS } from './api-client-options.js';
 import type { McpAccessView, McpConnectionView } from '@gitspace/protocol/mcp-access';
 import type { GitHubAppManifestForm, GitHubAppOwner, GitHubAppView, GitHubInstallationView, GitHubInstallRequestView, GitHubPerson, GitHubState } from '@gitspace/protocol/github';
 import { GITHUB_REMOVED_KEPT, GitHubLoginSchema } from '@gitspace/protocol/github';
@@ -446,24 +447,6 @@ function GitSettings({ settings, gitIdentity, onChange }: Pick<SettingsPageProps
   </>;
 }
 
-const API_CLIENT_TTLS: ReadonlyArray<{ value: string; label: string; ms: number | null }> = [
-  { value: 'never', label: 'Until revoked', ms: null },
-  { value: '7d', label: '7 days', ms: 7 * 86_400_000 },
-  { value: '30d', label: '30 days', ms: 30 * 86_400_000 },
-  { value: '90d', label: '90 days', ms: 90 * 86_400_000 },
-];
-const API_CLIENT_CAPABILITIES: ReadonlyArray<{ id: DeviceCapability; label: string; description: string }> = [
-  { id: 'rpc.read', label: 'Read', description: 'Queries and event streams' },
-  { id: 'rpc.write', label: 'Write', description: 'Create and change workspaces, settings, automations' },
-  { id: 'session.prompt', label: 'Talk to agents', description: 'Prompt and steer (answering their questions needs Decide as you)' },
-  { id: 'fleet.control', label: 'Fleet', description: 'Create, stop, start, destroy machines' },
-  { id: 'deployment.control', label: 'Deployment', description: 'Select cloud images and control GitSpace runtime releases (account scope required)' },
-  { id: 'devices.manage', label: 'Device management', description: 'Revoke enrolled browsers and API clients (whole account required)' },
-  { id: 'account.admin', label: 'Account administration', description: 'Manage provider keys, inference, session approval policy and review decisions (whole account and Write required)' },
-  { id: 'lifecycle.control', label: 'Lifecycle control', description: 'Approve execution content and browser origins through API/MCP, cancel and recover runs, retire resources (whole account and Write required)' },
-  { id: 'operator.decide', label: 'Decide as you', description: 'Answer agents\' questions and approvals, accept requirements, act on your Chrome and its share links, comment as you, file and share QA reports, decide which GitHub accounts the App serves, pause and resume storage. Off unless you need a client to stand in for you' },
-];
-
 function ApiClientPermissions({ projects, projectId, setProjectId, capabilities, setCapabilities, ttl, setTtl, id }: {
   projects: ReadonlyArray<{ id: string; name: string }>;
   projectId: string;
@@ -657,19 +640,23 @@ export function McpAccessSettings({ projects, canManageMcp, canCreateMcp, onMcpS
     setAction(next);
   };
   const target = action && action.kind !== 'create' ? action.connection.label : '';
+  const revokesOAuth = action?.kind === 'disable' && action.connection.oauth !== null;
   return <Group title="MCP">
     <SettingRows>
-      <SettingRow title="GitSpace MCP" description="Connect MCP clients over Streamable HTTP. Each connection has its own token, permissions, and revocation.">
+      <SettingRow title="GitSpace MCP" description="Connect MCP clients over Streamable HTTP. Each connection has its own token, permissions, and revocation. Apps that sign in with OAuth (Claude, ChatGPT, Claude Code) only need the endpoint: they ask you to allow them here.">
         {loading ? <Badge color="gray">Loading…</Badge> : view ? null : <Badge color="gray">Unavailable</Badge>}
       </SettingRow>
       {view ? <SettingRow title="Endpoint" description={view.endpoint}>{null}</SettingRow> : null}
       {view?.connections.map(connection => {
         const scope = connection.scope;
-        return <SettingRow key={connection.connectionId} title={<>{connection.label}<Badge color={connection.active ? 'green' : 'amber'}>{connection.active ? 'Active' : 'Inactive grant'}</Badge></>}
-          description={<>{scope?.kind === 'project' ? `Project: ${projects.find(project => project.id === scope.projectId)?.name ?? scope.projectId}` : 'Whole account'}<span className="mt-1 block">{connection.capabilities.join(', ')}</span><span className="mt-1 block">{connection.expiresAt ? `Expires ${new Date(connection.expiresAt).toLocaleString()}` : 'Until revoked'}</span>{connection.active ? null : <span className="mt-1 block">Its grant was revoked or expired. Disable it and add a new connection.</span>}</>}>
+        const projectIds = scope?.kind === 'project' ? [scope.projectId] : scope?.kind === 'projects' ? scope.projectIds : [];
+        const scopeText = projectIds.length === 0 ? 'Whole account' : `${projectIds.length === 1 ? 'Project' : 'Projects'}: ${projectIds.map(projectId => projects.find(project => project.id === projectId)?.name ?? projectId).join(', ')}`;
+        const { oauth } = connection;
+        return <SettingRow key={connection.connectionId} title={<>{connection.label}<Badge color={connection.active ? 'green' : 'amber'}>{connection.active ? 'Active' : 'Inactive grant'}</Badge>{oauth ? <Badge color="blue">OAuth</Badge> : null}</>}
+          description={<>{oauth ? <span className="mb-1 block">{oauth.client.registration === 'metadata-document' ? `Connected through OAuth by ${oauth.client.host ?? oauth.client.clientId}` : `Connected through OAuth by an app that registered itself${oauth.client.host ? ` and names ${oauth.client.host}` : ''}`} · returns to {oauth.redirectHost}</span> : null}{scopeText}<span className="mt-1 block">{connection.capabilities.join(', ')}</span><span className="mt-1 block">{connection.expiresAt ? `Expires ${new Date(connection.expiresAt).toLocaleString()}` : 'Until revoked'}</span>{connection.active ? null : <span className="mt-1 block">Its grant was revoked or expired. {oauth ? 'Revoke it to remove it, then connect the app again.' : 'Disable it and add a new connection.'}</span>}</>}>
           {canManageMcp ? <div className="flex gap-2">
-            <Button variant="ghost" size="compact" disabled={pending || loading || !connection.active} onClick={() => open({ kind: 'rotate', connection })}>Rotate token</Button>
-            <Button variant="ghost" size="compact" disabled={pending || loading} onClick={() => open({ kind: 'disable', connection })}>Disable</Button>
+            {oauth ? null : <Button variant="ghost" size="compact" disabled={pending || loading || !connection.active} onClick={() => open({ kind: 'rotate', connection })}>Rotate token</Button>}
+            <Button variant="ghost" size="compact" disabled={pending || loading} onClick={() => open({ kind: 'disable', connection })}>{oauth ? 'Revoke' : 'Disable'}</Button>
           </div> : null}
         </SettingRow>;
       })}
@@ -685,8 +672,8 @@ export function McpAccessSettings({ projects, canManageMcp, canCreateMcp, onMcpS
     <Dialog open={action !== null || secret !== null} onOpenChange={(next) => { if (!next) close(); }}>
       <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>{secret ? `Copy the token for ${secret.label}` : action?.kind === 'create' ? 'Add an MCP connection' : action?.kind === 'rotate' ? `Rotate the token for ${target}?` : `Disable ${target}?`}</DialogTitle>
-          <DialogDescription>{secret ? 'Shown once. Copy it now and keep it private. Closing this dialog clears the token; it cannot be retrieved later.' : action?.kind === 'create' ? 'Authorize a dedicated MCP client with the scope, permissions, and lifetime you choose. The private signing key stays in the vault.' : action?.kind === 'rotate' ? 'This connection\'s current token stops working immediately. Update the clients that use it with the new token. Other connections are unaffected.' : 'This connection\'s token stops working immediately and its client grant is revoked. Other connections are unaffected.'}</DialogDescription>
+          <DialogTitle>{secret ? `Copy the token for ${secret.label}` : action?.kind === 'create' ? 'Add an MCP connection' : action?.kind === 'rotate' ? `Rotate the token for ${target}?` : `${revokesOAuth ? 'Revoke' : 'Disable'} ${target}?`}</DialogTitle>
+          <DialogDescription>{secret ? 'Shown once. Copy it now and keep it private. Closing this dialog clears the token; it cannot be retrieved later.' : action?.kind === 'create' ? 'Authorize a dedicated MCP client with the scope, permissions, and lifetime you choose. The private signing key stays in the vault.' : action?.kind === 'rotate' ? 'This connection\'s current token stops working immediately. Update the clients that use it with the new token. Other connections are unaffected.' : revokesOAuth ? 'This app\'s access and refresh tokens stop working immediately, its client grant is revoked and the connection is removed. To use it again, connect it again from the app. Other connections are unaffected.' : 'This connection\'s token stops working immediately and its client grant is revoked. Other connections are unaffected.'}</DialogDescription>
         </DialogHeader>
         {secret ? <div className="flex min-w-0 flex-col gap-4">
           <InputCopy label="Streamable HTTP URL" value={secret.endpoint} />
@@ -699,7 +686,7 @@ export function McpAccessSettings({ projects, canManageMcp, canCreateMcp, onMcpS
         </fieldset> : null}
         <DialogFooter>
           <Button variant="secondary" disabled={pending} onClick={close}>{secret ? 'Done' : 'Cancel'}</Button>
-          {!secret ? <Button variant="primary" loading={pending} disabled={pending || !view || (action?.kind === 'create' && (!canCreateMcp || capabilities.length === 0 || !label.trim()))} onClick={() => void submit()}>{action?.kind === 'create' ? 'Add connection' : action?.kind === 'rotate' ? 'Rotate and invalidate old token' : 'Disable connection'}</Button> : null}
+          {!secret ? <Button variant="primary" loading={pending} disabled={pending || !view || (action?.kind === 'create' && (!canCreateMcp || capabilities.length === 0 || !label.trim()))} onClick={() => void submit()}>{action?.kind === 'create' ? 'Add connection' : action?.kind === 'rotate' ? 'Rotate and invalidate old token' : revokesOAuth ? 'Revoke connection' : 'Disable connection'}</Button> : null}
         </DialogFooter>
       </DialogContent>
     </Dialog>

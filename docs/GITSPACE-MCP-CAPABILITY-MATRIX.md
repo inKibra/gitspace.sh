@@ -53,7 +53,8 @@ Only what a browser alone can carry out stays outside MCP for every connection: 
 
 Scope rules and gaps:
 
-- Account-cloud authorization currently requires an account/user-scoped device. Do not promise that a project-scoped key can call every cloud-backed project/Inspector operation. See [account device authorization](../packages/account-worker/src/application.ts) and [cloud routing](../packages/account-worker/src/account-cloud-rpc.ts#L497).
+- Account-cloud authorization currently requires an account/user-scoped device. Do not promise that a project-scoped key can call every cloud-backed project/Inspector operation: on the account, a project-scoped grant reaches the `runtime.*` procedures of its projects' workspaces only. See [account device authorization](../packages/account-worker/src/application.ts) and [cloud routing](../packages/account-worker/src/account-cloud-rpc.ts#L497).
+- A grant can name **several projects** (`{ kind: 'projects', projectIds }`, two or more; one project is `{ kind: 'project' }`). It reaches exactly those projects wherever a project grant reaches its one: machine-side target checks ([`inputWithinScope`](../packages/protocol/src/device-grant.ts)), the account's runtime procedures, browser watch and dictation ([`scopeAllowsWorkspace`](../packages/protocol/src/device-grant.ts)), and delegation ([`scopeContains`](../packages/protocol/src/device-grant.ts)). Machines on older builds drop such records and so refuse them.
 - Machine-side authorization resolves top-level, nested Inspector, and session-only targets to their canonical project/workspace before comparing the grant. Unknown or foreign targets fail closed. A workspace grant cannot write project/global configuration. See [signed RPC](../packages/account-machine/src/signed-rpc.ts).
 - The MCP adapter never replaces a narrow backing grant with an account-wide credential. Cloud-backed operations that require account scope remain unavailable to narrow grants.
 - Actor labels, reviewer IDs, `actorKind: human`, resource IDs, and workspace paths are input data, not proof of authority. Bind provenance to authenticated identity.
@@ -86,7 +87,7 @@ URL: https://<account>.gitspace.sh/mcp
 Authorization: Bearer <generated-token>
 ```
 
-The bearer token is the MCP access key. There is no token exchange, OAuth login, or GitSpace-specific SDK to install in the MCP client. Keep the token out of repository files, logs, and shared conversations.
+A token connection's bearer is its MCP access key: no token exchange, OAuth login, or GitSpace-specific SDK is needed in the MCP client. Keep the token out of repository files, logs, and shared conversations. Clients that sign in with OAuth use the next section instead.
 
 All callers using one connection's token share its API client's authority and audit identity. This is not a multi-user privilege broker; give each client its own connection to tell them apart and revoke them separately. Full in-scope account control requires `rpc.read`, `rpc.write`, `session.prompt`, `fleet.control`, `devices.manage`, `deployment.control`, `account.admin`, and `lifecycle.control`. Administrative permissions remain opt-in. A narrow grant does not gain account authority.
 
@@ -97,6 +98,42 @@ All callers using one connection's token share its API client's authority and au
 Status reads reveal metadata only. Setup, rotation, and disable use signed browser-only endpoints outside the MCP tool catalog. Every change advances one revision for the account's connections, and a change based on an older revision is rejected instead of silently replacing another browser's work. After an ambiguous setup or rotation failure, refresh status and rotate deliberately rather than retrying automatically.
 
 An account that enabled MCP before connections existed keeps its grant as a connection named "GitSpace MCP", with its token unchanged.
+
+### Connect with OAuth
+
+MCP clients that connect only through OAuth (Claude.ai and ChatGPT custom connectors, Claude Code, other agents) sign in per the [MCP authorization specification (2026-07-28)](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization). The account origin is the authorization server and `<origin>/mcp` its one protected resource ([`mcp-authorization.ts`](../packages/account-worker/src/mcp-authorization.ts), loaded only on these routes).
+
+| Endpoint | What it is |
+|---|---|
+| `401` from `/mcp` | `WWW-Authenticate: Bearer realm="GitSpace MCP", resource_metadata="<origin>/.well-known/oauth-protected-resource/mcp"` (with `error="invalid_token"` when a token was sent) |
+| `GET /.well-known/oauth-protected-resource/mcp` (also without `/mcp`) | Protected resource metadata (RFC 9728): `resource` `<origin>/mcp`, `authorization_servers` `[<origin>]`, `scopes_supported` `rpc.read rpc.write session.prompt` (what a client asks for by default) |
+| `GET /.well-known/oauth-authorization-server` | Authorization server metadata (RFC 8414): issuer `<origin>`, every scope, `code_challenge_methods_supported: [S256]`, `authorization_response_iss_parameter_supported: true`, `client_id_metadata_document_supported: true`, token endpoint auth `none`, `client_secret_post`, `client_secret_basic` |
+| `POST /oauth/register` | Dynamic Client Registration (RFC 7591), at most 20 per ten minutes per account; unused registrations beyond 200 are dropped, oldest first |
+| `GET /oauth/authorize` | Authorization code with PKCE (S256 only), `resource` must be `<origin>/mcp` (RFC 8707); answers go back with `state` and `iss` (RFC 9207) |
+| `POST /oauth/token` | `authorization_code` and `refresh_token`, form-encoded |
+| `/oauth/consent?request=<id>` | The consent page (never framed) and its signed API `POST /v1/mcp-oauth/consent/(view\|decide)` |
+
+**Scopes** are the capability ids, one to one: `rpc.read`, `rpc.write`, `session.prompt`, `fleet.control`, `devices.manage`, `deployment.control`, `account.admin`, `lifecycle.control`, `operator.decide`. Unknown scopes (such as `offline_access`) are ignored. The token response's `scope` is what the person granted, which can differ from what the client asked.
+
+**Clients.** A client whose `client_id` is an https URL with a path is identified by its Client ID Metadata Document: fetched over https on the default port from a public host (no IP literals in private ranges, no `localhost`, `.local` or `.internal`), no redirects, at most 8 KB in 5 seconds, its `client_id` equal to its URL, `token_endpoint_auth_method` `none`; cached in the vault for its `Cache-Control: max-age` between 5 minutes and 24 hours (one hour without one), 64 documents at most. Other clients register dynamically; the consent page marks them unverified. Redirect URIs match exactly, https, or `http` on `localhost`, `127.0.0.1` or `[::1]` for native clients, where any port matches the registered one (RFC 8252 §7.3). A client or redirect URI GitSpace cannot verify ends on a GitSpace page, never at the redirect URI.
+
+**Consent.** The authorization request waits ten minutes for the consent page, which needs a signed-in GitSpace browser (an unconnected browser sees the connect page first, then the request). It shows the app's name, logo and host from its metadata, or "Unverified" for a registered app, and the redirect host prominently, with a warning when that is this computer. Permissions are checkboxes, the requested ones ticked; projects are the whole account, or one or more existing projects, or a new project named on the page (no repository); lifetime is 7, 30 or 90 days or until revoked. Allow signs a client invitation with the browser's key for exactly that choice; the vault makes the client's key, enrolls it and records the connection, as for a token connection. **Decide as you, Account administration, Lifecycle control, Device management and Deployment** also take a passkey step-up (`mcp-oauth.grant`, target: the request id, [PASSKEYS-DESIGN](PASSKEYS-DESIGN.md#purposes)); an account with no passkey answers it with the recovery key, as every non-bootstrap step-up does. Deny answers `access_denied`.
+
+**Tokens.** Codes (`gsoc_…`) are single-use and last 60 seconds. Access tokens (`gsoa_…`) last an hour or until the grant ends. Refresh tokens (`gsor_…`) last as long as the grant and rotate on every use. A code or refresh token presented a second time revokes the grant and every token of it. Dynamic client secrets are `gscs_…`. Codes, tokens and secrets are 256 random bits, and the vault keeps only their SHA-256.
+
+**Settings.** OAuth connections are listed in **Settings > Connections > MCP** with an OAuth badge, the app's host (or that it registered itself), the redirect host, permissions, projects and expiry. **Revoke** revokes the client grant, removes the connection and invalidates its access and refresh tokens; revoking the client under Devices does the same for access. They have no token to rotate.
+
+**Rollout.** The OAuth routes call new vault methods through `acrossRelease`, which retries "does not implement the method" for about four seconds while the vault still runs the previous build; after that they answer `503 temporarily_unavailable` (or a "try again" page) and nothing else changes. `/mcp` itself calls only `resolveMcpAccess`, which older vaults have: they refuse OAuth tokens (401) and keep serving token connections.
+
+#### Add GitSpace to Claude.ai
+
+1. In Claude.ai, open **Settings > Connectors** and choose **Add custom connector**.
+2. Name it (for example "GitSpace") and paste `https://<account>.gitspace.sh/mcp` as the server URL. Leave the OAuth client ID and secret empty, then **Add**.
+3. Choose **Connect**. Claude opens `https://<account>.gitspace.sh/oauth/consent?…` in the browser: "Allow Claude to use your GitSpace?", identified by its metadata document on `claude.ai`, returning to `claude.ai`, with Read, Write and Talk to agents ticked. Sign in to GitSpace there first if that browser is not connected.
+4. Choose the permissions, projects and lifetime, then **Allow** (with your passkey if you ticked a powerful permission). Claude shows the connector as connected and lists GitSpace's tools.
+5. To end it, **Revoke** the connection in **Settings > Connections > MCP**.
+
+Claude Code and other clients follow the same flow from their own "add MCP server" command with the same URL.
 
 ### Deployment
 

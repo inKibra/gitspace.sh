@@ -382,7 +382,8 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
     try {
       return ok((await deviceRecords()).map(({ record, verified }) => ({
         deviceId: record.binding.deviceId, kind: record.invite.invite.kind, label: record.binding.label,
-        scope: record.invite.invite.scope.kind === 'user' ? 'user' : record.invite.invite.scope.kind === 'project' ? `project:${record.invite.invite.scope.projectId}` : `workspace:${record.invite.invite.scope.workspaceId}`,
+        scope: record.invite.invite.scope.kind === 'user' ? 'user' : record.invite.invite.scope.kind === 'project' ? `project:${record.invite.invite.scope.projectId}`
+          : record.invite.invite.scope.kind === 'projects' ? `projects:${record.invite.invite.scope.projectIds.join(',')}` : `workspace:${record.invite.invite.scope.workspaceId}`,
         capabilities: [...record.invite.invite.capabilities], boundAt: new Date(record.binding.boundAt).toISOString(),
         expiresAt: verified?.expiresAt ? new Date(verified.expiresAt).toISOString() : null,
         revokedAt: record.revokedAt === null ? null : new Date(record.revokedAt).toISOString(),

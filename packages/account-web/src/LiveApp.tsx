@@ -33,6 +33,8 @@ import { AccountConnectPage } from './AccountConnectPage.js';
 import { ServiceAccessApproval } from './ServiceAccessApproval.js';
 import { SecureInputPage } from './SecureInputPage.js';
 import { SECURE_INPUT_PAGE } from '@gitspace/protocol-runtime/secure-input';
+import { MCP_OAUTH_CONSENT_PAGE } from '@gitspace/protocol/mcp-authorization';
+import { OAuthConsentPage, type OAuthConsentProjects } from './OAuthConsentPage.js';
 import { SkillsPage } from './SkillsPage.js';
 import { PluginsPage } from './PluginsPage.js';
 import { ProjectSecretsPage, type ProjectSecretsProps } from './ProjectSecretsPage.js';
@@ -1565,8 +1567,18 @@ function AccountProductRoute() {
 }
 
 
+/** The consent page lists the account's active projects and can make one (no repository) for the app it connects. */
+const oauthConsentProjects: OAuthConsentProjects = {
+  list: async () => (await configurationResult(rpcClient.project.list({ lifecycle: 'active' }))).map(project => ({ id: project.id, name: project.name })),
+  create: async (name) => {
+    const { project } = await configurationResult(rpcClient.project.create({ name, baseBranch: null, repositoryUrl: null }));
+    return { id: project.id, name: project.name };
+  },
+};
+
 export function LiveApp() {
   if (window.location.pathname === '/service-access') return <DeviceGate><ServiceAccessApproval /></DeviceGate>;
+  if (window.location.pathname === MCP_OAUTH_CONSENT_PAGE) return <DeviceGate><OAuthConsentPage requestId={new URLSearchParams(window.location.search).get('request') ?? ''} projects={oauthConsentProjects} /></DeviceGate>;
   const secureInput = SECURE_INPUT_PAGE.exec(window.location.pathname)?.[1];
   if (secureInput) return <DeviceGate><SecureInputPage id={secureInput} /></DeviceGate>;
   return <DeviceGate><ResultRpcProvider client={rpcClient}><SynchronizationProvider><InferenceProvider><Toasts><AccountFrame><AccountProductRoute /></AccountFrame></Toasts></InferenceProvider></SynchronizationProvider></ResultRpcProvider></DeviceGate>;

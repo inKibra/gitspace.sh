@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { deviceCanAdminister, DEVICE_SOCKET_PROTOCOL, socketProtocolProof } from '@gitspace/protocol';
+import { deviceCanAdminister, DEVICE_SOCKET_PROTOCOL, scopeAllowsWorkspace, socketProtocolProof } from '@gitspace/protocol';
 import {
   RuntimeBrowserHolderSchema, RuntimeBrowserWatchClientMessageSchema, RuntimeIdentitySchema, RuntimeBrowserWatchQuerySchema, browserUnbase64,
   type RuntimeBrowserHolder, type RuntimeBrowserRemoteInput, type RuntimeBrowserWatchServerMessage,
@@ -84,7 +84,7 @@ export async function serveBrowserWatch(request: Request, env: Env): Promise<Res
   const auth = await withDeviceAuthority(env, (view, now) => view.authorizeRequest({ header: offered.proof, method: 'GET', target: `${url.pathname}${url.search}`, body: new Uint8Array(), capabilities: ['rpc.read'], accountScope: false }, now));
   if (auth.status === 'error') return fail(auth.error.code === DEVICE_AUTHORITY_UNAVAILABLE ? 503 : auth.error.code === 'RPC_FORBIDDEN' ? 403 : 401, auth.error.code, auth.error.message);
   const { device } = auth.value, { projectId, workspaceId } = query.data;
-  if ((device.scope.kind === 'project' && device.scope.projectId !== projectId) || (device.scope.kind === 'workspace' && device.scope.workspaceId !== workspaceId)) return fail(403, 'RPC_FORBIDDEN', 'Workspace is outside the device scope');
+  if (!scopeAllowsWorkspace(device.scope, projectId, workspaceId)) return fail(403, 'RPC_FORBIDDEN', 'Workspace is outside the device scope');
   const denied = accountAccessResponse(await activeAccount(env, env.ACCOUNT_ID));
   if (denied) return denied;
   try { await requireWorkspaceAccess(env, env.ACCOUNT_ID, RuntimeIdentitySchema.parse({ projectId, workspaceId }), false); } catch (error) { return fail(404, 'WORKSPACE_UNAVAILABLE', described(error)); }

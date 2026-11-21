@@ -28,6 +28,12 @@ it('authorizes environment mutations against the scope being changed, not just t
   scope = { kind: 'project', projectId: 'project-a' };
   expect((await invoke('environment.putValue', { spaceId: 'own', scope: 'project', name: 'X', value: 'one' })).status).toBe(204);
   expect((await invoke('space.view', { projectId: 'project-a', workspaceId: 'foreign' })).status).toBe(403);
+  // Several projects reach exactly their workspaces, never another project's or the account's.
+  scope = { kind: 'projects', projectIds: ['project-a', 'project-c'] };
+  expect((await invoke('environment.putValue', { spaceId: 'own', scope: 'project', name: 'X', value: 'one' })).status).toBe(204);
+  expect((await invoke('environment.putValue', { spaceId: 'own', scope: 'workspace', name: 'X', value: 'one' })).status).toBe(204);
+  expect((await invoke('environment.putValue', { spaceId: 'foreign', scope: 'workspace', name: 'X', value: 'one' })).status).toBe(403);
+  expect((await invoke('environment.putValue', { spaceId: 'own', scope: 'global', name: 'X', value: 'one' })).status).toBe(403);
   scope = { kind: 'user' };
   expect((await invoke('environment.putValue', { spaceId: 'own', scope: 'global', name: 'X', value: 'one' })).status).toBe(204);
 });

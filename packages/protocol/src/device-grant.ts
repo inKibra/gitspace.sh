@@ -53,6 +53,8 @@ export type DeviceCapability = z.infer<typeof deviceCapabilitySchema>;
 export const deviceScopeSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('user') }),
   z.object({ kind: z.literal('project'), projectId: idSchema }),
+  /** Two or more projects; one project is `project`. */
+  z.object({ kind: z.literal('projects'), projectIds: z.array(idSchema).min(2).max(64).refine(ids => new Set(ids).size === ids.length, 'Project ids must be distinct') }),
   z.object({ kind: z.literal('workspace'), workspaceId: idSchema }),
 ]);
 export type DeviceScope = z.infer<typeof deviceScopeSchema>;
@@ -239,11 +241,24 @@ export function verifyDeviceInvite(input: SignedDeviceInvite, issuerSigningPubli
   }
 }
 
-/** A parent may only hand out what it holds: user ⊇ same project ⊇ same workspace. */
+/** A parent may only hand out what it holds: user ⊇ every scope; project ⊇ the same project; several projects ⊇ any of
+ * them or several of them; workspace ⊇ the same workspace. */
 export function scopeContains(parent: DeviceScope, child: DeviceScope): boolean {
   if (parent.kind === 'user') return true;
   if (parent.kind === 'project') return child.kind === 'project' && child.projectId === parent.projectId;
+  if (parent.kind === 'projects') {
+    return (child.kind === 'project' && parent.projectIds.includes(child.projectId))
+      || (child.kind === 'projects' && child.projectIds.every(projectId => parent.projectIds.includes(projectId)));
+  }
   return child.kind === 'workspace' && child.workspaceId === parent.workspaceId;
+}
+
+/** Whether a device scope reaches one workspace of one project: account scope reaches all; a project scope its
+ * project's; a workspace scope only itself. */
+export function scopeAllowsWorkspace(scope: DeviceScope, projectId: string, workspaceId: string): boolean {
+  if (scope.kind === 'project') return scope.projectId === projectId;
+  if (scope.kind === 'projects') return scope.projectIds.includes(projectId);
+  return scope.kind === 'user' || scope.workspaceId === workspaceId;
 }
 
 /** URL-safe token form of a signed invite, for `?enroll=<token>` and pasted client keys. */
@@ -394,6 +409,8 @@ export const passkeyCeremonyPurposeSchema = z.enum([
   'secure-input.open',
   /** Answer a secure-input request with a typed or saved value; target: the request id. */
   'secure-input.answer',
+  /** Grant an MCP client powerful permissions on the OAuth consent page; target: the authorization request id. */
+  'mcp-oauth.grant',
 ]);
 export type PasskeyCeremonyPurpose = z.infer<typeof passkeyCeremonyPurposeSchema>;
 export type StepUpPurpose = Exclude<PasskeyCeremonyPurpose, 'passkey.register'>;
@@ -591,7 +608,8 @@ export function requiresImageSelectionControl(procedurePath: string, input: unkn
 export function inputWithinScope(scope: DeviceScope, input: unknown, workspaceProject?: (workspaceId: string) => string | null, sessionTarget?: (sessionId: string) => { projectId: string; workspaceId: string } | null): boolean {
   if (scope.kind === 'user') return true;
   let targetFound = false;
-  const projectAllowed = (projectId: string) => scope.kind === 'project' ? projectId === scope.projectId : workspaceProject?.(scope.workspaceId) === projectId;
+  const projectAllowed = (projectId: string) => scope.kind === 'project' ? projectId === scope.projectId
+    : scope.kind === 'projects' ? scope.projectIds.includes(projectId) : workspaceProject?.(scope.workspaceId) === projectId;
   const workspaceAllowed = (workspaceId: string) => {
     const projectId = workspaceProject?.(workspaceId);
     return !!projectId && projectAllowed(projectId) && (scope.kind !== 'workspace' || workspaceId === scope.workspaceId);
@@ -604,7 +622,7 @@ export function inputWithinScope(scope: DeviceScope, input: unknown, workspacePr
       if (typeof target === 'string' && (name === 'projectId' || name === 'workspaceId' || name === 'spaceId' || name === 'sessionId')) {
         if (name === 'projectId') {
           if (!projectAllowed(target)) return false;
-          if (scope.kind === 'project') targetFound = true;
+          if (scope.kind === 'project' || scope.kind === 'projects') targetFound = true;
         } else if (name === 'sessionId') {
           const resolved = sessionTarget?.(target);
           if (!resolved || !projectAllowed(resolved.projectId) || !workspaceAllowed(resolved.workspaceId)) return false;

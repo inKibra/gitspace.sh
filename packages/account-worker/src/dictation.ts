@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { DEFAULT_DICTATION_SELECTOR, DEVICE_SOCKET_PROTOCOL, SERVICE_OFF, parseServiceSelector, socketProtocolProof } from '@gitspace/protocol';
+import { DEFAULT_DICTATION_SELECTOR, DEVICE_SOCKET_PROTOCOL, SERVICE_OFF, parseServiceSelector, scopeAllowsWorkspace, socketProtocolProof } from '@gitspace/protocol';
 import {
   DICTATION_FRAME_MAX_BYTES, DICTATION_MAX_BYTES, DICTATION_MAX_MS, DICTATION_SAMPLE_RATE, RuntimeDictationClientMessageSchema, RuntimeDictationQuerySchema,
   RuntimeIdentitySchema, type RuntimeDictationServerMessage,
@@ -270,7 +270,7 @@ export async function serveDictation(request: Request, env: Env, models: Dictati
   const auth = await withDeviceAuthority(env, (view, now) => view.authorizeRequest({ header: offered.proof, method: 'GET', target: `${url.pathname}${url.search}`, body: new Uint8Array(), capabilities: ['session.prompt'], browserOnly: true, accountScope: false }, now));
   if (auth.status === 'error') return fail(auth.error.code === DEVICE_AUTHORITY_UNAVAILABLE ? 503 : auth.error.code === 'RPC_FORBIDDEN' ? 403 : 401, auth.error.code, auth.error.message);
   const { device } = auth.value, { projectId, workspaceId } = query.data;
-  if ((device.scope.kind === 'project' && device.scope.projectId !== projectId) || (device.scope.kind === 'workspace' && device.scope.workspaceId !== workspaceId)) return fail(403, 'RPC_FORBIDDEN', 'Workspace is outside the device scope');
+  if (!scopeAllowsWorkspace(device.scope, projectId, workspaceId)) return fail(403, 'RPC_FORBIDDEN', 'Workspace is outside the device scope');
   const denied = accountAccessResponse(await activeAccount(env, env.ACCOUNT_ID));
   if (denied) return denied;
   try { await requireWorkspaceAccess(env, env.ACCOUNT_ID, RuntimeIdentitySchema.parse({ projectId, workspaceId }), false); } catch (error) { return fail(404, 'WORKSPACE_UNAVAILABLE', described(error)); }

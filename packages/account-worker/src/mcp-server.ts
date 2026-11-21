@@ -3,14 +3,8 @@ import type { CredentialVaultDO } from './application.js';
 
 const MAX_REQUEST_BYTES = 1024 * 1024;
 
-function reject(status: number, code: string, message: string): Response {
-  return Response.json({ error: { code, message } }, {
-    status,
-    headers: {
-      'cache-control': 'private, no-store',
-      ...(status === 401 ? { 'www-authenticate': 'Bearer realm="GitSpace MCP"' } : {}),
-    },
-  });
+function reject(status: number, code: string, message: string, headers: Record<string, string> = {}): Response {
+  return Response.json({ error: { code, message } }, { status, headers: { 'cache-control': 'private, no-store', ...headers } });
 }
 
 
@@ -42,8 +36,10 @@ async function boundedRequest(request: Request): Promise<Request | null> {
 }
 
 /**
- * One tenant, one independently revocable MCP access key, one dedicated API-client grant.
- * The access key never reaches RPC. Only the existing SDK's device signatures do.
+ * One tenant, one independently revocable MCP access key, one dedicated API-client grant: a token connection's bearer,
+ * or an OAuth access token (`mcp-authorization.ts`). A request without a current one is answered 401 with the protected
+ * resource metadata that starts an MCP client's OAuth flow. The access key never reaches RPC. Only the existing SDK's
+ * device signatures do.
  */
 export async function handleMcpRequest(
   request: Request,
@@ -59,9 +55,14 @@ export async function handleMcpRequest(
     const denied = accountAccessResponse(await activeAccount(env, env.ACCOUNT_ID));
     if (denied) return denied;
     const vault = (env.CREDENTIALS as DurableObjectNamespace<CredentialVaultDO>).getByName(env.ACCOUNT_ID);
-    const bearer = /^Bearer ([A-Za-z0-9_-]{43})$/u.exec(request.headers.get('authorization') ?? '');
-    const access = bearer ? await vault.resolveMcpAccess(bearer[1]!) : null;
-    if (!access) return reject(401, 'MCP_UNAUTHORIZED', 'A valid active MCP access token is required');
+    // The vault checks the token's form: a token connection's 43-character bearer, or `MCP_OAUTH_ACCESS_TOKEN`.
+    const bearer = /^Bearer ([A-Za-z0-9_-]{1,64})$/u.exec(request.headers.get('authorization') ?? '')?.[1];
+    const access = bearer ? await vault.resolveMcpAccess(bearer) : null;
+    if (!access) {
+      return reject(401, 'MCP_UNAUTHORIZED', 'A valid active MCP access token is required', {
+        'www-authenticate': `Bearer realm="GitSpace MCP", resource_metadata="${expectedOrigin}/.well-known/oauth-protected-resource/mcp"${request.headers.has('authorization') ? ', error="invalid_token"' : ''}`,
+      });
+    }
     const { device } = access;
     const bounded = await boundedRequest(request);
     if (!bounded) return reject(413, 'MCP_REQUEST_TOO_LARGE', 'MCP request exceeds the account request limit');

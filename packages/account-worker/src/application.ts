@@ -29,7 +29,9 @@ import { ensureAccountGitSpaceProject } from './gitspace-project.js';
 import { createDeviceBinding, deviceGrantDependency, encodeApiKey, STEP_UP_HEADER, type StepUpAction } from '@gitspace/protocol/device-grant';
 import { passkeySignInOptionsRequestSchema, passkeySignInRequestSchema, type PasskeyOperation } from '@gitspace/protocol/passkey-access';
 import { PASSKEY_TABLES, PasskeyVault } from './passkeys.js';
-import { mcpAccessConnectionRequestSchema, mcpAccessCreateRequestSchema, mcpAccessStatusRequestSchema, type McpAccessOperation, type McpAccessResult, type McpAccessView } from '@gitspace/protocol/mcp-access';
+import { mcpAccessConnectionRequestSchema, mcpAccessCreateRequestSchema, mcpAccessStatusRequestSchema, mcpConnectionViewSchema, type McpAccessOperation, type McpAccessResult, type McpAccessView } from '@gitspace/protocol/mcp-access';
+import { MCP_OAUTH_ACCESS_TOKEN } from '@gitspace/protocol/mcp-authorization';
+import type { McpAuthorizationVault } from './mcp-authorization.js';
 import { GitLfsObjectSchema, GitLfsProtectionSchema, GitLfsSnapshotSchema, projectStorageRoot } from '@gitspace/protocol-workspace';
 import {
   credentialAccessRequestSchema,
@@ -579,9 +581,22 @@ export class CredentialVaultDO extends BudgetedDurableObject {
         );
         CREATE TABLE IF NOT EXISTS mcp_connections (
           id TEXT PRIMARY KEY, label TEXT NOT NULL, device_id TEXT NOT NULL, sealed_key TEXT NOT NULL,
-          token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+          token_hash TEXT UNIQUE, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, oauth_json TEXT
         );
         CREATE TABLE IF NOT EXISTS mcp_access_revision (id INTEGER PRIMARY KEY CHECK (id = 1), revision INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS mcp_oauth_clients (
+          client_id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK (kind IN ('dynamic', 'metadata-document')),
+          client_json TEXT NOT NULL, secret_hash TEXT, created_at INTEGER NOT NULL, expires_at INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS mcp_oauth_requests (
+          request_id TEXT PRIMARY KEY, request_json TEXT NOT NULL, expires_at INTEGER NOT NULL,
+          state TEXT NOT NULL CHECK (state IN ('pending', 'decided'))
+        );
+        CREATE TABLE IF NOT EXISTS mcp_oauth_tokens (
+          token_hash TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK (kind IN ('code', 'access', 'refresh')), connection_id TEXT NOT NULL,
+          expires_at INTEGER, used_at INTEGER, code_json TEXT
+        );
+        CREATE INDEX IF NOT EXISTS mcp_oauth_tokens_connection ON mcp_oauth_tokens(connection_id);
         DROP TABLE IF EXISTS request_nonces;
         DROP TABLE IF EXISTS refresh_leases;
         UPDATE oauth_credentials SET state = 'active' WHERE state = 'refresh-uncertain';
@@ -661,6 +676,21 @@ export class CredentialVaultDO extends BudgetedDurableObject {
         const settings = migratedRoleSettings(profile.settings);
         if (JSON.stringify(settings) === JSON.stringify(profile.settings)) continue;
         this.ctx.storage.sql.exec('UPDATE inference_profiles SET profile_json = ? WHERE profile_id = ?', JSON.stringify({ ...profile, settings, revision: profile.revision + 1, updatedAt: new Date().toISOString() }), row.profile_id);
+      }
+      // OAuth connections have no bearer of their own: `token_hash` became nullable and `oauth_json` names the client.
+      if (this.ctx.storage.sql.exec<{ name: string; notnull: number }>('PRAGMA table_info(mcp_connections)').toArray().some(column => column.name === 'token_hash' && column.notnull === 1)) {
+        this.ctx.storage.transactionSync(() => {
+          this.ctx.storage.sql.exec(`
+            CREATE TABLE mcp_connections_next (
+              id TEXT PRIMARY KEY, label TEXT NOT NULL, device_id TEXT NOT NULL, sealed_key TEXT NOT NULL,
+              token_hash TEXT UNIQUE, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, oauth_json TEXT
+            );
+            INSERT INTO mcp_connections_next(id, label, device_id, sealed_key, token_hash, created_at, updated_at)
+              SELECT id, label, device_id, sealed_key, token_hash, created_at, updated_at FROM mcp_connections;
+            DROP TABLE mcp_connections;
+            ALTER TABLE mcp_connections_next RENAME TO mcp_connections;
+          `);
+        });
       }
       // An account's one MCP grant became a list of connections: the grant moves over with its token unchanged.
       if (this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'mcp_access'").toArray().length) {
@@ -1070,7 +1100,8 @@ export class CredentialVaultDO extends BudgetedDurableObject {
     return this.passkeys.request(input);
   }
 
-  /** The step-up check for actions served outside this object (secure input; OAuth consent next). */
+  /** The step-up check for actions served outside this object (secure input). OAuth consent spends its step-up inside
+   * the vault, in the transaction that records the grant. */
   consumeStepUp(input: { deviceId: string; action: StepUpAction; proof: string | null }) {
     return this.passkeys.consumeStepUp(input);
   }
@@ -1116,9 +1147,13 @@ export class CredentialVaultDO extends BudgetedDurableObject {
     return this.ctx.storage.sql.exec<{ revision: number }>('SELECT revision FROM mcp_access_revision WHERE id = 1').toArray()[0]?.revision ?? 0;
   }
 
+  private advanceMcpAccessRevision(): void {
+    this.ctx.storage.sql.exec('INSERT INTO mcp_access_revision(id, revision) VALUES (1, 1) ON CONFLICT(id) DO UPDATE SET revision = revision + 1');
+  }
+
   private mcpAccessView(): McpAccessView {
-    const rows = this.ctx.storage.sql.exec<{ id: string; label: string; device_id: string; created_at: string; updated_at: string }>(
-      'SELECT id, label, device_id, created_at, updated_at FROM mcp_connections ORDER BY created_at, id',
+    const rows = this.ctx.storage.sql.exec<{ id: string; label: string; device_id: string; created_at: string; updated_at: string; oauth_json: string | null }>(
+      'SELECT id, label, device_id, created_at, updated_at, oauth_json FROM mcp_connections ORDER BY created_at, id',
     ).toArray();
     return {
       revision: this.mcpAccessRevision(), endpoint: new URL('/mcp', this.env.ACCOUNT_URL).href,
@@ -1128,6 +1163,7 @@ export class CredentialVaultDO extends BudgetedDurableObject {
           connectionId: row.id, label: row.label, active: !!this.currentDeviceGrant(row.device_id), deviceId: row.device_id,
           scope: record?.invite.invite.scope ?? null, capabilities: record?.invite.invite.capabilities ?? [],
           expiresAt: record ? deviceGrantExpiresAt(record) : null, createdAt: row.created_at, updatedAt: row.updated_at,
+          oauth: mcpConnectionViewSchema.shape.oauth.parse(row.oauth_json === null ? null : JSON.parse(row.oauth_json)),
         };
       }),
     };
@@ -1135,6 +1171,31 @@ export class CredentialVaultDO extends BudgetedDurableObject {
 
   private async mcpTokenHash(token: string): Promise<string> {
     return credentialProtocolBase64.encode(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token))));
+  }
+
+  /** An MCP client device: its key is made here, bound to `invite`, and kept only sealed in the vault, as an API key. */
+  private async mintMcpClient(invite: SignedDeviceInvite, label: string, vaultKey: string): Promise<{ binding: DeviceBinding; sealedKey: string }> {
+    const privateKey = ed25519.utils.randomSecretKey();
+    const binding = createDeviceBinding({ inviteId: invite.invite.inviteId, deviceId: crypto.randomUUID(),
+      signingPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(privateKey)),
+      label, boundAt: Date.now(), signingPrivateKey: privateKey });
+    const key = encodeApiKey({ version: 2, userId: invite.invite.userId, deviceId: binding.deviceId,
+      signingPrivateKey: credentialProtocolBase64.encode(privateKey),
+      rpcUrl: new URL('/rpc', this.env.ACCOUNT_URL).href, enrollUrl: new URL('/v1/devices/enroll', this.env.ACCOUNT_URL).href });
+    return { binding, sealedKey: await sealVaultText(key, credentialProtocolBase64.decode(vaultKey), `mcp:${binding.deviceId}`) };
+  }
+
+  /** Enrolls a minted MCP client and records its connection: a bearer's hash for a token connection, the client for an
+   * OAuth one. Advances the revision. Run inside a transaction. */
+  private recordMcpConnection(input: { invite: SignedDeviceInvite; binding: DeviceBinding; sealedKey: string; label: string; tokenHash: string | null; oauth: string | null }): CredentialVaultResult<{ connectionId: string }> {
+    const enrolled = this.enrollDevice({ invite: input.invite, binding: input.binding });
+    if (enrolled.status === 'error') return enrolled;
+    const connectionId = crypto.randomUUID();
+    const now = new Date().toISOString();
+    this.ctx.storage.sql.exec('INSERT INTO mcp_connections(id, label, device_id, sealed_key, token_hash, created_at, updated_at, oauth_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      connectionId, input.label, input.binding.deviceId, input.sealedKey, input.tokenHash, now, now, input.oauth);
+    this.advanceMcpAccessRevision();
+    return { status: 'ok', value: { connectionId } };
   }
 
   /** Browser-only setup; no signing material is ever returned to the caller. Every change advances one revision, and is
@@ -1156,7 +1217,6 @@ export class CredentialVaultDO extends BudgetedDurableObject {
     const conflict = publicError('MCP_ACCESS_CONFLICT', 'MCP access changed; reload before trying again');
     if (revision !== (create ?? change)?.expectedRevision) return conflict;
     const newToken = () => credentialProtocolBase64.encode(crypto.getRandomValues(new Uint8Array(32))).replace(/\+/gu, '-').replace(/\//gu, '_').replace(/=+$/u, '');
-    const advance = () => this.ctx.storage.sql.exec('INSERT INTO mcp_access_revision(id, revision) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET revision = excluded.revision', revision + 1);
     if (create) {
       const { invite, label } = create;
       const issuer = this.currentDeviceGrant(authorized.value.deviceId);
@@ -1164,34 +1224,24 @@ export class CredentialVaultDO extends BudgetedDurableObject {
         || invite.invite.userId !== config.user_id || invite.invite.kind !== 'client' || invite.invite.canDelegate) {
         return publicError('RPC_FORBIDDEN', 'MCP requires a non-delegating client invitation from this browser');
       }
-      const privateKey = ed25519.utils.randomSecretKey();
-      const binding = createDeviceBinding({ inviteId: invite.invite.inviteId, deviceId: crypto.randomUUID(),
-        signingPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(privateKey)),
-        label, boundAt: Date.now(), signingPrivateKey: privateKey });
-      const key = encodeApiKey({ version: 2, userId: config.user_id, deviceId: binding.deviceId,
-        signingPrivateKey: credentialProtocolBase64.encode(privateKey),
-        rpcUrl: new URL('/rpc', this.env.ACCOUNT_URL).href, enrollUrl: new URL('/v1/devices/enroll', this.env.ACCOUNT_URL).href });
-      const sealedKey = await sealVaultText(key, credentialProtocolBase64.decode(config.vault_key), `mcp:${binding.deviceId}`);
+      const { binding, sealedKey } = await this.mintMcpClient(invite, label, config.vault_key);
       const token = newToken();
       const tokenHash = await this.mcpTokenHash(token);
       // Crypto yields: revalidate authority and revision immediately before the synchronous transaction.
       const revalidated = this.authorizeBrowserRequest({ ...input, capabilities: ['devices.manage'] });
       if (revalidated.status === 'error') return revalidated;
       if (this.mcpAccessRevision() !== revision) return conflict;
-      const connectionId = crypto.randomUUID();
       return this.ctx.storage.transactionSync((): McpAccessResult => {
-        const enrolled = this.enrollDevice({ invite, binding });
-        if (enrolled.status === 'error') return enrolled;
-        const now = new Date().toISOString();
-        this.ctx.storage.sql.exec('INSERT INTO mcp_connections(id, label, device_id, sealed_key, token_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)', connectionId, label, binding.deviceId, sealedKey, tokenHash, now, now);
-        advance();
-        return { status: 'ok', value: { ...this.mcpAccessView(), token, connectionId } };
+        const recorded = this.recordMcpConnection({ invite, binding, sealedKey, label, tokenHash, oauth: null });
+        if (recorded.status === 'error') return recorded;
+        return { status: 'ok', value: { ...this.mcpAccessView(), token, connectionId: recorded.value.connectionId } };
       });
     }
     if (!change) return publicError('INVALID_MCP_ACCESS', 'MCP access request is invalid');
-    const row = this.ctx.storage.sql.exec<{ id: string; device_id: string }>('SELECT id, device_id FROM mcp_connections WHERE id = ?', change.connectionId).toArray()[0];
+    const row = this.ctx.storage.sql.exec<{ id: string; device_id: string; oauth_json: string | null }>('SELECT id, device_id, oauth_json FROM mcp_connections WHERE id = ?', change.connectionId).toArray()[0];
     if (!row) return publicError('MCP_NOT_FOUND', 'That MCP connection no longer exists; reload');
     if (input.operation === 'rotate') {
+      if (row.oauth_json !== null) return publicError('MCP_OAUTH_CONNECTION', 'This connection signs in with OAuth and has no token to rotate: remove it, then connect the client again');
       if (!this.currentDeviceGrant(row.device_id)) return publicError('MCP_NOT_ACTIVE', 'This connection\'s grant was revoked or expired: disable it and add a new connection');
       const token = newToken();
       const tokenHash = await this.mcpTokenHash(token);
@@ -1200,34 +1250,76 @@ export class CredentialVaultDO extends BudgetedDurableObject {
       if (this.mcpAccessRevision() !== revision) return conflict;
       return this.ctx.storage.transactionSync((): McpAccessResult => {
         this.ctx.storage.sql.exec('UPDATE mcp_connections SET token_hash = ?, updated_at = ? WHERE id = ?', tokenHash, new Date().toISOString(), row.id);
-        advance();
+        this.advanceMcpAccessRevision();
         return { status: 'ok', value: { ...this.mcpAccessView(), token, connectionId: row.id } };
       });
     }
     const result = this.ctx.storage.transactionSync((): McpAccessResult => {
       this.recordDeviceRevocation(row.device_id);
       this.ctx.storage.sql.exec('DELETE FROM mcp_connections WHERE id = ?', row.id);
-      advance();
+      this.ctx.storage.sql.exec('DELETE FROM mcp_oauth_tokens WHERE connection_id = ?', row.id);
+      this.advanceMcpAccessRevision();
       return { status: 'ok', value: this.mcpAccessView() };
     });
     if (result.status === 'ok') await this.env.RELAY.getByName(this.env.RELAY_NAME).serviceRevokeDevice(row.device_id);
     return result;
   }
 
-  /** Internal DO RPC only. Authenticate the bearer before decrypting signing material. The token is looked up by its
-   * SHA-256: tokens are 256 random bits, so the lookup's timing reveals nothing that helps guess one. */
+  /** Internal DO RPC only. Authenticate the bearer before decrypting signing material: a token connection's own bearer,
+   * or an unexpired OAuth access token of a connection. Tokens are looked up by their SHA-256: they are 256 random bits,
+   * so the lookup's timing reveals nothing that helps guess one. */
   async resolveMcpAccess(token: string): Promise<{ key: string; device: VerifiedDevice } | null> {
-    if (!/^[A-Za-z0-9_-]{43}$/u.test(token)) return null;
+    const oauth = MCP_OAUTH_ACCESS_TOKEN.test(token);
+    if (!oauth && !/^[A-Za-z0-9_-]{43}$/u.test(token)) return null;
     const hash = await this.mcpTokenHash(token);
-    const row = this.ctx.storage.sql.exec<{ id: string; device_id: string; sealed_key: string }>('SELECT id, device_id, sealed_key FROM mcp_connections WHERE token_hash = ?', hash).toArray()[0];
+    const connection = () => (oauth
+      ? this.ctx.storage.sql.exec<{ id: string; device_id: string; sealed_key: string }>("SELECT c.id, c.device_id, c.sealed_key FROM mcp_oauth_tokens t JOIN mcp_connections c ON c.id = t.connection_id WHERE t.token_hash = ? AND t.kind = 'access' AND t.expires_at > ?", hash, Date.now())
+      : this.ctx.storage.sql.exec<{ id: string; device_id: string; sealed_key: string }>('SELECT id, device_id, sealed_key FROM mcp_connections WHERE token_hash = ?', hash)).toArray()[0];
+    const row = connection();
     const config = this.config();
     if (!row || !config || !this.currentDeviceGrant(row.device_id)) return null;
     const key = await openVaultText(row.sealed_key, credentialProtocolBase64.decode(config.vault_key), `mcp:${row.device_id}`);
-    // The connection may have been rotated or disabled while its key was opened.
+    // The connection may have been rotated, revoked or removed while its key was opened.
     const device = this.currentDeviceGrant(row.device_id);
-    const current = this.ctx.storage.sql.exec<{ token_hash: string }>('SELECT token_hash FROM mcp_connections WHERE id = ?', row.id).toArray()[0];
-    if (current?.token_hash !== hash || !device || device.kind !== 'client') return null;
+    if (connection()?.id !== row.id || !device || device.kind !== 'client') return null;
     return { key, device };
+  }
+
+  /** OAuth for `/mcp` (`mcp-authorization.ts`), loaded on its first use. */
+  private mcpAuthorizationServer: Promise<McpAuthorizationVault> | null = null;
+  private mcpAuthorization(): Promise<McpAuthorizationVault> {
+    this.mcpAuthorizationServer ??= import('./mcp-authorization.js').then(({ McpAuthorizationVault }) => new McpAuthorizationVault({
+      storage: this.ctx.storage,
+      accountUrl: this.env.ACCOUNT_URL,
+      config: () => this.config(),
+      currentDevice: (deviceId) => this.currentDeviceGrant(deviceId),
+      authorizeBrowser: (input) => this.authorizeBrowserRequest(input),
+      consumeStepUp: (input) => this.passkeys.consumeStepUp(input),
+      mintClient: (invite, label, vaultKey) => this.mintMcpClient(invite, label, vaultKey),
+      recordConnection: (input) => this.recordMcpConnection(input),
+      revokeDevice: (deviceId) => { this.recordDeviceRevocation(deviceId); },
+    }));
+    return this.mcpAuthorizationServer;
+  }
+
+  /** `POST /oauth/register`: Dynamic Client Registration (RFC 7591), the JSON body as sent. */
+  async mcpOAuthRegister(body: string) {
+    return (await this.mcpAuthorization()).register(body);
+  }
+
+  /** `GET /oauth/authorize`: records an authorization request for the consent page, or answers why not. */
+  async mcpOAuthAuthorize(query: Record<string, string>) {
+    return (await this.mcpAuthorization()).authorize(query);
+  }
+
+  /** `POST /v1/mcp-oauth/consent/(view|decide)` from a signed-in account-wide browser. */
+  async mcpOAuthConsent(input: { operation: 'view' | 'decide'; header: string | null; stepUp: string | null; target: string; body: Uint8Array }) {
+    return (await this.mcpAuthorization()).consent(input);
+  }
+
+  /** `POST /oauth/token`: the form fields and the `Authorization` header (client secret, Basic). */
+  async mcpOAuthToken(form: Record<string, string>, authorization: string | null) {
+    return (await this.mcpAuthorization()).token(form, authorization);
   }
 
   browserInvitationRequest(input: { operation: string; header: string | null; stepUp: string | null; target: string; body: Uint8Array }): CredentialVaultResult<BrowserInvitationValue> {
