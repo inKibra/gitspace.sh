@@ -152,9 +152,10 @@ export class SpaceEnvironmentStore {
     return { output: page.map((row) => row.output).join(''), nextOffset: rows[LOG_PAGE_SIZE]?.offset ?? null, cursor: page.length ? page[page.length - 1]!.offset + 1 : offset };
   }
 
-  /** `ended`: the runs this mutation ended. */
-  mutate(projectId: string, spaceId: string, input: LifecycleMutation, actor: LifecycleActor, shared: SharedEnvironment): { state: LifecycleState; shared: SharedEnvironmentChange | null; ended: LifecycleRun[] } {
+  /** `ended`: the runs this mutation ended. `retiredBindings`: the bindings a successful cloud/destroy cleared. */
+  mutate(projectId: string, spaceId: string, input: LifecycleMutation, actor: LifecycleActor, shared: SharedEnvironment): { state: LifecycleState; shared: SharedEnvironmentChange | null; ended: LifecycleRun[]; retiredBindings?: Record<string, string> } {
     const ended: LifecycleRun[] = [];
+    let retiredBindings: Record<string, string> | undefined;
     const result = this.storage.transactionSync(() => {
       const runs: LifecycleRunRecord[] = this.storage.sql.exec<RunRow>('SELECT scope,data FROM lifecycle_runs')
         .toArray().map((row) => ({ run: LifecycleRunSchema.parse(JSON.parse(row.data)), scope: row.scope }));
@@ -163,10 +164,12 @@ export class SpaceEnvironmentStore {
       const transition = transitionLifecycle({ state: current, runs, actor, now: new Date().toISOString() }, input);
       if (!transition.changed) return { state: transition.state, shared: null };
       const { state, record, log } = transition;
+      retiredBindings = transition.retiredBindings;
       for (const entry of [...(record ? [record] : []), ...(transition.replaced ?? [])]) {
         this.storage.sql.exec('INSERT INTO lifecycle_runs(id,scope,data) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data', entry.run.id, entry.scope, JSON.stringify(entry.run));
         if (!isLifecycleRunActive(entry.run)) ended.push(entry.run);
       }
+      for (const entry of transition.rebound ?? []) this.storage.sql.exec('UPDATE lifecycle_runs SET data=? WHERE id=?', JSON.stringify(entry.run), entry.run.id);
       if (log?.output) {
         let offset = this.storage.sql.exec<{ next: number }>('SELECT COALESCE(MAX(offset)+1,0) AS next FROM lifecycle_logs WHERE run_id=?', log.runId).one().next;
         for (let start = 0; start < log.output.length; start += LIFECYCLE_PREVIEW_LIMIT) this.storage.sql.exec(
@@ -182,7 +185,7 @@ export class SpaceEnvironmentStore {
       for (const resolve of this.settled.get(run.id) ?? []) resolve(run);
       this.settled.delete(run.id);
     }
-    return { ...result, ended };
+    return { ...result, ended, ...(retiredBindings ? { retiredBindings } : {}) };
   }
 
   /** Resolves when the run ends: it finished, was cancelled, replaced or interrupted. */

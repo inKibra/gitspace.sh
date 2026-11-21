@@ -8,7 +8,7 @@ import {
   effectiveEnvironmentValues, assertEnvironmentExecutionReady, environmentPreparationPhases,
   EnvironmentError, environmentFailure, isLifecycleRunActive, lifecycleStopReason, sanitizeLifecycleOutput, assertLifecycleRequestIdentity, parseLifecycleRunRequest, LifecycleLogReader,
   parseIngressFile, parseServiceIngressContent, serviceIngressContent, SERVICE_INGRESS_EXECUTION_ID,
-  type ApprovalSource, type EffectiveEnvironmentProfile, type EnvironmentBundle, type HostedIngressCredential, type LifecycleIncident, type ServiceIngressGroup,
+  type ApprovalSource, type EffectiveEnvironmentProfile, type EnvironmentBundle, type HostedIngressCredential, type LifecycleBindingUpdates, type LifecycleIncident, type ServiceIngressGroup,
   type EnvironmentLifecycleAuthority, type LifecyclePhase, type LifecycleRun, type LifecycleRunPhase, type LifecycleState, type LifecycleRunRequest,
 } from '@gitspace/protocol-environment';
 import type { EffectiveSecretMetadata } from '@gitspace/protocol';
@@ -81,7 +81,8 @@ export class WorkspaceEnvironmentManager {
     const space = this.space(spaceId, attachment);
     let lifecycle = await this.authority.getLifecycleState(space.projectId, spaceId);
     if (attachment) {
-      const copyBindings = lifecycle.runs.filter(run => run.attachment?.attachmentId === attachment.attachment.attachmentId && run.attachment.generation === attachment.attachment.generation).reduce<Record<string, string>>((bindings, run) => ({ ...bindings, ...run.bindings }), {});
+      // Runs are newest first: the newest run's binding wins.
+      const copyBindings = lifecycle.runs.filter(run => run.attachment?.attachmentId === attachment.attachment.attachmentId && run.attachment.generation === attachment.attachment.generation).reduceRight<Record<string, string>>((bindings, run) => ({ ...bindings, ...run.bindings }), {});
       lifecycle = { ...lifecycle, bindings: { ...lifecycle.bindings, ...copyBindings } };
     }
     const available = (attachment !== undefined || !cloudOnly)
@@ -373,7 +374,7 @@ export class WorkspaceEnvironmentManager {
         monitor = (async () => {
           while (dirty && !stopped) {
             dirty = false;
-            let bindings: Record<string, string>;
+            let bindings: LifecycleBindingUpdates;
             // A write may be incomplete; only final output validation determines validity.
             try { bindings = await this.readBindings(directory, redactions); } catch { continue; }
             const serialized = JSON.stringify(bindings);
@@ -418,7 +419,7 @@ export class WorkspaceEnvironmentManager {
       await monitor?.catch((error) => { failure ??= error; });
       this.active.delete(runId);
     }
-    let bindings: Record<string, string> = {};
+    let bindings: LifecycleBindingUpdates = {};
     try { bindings = await this.readBindings(directory, redactions); }
     catch (error) { failure ??= error; }
     if (ingressFile && !failure && result?.exitCode === 0) {
@@ -451,7 +452,7 @@ export class WorkspaceEnvironmentManager {
   }
 
 
-  private async readBindings(directory: string, secrets: readonly string[]): Promise<Record<string, string>> {
+  private async readBindings(directory: string, secrets: readonly string[]): Promise<LifecycleBindingUpdates> {
     const source = await readFile(join(directory, 'output.json'), 'utf8').catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? '{"bindings":{}}' : Promise.reject(error));
     return parseLifecycleBindingsJson(source, secrets);
   }

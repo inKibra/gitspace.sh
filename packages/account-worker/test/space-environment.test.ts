@@ -249,19 +249,29 @@ describe('workspace environment', () => {
     const destroyHash = `sha256:${'b'.repeat(64)}`;
     await p.mutate('workspace', { op: 'configure', bundleJson: JSON.stringify({ version: 1, profiles: { base: {} } }), executions: [{ id: 'destroy', kind: 'script', phase: 'cloud/destroy', label: 'Destroy', command: '10-destroy.sh', fileName: '10-destroy.sh', content: 'echo destroy', hash: destroyHash }] });
     await p.mutate('workspace', { op: 'approval', scope: 'workspace', executionHash: destroyHash, approved: true }, human);
-    const run = async (runId: string, phase: 'cloud/provision' | 'cloud/destroy', executionHashes: string[], bindings: Record<string, string>) => {
+    const run = async (runId: string, phase: 'cloud/provision' | 'cloud/destroy', executionHashes: string[], bindings: Record<string, string>, status: 'succeeded' | 'failed' = 'succeeded') => {
       await p.mutate('workspace', { op: 'claim', runId, phase, profile: 'base', executionHashes, generation: null, rerun: true });
       await p.mutate('workspace', { op: 'start', runId });
-      await p.mutate('workspace', { op: 'finish', runId, status: 'succeeded', exitCode: 0, results: [], output: '', bindings });
+      return p.mutate('workspace', { op: 'finish', runId, status, exitCode: status === 'succeeded' ? 0 : 1, results: [], output: '', bindings });
     };
     await run('provision', 'cloud/provision', [], { BUCKET: 'bucket-123' });
-    await run('destroy', 'cloud/destroy', [destroyHash], {});
+    const copy: LifecycleActor = { ...machine, attachment: { attachmentId: 'copy-a', generation: 1 } };
+    await p.mutate('workspace', { op: 'claim', runId: 'copy', phase: 'workspace/materialize', profile: 'base', executionHashes: [], generation: null, attachment: { attachmentId: 'copy-a', generation: 1 }, rerun: false }, copy);
+    await p.mutate('workspace', { op: 'start', runId: 'copy' }, copy);
+    await p.mutate('workspace', { op: 'finish', runId: 'copy', status: 'succeeded', exitCode: 0, results: [], output: '', bindings: { PORT: '5433' } }, copy);
+    expect((await run('destroy-failed', 'cloud/destroy', [destroyHash], {}, 'failed')).bindings).toEqual({ BUCKET: 'bucket-123' });
+    expect((await run('destroy', 'cloud/destroy', [destroyHash], {})).bindings).toEqual({});
+    expect((await p.get('workspace')).runs.find((entry) => entry.id === 'copy')?.bindings).toEqual({});
     const workspaceId = (await p.space('workspace')).identity.workspaceId;
     const journal = await env.SPACE_CONTEXT.getByName(JSON.stringify([env.ACCOUNT_ID, p.projectId, workspaceId])).listJournal({ projectId: p.projectId, spaceId: workspaceId });
-    expect(journal).toHaveLength(1);
-    expect(journal[0]).toMatchObject({ phase: 'cloud/destroy', title: 'Deleted this workspace\'s cloud resources', outcome: 'Deleted' });
-    expect(journal[0]?.body).toContain('- BUCKET: bucket-123');
-    expect(journal[0]?.body).toContain('cloud/destroy run destroy succeeded');
+    expect(journal).toHaveLength(2);
+    const [failed, deleted] = journal;
+    expect(failed).toMatchObject({ phase: 'cloud/destroy', title: 'cloud/destroy failed; recorded resources may remain' });
+    expect(failed?.body).toContain('- BUCKET: bucket-123');
+    expect(deleted).toMatchObject({ phase: 'cloud/destroy', title: 'Deleted this workspace\'s cloud resources', outcome: 'Deleted' });
+    expect(deleted?.body).toContain('- BUCKET: bucket-123');
+    expect(deleted?.body).toContain('- PORT: 5433');
+    expect(deleted?.body).toContain('cloud/destroy run destroy succeeded');
   });
 
   it('moves a workspace environment held by the project into the workspace object once', async () => {

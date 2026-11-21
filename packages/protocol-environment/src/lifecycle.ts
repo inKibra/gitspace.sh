@@ -1,7 +1,7 @@
 import { EnvironmentError, type EnvironmentFailure } from './errors.js';
 import {
   LifecycleMutationSchema, LifecyclePhaseSchema, executionHash, loadEnvironmentBundle, parseEnvironmentBundleJson, resolveEnvironmentProfile, selectLifecycleScripts,
-  type EnvironmentBundle, type EffectiveEnvironmentProfile, type LifecycleExecution, type LifecycleMutation,
+  type EnvironmentBundle, type EffectiveEnvironmentProfile, type LifecycleBindingUpdates, type LifecycleExecution, type LifecycleMutation,
   type LifecyclePhase, type LifecycleRun, type LifecycleRunPhase, type LifecycleState, type LifecycleRunRequest,
 } from './schema.js';
 import type { BrowserSiteLevel } from './browser-site-level.js';
@@ -80,6 +80,11 @@ export interface LifecycleTransition {
   record?: LifecycleRunRecord;
   /** Runs a new claim cancelled: the newest run wins. */
   replaced?: LifecycleRunRecord[];
+  /** Other runs whose bindings this mutation changed, without ending them: a successful cloud/destroy clears every
+   * run's bindings, and an attachment run's retracted binding leaves its copy's earlier runs too. */
+  rebound?: LifecycleRunRecord[];
+  /** The bindings a successful cloud/destroy cleared (`recordedLifecycleBindings` before it ended). */
+  retiredBindings?: Record<string, string>;
   log?: { runId: string; output: string };
   sharedChanged: boolean;
 }
@@ -118,6 +123,19 @@ export function isLifecycleRunActive(run: Pick<LifecycleRun, 'status'>): boolean
 }
 export function lifecycleRunOutcome(run: Pick<LifecycleRun, 'status'>): 'running' | 'failed' | 'succeeded' {
   return isLifecycleRunActive(run) ? 'running' : run.status === 'succeeded' ? 'succeeded' : 'failed';
+}
+/** The bindings a workspace's lifecycle record holds: its own, then each run's (an attachment's), newer over older. */
+export function recordedLifecycleBindings(state: Pick<LifecycleState, 'bindings' | 'runs'>): Record<string, string> {
+  return state.runs.reduceRight<Record<string, string>>((all, run) => ({ ...all, ...run.bindings }), { ...state.bindings });
+}
+/** A run's binding output applied to recorded bindings: a string sets the binding, null removes it. */
+function applyBindingUpdates(bindings: Readonly<Record<string, string>> | undefined, updates: LifecycleBindingUpdates): Record<string, string> {
+  const next = { ...bindings };
+  for (const [name, value] of Object.entries(updates)) {
+    if (value === null) delete next[name];
+    else next[name] = value;
+  }
+  return next;
 }
 export interface LifecycleProjectionScope { profile: string; machineId?: string; generation?: number | null }
 
@@ -273,6 +291,8 @@ export function transitionLifecycle(facts: LifecycleTransitionFacts, candidate: 
   const state: LifecycleState = { ...facts.state, claim: null };
   let record: LifecycleRunRecord | undefined;
   const replaced: LifecycleRunRecord[] = [];
+  const rebound: LifecycleRunRecord[] = [];
+  let retiredBindings: Record<string, string> | undefined;
   let log: LifecycleTransition['log'];
   let sharedChanged = false;
   const owned = (runId: string): LifecycleRunRecord => {
@@ -287,6 +307,20 @@ export function transitionLifecycle(facts: LifecycleTransitionFacts, candidate: 
     return isLifecycleRunActive(found.run) ? found : null;
   };
   const unchanged: LifecycleTransition = { state, changed: false, sharedChanged: false };
+  /** A run's binding output lands in the workspace's bindings, or an attachment run's own. A key an attachment run
+   * retracts also leaves the earlier runs of its copy, which the machine reads together. */
+  const bind = (target: LifecycleRun, updates: LifecycleBindingUpdates): void => {
+    const attachment = target.attachment;
+    if (!attachment) { state.bindings = applyBindingUpdates(state.bindings, updates); return; }
+    target.bindings = applyBindingUpdates(target.bindings, updates);
+    const retracted = Object.fromEntries(Object.entries(updates).filter(([, value]) => value === null));
+    for (const entry of facts.runs) {
+      const run = entry.run;
+      if (run.id === target.id || run.spaceId !== state.spaceId || run.attachment?.attachmentId !== attachment.attachmentId || run.attachment.generation !== attachment.generation) continue;
+      if (!Object.keys(retracted).some((name) => run.bindings && Object.hasOwn(run.bindings, name))) continue;
+      rebound.push({ ...entry, run: { ...run, bindings: applyBindingUpdates(run.bindings, retracted) } });
+    }
+  };
   switch (input.op) {
     case 'configure': {
       const bundle = parseEnvironmentBundleJson(input.bundleJson);
@@ -378,10 +412,7 @@ export function transitionLifecycle(facts: LifecycleTransitionFacts, candidate: 
       record.run.output = (record.run.output + output).slice(-LIFECYCLE_PREVIEW_LIMIT);
       if (input.results) record.run.results = input.results.map((result) => ({ ...result, output: sanitizeLifecycleOutput(result.output).slice(-LIFECYCLE_PREVIEW_LIMIT) }));
       log = { runId: input.runId, output };
-      if (input.bindings) {
-        if (record.run.attachment) record.run.bindings = { ...record.run.bindings, ...input.bindings };
-        else state.bindings = { ...state.bindings, ...input.bindings };
-      }
+      if (input.bindings) bind(record.run, input.bindings);
       break;
     }
     case 'finish': {
@@ -399,13 +430,24 @@ export function transitionLifecycle(facts: LifecycleTransitionFacts, candidate: 
       record.run = { ...record.run, status, failure, finishedAt: now, exitCode: failure ? input.exitCode || 1 : 0,
         results: (input.results.length ? input.results : record.run.results).map((result) => ({ ...result, output: sanitizeLifecycleOutput(result.output).slice(-LIFECYCLE_PREVIEW_LIMIT) })), output: output ? output.slice(-LIFECYCLE_PREVIEW_LIMIT) : record.run.output };
       if (failure) record.run.incidents = [...record.run.incidents, { id: `${record.run.id}:failure`, kind: 'domain', occurredAt: now, message: failure.message, failure }];
-      if (record.run.attachment) record.run.bindings = { ...record.run.bindings, ...input.bindings };
-      else state.bindings = { ...state.bindings, ...input.bindings };
+      bind(record.run, input.bindings);
       if (status === 'succeeded' && record.run.phase === 'cloud/provision') {
         state.provisioned = { runId: record.run.id, profile: record.run.profile, executionHashes: record.run.executionHashes, machineId: record.run.machineId, completedAt: now };
         state.destroyedAt = null;
       }
-      if (status === 'succeeded' && record.run.phase === 'cloud/destroy') { state.destroyedAt = now; state.policy = { automatic: false }; }
+      if (status === 'succeeded' && record.run.phase === 'cloud/destroy') {
+        state.destroyedAt = now;
+        state.policy = { automatic: false };
+        // The destroyed resources' bindings go with them: the next provision starts from none.
+        const destroyed = record.run;
+        retiredBindings = recordedLifecycleBindings({ bindings: state.bindings, runs: [destroyed, ...state.runs.filter((run) => run.id !== destroyed.id)] });
+        state.bindings = {};
+        if (destroyed.bindings) destroyed.bindings = {};
+        for (const entry of facts.runs) {
+          if (entry.run.id === destroyed.id || entry.run.spaceId !== state.spaceId || !entry.run.bindings || Object.keys(entry.run.bindings).length === 0) continue;
+          rebound.push({ ...entry, run: { ...entry.run, bindings: {} } });
+        }
+      }
       break;
     }
     case 'interrupt': {
@@ -421,7 +463,7 @@ export function transitionLifecycle(facts: LifecycleTransitionFacts, candidate: 
     }
   }
   if (record) state.runs = [record.run, ...state.runs.filter((run) => run.id !== record.run.id)];
-  for (const entry of replaced) state.runs = state.runs.map((run) => run.id === entry.run.id ? entry.run : run);
+  for (const entry of [...replaced, ...rebound]) state.runs = state.runs.map((run) => run.id === entry.run.id ? entry.run : run);
   state.revision += 1;
-  return { state, changed: true, record, replaced, log, sharedChanged };
+  return { state, changed: true, record, replaced, rebound, retiredBindings, log, sharedChanged };
 }

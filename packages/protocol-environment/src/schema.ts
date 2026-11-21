@@ -248,29 +248,31 @@ export const LifecycleExecutionSchema = z.object({
 }).strict();
 export type LifecycleExecution = z.infer<typeof LifecycleExecutionSchema>;
 
-/** Bindings are resource identifiers or secret references, never credential material. */
-export const LifecycleBindingsSchema = z.record(
-  z.string().min(1).max(128).regex(/^[A-Za-z][A-Za-z0-9_.-]*$/u),
-  z.string().max(4_096),
-).superRefine((bindings, context) => {
+const lifecycleBindingNameSchema = z.string().min(1).max(128).regex(/^[A-Za-z][A-Za-z0-9_.-]*$/u);
+const lifecycleBindingValueSchema = z.string().max(4_096);
+function refineLifecycleBindings(bindings: Record<string, string | null>, context: z.RefinementCtx): void {
   for (const [name, value] of Object.entries(bindings)) {
     if (['__proto__', 'constructor', 'prototype'].includes(name)
-      || (secretLikeName.test(name) && !/^secret:[A-Z][A-Z0-9_]*$/u.test(value))
-      || credentialMaterial.test(value)) {
+      || (value !== null && ((secretLikeName.test(name) && !/^secret:[A-Z][A-Z0-9_]*$/u.test(value)) || credentialMaterial.test(value)))) {
       context.addIssue({ code: 'custom', path: [name], message: 'Bindings must contain non-secret resource identifiers or secret:NAME references' });
     }
   }
-});
+}
+/** Bindings are resource identifiers or secret references, never credential material. */
+export const LifecycleBindingsSchema = z.record(lifecycleBindingNameSchema, lifecycleBindingValueSchema).superRefine(refineLifecycleBindings);
+/** A run's binding output: a string sets the binding, null removes it. */
+export const LifecycleBindingUpdatesSchema = z.record(lifecycleBindingNameSchema, lifecycleBindingValueSchema.nullable()).superRefine(refineLifecycleBindings);
+export type LifecycleBindingUpdates = z.infer<typeof LifecycleBindingUpdatesSchema>;
 
-export function parseLifecycleBindingsJson(source: string, secrets: readonly string[]): Record<string, string> {
+export function parseLifecycleBindingsJson(source: string, secrets: readonly string[]): LifecycleBindingUpdates {
   if (source.length > 65_536) throw new EnvironmentError('InvalidConfiguration', 'Lifecycle output exceeds 64 KiB');
   let value: unknown;
   try { value = JSON.parse(source); } catch { throw new EnvironmentError('InvalidConfiguration', 'Lifecycle output is not valid JSON'); }
-  if (!value || typeof value !== 'object' || !('bindings' in value)) throw new EnvironmentError('InvalidConfiguration', 'Lifecycle output must be JSON {bindings:Record<string,string>}');
-  const parsed = LifecycleBindingsSchema.safeParse(value.bindings);
-  if (!parsed.success) throw new EnvironmentError('InvalidConfiguration', 'Lifecycle bindings must be non-secret resource identifiers', { detail: parsed.error.message });
+  if (!value || typeof value !== 'object' || !('bindings' in value)) throw new EnvironmentError('InvalidConfiguration', 'Lifecycle output must be JSON {bindings:Record<string,string|null>}');
+  const parsed = LifecycleBindingUpdatesSchema.safeParse(value.bindings);
+  if (!parsed.success) throw new EnvironmentError('InvalidConfiguration', 'Lifecycle bindings must be non-secret resource identifiers or null', { detail: parsed.error.message });
   for (const [name, binding] of Object.entries(parsed.data)) {
-    if (!/^secret:[A-Z][A-Z0-9_]*$/u.test(binding) && secrets.some((secret) => secret && binding.includes(secret))) throw new EnvironmentError('InvalidConfiguration', `Lifecycle binding ${name} must use a secret:NAME reference, not a credential`, { name });
+    if (binding !== null && !/^secret:[A-Z][A-Z0-9_]*$/u.test(binding) && secrets.some((secret) => secret && binding.includes(secret))) throw new EnvironmentError('InvalidConfiguration', `Lifecycle binding ${name} must use a secret:NAME reference, not a credential`, { name });
   }
   return parsed.data;
 }
@@ -334,11 +336,11 @@ export const LifecycleMutationSchema = z.discriminatedUnion('op', [
     rerun: z.boolean(), deadlineAt: z.string().datetime().optional(), terminalName: z.string().max(256).nullable().optional(),
     interactive: z.boolean().optional(),
   }).strict(),
-  z.object({ op: z.literal('append'), runId: lifecycleIdSchema, output: z.string().max(524_288), results: lifecycleResultsSchema.optional(), bindings: LifecycleBindingsSchema.optional(), incidents: z.array(LifecycleIncidentSchema).optional() }).strict(),
+  z.object({ op: z.literal('append'), runId: lifecycleIdSchema, output: z.string().max(524_288), results: lifecycleResultsSchema.optional(), bindings: LifecycleBindingUpdatesSchema.optional(), incidents: z.array(LifecycleIncidentSchema).optional() }).strict(),
   z.object({
     op: z.literal('finish'), runId: lifecycleIdSchema, status: z.enum(['succeeded', 'failed', 'cancelled', 'timed-out', 'interrupted']),
     incidents: z.array(LifecycleIncidentSchema).optional(),
-    failure: EnvironmentFailureSchema.optional(), exitCode: z.number().int(), results: lifecycleResultsSchema, output: z.string().max(524_288), bindings: LifecycleBindingsSchema,
+    failure: EnvironmentFailureSchema.optional(), exitCode: z.number().int(), results: lifecycleResultsSchema, output: z.string().max(524_288), bindings: LifecycleBindingUpdatesSchema,
   }).strict(),
   z.object({ op: z.literal('start'), runId: lifecycleIdSchema }).strict(),
   z.object({ op: z.literal('cancel'), runId: lifecycleIdSchema }).strict(),

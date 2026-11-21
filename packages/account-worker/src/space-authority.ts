@@ -44,7 +44,7 @@ import { z } from 'zod';
 import type { CloudProjectSummary, CloudWorkspaceDefinition, ProjectLifecycle, WorkspaceLifecycle } from '@gitspace/protocol';
 import { assertPhaseMove, PHASE_LABEL, type GitLfsConfirmedObject, type WorkspacePhase, type WorkspaceReport, type WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
 import { RetainedLfsSnapshotSchema } from './git-lfs-retention.js';
-import { LifecycleRunRequestSchema, LifecycleRunSchema, environmentFailure, type EnvironmentFailure, type LifecycleActor, type LifecycleMutation, type LifecycleRun, type LifecycleRunLog, type LifecycleState } from '@gitspace/protocol-environment';
+import { LifecycleRunRequestSchema, LifecycleRunSchema, environmentFailure, recordedLifecycleBindings, type EnvironmentFailure, type LifecycleActor, type LifecycleMutation, type LifecycleRun, type LifecycleRunLog, type LifecycleState } from '@gitspace/protocol-environment';
 import { forwardPosition } from './cloud-stack-status.js';
 import { originAccess, originReadCredentials } from './origin-access.js';
 import { BudgetedDurableObject, WORKER_VERSION, type ReleaseRestart } from './storage-quarantine.js';
@@ -999,7 +999,7 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
       const state = result.state;
       // A claim ends a run only by skipping it: the workspace's resources were already destroyed.
       if (input.op !== 'claim') for (const run of result.ended) {
-        if (run.phase === 'cloud/destroy') await this.journalDestroy(identity, state, run);
+        if (run.phase === 'cloud/destroy') await this.journalDestroy(identity, run, run.status === 'succeeded' && result.retiredBindings ? result.retiredBindings : recordedLifecycleBindings(state));
       }
       this.ctx.waitUntil(notifyLifecycleHolders(this.env, identity.workspaceId, state, actor.machineId));
       return { status: 'ok', state };
@@ -1009,11 +1009,11 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
       throw error;
     }
   }
-  /** One journal entry per ended cloud/destroy run, naming the resources the workspace recorded (its bindings and its
-   * provisioning run's) and the outcome. A failed write is logged; the run's own record is unaffected. */
-  private async journalDestroy(identity: z.infer<typeof RuntimeIdentitySchema>, state: LifecycleState, run: LifecycleRun): Promise<void> {
-    const provisioned = state.provisioned ? state.runs.find(entry => entry.id === state.provisioned?.runId) : undefined;
-    const resources = Object.entries({ ...state.bindings, ...provisioned?.bindings, ...run.bindings });
+  /** One journal entry per ended cloud/destroy run, naming the resources the workspace recorded (`recorded`: what a
+   * successful run cleared, else what the record still holds) and the outcome. A failed write is logged; the run's own
+   * record is unaffected. */
+  private async journalDestroy(identity: z.infer<typeof RuntimeIdentitySchema>, run: LifecycleRun, recorded: Record<string, string>): Promise<void> {
+    const resources = Object.entries(recorded);
     const succeeded = run.status === 'succeeded';
     const body = [
       `cloud/destroy run ${run.id} ${run.status} on machine ${run.machineId}.`,

@@ -177,7 +177,7 @@ Attach an authorized online machine to the workspace and select it in Environmen
 
 The chosen cache provides the workspace checkout and repository helpers. In Environment, retirement needs a separate confirmation, and API/MCP clients need lifecycle-control authority. Selecting or resuming a cache does not authorize destruction or a cloud provisioning rerun.
 
-Cloud bindings and logs remain available after retirement. Failed or uncertain destruction does not erase the records needed to recover.
+A successful `cloud/destroy` clears the workspace's bindings, including each copy's: the next `cloud/provision` starts from none. The journal entry of that run keeps the list of what it deleted, and run logs remain available. A failed, cancelled, or interrupted destruction keeps the bindings needed to recover. To run `cloud/destroy` again after it succeeded, request it with `rerun: true`; without it the request is skipped.
 
 ## Script inputs and outputs
 
@@ -210,7 +210,7 @@ Services started from `.gitspace/services.json` receive the same two URL variabl
 }
 ```
 
-The runner observes the output file during execution and merges valid partial bindings into the cloud ledger. It also reads them when the phase finishes, including failure. Write each resource ID as soon as the provider returns it, using a temporary file and an atomic rename over the output path. The input bindings are a phase-start snapshot; later scripts in the same phase must also read the shared output file to see new IDs. Preserve its earlier bindings when adding another resource. Keep the output file within 64 KiB. A resource created before its ID reaches the cloud still needs provider-side reconciliation after interruption.
+The runner observes the output file during execution and merges valid partial bindings into the cloud ledger. It also reads them when the phase finishes, including failure. Write each resource ID as soon as the provider returns it, using a temporary file and an atomic rename over the output path. The input bindings are a phase-start snapshot; later scripts in the same phase must also read the shared output file to see new IDs. Preserve its earlier bindings when adding another resource. A binding the output omits keeps its recorded value; to remove one (a resource the script deleted, or a stale value), write it as `null`, for example `{"bindings": {"sourcePin": null}}`. Keep the output file within 64 KiB. A resource created before its ID reaches the cloud still needs provider-side reconciliation after interruption.
 
 Bindings are strings for resource IDs, URLs, or `secret:NAME` references. They are not a credential store. A secret reference names a secret; it does not turn the binding into the secret's plaintext value. Store it as a project secret or grant an account secret to the project, then declare the required name in the profile.
 

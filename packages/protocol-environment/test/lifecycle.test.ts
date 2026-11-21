@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import {
   emptyLifecycleState, transitionLifecycle, environmentFailure, loadEnvironmentBundle,
   isLifecycleRunActive, lifecycleRunOutcome, lifecycleExecutionOutcome, LifecycleLogReader, type LifecycleActor, type LifecycleMutation,
-  type LifecycleRunRecord, type LifecycleState,
+  type LifecycleRunRecord, type LifecycleState, type LifecycleTransition,
   isInteractiveLifecycleScript, assertLifecycleRequestIdentity, parseLifecycleRunRequest,
 } from '../src/index.js';
 
@@ -12,15 +12,16 @@ function scenario() {
   let state = emptyLifecycleState('project', 'workspace');
   const records = new Map<string, LifecycleRunRecord>();
   let time = '2026-09-01T00:00:00.000Z';
-  const apply = (input: LifecycleMutation, actor = machine): LifecycleState => {
-    const transition = transitionLifecycle({ state, runs: [...records.values()], actor, now: time }, input);
-    state = transition.state;
-    if (transition.record) records.set(transition.record.run.id, transition.record);
-    return state;
+  const transition = (input: LifecycleMutation, actor = machine): LifecycleTransition => {
+    const result = transitionLifecycle({ state, runs: [...records.values()], actor, now: time }, input);
+    state = result.state;
+    for (const record of [...(result.record ? [result.record] : []), ...(result.rebound ?? [])]) records.set(record.run.id, record);
+    return result;
   };
+  const apply = (input: LifecycleMutation, actor = machine): LifecycleState => transition(input, actor).state;
   apply({ op: 'configure', bundleJson: JSON.stringify({ version: 1, profiles: { base: {} } }), executions: [{ id: 'prepare', kind: 'script', label: 'Prepare', command: '01-prepare.sh', content: 'echo ready', fileName: '01-prepare.sh', phase: 'machine/prepare', hash }] });
   apply({ op: 'approval', scope: 'project', executionHash: hash, approved: true }, { actorId: 'browser', machineId: 'browser', kind: 'browser', lifecycleControl: true });
-  return { apply, advance: (now: string) => { time = now; } };
+  return { apply, transition, advance: (now: string) => { time = now; } };
 }
 const claim = (runId: string, overrides: Partial<Extract<LifecycleMutation, { op: 'claim' }>> = {}): LifecycleMutation => ({ op: 'claim', runId, phase: 'machine/prepare', profile: 'base', executionHashes: [hash], generation: 1, rerun: false, ...overrides });
 const finish = (runId: string, overrides: Partial<Extract<LifecycleMutation, { op: 'finish' }>> = {}): LifecycleMutation => ({ op: 'finish', runId, status: 'succeeded', exitCode: 0, results: [], output: '', bindings: {}, ...overrides });
@@ -136,6 +137,48 @@ describe('isomorphic environment decisions', () => {
     const expired = context.apply(finish('deadline', { bindings: { partial: 'resource-before-timeout' } }));
     expect(expired.runs[0]).toMatchObject({ status: 'timed-out', exitCode: 1, failure: { code: 'DeadlineExceeded' } });
     expect(expired.bindings).toEqual({ partial: 'resource-before-timeout' });
+  });
+  it('keeps bindings through a failed provision and a failed destroy; a successful destroy clears them all for the next provision', () => {
+    const context = scenario();
+    const attachment = { attachmentId: 'copy-a', generation: 1 };
+    context.apply(claim('provision', { phase: 'cloud/provision' }));
+    context.apply({ op: 'append', runId: 'provision', output: '', bindings: { SOURCE_PIN: 'old-commit' } });
+    const failed = context.apply(finish('provision', { status: 'failed', exitCode: 1, bindings: { BUCKET: 'bucket-1' } }));
+    expect(failed.bindings).toEqual({ SOURCE_PIN: 'old-commit', BUCKET: 'bucket-1' });
+    context.apply(claim('copy', { generation: null, phase: 'workspace/materialize', attachment }), { ...machine, attachment });
+    context.apply(finish('copy', { bindings: { PORT: '5433' } }), { ...machine, attachment });
+    context.apply(claim('destroy-failed', { phase: 'cloud/destroy' }));
+    const kept = context.apply(finish('destroy-failed', { status: 'failed', exitCode: 1 }));
+    expect(kept.bindings).toEqual({ SOURCE_PIN: 'old-commit', BUCKET: 'bucket-1' });
+    expect(kept.runs.find((run) => run.id === 'copy')?.bindings).toEqual({ PORT: '5433' });
+    expect(kept.destroyedAt).toBeNull();
+    context.apply(claim('destroy', { phase: 'cloud/destroy', rerun: true }));
+    const destroyed = context.transition(finish('destroy'));
+    expect(destroyed.retiredBindings).toEqual({ SOURCE_PIN: 'old-commit', BUCKET: 'bucket-1', PORT: '5433' });
+    expect(destroyed.state.bindings).toEqual({});
+    expect(destroyed.state.runs.find((run) => run.id === 'copy')?.bindings).toEqual({});
+    expect(destroyed.rebound?.map((entry) => entry.run.id)).toEqual(['copy']);
+    const next = context.apply(claim('provision-again', { phase: 'cloud/provision' }));
+    expect(next.claim?.status).toBe('claimed');
+    expect(next.bindings).toEqual({});
+    expect(context.apply(finish('provision-again', { bindings: { BUCKET: 'bucket-2' } })).bindings).toEqual({ BUCKET: 'bucket-2' });
+  });
+  it('retracts a binding written as null, at append and at finish, for the workspace and for a copy', () => {
+    const context = scenario();
+    context.apply(claim('run', { phase: 'cloud/provision' }));
+    context.apply({ op: 'append', runId: 'run', output: '', bindings: { A: '1', B: '2' } });
+    expect(context.apply({ op: 'append', runId: 'run', output: '', bindings: { A: null } }).bindings).toEqual({ B: '2' });
+    const finished = context.apply(finish('run', { bindings: { B: null, C: '3' } }));
+    expect(finished.bindings).toEqual({ C: '3' });
+    const attachment = { attachmentId: 'copy-a', generation: 1 };
+    const copy = { ...machine, attachment };
+    context.apply(claim('copy-1', { generation: null, phase: 'workspace/materialize', attachment }), copy);
+    context.apply(finish('copy-1', { bindings: { PORT: '5433', HOST: 'db' } }), copy);
+    context.apply(claim('copy-2', { generation: null, phase: 'workspace/materialize', attachment, rerun: true }), copy);
+    const retracted = context.apply(finish('copy-2', { bindings: { PORT: null } }), copy);
+    expect(retracted.runs.find((run) => run.id === 'copy-1')?.bindings).toEqual({ HOST: 'db' });
+    expect(retracted.runs.find((run) => run.id === 'copy-2')?.bindings).toEqual({});
+    expect(retracted.bindings).toEqual({ C: '3' });
   });
   it('keeps independent script exits across split frames, unstarted scripts, and an interrupted successor', () => {
     const first = 'workspace/materialize:10-dependencies.sh';

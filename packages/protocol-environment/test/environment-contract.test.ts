@@ -7,6 +7,7 @@ import {
   resolveEnvironmentProfile,
   resolveEnvironmentValues,
   resolveExecutionApproval,
+  parseLifecycleBindingsJson,
   selectLifecycleScripts,
   type EnvironmentBundle,
 } from '@gitspace/protocol-environment';
@@ -99,5 +100,10 @@ describe('lifecycle bindings', () => {
     expect(LifecycleBindingsSchema.safeParse({ database: 'postgres://user:password@db.example.test/app' }).success).toBe(false);
     expect(LifecycleBindingsSchema.safeParse({ endpoint: 'https://example.test/?token=plaintext' }).success).toBe(false);
     expect(LifecycleBindingsSchema.safeParse({ resource: `ghp_${'a'.repeat(30)}` }).success).toBe(false);
+  });
+  it('reads null in lifecycle output as a retraction, which a recorded binding never holds', () => {
+    expect(parseLifecycleBindingsJson(JSON.stringify({ bindings: { database: 'db-123', password: null } }), [])).toEqual({ database: 'db-123', password: null });
+    expect(() => parseLifecycleBindingsJson(JSON.stringify({ bindings: { password: 'plaintext' } }), [])).toThrow();
+    expect(LifecycleBindingsSchema.safeParse({ database: null }).success).toBe(false);
   });
 });
