@@ -27,8 +27,12 @@ a row.
 - **The source is the truth.** A row is a projection of a record that lives where it lives today: a workspace's
   `QuestionsDoc`, a project operation, an incident in `AccountStateDO`, and so on. Acting on a row calls that source's
   existing procedure. The row goes away when the source says it is closed, whoever closed it and wherever.
-- **One account-level table.** Sources push compact rows into the account directory object (`UserProjectIndexDO`),
-  where workspace statuses already land. The page reads that one object and never fans out to projects (§6).
+- **One list, the one Needs you already uses.** Today each workspace's runtime reports what its main conversation
+  waits on (`waitingOn`) to the account directory, and that report is what turns its sidebar row orange. The report
+  grows to the workspace's full list of open items. Items that don't come from a workspace (watchdog incidents,
+  alerts, outside passkey approvals) join the same directory list from their own sources. The sidebar's Needs you and
+  the Inbox are two views of that one list, so they can't disagree. The page reads the directory and never fans out to
+  projects (§6).
 - **Counted carefully.** The badge counts what blocks an agent or is broken. It does not count reported issues,
   alerts an automation already took, or anything waiting longer than two days (§2).
 - **Monitoring folds in.** Storage incidents become Problem rows, and `/monitoring` goes away (§5).
@@ -131,15 +135,15 @@ status row per workspace, and the browser's copy of that row carries only the co
 | **Passkey approval** (issue #239) | Does not exist. #239 has two parts. Part 1: an agent's "use passkey for <origin>", answered with the person's passkey step-up. Part 2: `/approve/<id>` for an outside client attempting something its grant lacks. Both say the request "also appears in Needs you". Step-up today: `CredentialVaultDO.consumeStepUp` with a `purpose` and targets (`account-worker/src/passkeys.ts`, `StepUpPrompt.tsx`, `docs/PASSKEYS-DESIGN.md`) | — | A new step-up purpose naming the request id, spent in the same vault transaction as the action | — |
 | **Requirement to accept** | `inspector_goal_requirements` in the workspace's `SpaceContextDO`. Status `review` means evidence is attached and a person must act (`protocol/src/inspector-contract.ts`, `space-context.ts`) | Per workspace only: `inspector.overview` | `inspector.requirement.setAcceptance` (`operator.decide`, browser devices; it journals a decision) | `inspector/GoalSurface.tsx`, `goal/RequirementsSection.tsx` |
 | **Guide to review** | `inspector_guide_revisions` plus `inspector_guide_reviewer_state` (decision per revision and head commit). **There is no "ready for review" signal**: `ChangeGuideView` has no status | Per workspace only | `inspector.guide.setApproval` (`account.admin`; needs every section read) | `inspector/ChangeGuideSurface.tsx` |
-| **Agent stopped on an error** | The main conversation is `failed` with `error` (`protocol-runtime/src/base.ts`). `WorkspaceReport.failure` exists, but the index does not store it | Only `agents.red` in the summary (red dot) | Retry in the workspace | `RuntimeWorkspace.tsx` |
+| **Agent stopped on an error** | The main conversation is `failed` with `error` (`protocol-runtime/src/base.ts`). `WorkspaceReport.failure` exists, but the directory does not store it | Only `agents.red` in the summary (red dot) | Retry in the workspace | `RuntimeWorkspace.tsx` |
 | **Lifecycle script failed** | `RuntimeCacheObservation.setup[]` with `state: 'failed'`, plus `lifecycle_runs`/`lifecycle_logs` in the workspace object | Machine detail inside the workspace. The summary does not count it | Retry in Environment | `environment/LiveEnvironment.tsx`, `LifecycleLogDialog` |
 | **Sync problem / push refused** | `syncProblem` or `RuntimeAttachment.failure` from the machine heartbeat (`space-authority.ts` `runtimeHeartbeat`). A conversation notice goes out once it has lasted 5 minutes | Only `sync.problems` (a count) and `sync.conflicts` in the summary | In the workspace | `GitSpaceShell.tsx` "sync problem" |
 | **Update base failed** (and other project operations) | `CloudProjectOperation` rows in `ProjectAuthorityDO` (`protocol/src/project-authority.ts`), kept until dismissed | **Already account-wide**: `operations` on the directory snapshot and `directory.project` slices | `project.operations.retry` / `.dismiss` | `OperationProgress.tsx`, `AccountWorkPages.tsx` |
 | **Machine offline** | `FleetCatalogDO` machine `state` (`offline`, `error`, …) | **Already account-wide**: `directory.machines` | Start or move, in Settings → Machines | `SettingsPage.tsx` |
-| **Automation proposed** | `automations.proposal_json` in `ProjectAutomationsDO`. It never runs until approved | **Count already account-wide**: `automation_summaries.proposed` in the index, read by `automations.overview` | `automations.approve` / `automations.delete` | `automations/AutomationCard.tsx` |
+| **Automation proposed** | `automations.proposal_json` in `ProjectAutomationsDO`. It never runs until approved | **Count already account-wide**: `automation_summaries.proposed` in the directory, read by `automations.overview` | `automations.approve` / `automations.delete` | `automations/AutomationCard.tsx` |
 | **Watchdog incident** | `AccountStateDO` key `storage-incidents` (`account-worker/src/account-state.ts`). Written by an object's own breaker (`storage-quarantine.ts`) and by the platform watchdog's posts (`platform/src/storage-watchdog.ts`, `POST /__platform/storage`). Alerts resolve on their own (`healthy`) | `storageIncidents.list` plus live key `storage-incidents` | `storageIncidents.resume` (Resume, or Dismiss for an alert; snoozes that object's alerts 6 h), `.pause`, `.inspect`; all need `account.admin`. `list` needs only `rpc.read` | `MonitoringPage.tsx`, `StorageIncidents.tsx` |
 | **Infrastructure alert** | **Does not exist.** The only inbound webhook is the GitHub App's (`account-worker/src/github-app.ts`). `docs/AUTOMATIONS-DESIGN.md` lists other event sources as out of scope | — | — | — |
-| **Reported issue** | `RuntimeQaItem` (`protocol-runtime/src/workspace-controls.ts`), from `report_issue` and runtime failures. Today it is stored as a project event `entity: 'qa'` in `ProjectAuthorityDO` and filtered per workspace (`appendRuntimeQa`, `createRuntimeQaServices`, `runtime-services.ts`). Moving it into the workspace object was built (`9600abf5`), taken out (`1e02d968`), and is Chatter's milestone 1 | The workspace's `documents['gitspace.qa']` | `runtime.qa` actions `dismiss`, `merge`, `fixed`, `file` (to `AccountStateDO.fileIssue`), `share` (a GitHub draft; `operator.decide` plus `account.admin`) | `inspector/IssuesView.tsx` (the Inspector's Issues tab) |
+| **Reported issue** | `RuntimeQaItem` (`protocol-runtime/src/workspace-controls.ts`) in the workspace's own object, table `runtime_qa_items` (`account-worker/src/runtime-qa.ts`; Chatter milestone 1, built 2026-11-20). The project object's alarm moves the items it kept into their workspaces, and until a workspace's move is done its runtime also shows the project's copy. Items come from runtime failures (`qa.report`, which skips a failure whose open item has the same title and history) and from `report_issue`. Chatter decision 5 replaces `report_issue` with `chatter_post { kind: 'tooling' }`, which files the QA item in the posting workspace's object and links the post and the item (Chatter milestone 3; `report_issue` is still in `CODE_ONLY_TOOLS` today) | The workspace's `documents['gitspace.qa']`; nothing reads QA items project-wide | `runtime.qa` actions `dismiss`, `merge`, `fixed`, `file` (to `AccountStateDO.fileIssue`), `share` (a GitHub draft; `operator.decide` plus `account.admin`) | `inspector/IssuesView.tsx` (the Inspector's Issues tab) |
 
 Account-level items the mock leaves out also wait on the person, and already reach the browser:
 
@@ -155,13 +159,14 @@ They are Problem rows under the project, or under "Account" when no project appl
 
 ## 4. How a row is cleared and kept in sync
 
-**Rule.** A row is the source's open record, projected. Each source publishes its whole current list of open items,
-which is small, and the index replaces that source's rows with it. The row leaves when the next publication no longer
-has it. Nothing in the Inbox stores "done". So a question answered in the workspace, by the project agent's relayed
-answer, or by an outside MCP client (`answeredBy`) clears from the Inbox the same way as one answered in the Inbox. So
-does a question closed as `replied` because the person wrote in the chat. A lost publication is corrected by the next
-one, as `docs/SIMPLIFICATION.md` Rules 10 asks ("a lost message is corrected by the next change or by one small read on
-reconnect").
+**Rule.** A row is the source's open record, projected. Each workspace's status report carries its whole current list
+of open items, and the directory replaces that workspace's list with each report. Sources outside workspaces do the
+same with their own list (§6). The row leaves when the next report no longer has it. Nothing in the Inbox stores
+"done". So a question answered in the workspace, by the project agent's relayed answer, or by an outside MCP client
+(`answeredBy`) clears from the Inbox the same way as one answered in the Inbox. So does a question closed as `replied`
+because the person wrote in the chat. The workspace's row in the sidebar leaves Needs you in the same report. A lost
+report is corrected by the next one, as `docs/SIMPLIFICATION.md` Rules 10 asks ("a lost message is corrected by the
+next change or by one small read on reconnect").
 
 **Acting.** Each action calls the existing procedure of the source, under the device's existing grant:
 
@@ -183,12 +188,12 @@ reconnect").
 
 **Undo.** The mock clears at once and offers Undo for 6 s. Most sources can't undo: an approved script runs, an
 answered question starts a turn. The Inbox therefore holds the call in the tab for the Undo window and sends it when
-the window ends, or at once when the page is hidden or left (decision 5). Until the source's next publication, the row
-shows as cleared, so a second tab does not show it as open.
+the window ends, or at once when the page is hidden or left (decision 5). Until the source's next report, the row
+shows as cleared in this tab; other tabs clear it with that report.
 
 **Conflicts.** A source may refuse because the item already closed: `questionRefusal`, a lifecycle hash no longer
 current, an approval revision that moved. The row then shows what happened ("Already answered in the workspace",
-"Content changed since you looked") and leaves with the next publication.
+"Content changed since you looked") and leaves with the next report.
 
 **One row per conversation, not per question.** Answering any question of a conversation closes that conversation's
 other open questions as `replied` (`closeRepliedQuestions`, SIMPLIFICATION 280). The Inbox therefore groups a
@@ -235,89 +240,180 @@ Changes:
 
 ## 6. Storage and live updates
 
-**Where rows live.** A new table in `UserProjectIndexDO`, the account directory object. It already receives every
-workspace's status row (`setWorkspaceStatus`) and every project's automation summary (`setAutomationSummary`), and it
-is the one account object browsers hold a socket to (`GET /v1/directory/events`).
+The Inbox adds no store of its own. It is built on the pipeline that already makes a sidebar row orange.
+
+**The pipeline today.**
+1. After each change, the workspace runtime builds a report (`rebuild` → `options.published`,
+   `runtime-workspace-do/src/runtime.ts` ~588). The report carries the status summary, `waitingOn`, `failure`,
+   `lastReply` and a preview. `waitingOn` is the main conversation's first open question: its kind (`ask` or
+   `approval`), its first 200 characters and its full length.
+2. The runtime host compares that with the last send and sends when it changed:
+   `status.send({ ..., waitingOn, lastReply, ... })` through a latest-only sender (`account-worker/src/account-runtime-host.ts`
+   ~155–191).
+3. The account directory object, `UserProjectIndexDO` (defined in `account-worker/src/project-authority.ts`), keeps
+   one row per workspace in `workspace_statuses` (`summary`, `waiting_json`, `since`, `last_reply`, `status_cursor`,
+   `preview`). It drops a send older than the stored cursor. `since` moves only when the colour or what it waits on
+   changes (`setWorkspaceStatus`).
+4. It sends every row once per socket (`statuses`) and each changed row after that (`status`), to every open tab.
+   Those messages carry `{ projectId, workspaceId, status, preview }`, so `waiting_json` stays server-side. It is
+   read only by `projectWorkspaceStatuses` for the project view and the project agent's board.
+5. The sidebar colours the row from `status.primaryColor`, which is orange when an agent has an open question or the
+   workspace has sync conflicts (`runtime-workspace-do/src/workspace-status.ts`). The Needs you filter and the
+   per-project counts read that colour (`AppSidebar.tsx`).
+
+**The change: from `waitingOn` to the workspace's list.** The report's `waitingOn` becomes `waiting`: every open item
+of the workspace, in the same report, through the same send, into the same row (`waiting_json`).
 
 ```
-inbox_items(
-  key TEXT PRIMARY KEY,        -- source-scoped: q:<workspaceId>:<conversationId>, env:<projectId>:<executionHash>,
-                               -- op:<operationId>, inc:<objectId>, qa:<projectId>:<dedupKey>, …
-  source TEXT NOT NULL,        -- workspace:<id> | project:<id> | account
-  project_id TEXT,             -- null for account-level rows
-  workspace_id TEXT,
-  kind TEXT NOT NULL,          -- question | plan | approval | review | requirement | problem | incident | alert | issue | mention
-  band TEXT NOT NULL,          -- problems | waiting | issues
-  title TEXT NOT NULL,         -- ≤ 200 characters
-  since TEXT NOT NULL,         -- when it began waiting on the person, from the source
-  counted INTEGER NOT NULL,    -- 0 for issues, handled alerts, mentions
-  body_json TEXT NOT NULL,     -- what the collapsed row and its action need: ids, choices, prompt ≤ 200, the hash,
-                               -- the operation kind; never transcript text, never a secret
-  revision INTEGER NOT NULL    -- the source's cursor; an older send is dropped, as status_cursor does
-)
-INDEX ON (project_id, since), (counted, since)
-inbox_counts(project_id TEXT PRIMARY KEY, counted INTEGER, problems INTEGER, waiting INTEGER, issues INTEGER)
+waiting: {
+  items: WaitingItem[]        // at most 20; counted items first, then oldest first
+  more: number                // open items past the 20
+  qa: { open: number, heads: QaHead[] }   // §6 Issues, below
+}
+WaitingItem {
+  key                         // stable: question id, setup run id, execution hash, …
+  kind                        // ask | plan | approval | lifecycle-approval | takeover | secure-input | mcp-elicitation
+                              // | passkey | declared | requirement | guide | failed | setup-failed | sync | conflict
+  conversationId?, subagent?  // every conversation, subagents included; today only the main one reaches the directory
+  entry?                      // the asking entry's ordinal, for Open and for Ghosts (§8)
+  since                       // from the source: askedAt, the failure's time, the step's time
+  counted                     // false for kinds the badge does not count (§2, decision 2)
+  title, characters           // the prompt or message, cut to 200 characters, with its full length, as waitingOn is
+  detail                      // small and kind-specific, ≤ 400 bytes: up to 9 choice titles of ≤ 80 characters; a
+                              // lifecycle card's phase, file names and hashes; a secure input's origin, URL and
+                              // expiresAt; an elicitation's server, mode, host, secretLooking and expiresAt; a
+                              // declaration's hash, kind, file and level; a failed step's phase and run id
+}
 ```
 
-**Who writes.** Each writer replaces its source's rows in one transaction, with a growing cursor:
+The workspace runtime knows most of the list already:
+- Open questions of every conversation (`QuestionsDoc`), which includes plans, tool approvals, lifecycle approvals,
+  takeovers, secure-input requests, MCP elicitations from users' servers, and (with #239 Part 1) an agent's "use
+  passkey for <origin>".
+- The main conversation's failure (`WorkspaceReport.failure`, already in the report).
+- A failed setup step (`RuntimeCacheObservation.setup`).
+- A sync problem that has lasted 5 minutes, and sync conflicts.
+- Declarations without approval, from the workspace's lifecycle state (`environment_state`).
 
-| Source | Writer |
-| --- | --- |
-| A workspace: open questions of **every** conversation (today `waitingOn` is the main conversation's first only), failed main conversation, failed setup step, lasting sync problem, and later its open QA items | The status send it already makes: `WorkspaceStatusSend` gains `inbox` items, sent when they change (`account-runtime-host.ts` already compares `waitingOn` before sending). The status call is reused, not a second call per publication. Old index code reads fields by name (`workspaceStatusRowSchema` is a plain `z.object`), so a send carrying the new field to an object still on the previous release loses only the new rows. That fits the rollout rule |
-| A workspace's goal and guide: requirements in `review`, a guide revision ready | `SpaceContextDO` after a requirement or guide write, through a new `setWorkspaceInbox` call, made `acrossRelease` |
-| A project: failed operations, automation proposals and failed runs, declarations without approval (one row per execution hash, listing the workspaces and base that declare it) | `ProjectAuthorityDO` and `ProjectAutomationsDO`, beside `publishDirectory` / `setAutomationSummary` |
-| The account: storage incidents, provider, plugin and GitHub problems | `AccountStateDO.saveStorageIncidents`, where it already calls `notifyBrowsers`, and the other owners at their existing notice points |
-| Chatter mentions (§8) | `ProjectChatterDO` |
-| Alerts (§3, decision 9) | Where alerts are stored |
+Requirements in `review` and a guide revision ready for the person live in `SpaceContextDO`. After a requirement or
+guide write, that object tells its own workspace's runtime host which review items are open. The call is new and goes
+through `acrossRelease`. The host keeps them and puts them in the next report. The workspace still sends one list.
+
+The summary's orange is computed from the same list, in the same rebuild: a workspace is orange exactly when its list
+has a counted item. Needs you then filters, and counts, workspaces whose row has counted items. The Inbox shows the
+items of those same rows. The two read one row, so they can't disagree. Unconfirmed status (`workspaceStatusColor`
+turning a row orange for an unknown holder or stale status) is no longer counted as Needs you. It gets its own line
+on the Inbox (§5).
+
+**Items that don't come from a workspace** join the same directory list from their own sources. Each sends its whole
+current list with a growing cursor, under the same rule as a workspace's report: replace the list, drop older sends.
+- **Failed project operations** are already in the directory (`operations` on the snapshot and `directory.project`
+  slices). The Inbox reads them there.
+- **Automation proposals, failed runs and alerts.** `ProjectAutomationsDO` already pushes a per-project summary into
+  the directory (`setAutomationSummary`). The summary gains the heads of proposals (id, name, revision), failed runs
+  and open alerts (decision 9), with the same caps.
+- **Watchdog incidents and other account problems.** `AccountStateDO` sends the active incidents to the directory
+  where it already calls `notifyBrowsers` (`saveStorageIncidents`). The same account list carries outside passkey
+  approvals (#239 Part 2, `/approve/<id>`, recorded in `CredentialVaultDO`) and provider, plugin and GitHub problems.
+  That is one row for the account in a small table beside `workspace_statuses` (`source_waiting(source, waiting_json,
+  cursor)`, sources `account` and `chatter:<projectId>`), with the same shape as a workspace's `waiting`.
+- **Chatter mentions** (§8) come from `ProjectChatterDO`, one list per project.
+
+Declarations are carried per workspace and grouped by hash in the browser into one row ("on develop and in 3
+workspaces"; the base branch is the base workspace, whose id is the project id).
+
+**Issues: a count and heads per workspace, not every QA item.** QA items live in each workspace's own object
+(`runtime_qa_items`, `account-worker/src/runtime-qa.ts`), and the runtime already reads them on each rebuild for
+`documents['gitspace.qa']`. Under Chatter decision 5 they are filed there by tooling posts. The report carries
+`qa: { open, heads }`:
+- `open` is the number of open items;
+- `heads` holds up to 5 groups of open items with the same title, newest first. Each group has the title (≤ 120
+  characters), how many items, the newest `createdAt`, the tool, and the linked Chatter post when there is one.
+
+There are two other ways to do this, and both are worse:
+- Every QA item in the report would put an unbounded list into every report. One project once held 1,261 QA items,
+  438 KB (SIMPLIFICATION 43).
+- A bare count can't group the same failure across workspaces, and can't name a row, without opening every
+  workspace with issues.
+
+Heads are enough to draw and group the issue rows across workspaces (decision 7). Expanding a row reads that
+workspace's `gitspace.qa` (`runtime.qa` for actions), one object for the row opened. Issues are uncounted, so the
+QA part never turns a workspace orange.
 
 **What the browser gets.**
-- **On socket open:** an `inbox.counts` message with `inbox_counts`, a few bytes per project, beside the existing
-  `statuses`. This feeds the nav badge, Needs you and the Today tiles in every tab.
-- **On change:** one message per changed row, `{ type: 'inbox.row', row }` or `{ type: 'inbox.removed', key }`, plus
-  the new counts. The same pattern as `status` messages: small, about one thing, corrected on reconnect by one read.
-- **The page:** `inbox.list { filter?, for?, before?, limit }` reads the index's rows, newest-waiting first, 200 to a
-  page. The stale tier is a second page fetched when opened. No project or workspace object is opened.
-- **On expand only:** the conversation before a question, a lifecycle diff, a guide's sections or a report's text
+- **On socket open:** `statuses` with each row's summary and the **heads** of its items: key, kind, title cut to 120
+  characters, since, counted, conversation, and the QA count. That is enough for the sidebar's Needs you, the nav
+  badge, the Today tiles and the Inbox's collapsed rows. The account and per-project source rows come with them.
+- **On change:** today's `status` message carries the changed workspace's whole `waiting`, details included, at most
+  about 13 KB. Source rows change the same way. Each message is about the one thing that changed, and a reconnect
+  reads the heads again.
+- **The Inbox page:** one directory read, `inbox.list { for?, filter? }`, returns the full items (with `detail`) of
+  the rows the page shows. It reads `waiting_json` and the source rows, the store `projectWorkspaceStatuses` already
+  reads, and opens no project or workspace object.
+- **On expand only:** the conversation before a question, a lifecycle diff, a guide's sections, a report's text. These
   come from the source (`runtime.snapshot`/`history_read` of that conversation, `environment` views,
-  `inspector.overview`, `runtime.qa`). That is one object for the one row opened. It may wake that workspace's object;
-  it starts no agent.
+  `inspector.overview`, `runtime.qa`): one object for the one row opened. It may wake that workspace's object; it
+  starts no agent.
 
-**Sizing (estimates).**
-- An account with 50 projects of 20 live workspaces has 1,000 status rows, which it carries today.
-- Open items are mostly 0–3 per workspace, so 0–3,000 rows at about 600 bytes: under 2 MB.
-- A cap of 20 rows per workspace source plus "and N more" bounds a runaway at 20,000 rows, about 12 MB, still paged.
-- Writes ride sends that happen already. The new calls are per requirement or guide write, per operation, per
-  incident.
-- A tab gets the counts once and then only row changes.
-- Today's heavy per-project boot reads (a `ProjectGraphReader` per project running `space.view` and `automations.list`,
-  `sidebar/project-graph.tsx`; `space.view` took 4.5–6 s for 122 workspaces, SIMPLIFICATION 314) are not used by the
-  Inbox.
+**Sizing (estimates), with the limits that bound them.**
 
-**Who sees what.** `inbox.list` and the socket messages are filtered by the device's scope:
-- account devices see every row;
-- a project-scoped device sees that project's rows;
-- a workspace-scoped device sees that workspace's rows;
-- share viewers see none.
+Per workspace:
+- Today's report carries one question of at most 200 characters.
+- The new list carries at most 20 items of about 600 bytes each: a 200-character title, a detail of at most 400
+  bytes, ids. QA heads add at most 5 × ~200 bytes. That puts a workspace's `waiting` at about 13 KB at most.
+- It is typically 0–3 items, so 0–2 KB.
+- A workspace with more open items says so (`more`). The row shows "and N more in this workspace · Open", and the
+  workspace's own cards hold the rest.
+- Titles keep their full length (`characters`), as `waitingOn` does, so a cut is shown as one.
 
-Account-level rows need account scope. Actions are shown only when the device holds their capability
-(`session.prompt`, `operator.decide`, `account.admin`, `lifecycle.control`; `protocol/src/device-grant.ts`). Otherwise
-the row is read-only, as incidents are today for non-administrators.
+The directory:
+- An account with 50 projects of 20 live workspaces has the 1,000 rows it already carries.
+- Typically about 1–2 MB of `waiting_json`; at most about 13 MB if every workspace hit its cap.
+- Each row stays far below a Durable Object SQLite row's 2 MB limit.
 
-**Erasure.** Deleting a project deletes its rows and counts. Deleting or archiving a workspace sends an empty list for
-its source. Archived projects' rows are hidden, as the sidebar hides their counts (SIMPLIFICATION 286).
+The socket:
+- Today's `statuses` is one message with every row. Heads, not details, keep it small: about 200 bytes per carried
+  item, typically under 300 KB for 1,000 workspaces.
+- An account large enough to pass a few hundred KB gets `statuses` in chunks rather than one message.
+- A change sends at most one workspace's `waiting`.
+
+Writes:
+- No new send per publication: the list rides the status send the host already makes when something changed.
+- New calls are a review change in `SpaceContextDO`, an automation summary, and an incident.
+- Today's heavy per-project boot reads (a `ProjectGraphReader` per project running `space.view` and
+  `automations.list`, `sidebar/project-graph.tsx`; `space.view` took 4.5–6 s for 122 workspaces, SIMPLIFICATION 314)
+  are not used by the Inbox.
+
+**Rollout.** `WorkspaceStatusSend` gains `waiting` and loses `waitingOn` in the same change:
+- Directory code still on the previous release reads the send's fields by name (`workspaceStatusRowSchema` is a plain
+  `z.object`), so for those minutes it sees no `waitingOn` and stores none.
+- New directory code receiving a send from a workspace still on the previous release (no `waiting`) stores its
+  `waitingOn` as a one-item list. That reading is deleted in the following release.
+- Calls to new methods (`SpaceContextDO` to its host, the account list) go through `acrossRelease`
+  (`account-worker/src/release-worker.ts`) or fail soft.
+
+**Who sees what.** The directory socket admits only account-scoped devices with `rpc.read` (`accountScope: true`,
+`UserProjectIndexDO.fetch`), and `inbox.list` follows the same rule. So the Inbox, like the sidebar's directory, is
+for account devices. A project- or workspace-scoped device and a share viewer keep the workspace's own cards. Actions
+are shown only when the device holds their capability (`session.prompt`, `operator.decide`, `account.admin`,
+`lifecycle.control`; `protocol/src/device-grant.ts`). Otherwise the row is read-only, as incidents are today for
+non-administrators.
+
+**Erasure.** A workspace's list goes with its status row. Archiving sends an empty list, and deleting removes the
+row. Archived projects' rows are hidden, as the sidebar hides their counts (SIMPLIFICATION 286).
 
 ## 7. The Today strip
 
 | Tile | Data today | New |
 | --- | --- | --- |
 | Agents working | Sum of `status.agents.green` over the status rows, client-side | — |
-| Waiting on you, longest wait | — | `inbox_counts` and the oldest counted `since` |
+| Waiting on you, longest wait | — | Counted item heads in the status rows, and the oldest counted `since` |
 | Open approvals | Automation `proposed` only | Approval rows |
 | Problems, from alerts | — | Problem rows |
 | Machines online | `directory.machines` (`state === 'online'`), client-side (`LiveApp.tsx`) | — |
 | Spend today of budget | **None at account level.** Cost is per session (`SessionUsageReport.costUsd`, `runtime.session { type: 'usage' }`). `providers.usage` gives subscription windows, not dollars. The credit ledger is operator-only | A per-account daily usage roll-up and a budget setting |
 | Tool calls and turns per hour | **None** (no metrics store) | Hourly counters per account |
-| Project health chips | Derivable from the status rows | From `inbox_counts` per project |
+| Project health chips | Derivable from the status rows | From the item heads per project |
 
 Decision 10 covers which of these ship first.
 
@@ -329,8 +425,8 @@ Decision 10 covers which of these ship first.
   so it answers from what the agent knew when it asked (Ghosts decision 3). It opens with "Why did the agent ask
   this?" in its composer.
 - The row needs the asking entry's ordinal. `RuntimeQuestion` has `conversationId` but no entry. A block ask's id
-  comes from its message row (`blockAskQuestionId`), and an approval carries its call id. So the workspace's inbox
-  item carries `entry`, computed when the item is published.
+  comes from its message row (`blockAskQuestionId`), and an approval carries its call id. So the report's
+  `WaitingItem` carries `entry`, computed when the report is built.
 - A ghost's **draft** goes into the row's note field instead of a workspace composer. The person sends it with the
   answer.
 - An issue row's reports each carry a `historyRef`. Each offers "Ask a ghost about this", as Chatter tooling posts do
@@ -338,14 +434,16 @@ Decision 10 covers which of these ship first.
 - Requires Ghosts milestones 4 and 6.
 
 **Chatter** (`docs/CHATTER-DESIGN.md`):
-- **Tooling posts → issue rows.** Under Chatter decision 5b, `chatter_post { kind: 'tooling' }` files the QA item in
-  the posting workspace's object and links the post. The issue row shows that link and what the project agent did
-  ("started fix-sync-stall", "marked for filing"), as an alert row shows `handledBy`. A row the project agent has
-  acted on is listed but not counted. Filing with GitSpace stays the person's decision (`operator.decide`).
+- **Tooling posts → issue rows.** Under Chatter decision 5, `chatter_post { kind: 'tooling' }` replaces
+  `report_issue`: it files the QA item in the posting workspace's object and links the post and the item. The
+  workspace's report carries the item's group in its QA heads with that link (§6). The issue row shows the link and
+  what the project agent did ("started fix-sync-stall", "marked for filing"), as an alert row shows `handledBy`.
+  Filing with GitSpace stays the person's decision (`operator.decide`).
 - **@mentions of the person.** Chatter addresses no one, and a post that needs a person to choose is a question
   (Chatter §4). A post that names the person (people's posts and agents' posts alike) makes an uncounted `mention` row
   in Waiting on you, with Reply (the Chatter composer) and Open in Chatter. The row clears when the person replies or
-  opens the post. `ProjectChatterDO` keeps a per-person read offset and publishes the rows (decision 12).
+  opens the post. `ProjectChatterDO` keeps a per-person read offset and sends the project's open mentions as its list
+  in the directory (source `chatter:<projectId>`, §6; decision 12).
 - **Refused hand-offs.** A returned post (`type: 'returned'`) goes back to the agent, which works around it. The Inbox
   makes no row per returned post. A project with returned hand-offs today shows one folded line ("3 hand-offs returned
   today · Open Chatter") under its section when grouped by project (decision 12).
@@ -359,31 +457,35 @@ Each step ships alone.
    - Rows from what already reaches the browser: storage incidents (`storageIncidents.list`), failed project operations
      (`directory` operations), offline machines (`directory.machines`), automation proposals and failed runs per
      project (`automations.overview`, linking to Automations), account problems (§3).
-   - One row per workspace whose main conversation waits: add `waitingOn` (kind and 200 characters) to the socket's
-     `status` message, from `waiting_json`. The row has Open only.
-   - The bands, filters, group by project, keys, stale tier and empty state.
-2. **Inbox items in the index.** `inbox_items`, `inbox_counts`, `inbox.counts`/`inbox.row`/`inbox.removed`,
-   `inbox.list`, device-scope filtering. Workspaces publish every conversation's open questions on the status send.
-   Rows for incidents and operations move to server rows. The badge and Needs you read `inbox_counts`.
+   - One row per workspace whose main conversation waits: today's `waitingOn` (kind and 200 characters) added to the
+     socket's `status` message, from `waiting_json`. The row has Open only. Needs you and the Inbox already read the
+     same row.
+2. **The workspace's list.**
+   - `waitingOn` becomes `waiting` in the report, the send and `waiting_json`: every open question of every
+     conversation, subagents included, with the caps and truncation of §6.
+   - Heads on `statuses`, the whole list on `status`, and `inbox.list`.
+   - Orange computed from the list; Needs you filters and counts from it; the "Status not confirmed" line.
+   - The account list (`source_waiting`) with incidents.
 3. **Answer in place.**
    - Asks and plans: one row per conversation, send with a note, staged answers shown.
    - Permission prompts through `runtime.answer`; Dismiss, Undo, refusals.
    - Secure input (open the page, Decline) and MCP elicitation forms.
 4. **Approvals by content.** Declarations without approval, one row per execution hash with where it is declared and
    who waits. Lifecycle, browser site (with level), route, and Approve all declared. Automation proposals inline.
-5. **Problems from workspaces.** Failed main conversation (store `failure`, which the report already has), failed
+5. **Problems from workspaces.** Failed main conversation (already in the report as `failure`), failed
    setup step with its last log line, sync problem after 5 minutes, each with its retry. Report to GitSpace after 2
    hours.
-6. **Reviews.** `SpaceContextDO` publishes requirements in `review`, plus a guide revision whose head commit has no
-   decision from the person while the workspace is in Review. Accept and Reopen inline.
+6. **Reviews.** `SpaceContextDO` tells its workspace's host which requirements are in `review` and whether a guide
+   revision's head commit has no decision from the person while the workspace is in Review. The host carries them in
+   the report. Accept and Reopen inline.
 7. **Issues.**
-   - Needs Chatter milestone 1 (QA items in the workspace object).
-   - Workspaces publish open QA items. Rows group reports by the dedup rule (decision 7).
+   - QA items are already in the workspace object (Chatter milestone 1).
+   - The report carries `qa: { open, heads }`. Rows group heads across workspaces by the dedup rule (decision 7).
    - Dismiss, merge, mark fixed, File with GitSpace, GitHub draft.
    - The Report dialog, filing into the selected workspace's object, or into the base workspace's (workspace id =
      project id) when no workspace applies. `RuntimeQaItem` gains `scope: 'gitspace' | 'project'`.
-8. **Today strip and context.** Tiles from existing data and `inbox_counts`, and project health chips. Goal-first
-   identity: the goal's title, emoji and requirement counts are pushed to the index as journals are
+8. **Today strip and context.** Tiles from existing data and the item heads, and project health chips. Goal-first
+   identity: the goal's title, emoji and requirement counts are pushed to the directory as journals are
    (`setWorkspaceJournal`). The conversation before a question loads on expand.
 9. **Ghosts and Chatter.** "Ask a ghost why it asked" and drafts into the note (after Ghosts milestones 4 and 6).
    Tooling-post links, mention rows and returned hand-off lines (after Chatter milestones 3 and 6).
@@ -391,19 +493,27 @@ Each step ships alone.
 11. **Passkey approvals** (#239): the step-up purpose and the approval rows.
 12. **Spend and activity** (decision 10), if chosen.
 
-Any step where a source calls a new method on the index goes through `acrossRelease` (`account-worker/src/release-worker.ts`)
-or fails soft, because objects may serve the previous code for a few minutes after a release.
+Any step where a source calls a new method on another object goes through `acrossRelease`
+(`account-worker/src/release-worker.ts`) or fails soft, because objects may serve the previous code for a few minutes
+after a release.
 
 ## 10. Open decisions
 
-**1. Where Inbox rows live.**
-- a. A table in `UserProjectIndexDO`, pushed by each source with its full open list (§6).
-- b. No stored rows: `inbox.list` asks every project and workspace object at read time.
-- c. The browser derives rows from per-workspace watches.
+**1. Where the Inbox's list comes from.**
+- a. The existing Needs-you pipeline. The workspace's status report grows from `waitingOn` to its full list of open
+  items, stored in the directory's status row. Sources outside workspaces add their own lists to the same directory
+  (§6).
+- b. A separate table of Inbox rows in the directory, written item by item by each source.
+- c. No stored list: `inbox.list` asks every project and workspace object at read time, or the browser watches every
+  workspace.
 
-*Recommendation:* a. b opens every object of the account per page view (`space.view` alone takes seconds for a large
-project). c needs a watch per workspace and still can't see projects the tab hasn't opened. a reuses the status send
-and the one socket every tab already holds.
+*Recommendation:* a.
+- Needs you and the Inbox then read one row, so they can't disagree, and a workspace's colour and its list come from
+  one rebuild.
+- It reuses the send the host already makes and the socket every tab already holds.
+- b builds a second list beside the one that makes rows orange, and the two would drift: a question closed in the
+  workspace would clear one and not yet the other.
+- c opens every object of the account per view (`space.view` alone takes seconds for a large project).
 
 **2. What the badge counts.**
 - a. The mock's rule: every fresh row except reported issues and alerts an automation took. Rows over two days old
@@ -506,5 +616,5 @@ hand-off is resolved by the agent and the project agent, and a row each would be
 - c. Rich: goal-first plus the plan's steps.
 
 *Recommendation:* b. Across many projects the goal is what the person recognizes, and the workspace name isn't. Its
-data is small (title, emoji, two counts, current step) and is pushed to the index once per change. c's step track
+data is small (title, emoji, two counts, current step) and is pushed to the directory once per change. c's step track
 belongs on expand.
