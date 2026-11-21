@@ -594,10 +594,7 @@ export class UserProjectIndexDO extends BudgetedDurableObject {
   }
 
   private async hydrateDirectory(): Promise<void> {
-    if (this.directory.hydrated()) {
-      await this.readRelations();
-      return;
-    }
+    if (this.directory.hydrated()) return;
     if (!this.hydration) {
       this.hydration = (async () => {
         // Only a one-time migration read, never an authority subscription.
@@ -621,13 +618,20 @@ export class UserProjectIndexDO extends BudgetedDurableObject {
     await this.hydration;
   }
 
-  /** Reads again, once, the projects whose directory entry was stored before entries carried relations. */
+  /** Reads again the projects whose directory entry was stored before entries carried relations, sending each project's
+   * new slice to the open sockets. A project that cannot be read (an authority still on code from before the deploy
+   * answers "The RPC receiver does not implement the method", or a publication without relations) stays as it is and is
+   * read again when the next socket opens. */
   private async readRelations(): Promise<void> {
     const listed = new Set(this.list().map((project) => project.id));
     const stale = this.directory.projectsWithoutRelations().filter((projectId) => listed.has(projectId));
     await Promise.all(stale.map(async (projectId) => {
-      const publication = await (this.env.PROJECT_AUTHORITY as DurableObjectNamespace<ProjectAuthorityDO>).getByName(`${this.env.ACCOUNT_ID}:${projectId}`).directoryPublication();
-      if (publication) this.publishDirectory(publication);
+      try {
+        const publication = await (this.env.PROJECT_AUTHORITY as DurableObjectNamespace<ProjectAuthorityDO>).getByName(`${this.env.ACCOUNT_ID}:${projectId}`).directoryPublication();
+        if (publication) this.publishDirectory(publication);
+      } catch (error) {
+        console.error(JSON.stringify({ event: 'directory_relations_unread', projectId, message: error instanceof Error ? error.message : String(error) }));
+      }
     }));
   }
 
@@ -660,6 +664,8 @@ export class UserProjectIndexDO extends BudgetedDurableObject {
     await this.seedWorkspaceStatuses();
     // Every status row once per socket; later changes arrive one row at a time.
     server.send(JSON.stringify({ type: 'statuses', rows: this.workspaceStatuses() }));
+    // After the socket is answered: a project read again arrives as its slice, and one that fails never fails the socket.
+    this.ctx.waitUntil(this.readRelations());
     return new Response(null, { status: 101, webSocket: client, headers: { 'sec-websocket-protocol': offered.protocol } });
   }
 

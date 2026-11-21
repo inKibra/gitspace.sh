@@ -61,18 +61,27 @@ it('reads a listed project\'s graph again on request and settles once the read e
   expect(reads.refetch).toHaveBeenCalledTimes(1);
 });
 
-it('draws the sidebar\'s stacks from the directory\'s relations before the project view is read, then adds the positions it measured against the same parents', async () => {
-  const ids = ['bakery-core', 'bakery-api', 'bakery-docs'];
-  const parent: Record<string, string> = { 'bakery-api': 'bakery-core', 'bakery-docs': 'bakery-core' };
-  const workspaces = ids.map((id) => ({ id, projectId: 'bakery', kind: 'worktree' as const, lifecycle: 'active' as const, relations: { dependsOn: [], relatedTo: [], stackedOn: parent[id] ?? null } }));
-  const behind = (parentId: string): StackStatus => ({ parentId, parentBranch: parentId, baseBranch: 'main', mergeBase: null, parentAhead: 2, parentMerged: 'not-merged', baseRewritten: false, instruction: null });
+const ids = ['bakery-core', 'bakery-api', 'bakery-docs'];
+const behind = (parentId: string): StackStatus => ({ parentId, parentBranch: parentId, baseBranch: 'main', mergeBase: null, parentAhead: 2, parentMerged: 'not-merged', baseRewritten: false, instruction: null });
+/** The project view's reading of a workspace: its relations, 2 behind the parent it is stacked on and in a later phase. */
+const read = (id: string, stackedOn: string | null) => ({ id, relations: { dependsOn: [], relatedTo: [], stackedOn },
+  stack: { waitsOn: [], blocks: [], position: stackedOn ? behind(stackedOn) : null, findings: stackedOn ? [{ code: 'ahead-of-parent', message: `${id} is in a later phase than ${stackedOn}`, workspaceId: stackedOn }] : [] } });
+const row = (id: string) => container.querySelector<HTMLElement>(`[data-workspace="${id}"]`);
+
+/** The sidebar of project Bakery with the graph `useProjectGraphs` builds from these directory relations. */
+async function renderSidebar(relations: (id: string) => { dependsOn: string[]; relatedTo: string[]; stackedOn: string | null } | null) {
+  const workspaces = ids.map((id) => ({ id, projectId: 'bakery', kind: 'worktree' as const, lifecycle: 'active' as const, relations: relations(id) }));
   function Sidebar() {
     const { graphs, readers } = useProjectGraphs(bakery, workspaces);
     return <SidebarProvider persist={false}>{readers}<AppSidebar view="projects" onView={() => undefined} selected={null} machines={[]} onSelectWorkspace={() => undefined}
       projects={[{ id: 'bakery', name: 'Bakery', workspaces: ids.map((id) => ({ id, projectId: 'bakery', name: id, branch: id, closedAt: null, phase: 'code' })), graph: graphs.bakery }]} /></SidebarProvider>;
   }
-  const row = (id: string) => container.querySelector<HTMLElement>(`[data-workspace="${id}"]`);
   await act(() => root.render(<Sidebar />));
+}
+
+it('draws the sidebar\'s stacks from the directory\'s relations before the project view is read, then adds the positions it measured against the same parents', async () => {
+  const parent: Record<string, string> = { 'bakery-api': 'bakery-core', 'bakery-docs': 'bakery-core' };
+  await renderSidebar((id) => ({ dependsOn: [], relatedTo: [], stackedOn: parent[id] ?? null }));
   for (const id of ['bakery-api', 'bakery-docs']) {
     expect(row(id)?.querySelector('button')?.style.paddingLeft).toBe('30px');
     expect(row(id)?.textContent).toContain('on bakery-core');
@@ -80,13 +89,21 @@ it('draws the sidebar\'s stacks from the directory\'s relations before the proje
   expect(row('bakery-api')?.textContent).not.toContain('2 behind');
   // The view, read before bakery-docs moved from bakery-old onto bakery-core, measured it against bakery-old: only
   // bakery-api's position and phase finding show.
-  const read = (id: string, stackedOn: string | null) => ({ id, relations: { dependsOn: [], relatedTo: [], stackedOn },
-    stack: { waitsOn: [], blocks: [], position: stackedOn ? behind(stackedOn) : null, findings: stackedOn ? [{ code: 'ahead-of-parent', message: `${id} is in a later phase than ${stackedOn}`, workspaceId: stackedOn }] : [] } });
   view.read = { state: 'success', value: { project: { baseBranch: 'main' }, workspaces: [read('bakery-core', null), read('bakery-api', 'bakery-core'), read('bakery-docs', 'bakery-old')] } };
-  await act(() => root.render(<Sidebar />));
+  await renderSidebar((id) => ({ dependsOn: [], relatedTo: [], stackedOn: parent[id] ?? null }));
   expect(row('bakery-api')?.textContent).toContain('2 behind');
   expect(row('bakery-api')?.textContent).toContain('ahead of its parent');
   expect(row('bakery-docs')?.textContent).toContain('on bakery-core');
   expect(row('bakery-docs')?.textContent).not.toContain('2 behind');
   expect(row('bakery-docs')?.textContent).not.toContain('ahead of its parent');
+});
+
+it('draws the project view\'s stacks where the directory does not know the relations yet', async () => {
+  await renderSidebar(() => null);
+  expect(row('bakery-api')?.querySelector('button')?.style.paddingLeft).toBe('14px');
+  view.read = { state: 'success', value: { project: { baseBranch: 'main' }, workspaces: [read('bakery-core', null), read('bakery-api', 'bakery-core'), read('bakery-docs', null)] } };
+  await renderSidebar(() => null);
+  expect(row('bakery-api')?.querySelector('button')?.style.paddingLeft).toBe('30px');
+  expect(row('bakery-api')?.textContent).toContain('on bakery-core');
+  expect(row('bakery-api')?.textContent).toContain('2 behind');
 });

@@ -98,7 +98,8 @@ describe('account directory projection', () => {
     await expect.poll(() => receiver.directorySnapshot()).toMatchObject({ projects: [{ id: project.id }], workspaces: [{ id: workspace.id }] });
   });
 
-  it('carries each workspace\'s relations, and reads a project again once when its entry was stored before entries carried them', async () => {
+  it('carries each workspace\'s relations; an entry stored before them is read again after a socket opens, and an authority still on older code never fails the socket', async () => {
+    const device = await browserDevice();
     const index = env.USER_PROJECTS.getByName(env.ACCOUNT_ID);
     const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${project.id}`);
     const member = { ...workspace, id: 'directory-member', name: 'Directory member' };
@@ -106,11 +107,31 @@ describe('account directory projection', () => {
     await authority.putWorkspace({ ...workspace, expectedRevision: 0 });
     await authority.putWorkspace({ ...member, expectedRevision: 0 });
     expect(await authority.setWorkspaceRelations(member.id, { dependsOn: [], relatedTo: [], stackedOn: workspace.id })).toMatchObject({ status: 'ok' });
-    const relations = async () => Object.fromEntries((await index.directorySnapshot()).workspaces.map((entry) => [entry.id, entry.relations]));
-    const stacked = { [workspace.id]: none, [member.id]: { ...none, stackedOn: workspace.id } };
-    await expect.poll(relations).toEqual(stacked);
-    await runInDurableObject(index, (_instance, state) => { state.storage.sql.exec("UPDATE directory_sources SET value_json=json_remove(value_json,'$.relations') WHERE source='project'"); });
-    expect(await relations()).toEqual(stacked);
+    const stacked = { ...none, stackedOn: workspace.id };
+    await expect.poll(async () => (await index.directorySnapshot()).workspaces.find((entry) => entry.id === member.id)?.relations).toEqual(stacked);
+    // Right after a deploy, an authority can still run code without the method the directory calls.
+    const outdated = vi.spyOn(ProjectAuthorityDO.prototype, 'directoryPublication').mockImplementation(() => { throw new TypeError('The RPC receiver does not implement the method "directoryPublication".'); });
+    // The directory restarts with an entry stored before entries carried relations.
+    await runInDurableObject(index, async (_instance, state) => {
+      state.storage.sql.exec("UPDATE directory_sources SET value_json=json_remove(value_json,'$.relations') WHERE source='project'");
+      const restarted = new UserProjectIndexDO(state, env);
+      await state.blockConcurrencyWhile(async () => {});
+      const open = async () => {
+        const response = await restarted.fetch(device.request());
+        expect(response.status).toBe(101);
+        return socketEvents(response.webSocket!);
+      };
+      const first = await open();
+      expect(await first.next()).toMatchObject({ type: 'message', value: { type: 'directory', snapshot: { workspaces: expect.arrayContaining([expect.objectContaining({ id: member.id, relations: null })]) } } });
+      await vi.waitFor(() => expect(outdated).toHaveBeenCalled());
+      outdated.mockRestore();
+      // The next socket reads the project again, and its slice reaches every socket.
+      const second = await open();
+      expect(await second.next()).toMatchObject({ type: 'message', value: { type: 'directory' } });
+      let next = await second.next();
+      while (next.type === 'message' && next.value.type !== 'directory.project') next = await second.next();
+      expect(next).toMatchObject({ type: 'message', value: { type: 'directory.project', projectId: project.id, workspaces: expect.arrayContaining([expect.objectContaining({ id: member.id, relations: stacked })]) } });
+    });
   });
 
   it('continues a source version from its retired outbox, so the directory keeps accepting it', async () => {

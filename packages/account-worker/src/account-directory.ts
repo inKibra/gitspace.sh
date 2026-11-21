@@ -75,7 +75,7 @@ export class AccountDirectoryProjection {
       .map((row) => JSON.parse(row.value_json) as DirectoryPublication);
     const definitions: CloudWorkspaceDefinition[] = [];
     const operations: CloudProjectOperation[] = [];
-    const relations: Record<string, WorkspaceRelations> = {};
+    const relations: Record<string, WorkspaceRelations | null> = {};
     const projectRevisions: Record<string, number> = Object.fromEntries(visible.map((project) => [project.id, 0]));
     let machines: AccountDirectorySnapshot['machines'] = [];
     for (const source of sources) {
@@ -85,13 +85,15 @@ export class AccountDirectoryProjection {
         definitions.push(...source.workspaces.filter((workspace) => workspace.projectId === source.project.id));
         // Rows stored before `operations` existed decode without it.
         operations.push(...(source.operations ?? []));
-        // Rows stored before `relations` existed decode without it, until hydration reads their project again.
-        Object.assign(relations, source.relations);
+        // Rows stored before `relations` existed decode without it: their workspaces' relations are unknown until the
+        // directory reads the project again.
+        const stored: Readonly<Record<string, WorkspaceRelations>> | undefined = source.relations;
+        for (const workspace of source.workspaces) relations[workspace.id] = stored ? stored[workspace.id] ?? emptyRelations() : null;
       }
     }
     // Rows stored before `runtime` existed decode without it.
     const cloud = new Set<string>(sources.flatMap((source) => source.source === 'space' && source.runtime ? [source.runtime.workspaceId] : []));
-    const workspaces = definitions.map((workspace) => ({ ...workspace, cloudRuntime: cloud.has(workspace.id), relations: relations[workspace.id] ?? emptyRelations() }));
+    const workspaces = definitions.map((workspace) => ({ ...workspace, cloudRuntime: cloud.has(workspace.id), relations: relations[workspace.id] ?? null }));
     const bySpace = new Map(workspaces.map((workspace) => [workspace.id, workspace]));
     const byMachine = new Map(machines.map((machine) => [machine.id, machine]));
     const placements: AccountDirectorySnapshot['placements'] = [];

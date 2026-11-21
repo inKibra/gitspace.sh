@@ -2,6 +2,7 @@ import type { StackStatus } from '@gitspace/protocol';
 import type { AccountDirectorySnapshot } from '@gitspace/protocol/account-directory';
 import type { PullRequestState } from '@gitspace/protocol/automations-contract';
 import { accountLiveKey } from '@gitspace/protocol/live-notice';
+import { emptyRelations } from '@gitspace/protocol-workspace';
 import { useResultQuery } from 'result-rpc/react';
 import { createContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useLiveChanges } from '../live-notices.js';
@@ -46,11 +47,10 @@ export interface ProjectGraph {
 /** Project graphs by project id; empty outside the account frame. */
 export const ProjectGraphsContext = createContext<Readonly<Record<string, ProjectGraph>>>({});
 
-/** What the project view says of a workspace's branch, with the parent it was measured against. */
-type StackReading = Pick<GraphRelations, 'stackedOn' | 'position' | 'aheadOfParent'>;
-/** One project's slow reads: the project view's stack readings and the links; each null until read. */
+/** One project's slow reads: what the project view says of each workspace (its relations, and its branch's position
+ * and phase finding against the parent it was measured against), and the links; each null until read. */
 interface ProjectReading {
-  stack: Readonly<Record<string, StackReading>> | null;
+  stack: Readonly<Record<string, GraphRelations>> | null;
   pullRequests: Readonly<Record<string, readonly LinkedPullRequest[]>> | null;
 }
 
@@ -68,8 +68,8 @@ function ProjectGraphReader({ projectId, refresh, onRead, onRefreshed }: { proje
   useEventRefresh(refresh === 0 ? null : refresh, async () => {
     try { await view.refetch(); } finally { onRefreshed(projectId); }
   });
-  const stack = useMemo(() => viewValue ? Object.fromEntries(viewValue.workspaces.map((workspace): [string, StackReading] => [workspace.id, {
-    stackedOn: workspace.relations.stackedOn, position: workspace.stack.position, aheadOfParent: workspace.stack.findings.find(finding => finding.code === 'ahead-of-parent')?.message ?? null,
+  const stack = useMemo(() => viewValue ? Object.fromEntries(viewValue.workspaces.map((workspace): [string, GraphRelations] => [workspace.id, {
+    ...workspace.relations, position: workspace.stack.position, aheadOfParent: workspace.stack.findings.find(finding => finding.code === 'ahead-of-parent')?.message ?? null,
   }])) : null, [viewValue]);
   const pullRequests = useMemo(() => {
     if (!links) return null;
@@ -86,9 +86,11 @@ function ProjectGraphReader({ projectId, refresh, onRead, onRefreshed }: { proje
 }
 
 /** Keeps a graph for each listed project: its workspaces' relations from the account directory at once, and their stack
- * positions and links once `readers`, which the caller renders, read them in the background. A position the project
- * view measured against another parent than the directory's is not shown. `refresh` reads one project's view again
- * now, settling once the read ended (at once for a project not listed). */
+ * positions and links once `readers`, which the caller renders, read them in the background. Where the directory does
+ * not know a workspace's relations yet (a copy saved before it carried them, or an entry its project has not been read
+ * again for), the project view's are used once read. A position the project view measured against another parent than
+ * the graph's is not shown. `refresh` reads one project's view again now, settling once the read ended (at once for a
+ * project not listed). */
 export function useProjectGraphs(projects: readonly { id: string; baseBranch: string }[], workspaces: readonly Pick<AccountDirectorySnapshot['workspaces'][number], 'id' | 'projectId' | 'kind' | 'lifecycle' | 'relations'>[]): { graphs: Readonly<Record<string, ProjectGraph>>; readers: ReactNode; refresh(projectId: string): Promise<void> } {
   const [readings, setReadings] = useState<Readonly<Record<string, ProjectReading>>>({});
   const [requests, setRequests] = useState<Readonly<Record<string, number>>>({});
@@ -97,9 +99,10 @@ export function useProjectGraphs(projects: readonly { id: string; baseBranch: st
     const relations: Record<string, Record<string, GraphRelations>> = {};
     for (const workspace of workspaces) {
       if (workspace.kind !== 'worktree' || workspace.lifecycle === 'deleting') continue;
-      const reading = readings[workspace.projectId]?.stack?.[workspace.id];
-      const measured = reading?.stackedOn === workspace.relations.stackedOn ? reading : null;
-      (relations[workspace.projectId] ??= {})[workspace.id] = { ...workspace.relations, position: measured?.position ?? null, aheadOfParent: measured?.aheadOfParent ?? null };
+      const viewed = readings[workspace.projectId]?.stack?.[workspace.id];
+      const listed = workspace.relations ?? viewed ?? emptyRelations();
+      const measured = viewed?.stackedOn === listed.stackedOn ? viewed : null;
+      (relations[workspace.projectId] ??= {})[workspace.id] = { dependsOn: listed.dependsOn, relatedTo: listed.relatedTo, stackedOn: listed.stackedOn, position: measured?.position ?? null, aheadOfParent: measured?.aheadOfParent ?? null };
     }
     return Object.fromEntries(projects.map((project): [string, ProjectGraph] => [project.id, { baseBranch: project.baseBranch, relations: relations[project.id] ?? {}, pullRequests: readings[project.id]?.pullRequests ?? null }]));
   }, [projects, workspaces, readings]);
