@@ -2030,21 +2030,30 @@ export class CredentialVaultDO extends BudgetedDurableObject {
     });
   }
 
-  /** A Service's spending joins the account's usage by UTC day, profile, service (`ghost`, `decision`) and model: tokens
-   * and cost, no text. The rows of the `ghost_usage` table it replaces move in once, as `ghost`, their cached prompt
-   * tokens counted as input. */
+  /** A Service's spending joins the account's usage by UTC day, profile, service (`ghost`, `decision`), model and the
+   * workspace whose agent spent it ('' for the account's own): tokens and cost, no text. The rows of the `ghost_usage`
+   * table it replaces move in once, as `ghost`, their cached prompt tokens counted as input; rows recorded before
+   * usage named workspaces move in once as the account's own. */
   recordServiceUsage(raw: unknown): void {
     const usage = ServiceUsageSchema.parse(raw);
     const sql = this.ctx.storage.sql;
-    sql.exec('CREATE TABLE IF NOT EXISTS service_usage(day TEXT NOT NULL, profile_id TEXT NOT NULL, service TEXT NOT NULL, model TEXT NOT NULL, requests INTEGER NOT NULL, input INTEGER NOT NULL, output INTEGER NOT NULL, cost_usd REAL NOT NULL, PRIMARY KEY(day, profile_id, service, model))');
+    const create = 'CREATE TABLE IF NOT EXISTS service_usage(day TEXT NOT NULL, profile_id TEXT NOT NULL, service TEXT NOT NULL, model TEXT NOT NULL, workspace_id TEXT NOT NULL DEFAULT \'\', requests INTEGER NOT NULL, input INTEGER NOT NULL, output INTEGER NOT NULL, cost_usd REAL NOT NULL, PRIMARY KEY(day, profile_id, service, model, workspace_id))';
+    const existing = sql.exec<{ sql: string }>("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'service_usage'").toArray()[0];
+    if (existing && !existing.sql.includes('workspace_id')) this.ctx.storage.transactionSync(() => {
+      sql.exec('ALTER TABLE service_usage RENAME TO service_usage_unattributed');
+      sql.exec(create);
+      sql.exec('INSERT INTO service_usage(day, profile_id, service, model, requests, input, output, cost_usd) SELECT day, profile_id, service, model, requests, input, output, cost_usd FROM service_usage_unattributed');
+      sql.exec('DROP TABLE service_usage_unattributed');
+    });
+    else sql.exec(create);
     if (sql.exec("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ghost_usage'").toArray().length) this.ctx.storage.transactionSync(() => {
       sql.exec(`INSERT INTO service_usage(day, profile_id, service, model, requests, input, output, cost_usd)
         SELECT day, profile_id, 'ghost', model, requests, input + cache_read + cache_write, output, cost_usd FROM ghost_usage`);
       sql.exec('DROP TABLE ghost_usage');
     });
-    sql.exec(`INSERT INTO service_usage(day, profile_id, service, model, requests, input, output, cost_usd) VALUES(?,?,?,?,?,?,?,?)
-      ON CONFLICT(day, profile_id, service, model) DO UPDATE SET requests=requests+excluded.requests, input=input+excluded.input, output=output+excluded.output, cost_usd=cost_usd+excluded.cost_usd`,
-    new Date().toISOString().slice(0, 10), usage.profileId, usage.service, usage.model, usage.requests, usage.input, usage.output, usage.costUsd);
+    sql.exec(`INSERT INTO service_usage(day, profile_id, service, model, workspace_id, requests, input, output, cost_usd) VALUES(?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(day, profile_id, service, model, workspace_id) DO UPDATE SET requests=requests+excluded.requests, input=input+excluded.input, output=output+excluded.output, cost_usd=cost_usd+excluded.cost_usd`,
+    new Date().toISOString().slice(0, 10), usage.profileId, usage.service, usage.model, usage.workspaceId ?? '', usage.requests, usage.input, usage.output, usage.costUsd);
   }
 
   /** Each account's usage: a report or why its read failed. API keys report none, so they are not read. */

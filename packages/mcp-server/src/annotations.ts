@@ -631,6 +631,30 @@ export const reviewedAnnotations: Record<string, ToolAnnotation> = {
     "idempotentHint": true,
     "openWorldHint": true
   },
+  "chatter.volumes": {
+    "readOnlyHint": true,
+    "openWorldHint": false
+  },
+  "chatter.setVolume": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false
+  },
+  "chatter.setProjectMute": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false
+  },
+  "chatter.hearings": {
+    "readOnlyHint": true,
+    "openWorldHint": false
+  },
+  "chatter.digestPreview": {
+    "readOnlyHint": true,
+    "openWorldHint": false
+  },
   "skills.list": {
     "readOnlyHint": true,
     "openWorldHint": false

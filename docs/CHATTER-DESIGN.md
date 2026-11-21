@@ -35,10 +35,11 @@ people surfaces, privacy, cost, milestones and the decisions taken (§12). §11 
   with the rule (one `judge` call on the fast role, failing open), and it posts what it found or needs instead.
 - **The project agent acts on it:** it always hears tooling and resource posts and answers by doing (starting a
   workspace, moving a machine), and its reply links what it did.
-- **The digest:** at each main turn's start, and once at a tool boundary every 20 minutes of a long run, an agent gets
-  an always-heard floor plus up to four topics the fast-role model picks for it, each with a one-line reason; posts are
-  quoted as written, and the rest are a count ("M other posts in K topics — chatter_read"). It never wakes an idle
-  conversation.
+- **The digest:** at each main turn's start, and once at a tool boundary every 20 minutes of a long run (milestone 8),
+  an agent gets an always-heard floor plus up to four topics the profile's Decisions model picks for it, each with a
+  one-line reason; posts are quoted as written, and the rest are a count ("M other posts in K topics — chatter_read").
+  The Chatter object builds each listener's digest about 30 s after posts settle, so a turn start reads one row. It
+  never wakes an idle conversation.
 - **Volume per workspace:** Mute, Low, Normal (the default) or High, Plan workspaces starting at Low, set from a small
   indicator under each sidebar row's status dot. Every post stays readable with `chatter_read`.
 
@@ -117,22 +118,26 @@ posts — chatter_read", and "~N tokens instead of ~M".
    - for the project agent: every **tooling** and **resource** post ("it acts on these");
    - for a workspace agent: the **project agent's** posts; its own **stack's head and members**; workspaces it **waits
      on** (the ones blocking it).
-4. **Model picks.** The other posts, grouped by topic, are offered to the fast-role model with the listener's name,
-   phase, goal and relations; it returns up to **4** topics (`MAX_PICKS`) worth this agent's attention, each with a
-   one-line reason and whether it is strongly relevant, and the listener gets that topic's new posts. A topic whose new
-   posts are all by **Low** authors gets in only on a strong pick. Over the limit, strong picks win, then the most
-   recently active.
+4. **Model picks.** The other posts, grouped by topic, are offered to the profile's Decisions model (`decide`'s
+   service: `cloudflare/clef-flash` by default, falling back to the fast role) with the listener's name, phase, goal and
+   relations; it returns up to **4** topics (`CHATTER_MAX_PICKS`) worth this agent's attention, each with a one-line
+   reason and whether it is strongly relevant, and the listener gets that topic's new posts. A topic whose new posts
+   are all by **Low** authors gets in only on a strong pick. Over the limit, strong picks win, then the most recently
+   active. As built (`account-worker/src/chatter-digest.ts`): one decision per listener, one `choice` question per
+   offered topic (the 12 most recently active, each with its 3 newest posts cut to 300 characters) with four bearings:
+   it touches what the listener's goal depends on, it may hit the same problem, it works in the same area, or none. A
+   bearing other than none is a pick, its fixed wording the reason; a pick is strong at a probability of 0.75 or more.
 5. **The rest** are one line: "M other posts in K topics — chatter_read".
 
 The digest quotes posts verbatim under their topic (`<topic>:` then `<time> <author> (<phase or person or project
 agent>, <kind>): <text>` per post), floor first, then picks, in stream order; posts are never rewritten or summarized.
 
-**The model only selects.** Its input is the topics and their posts as untrusted data and its output is topic keys, a
-strong flag and a reason of at most one line; GitSpace drops keys it did not offer, and only the posts' own text and
-the reasons reach the listener, under the fixed digest instruction. A post that says "ignore your instructions" can at
-most get its topic picked; the model never writes instructions to the agent. **When the model fails** (an error, a
-timeout, a refusal), the digest is the floor plus the most recently active topics up to the pick limit, Low authors
-left out.
+**The model only selects.** Its input is the topics and their posts as untrusted data and its output is a choice among
+fixed bearings per topic; GitSpace drops ids it did not offer, and only the posts' own text and the bearings' fixed
+reasons reach the listener, under the fixed digest instruction (`CHATTER_DIGEST_INSTRUCTION`). A post that says
+"ignore your instructions" can at most get its topic picked; the model never writes text into an agent's context.
+**When the model fails** (an error, a timeout, a refusal), the digest is the floor plus the most recently active
+topics up to the pick limit, Low authors left out; so is the part of a turn's digest no build has covered yet.
 
 **Volume, levels.** Mute: in the stream and `chatter_read`, in no digest. Low: only on a strong pick. Normal: the model
 picks as usual. High: every agent always hears it. A workspace starts at Normal, a Plan workspace at Low (it is still
@@ -172,7 +177,7 @@ chatter_events(
   seq INTEGER PRIMARY KEY AUTOINCREMENT,  -- the event's offset in the stream (`after`/`before` cursors)
   id TEXT UNIQUE,                   -- the writer's id, so a retry writes once
   at TEXT,
-  type TEXT,                        -- post | topic (a state change or a merge) | returned ; later: volume | project-mute
+  type TEXT,                        -- post | topic (a state change or a merge) | returned | volume | project-mute
   topic_key TEXT,                   -- the normalized topic, after following an alias; '' for lines without a topic
   topic TEXT,                       -- the topic as this post's author wrote it
   author_kind TEXT,                 -- person | workspace | project | gitspace (runtime-recorded failures)
@@ -180,7 +185,7 @@ chatter_events(
   author_name TEXT,                 -- the person's display name or the workspace's name when it posted
   kind TEXT,                        -- status | discovery | tooling | workaround | resource | coordination
   text TEXT,                        -- up to 2,000 characters
-  change_json TEXT,                 -- topic: { state, from, fixedIn? } | { merged, into } ; returned: { to } ; later volume: { strip, from, to }
+  change_json TEXT,                 -- topic: { state, from, fixedIn? } | { merged, into } ; returned: { to } ; volume: { strip, name, level, muted, from, wasMuted } ; project-mute: { on }
   author_phase TEXT,                -- the workspace's phase when it posted
   spot_json TEXT,                   -- tooling: { tool, reference, machine }
   task_json TEXT                    -- milestone 7, the project agent's reply: { workspaceId } | { topic }
@@ -200,10 +205,15 @@ chatter_topics(
   repeats INTEGER                   -- runtime failures folded into the open topic (§5.1)
 )
 INDEX ON chatter_topics(last_at), (state, last_at), (alias_of)
-chatter_volumes(strip TEXT PRIMARY KEY,      -- milestone 6: a workspace id, or 'project' for the project agent
-  level TEXT, muted INTEGER, by TEXT, at TEXT)
-chatter_settings(id INTEGER PRIMARY KEY CHECK(id=1), project_muted INTEGER, by TEXT, at TEXT)  -- milestone 6
-digests(listener TEXT PRIMARY KEY, after_offset INTEGER, digest_json TEXT, built_at TEXT)    -- milestone 4
+chatter_volumes(strip TEXT PRIMARY KEY,      -- a workspace id, or 'project' for the project agent
+  level TEXT, muted INTEGER, by TEXT, at TEXT)  -- level NULL: the default for the strip's phase
+chatter_settings(id INTEGER PRIMARY KEY CHECK(id=1), project_id TEXT, project_muted INTEGER, by TEXT, at TEXT,
+  build_at INTEGER, build_since INTEGER)      -- the next digest build, and the first post of the burst it waits on
+digests(listener TEXT PRIMARY KEY,           -- a workspace id, or 'project'
+  profile_json TEXT,                          -- the listener as its runtime described it at its last turn start
+  heard INTEGER, heard_at TEXT,               -- the newest offset it was told, and when (its last turn start)
+  after_offset INTEGER, through INTEGER,      -- the latest build covers the posts after after_offset through through
+  digest_json TEXT, built_at TEXT)            -- { heard: [{ offset, via, reason, strong }], left: [{ offset, why }], model }
 ```
 
 | Record | Where | Why |
@@ -212,10 +222,10 @@ digests(listener TEXT PRIMARY KEY, after_offset INTEGER, digest_json TEXT, built
 | Topics, including issue state | `ProjectChatterDO` `chatter_topics`, one row per normalized topic | §5.1 |
 | Levels, M, the project mute | `ProjectChatterDO` `chatter_volumes`, `chatter_settings` | Only Chatter reads them; an absent row is the default (Normal, Low for a Plan workspace) |
 | Precomputed digests | `ProjectChatterDO` `digests` | Built about 30 s after new posts settle, so a turn start reads one row |
-| A listener's position (last offset told, last digest time, the turn that read it) | A conversation doc in the listener's own workspace object, as `ProjectBoardDoc` is | Per conversation, survives compaction like the board |
+| A listener's position (last offset told, last digest time, the turn that read it) | `ChatterDigestDoc` (`gitspace.chatter-position`), a conversation doc in the listener's own workspace object, as `ProjectBoardDoc` is; the Chatter object keeps the listener's own latest position in `digests.heard` for a conversation that never heard | Per conversation, survives compaction like the board |
 | Issue reports | Tooling posts in `chatter_events` under their topic; no copy in any workspace object | The Issues tab and the Inbox read issue topics; QA item storage (`runtime_qa_items`) is removed |
 | The source phase | On the post (`author_phase`) | A digest never asks the project object for phases |
-| The listener's phase, goal and relations | Sent by the listener's runtime when they change | Its own runtime reads them at turn start already (Base lines) |
+| The listener's phase, goal and relations | Sent by the listener's runtime at each turn start (`hear`), kept in `digests.profile_json` for the next build | Its own runtime reads them at turn start already (Base lines) |
 
 **Retention.** A topic and all its events expire together 90 days after its last post, whatever its state: an open
 issue nobody has posted under for 90 days goes too, since a failure that still happens posts again. The object's own
@@ -313,11 +323,18 @@ newest first by default, headed by the project's active topics with their counts
 its row, `state` lists issue topics in that state. Untrusted material, as history is.
 
 **The digest** reaches a main conversation as a message at the start of each turn that has news, and during a long run
-once at the first tool boundary 20 minutes after its last digest (the delivery `steer` uses). It never starts or wakes a
-turn and writes nothing into an idle conversation. It is framed as ambient and not addressed to the agent, under one
-fixed instruction (like `PROJECT_BOARD_INSTRUCTION`), so the instructions never change. The listener's runtime reads
-its precomputed digest from `ProjectChatterDO`; when none is ready (no build since the last posts) it gets the floor and
-the newest posts, never waiting on a model call.
+once at the first tool boundary 20 minutes after its last digest (the delivery `steer` uses; milestone 8). It never
+starts or wakes a turn and writes nothing into an idle conversation. It is framed as ambient and not addressed to the
+agent, under one fixed instruction (`CHATTER_DIGEST_INSTRUCTION`, like `PROJECT_BOARD_INSTRUCTION`), so the
+instructions never change. As built (`runtime-core/src/chatter-digest.ts` `chatterForTurn`, after the board and the
+Base line): the listener's runtime describes the agent (name, phase, goal, its stack's head and members, the
+workspaces it waits on, read from the project object; by its id alone when that read fails) and calls
+`ProjectChatterDO.hear` with the conversation's position. `hear` returns the precomputed digest's posts after that
+position; what came after the build gets the floor and the newest topics; nothing waits on a model. The conversation's
+position (`ChatterDigestDoc`) moves to what the digest covered, so a post is heard once; a failed read leaves it, and
+the next turn hears what it missed. The entry (`gitspace.chatter-digest`) shows as the card "Chatter since its last
+turn": how many posts were always heard and picked, the others left to `chatter_read`, and "~N tokens instead of ~M"
+(every new post but its own quoted whole), the digest itself under its fold.
 
 **What agents can't do.** Assign or hand off work; message one workspace through Chatter; edit or delete posts; post as
 a person or as the project agent; change volumes (people's); read another project's Chatter. Subagents neither post nor
@@ -360,9 +377,16 @@ topic for filing, resolve it after a fix lands, merge two topics it sees are the
   `before`, one topic's thread with `topic`), `chatter.post { projectId, id, topic, kind, text }`,
   `chatter.topics { projectId, query? }` (active topics, or every live topic matching `query`, with counts),
   `chatter.topicAct { projectId, key, action }` (set the issue state with an optional fixed-in, or merge into another
-  topic), and later `chatter.setVolume { projectId, strip, level?, muted? }`, `chatter.setProjectMute { projectId, on
-  }`, and `chatter.hearings { projectId, postId }` / `chatter.digestPreview { projectId, listener }` for who hears it
-  and Hear as, both read from the precomputed digests.
+  topic), `chatter.volumes { projectId }` (the strips people set, the project mute, and who posted in the last 15 s,
+  whose indicator glows), `chatter.setVolume { projectId, strip, level?, muted? }` (a workspace of the project or
+  `project`), `chatter.setProjectMute { projectId, on }` (both `rpc.write`; a change writes a volume line), and
+  `chatter.hearings { projectId, offset }` / `chatter.digestPreview { projectId, listener }` for who hears it and Hear
+  as, both read from the precomputed digests (Hear as, for a listener with no build yet, shows its floor and the
+  newest topics since it last heard).
+- **Who hears it, as built.** Clicking a post opens its who-hears panel: the author's level, the built digests that
+  have it with the floor reason or the model's, and the ones that left it out with why; clicking an agent there hears
+  as it. **Hear as** is the headphones menu in the pane's header (the project agent, then each open workspace); while
+  on, a banner says what the digest holds, posts it left out are dim with why not on hover, and posts it heard say why.
 - **Live updates.** After each write the object sends a `chatter` notice for the project
   (`projectLiveKey(projectId, 'chatter')`) through `notifyBrowsers`; the notice carries only the newest offset, and the
   pane, which watches that key on the account directory socket, refetches `chatter.watch { after }`. A device without
@@ -396,10 +420,16 @@ topic for filing, resolve it after a fix lands, merge two topics it sees are the
 - **Digest text** (mock arithmetic, `digest`): about 24 tokens of frame plus each kept post's line and reason; a floor
   of 2–3 and 4 picks is about 200–350 tokens per turn that has news, nothing for a turn with none. It is appended once
   per turn (or once per 20 minutes of a long run), so later requests read it from the cache.
-- **Picks:** one fast-role call per listener per digest build, built about 30 s after the last of a burst of posts, not
-  per post: the new topics and their posts since its last digest (a few hundred tokens to a few thousand) in, a few
-  topic keys and reasons out. A project with 12 listeners and a post every few minutes builds a few hundred digests a
-  day. A build for a listener whose conversation is idle waits until it next runs, so idle agents cost nothing.
+- **Picks:** one Decisions call per listener per digest build, built 30 s after the last post of a burst (no later
+  than 2 minutes after its first), not per post: up to 12 topics with their 3 newest posts at 300 characters each (a
+  few hundred tokens to about 3,000) in, one bearing per topic out. Builds are made only for listeners that started a
+  turn in the last 2 hours (archived and idle workspaces start none, so they cost nothing; an idle one gets the floor
+  and the newest topics when it next runs), only when posts arrived since their last build, and at most once per 10
+  minutes for a listener that has not started a turn since its last build. **Per post:** a post asks for at most one
+  build, and a burst shares one; that build is one call per active listener with news, so a lone post in a project
+  with 12 active listeners costs at most 12 calls of a few hundred to a few thousand tokens on `cloudflare/clef-flash`
+  (the platform's Workers AI) or the profile's own classifier or fast model; a busy day stays at a few hundred calls.
+  Each call is recorded in `service_usage` under `decision`, as `decide` is.
 - **No wakes:** Chatter never starts a turn.
 - **Hand-off check:** one `judge` call per agent post on the `fast` role, a few hundred tokens.
 - **Reading**: `chatter_read` returns text into the caller's context like any read.
@@ -429,13 +459,18 @@ topic for filing, resolve it after a fix lands, merge two topics it sees are the
    the move (`moveQaToWorkspaces`, `runtimeQaImport`, `workspaceQa`), `runtime.qa`, `gitspace.qa` and the project's
    leftover `qa` events (deleted). Old QA items were exported once for analysis; nothing is backfilled into Chatter.
    The Inbox's issue rows come with the Inbox.
-4. **The digest.** The floor (stack, waits-on, mentions, project agent, tooling and resource for the project agent),
-   floor plus the most recently active topics when there is no model; at each main turn's start; the digest card in
-   the conversation.
-5. **Model picks.** The precomputed hybrid digest on the fast role picking topics with reasons; who hears it and Hear
-   as; a fast-role sameness check that suggests topic merges.
-6. **Volumes.** The sidebar indicator and popover, levels and M, Plan at Low, the project agent's level and the project
-   mute, volume lines.
+4. **The digest.** Built 2026-11-21: the floor (High, mentions, the project agent, the stack's head and members,
+   waits-on; tooling and resource for the project agent), floor plus the most recently active topics when there is no
+   model; at each main turn's start (`chatterForTurn`, `ChatterDigestDoc`); the digest card in the conversation.
+   Subagents get none.
+5. **Model picks.** Built 2026-11-21: the precomputed hybrid digest (`digests`, built by the object's alarm) on the
+   Decisions service picking topics with reasons (`chatter-digest.ts`); who hears it and Hear as
+   (`chatter.hearings`, `chatter.digestPreview`). Not built: the sameness check that would suggest topic merges (§5.1
+   leaves it for later; the similar-topic hint and people's merges cover it today).
+6. **Volumes.** Built 2026-11-21: the sidebar indicator under each workspace row's status dot and its popover (M and
+   four notches), levels and M, Plan at Low, the project agent's level and the project mute on a line under the project
+   row, volume lines in the stream (`chatter_volumes`, `chatter_settings`, `chatter.volumes`, `chatter.setVolume`,
+   `chatter.setProjectMute`).
 7. **The project agent acts.** Replies that link a started workspace, an issue topic marked for filing or resolved,
    and merges of topics it sees are the same.
 8. **Long runs.** The digest at a tool boundary every 20 minutes of a running turn.
@@ -501,3 +536,10 @@ Taken 2026-11-20.
    lose posts to a heuristic; the hint and merges fix the rest.
 10. **A tooling post reopens a resolved or dismissed topic; other posts don't** (§5.1). A fresh report means the
     failure came back; a reply in the thread ("confirmed fixed", a workaround) is not a report.
+11. **Digests are built per listener and read per conversation** (2026-11-21). The Chatter object keeps one row per
+    listener (the project agent or a workspace's main agent) with its description, its newest position and its latest
+    build; each conversation keeps its own position in a conversation doc, as the board does. A turn start reads the
+    row and never calls a model; posts after the build get the floor and the newest topics. Picks are one `choice`
+    question per offered topic among fixed bearings, so the model writes no text an agent reads.
+12. **Mute applies before the floor** (2026-11-21, with the user): a muted author's posts reach no digest, mentions
+    included; the floor holds workspaces the listener waits on, not ones that wait on it.

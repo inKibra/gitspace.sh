@@ -151,3 +151,7 @@ body { overflow: hidden; }
 }
 @keyframes ghost-shimmer { from { background-position: 110% 0; } to { background-position: -110% 0; } }
 @media (prefers-reduced-motion: reduce) { .ghost-bob, .ghost-caret, .ghost-shimmer { animation: none; } }
+/* A Chatter volume indicator's glow when its workspace posts: lit at once, then gone over its duration. */
+.chatter-glow { animation-name: chatter-glow; animation-timing-function: cubic-bezier(0.4, 0, 0.8, 0.55); animation-fill-mode: forwards; }
+@keyframes chatter-glow { from { opacity: 1; } to { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .chatter-glow { animation: none; opacity: 0; } }

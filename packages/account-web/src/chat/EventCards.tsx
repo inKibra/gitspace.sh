@@ -169,10 +169,10 @@ export function EventCard({ item }: { item: InterruptionBlock }) {
   </OriginCard></div>;
 }
 
-const NOTICE_SOURCE_COLOR: Record<string, string> = { Stack: badgeColors.gray, Blocks: badgeColors.amber };
+const NOTICE_SOURCE_COLOR: Record<string, string> = { Stack: badgeColors.gray, Blocks: badgeColors.amber, 'Chatter since its last turn': badgeColors.blue };
 
-/** One of GitSpace's own notices to the agent (a machine, the stack, an invalid block, the workspace board), a quiet
- * line; the agent reads it on its next turn. A notice longer than its line folds the rest underneath. */
+/** One of GitSpace's own notices to the agent (a machine, the stack, an invalid block, the workspace board, a Chatter
+ * digest), a quiet line; the agent reads it on its next turn. A notice longer than its line folds the rest underneath. */
 export function NoticeRow({ item }: { item: InterruptionBlock }) {
   const text = item.detail ?? '';
   const color = NOTICE_SOURCE_COLOR[item.title]

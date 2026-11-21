@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ChatterKind, ChatterTopic, ChatterTopicAction } from '@gitspace/protocol/chatter-contract';
+import type { ChatterDigest, ChatterHearings, ChatterKind, ChatterTopic, ChatterTopicAction } from '@gitspace/protocol/chatter-contract';
 import { projectLiveKey } from '@gitspace/protocol/live-notice';
 import { liveTicks } from '../live-notices.js';
 import { rpcClient } from '../rpc-client.js';
@@ -104,5 +104,17 @@ export function useChatter(projectId: string) {
     return null;
   }, [projectId, update]);
 
-  return { state, active, error, loadOlder, post, act };
+  /** Hear as: one listener's digest (a workspace id, or `project` for the project agent); a string says why not. */
+  const hearAs = useCallback(async (listener: string): Promise<ChatterDigest | string> => {
+    const result = await rpcClient.chatter.digestPreview({ projectId, listener });
+    return result.status === 'ok' ? result.value : rpcErrorMessage(result.error, 'Hear as an agent');
+  }, [projectId]);
+
+  /** Who hears the post at `offset`; a string says why it could not be read. */
+  const hearings = useCallback(async (offset: number): Promise<ChatterHearings | string> => {
+    const result = await rpcClient.chatter.hearings({ projectId, offset });
+    return result.status === 'ok' ? result.value : rpcErrorMessage(result.error, 'Read who hears it');
+  }, [projectId]);
+
+  return { state, active, error, loadOlder, post, act, hearAs, hearings };
 }

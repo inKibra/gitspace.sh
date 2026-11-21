@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import type { AssistantMessage, Context, ToolCall } from '@earendil-works/pi-ai';
 import { createDeviceBinding, credentialProtocolBase64, DEVICE_SOCKET_PROTOCOL, signDeviceInvite, signRpcRequest } from '@gitspace/protocol';
-import { GHOST_LIFETIME_MS, GHOST_MAX_ROUNDS, GHOST_PATH, GhostServerMessageSchema, RuntimeIdentitySchema, RuntimeSnapshotSchema, type GhostServerMessage } from '@gitspace/protocol-runtime';
+import { GHOST_LIFETIME_MS, GHOST_MAX_ROUNDS, GHOST_PATH, GhostAskResultSchema, GhostServerMessageSchema, RuntimeIdentitySchema, RuntimeSnapshotSchema, type GhostServerMessage, type ServiceUsage } from '@gitspace/protocol-runtime';
 import { InspectorCloudArtifacts, readInspectorContext } from '../src/account-inspector-data.js';
 import { createDocumentMarkdown } from '../src/document-markdown.js';
 import { GhostSession, type GhostModel } from '../src/ghost-session.js';
@@ -38,10 +38,12 @@ async function fixture() {
   return { identity: RuntimeIdentitySchema.parse({ projectId, workspaceId }), device: { deviceId: binding.deviceId, key } };
 }
 
-/** Two conversations of the workspace: the main one the ghost reads, and another it must never reach. */
+/** Two conversations of the workspace: the main one the ghost reads, and another it must never reach; and the asking
+ * agent's own conversation, in another workspace. */
 const TRANSCRIPTS: Record<string, string[]> = {
   main: ['Where should exports go?', 'The archive bucket: uploads is public.', 'Exports now go to the archive bucket.'],
   other: ['The other conversation keeps a secret: the launch is on Friday.'],
+  asking: ['Which port does the proxy use?', 'Port 8443: 443 is taken by the gateway.'],
 };
 const RangeSchema = z.object({ from: z.number().optional(), before: z.number().optional(), newestFirst: z.boolean().optional() });
 
@@ -93,7 +95,7 @@ async function ghost(identity: z.infer<typeof RuntimeIdentitySchema>, model: Gho
   });
   const target = { ...identity, conversationId: 'main' };
   await session.start({
-    target, title: 'Main', entries: 3, archived: false, driveAsOf, profileId: 'default', model,
+    asker: 'person', target, title: 'Main', main: true, entries: 3, archived: false, driveAsOf, profileId: 'default', model,
     tools: createGhostTools({ env, target, driveAsOf, judge: async (_state, questions) => Object.fromEntries(Object.keys(questions).map(id => [id, 1])), documentMarkdown: createDocumentMarkdown(null, env.AI) }),
   });
   const answer = async (text: string) => {
@@ -238,7 +240,7 @@ describe('a ghost of one session', () => {
     await answer('Where do exports go?');
     expect(recorded).toEqual([{ service: 'ghost', profileId: 'default', model: 'openai/fake', requests: 2, input: 200, output: 40, costUsd: 0.006 }]);
     const rows = await runInDurableObject(env.CREDENTIALS.getByName(env.ACCOUNT_ID), (_instance, state) => state.storage.sql.exec('SELECT * FROM service_usage').toArray());
-    expect(rows).toEqual([{ day: new Date().toISOString().slice(0, 10), profile_id: 'default', service: 'ghost', model: 'openai/fake', requests: 2, input: 200, output: 40, cost_usd: 0.006 }]);
+    expect(rows).toEqual([{ day: new Date().toISOString().slice(0, 10), profile_id: 'default', service: 'ghost', model: 'openai/fake', workspace_id: '', requests: 2, input: 200, output: 40, cost_usd: 0.006 }]);
   });
 
   test('moves the account\'s ghost_usage rows into its service usage once, and adds decisions beside them', async () => {
@@ -255,8 +257,27 @@ describe('a ghost of one session', () => {
     }));
     expect(ghostTable).toBe(0);
     expect(rows).toEqual([
-      { day: '2026-11-01', profile_id: 'default', service: 'ghost', model: 'openai/fake', requests: 5, input: 140, output: 20, cost_usd: 0.5 },
-      { day: new Date().toISOString().slice(0, 10), profile_id: 'default', service: 'decision', model: 'cloudflare/clef-flash', requests: 2, input: 200, output: 0, cost_usd: 0.0002 },
+      { day: '2026-11-01', profile_id: 'default', service: 'ghost', model: 'openai/fake', workspace_id: '', requests: 5, input: 140, output: 20, cost_usd: 0.5 },
+      { day: new Date().toISOString().slice(0, 10), profile_id: 'default', service: 'decision', model: 'cloudflare/clef-flash', workspace_id: '', requests: 2, input: 200, output: 0, cost_usd: 0.0002 },
+    ]);
+  });
+
+  test('names the workspace whose agent spent it, and keeps rows recorded before as the account\'s own', async () => {
+    const vault = env.CREDENTIALS.getByName(env.ACCOUNT_ID);
+    await runInDurableObject(vault, (_instance, state) => {
+      state.storage.sql.exec('CREATE TABLE service_usage(day TEXT NOT NULL, profile_id TEXT NOT NULL, service TEXT NOT NULL, model TEXT NOT NULL, requests INTEGER NOT NULL, input INTEGER NOT NULL, output INTEGER NOT NULL, cost_usd REAL NOT NULL, PRIMARY KEY(day, profile_id, service, model))');
+      state.storage.sql.exec("INSERT INTO service_usage VALUES('2026-11-01', 'default', 'ghost', 'openai/fake', 1, 100, 20, 0.5)");
+    });
+    const spent: ServiceUsage = { service: 'ghost', profileId: 'default', model: 'openai/fake', requests: 1, input: 100, output: 20, costUsd: 0.25 };
+    await vault.recordServiceUsage({ ...spent, workspaceId: 'parser' });
+    await vault.recordServiceUsage({ ...spent, workspaceId: 'parser' });
+    await vault.recordServiceUsage(spent);
+    const rows = await runInDurableObject(vault, (_instance, state) => state.storage.sql.exec('SELECT day, workspace_id, requests, cost_usd FROM service_usage ORDER BY day, workspace_id').toArray());
+    const today = new Date().toISOString().slice(0, 10);
+    expect(rows).toEqual([
+      { day: '2026-11-01', workspace_id: '', requests: 1, cost_usd: 0.5 },
+      { day: today, workspace_id: '', requests: 1, cost_usd: 0.25 },
+      { day: today, workspace_id: 'parser', requests: 2, cost_usd: 0.5 },
     ]);
   });
 });
@@ -340,5 +361,129 @@ describe('a ghost\'s object', () => {
     await vi.waitFor(async () => expect(await runInDurableObject(object, async (_instance, state) => state.storage.getAlarm())).toBeNull());
     // The object holds no ghost any more: an alarm finds nothing to end.
     expect(await runInDurableObject(object, async (_instance, state) => (await state.storage.list()).size)).toBe(0);
+  });
+});
+
+describe('an agent\'s ghost (ghost_ask)', () => {
+  type Turn = Array<Record<string, unknown>>;
+  const created = { type: 'response.created', response: { id: 'resp', status: 'in_progress', output: [] } };
+  const done = { type: 'response.completed', response: { id: 'resp', status: 'completed', output: [], usage: { input_tokens: 100, output_tokens: 20, total_tokens: 120 } } };
+  /** One model turn calling tools, as OpenAI's Responses API streams it. */
+  const calls = (...called: Array<[string, Record<string, unknown>]>): Turn => [created, ...called.flatMap(([name, args], index) => {
+    const item = { type: 'function_call', id: `fc_${index}`, call_id: `call_${index}`, name };
+    return [{ type: 'response.output_item.added', output_index: index, item: { ...item, arguments: '' } }, { type: 'response.output_item.done', output_index: index, item: { ...item, arguments: JSON.stringify(args) } }];
+  }), done];
+  /** One model turn answering in text. */
+  const says = (text: string): Turn => [created,
+    { type: 'response.output_item.added', output_index: 0, item: { type: 'message', id: 'msg', role: 'assistant', status: 'in_progress', content: [] } },
+    { type: 'response.output_text.delta', output_index: 0, content_index: 0, item_id: 'msg', delta: text },
+    { type: 'response.output_item.done', output_index: 0, item: { type: 'message', id: 'msg', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text, annotations: [] }] } },
+    done];
+
+  /**
+   * The fixture's project with an asking workspace beside its workspace: the asker's conversation is `asking`, the
+   * other workspace's are `main` and `other`. The account's default profile answers on OpenAI, whose Responses API
+   * streams `turns` in order; every request body is kept.
+   */
+  async function asking(turns: Turn[]) {
+    const { identity } = await fixture();
+    const askerId = crypto.randomUUID();
+    const reads = transcripts();
+    vi.spyOn(SpaceAuthorityDO.prototype, 'runtimeSnapshot').mockImplementation(async raw => {
+      const { workspaceId } = RuntimeIdentitySchema.parse(raw);
+      const conversations = workspaceId === askerId ? [{ id: 'asking', parentId: null, title: 'Proxy', status: 'running', messages: [] }]
+        : [{ id: 'main', parentId: null, title: 'Exports', status: 'idle', messages: [] }, { id: 'other', parentId: null, title: 'Other', status: 'idle', messages: [] }];
+      return Response.json(RuntimeSnapshotSchema.parse({ version: 1, projectId: identity.projectId, workspaceId, cursor: 0, conversations, tasks: [], attachments: [], questions: [], documents: {} }));
+    });
+    const bodies: string[] = [];
+    network.use(
+      http.get('https://pi.dev/*', () => new HttpResponse(null, { status: 404 })),
+      http.get('https://api.openai.com/*', () => HttpResponse.json({ data: [] })),
+      http.post('https://api.openai.com/*', async ({ request }) => {
+        bodies.push(await request.text());
+        const turn = turns[Math.min(bodies.length, turns.length) - 1] ?? [];
+        return new HttpResponse(turn.map(event => `event: ${String(event.type)}\ndata: ${JSON.stringify(event)}\n\n`).join(''), { headers: { 'content-type': 'text/event-stream' } });
+      }),
+    );
+    const vault = env.CREDENTIALS.getByName(env.ACCOUNT_ID);
+    await vault.ensureInference();
+    await vault.putBrowserApiKey('default', 'openai', 'sk-ghost-key');
+    const asker = { projectId: identity.projectId, workspaceId: askerId, conversationId: 'asking' };
+    const ghost = (ghostId: string) => env.GHOSTS.getByName(`${env.ACCOUNT_ID}:ghost:${ghostId}`);
+    return { identity, askerId, asker, reads, bodies, ghost };
+  }
+  const answered = <T extends { status: string }>(reply: T) => {
+    if (reply.status !== 'answered' || !('result' in reply)) throw new Error(`Expected an answer, got ${JSON.stringify(reply)}`);
+    return GhostAskResultSchema.parse(reply.result);
+  };
+
+  test('answers about another workspace\'s session from that session only, cited as the asker reads it; the asking workspace\'s usage counts it', async () => {
+    const { identity, askerId, asker, reads, bodies, ghost } = await asking([
+      calls(['history_read', { fromEnd: true }], ['history_read', { conversationId: 'other', fromEnd: true }], ['history_read', { conversationId: 'asking', fromEnd: true }]),
+      says('Exports go to the archive bucket [#1-2], as the plan says [drive://workspace/plan.md:2-2].'),
+    ]);
+    const ghostId = crypto.randomUUID();
+
+    const result = answered(await ghost(ghostId).ask({ ghostId, asker, question: 'Where do exports go?', open: { workspaceId: identity.workspaceId, workspace: 'Exports work', conversationId: null, archived: false, profileId: 'default' } }));
+    expect(result).toMatchObject({
+      ghostId, session: { workspaceId: identity.workspaceId, workspace: 'Exports work', conversationId: 'main', title: 'Exports', main: true, archived: false },
+      answer: 'Exports go to the archive bucket [#1-2], as the plan says [drive://workspace/plan.md:2-2].',
+      cites: [
+        { kind: 'entry', from: 1, to: 2, ref: `history://${identity.workspaceId}/main#1-2` },
+        { kind: 'drive', url: 'drive://workspace/plan.md', lines: [2, 2], generation: null, ref: `drive://workspaces/${identity.workspaceId}/plan.md:2-2` },
+      ],
+      reads: [{ kind: 'read', from: 0, to: 2 }], draft: null, rounds: 1, truncated: false,
+      usage: { model: expect.stringMatching(/^openai\//u), requests: 2, input: 200, output: 40 },
+    });
+    // It read the main conversation of that workspace and nothing else: not its other conversation, not the asker's.
+    const read = bodies[1] ?? '';
+    expect(read).toContain('The archive bucket: uploads is public.');
+    expect(read).not.toContain('launch is on Friday');
+    expect(read).not.toContain('Port 8443');
+    expect(reads.mock.calls.every(([raw]) => z.object({ workspaceId: z.literal(identity.workspaceId), conversationId: z.literal('main') }).safeParse(raw).success)).toBe(true);
+    const rows = await runInDurableObject(env.CREDENTIALS.getByName(env.ACCOUNT_ID), (_instance, state) => state.storage.sql.exec("SELECT service, workspace_id, requests, input, output FROM service_usage WHERE service = 'ghost'").toArray());
+    expect(rows).toEqual([{ service: 'ghost', workspace_id: askerId, requests: 2, input: 200, output: 40 }]);
+  });
+
+  test('answers about the asker\'s own conversation', async () => {
+    const { askerId, asker, reads, bodies, ghost } = await asking([calls(['history_read', { fromEnd: true }]), says('The proxy uses port 8443, since the gateway holds 443 [#1].')]);
+    const ghostId = crypto.randomUUID();
+
+    const result = answered(await ghost(ghostId).ask({ ghostId, asker, question: 'Which port did we pick, and why?', open: { workspaceId: askerId, workspace: 'Proxy work', conversationId: 'asking', archived: false, profileId: 'default' } }));
+    expect(result).toMatchObject({ session: { workspaceId: askerId, conversationId: 'asking', title: 'Proxy', main: true }, cites: [{ kind: 'entry', from: 1, ref: `history://${askerId}/asking#1` }] });
+    expect(bodies[1]).toContain('Port 8443: 443 is taken by the gateway.');
+    expect(reads.mock.calls.every(([raw]) => z.object({ workspaceId: z.literal(askerId), conversationId: z.literal('asking') }).safeParse(raw).success)).toBe(true);
+  });
+
+  test('a follow-up reuses the ghost and its reads while it lives, only for the conversation that started it; once it fades a new one starts', async () => {
+    const { identity, asker, bodies, ghost } = await asking([
+      calls(['history_read', { fromEnd: true }]), says('The archive bucket [#2].'),
+      says('Because uploads is public [#1].'),
+      says('The archive bucket [#2].'),
+    ]);
+    const ghostId = crypto.randomUUID();
+    const open = { workspaceId: identity.workspaceId, workspace: 'Exports work', conversationId: null, archived: false, profileId: 'default' };
+    const object = ghost(ghostId);
+    const alarm = async () => runInDurableObject(object, async (_instance, state) => ({ keys: (await state.storage.list()).size, alarm: await state.storage.getAlarm() }));
+
+    const first = answered(await object.ask({ ghostId, asker, question: 'Where do exports go?', open }));
+    // Another conversation, even of the same workspace, can't reach it.
+    expect(await object.ask({ ghostId, asker: { ...asker, conversationId: 'elsewhere' }, question: 'Tell me too', open: null })).toEqual({ status: 'faded' });
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(Date.now() + 60_000);
+    const again = answered(await object.ask({ ghostId, asker, question: 'Why there?', open: null }));
+    expect(again).toMatchObject({ ghostId, answer: 'Because uploads is public [#1].', reads: [], rounds: 0 });
+    // The follow-up carried the first question and what the ghost read for it; its life moved ten minutes on.
+    expect(bodies).toHaveLength(3);
+    expect(bodies[2]).toContain('Where do exports go?');
+    expect(bodies[2]).toContain('The archive bucket: uploads is public.');
+    expect(Date.parse(again.expiresAt)).toBeGreaterThan(Date.parse(first.expiresAt));
+    expect(await alarm()).toEqual({ keys: 0, alarm: Date.parse(again.expiresAt) });
+
+    expect(await runDurableObjectAlarm(object)).toBe(true);
+    expect(await object.ask({ ghostId, asker, question: 'Still there?', open: null })).toEqual({ status: 'faded' });
+    expect(await alarm()).toEqual({ keys: 0, alarm: null });
+    const fresh = crypto.randomUUID();
+    expect(answered(await ghost(fresh).ask({ ghostId: fresh, asker, question: 'Where do exports go?', open }))).toMatchObject({ ghostId: fresh, answer: 'The archive bucket [#2].' });
   });
 });

@@ -27,6 +27,7 @@ import { MODEL_ROLE_LABELS, type ModelRoleSelector } from '@gitspace/protocol/in
 import { fitRequestImages, imageLimits, SUBAGENT_REQUEST_IMAGE_BYTES, SUBAGENT_REQUEST_IMAGES } from './inference/image-limits.js';
 import { boardAfterCompaction, boardForTurn, PROJECT_BOARD_INSTRUCTION, ProjectBoardDoc, STACK_BOARD_INSTRUCTION, type TurnBoard } from './project-board.js';
 import { baseAfterCompaction, baseForTurn, WORKSPACE_BASE_INSTRUCTION } from './workspace-base.js';
+import { CHATTER_DIGEST_INSTRUCTION, chatterForTurn } from './chatter-digest.js';
 import { messageAttachments, withAttachmentRenditions, type AttachmentRendition } from './inference/attachments.js';
 import type { ChatAttachment } from '@gitspace/protocol-runtime/chat-attachments';
 /** `role` is the profile role the model came from, when it came from one. `withoutTools` are the tools the profile's
@@ -180,7 +181,7 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
     const child = (await input.read.snapshot(AgentDefinitionContextDoc, input.conversationId, context))?.child;
     const extra = await options.tools.instructions(String(input.conversationId), context);
     const heads = !child && stackBoard !== undefined && ((await input.read.snapshot(ProjectBoardDoc, input.conversationId, context))?.rows.length ?? 0) > 0;
-    return [workspace?.instructions, !child ? workspace?.goal : '', !child && workspace?.phase === 'plan' ? 'This workspace is in plan mode: in general, use it for planning rather than coding.' : '', extra, !child && projectBoard ? PROJECT_BOARD_INSTRUCTION : '', heads ? STACK_BOARD_INSTRUCTION : '', !child && options.tools.workspaceBase ? WORKSPACE_BASE_INSTRUCTION : ''].filter(Boolean).join('\n\n');
+    return [workspace?.instructions, !child ? workspace?.goal : '', !child && workspace?.phase === 'plan' ? 'This workspace is in plan mode: in general, use it for planning rather than coding.' : '', extra, !child && projectBoard ? PROJECT_BOARD_INSTRUCTION : '', heads ? STACK_BOARD_INSTRUCTION : '', !child && options.tools.workspaceBase ? WORKSPACE_BASE_INSTRUCTION : '', !child && options.tools.chatterDigest ? CHATTER_DIGEST_INSTRUCTION : ''].filter(Boolean).join('\n\n');
   } }], hooks: [hook(GenerationTask, { async beforeRequest(input, runtime, context) {
     const signal = context.abortSignal;
     if (!signal) throw new Error('Generation hook requires an invocation abort signal');
@@ -235,11 +236,14 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
       if (fitted !== request) return { messages: fitted.messages };
     }
     // The project agent's turn starts with its workspace board; a workspace agent's with its stack board while it heads
-    // a stack, then a Base line when its base changed; appended after everything earlier requests sent.
+    // a stack, then a Base line when its base changed; then the Chatter digest; appended after everything earlier
+    // requests sent. Subagents get none of them.
     const turn = !child && live?.run ? String(live.run.taskId) : null;
+    const chatter = options.tools.chatterDigest;
     const lines = turn === null ? [] : [
       board ? await boardForTurn(harness, runtime.conversationId, turn, input.messages, board, context) : null,
       options.tools.workspaceBase ? await baseForTurn(harness, runtime.conversationId, turn, options.tools.workspaceBase, context) : null,
+      chatter ? await chatterForTurn(harness, runtime.conversationId, turn, chatter, async () => await runtime.snapshot(WorkspaceDoc, context), context) : null,
     ].filter(line => line !== null);
     if (lines.length) return { messages: [...outgoing, ...lines] };
     return described || lean || attached || repaired ? { messages: outgoing } : undefined;

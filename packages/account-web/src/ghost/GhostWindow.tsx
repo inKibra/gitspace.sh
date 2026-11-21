@@ -6,10 +6,10 @@ import { GHOST_LIFETIME_MS, GHOST_WARN_MS, type GhostCite, type GhostRead } from
 import { ArrowUp, BookOpen01, Check, Copy01, File02, Hourglass03, Lock01, SearchSm, XClose } from '@untitledui/icons';
 import { AnimatePresence, motion } from 'framer-motion';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { AMBER, CiteChip, GHOST, GhostGlyph, Inline } from './ghost-parts.js';
+import { AMBER, CiteChip, GHOST, GhostGlyph, Inline, readLabel } from './ghost-parts.js';
 import {
   askGhost, citeGhost, closeGhost, composeGhostDraft, dismissGhost, ghostBusy, keepGhost, setGhostInput, summonGhost, useGhost,
-  type Ghost, type GhostAnswer, type GhostReadLine,
+  type Ghost, type GhostAnswer,
 } from './ghost-store.js';
 
 const ICON = { width: 14, height: 14, strokeWidth: 1.75 };
@@ -22,13 +22,6 @@ function clock(ms: number): string {
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 }
 const time = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-
-function readLabel(line: GhostReadLine): string {
-  const { read } = line;
-  if (read.kind === 'search') return `searched “${read.query}”${read.hits === null ? '' : ` · ${read.hits} ${read.hits === 1 ? 'hit' : 'hits'}`}`;
-  if (read.kind === 'read') return read.from === null ? 'reading the transcript' : read.from === read.to ? `read entry ${read.from}` : `read transcript ${read.from}–${read.to}`;
-  return `read ${read.url}`;
-}
 
 function HeaderButton({ label, onClick, children }: { label: string; onClick(): void; children: ReactNode }) {
   return <Tooltip content={label} side="top">
@@ -102,7 +95,7 @@ function AnswerView({ answer, ghost, onCite, onOpenWorkspace }: { answer: GhostA
         const Icon = READ_ICON[line.read.kind];
         return <motion.li key={line.index} initial={{ opacity: 0, x: -4 }} animate={{ opacity: 1, x: 0 }} className="flex min-w-0 items-center gap-1.5" title={line.failed ?? undefined}>
           <Icon width={11} height={11} strokeWidth={1.75} className="shrink-0" />
-          <span className={`min-w-0 truncate ${line.done ? line.failed ? 'line-through opacity-70' : '' : 'ghost-shimmer'}`}>{readLabel(line)}</span>
+          <span className={`min-w-0 truncate ${line.done ? line.failed ? 'line-through opacity-70' : '' : 'ghost-shimmer'}`}>{readLabel(line.read)}</span>
           {line.done && !line.failed ? <Check width={10} height={10} strokeWidth={2.25} className="shrink-0 opacity-50" /> : null}
         </motion.li>;
       })}

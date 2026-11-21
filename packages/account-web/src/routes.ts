@@ -91,4 +91,13 @@ export function navigateProductUrl(url: URL, mode: 'push' | 'replace' = 'push'):
   window.dispatchEvent(new PopStateEvent('popstate'));
 }
 
+/** Shows a project's agent view: one of its workspaces, or the project agent's when `workspaceId` is null. */
+export function selectInspection(projectId: string, workspaceId: string | null): void {
+  const url = new URL(window.location.href);
+  url.searchParams.set('project', projectId);
+  if (workspaceId) url.searchParams.set('workspace', workspaceId);
+  else url.searchParams.delete('workspace');
+  navigateProductUrl(setProductRoute(url, 'agent'));
+}
+
 export const ACCOUNT_DIRECTORY_CHANGED = 'gitspace:account-directory-changed';

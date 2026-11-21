@@ -204,8 +204,138 @@ export const ChatterReturnedLineCodec = wire.object({
 });
 export type ChatterReturnedLine = InputOf<typeof ChatterReturnedLineCodec>;
 
-export const ChatterEventCodec = wire.union([ChatterPostCodec, ChatterTopicLineCodec, ChatterReturnedLineCodec]);
+/** The levels of a Chatter volume strip, quietest first (docs/CHATTER-DESIGN.md §3): Mute (its posts reach no digest),
+ * Low (only on a strong pick), Normal (the model picks as usual), High (every agent always hears it). */
+export const CHATTER_LEVELS = ['mute', 'low', 'normal', 'high'] as const;
+export type ChatterLevel = typeof CHATTER_LEVELS[number];
+/** The strip of the project agent; every other strip is a workspace id. */
+export const CHATTER_PROJECT_STRIP = 'project';
+/** Topics the model may add to one digest beyond its floor. */
+export const CHATTER_MAX_PICKS = 4;
+
+/** A strip without a level a person set: Low for a Plan workspace (it is still guessing), else Normal. */
+export function defaultChatterLevel(phase: string | null): ChatterLevel {
+  return phase === 'plan' ? 'low' : 'normal';
+}
+
+/** A person set a strip's volume: `strip` is a workspace id or `project` (the project agent), `name` the strip's name
+ * then; `level` is the fader's notch and `muted` its M, `from` and `wasMuted` what they were. It belongs to no topic. */
+export const ChatterVolumeLineCodec = wire.object({
+  type: wire.literal('volume'),
+  offset: wire.integer({ min: 1 }),
+  id: wire.string,
+  at: wire.date,
+  topicKey: wire.literal(''),
+  author: ChatterAuthorCodec,
+  strip: wire.string,
+  name: wire.string,
+  level: wire.enum(CHATTER_LEVELS),
+  muted: wire.boolean,
+  from: wire.enum(CHATTER_LEVELS),
+  wasMuted: wire.boolean,
+});
+export type ChatterVolumeLine = InputOf<typeof ChatterVolumeLineCodec>;
+
+/** A person muted (`on`) or unmuted Chatter for the project: while muted, no agent gets a digest. No topic. */
+export const ChatterProjectMuteLineCodec = wire.object({
+  type: wire.literal('project-mute'),
+  offset: wire.integer({ min: 1 }),
+  id: wire.string,
+  at: wire.date,
+  topicKey: wire.literal(''),
+  author: ChatterAuthorCodec,
+  on: wire.boolean,
+});
+export type ChatterProjectMuteLine = InputOf<typeof ChatterProjectMuteLineCodec>;
+
+export const ChatterEventCodec = wire.union([ChatterPostCodec, ChatterTopicLineCodec, ChatterReturnedLineCodec, ChatterVolumeLineCodec, ChatterProjectMuteLineCodec]);
 export type ChatterEvent = InputOf<typeof ChatterEventCodec>;
+
+/** One strip a person set: its notch (null: the default for its phase), its M, and who set it when. */
+export const ChatterStripCodec = wire.object({ strip: wire.string, level: wire.nullable(wire.enum(CHATTER_LEVELS)), muted: wire.boolean, by: wire.string, at: wire.date });
+export type ChatterStrip = InputOf<typeof ChatterStripCodec>;
+
+/** A project's volumes, as the sidebar reads them: the strips people set (an absent strip is at its default), the
+ * project mute (null: never set), and each workspace or project agent that posted in the last few seconds (its
+ * indicator glows), by strip. */
+export const ChatterVolumesCodec = wire.object({
+  strips: wire.array(ChatterStripCodec),
+  projectMuted: wire.nullable(wire.object({ on: wire.boolean, by: wire.string, at: wire.date })),
+  recent: wire.array(wire.object({ strip: wire.string, at: wire.date })),
+});
+export type ChatterVolumes = InputOf<typeof ChatterVolumesCodec>;
+
+/** Why a post reached a digest: always heard (`floor`, with the floor's reason), or its topic picked by the model with a
+ * one-line reason, `strong` when the model was sure. */
+export const ChatterHeardCodec = wire.object({ offset: wire.integer({ min: 1 }), via: wire.enum(['floor', 'pick']), reason: wire.string, strong: wire.boolean });
+export type ChatterHeard = InputOf<typeof ChatterHeardCodec>;
+/** Why a post did not reach a digest. */
+export const ChatterLeftCodec = wire.object({ offset: wire.integer({ min: 1 }), why: wire.string });
+export type ChatterLeft = InputOf<typeof ChatterLeftCodec>;
+
+/** One listener's digest of the posts after `after` through `through` (docs/CHATTER-DESIGN.md §3): the posts it hears
+ * and why, and the others with why not (its own posts are in neither). `builtAt` is when the Chatter object built it
+ * (null: made without a build, the floor and the newest topics); `model` is the Decisions model that picked (null when
+ * none did); `muted`: Chatter is muted for the project, so it hears nothing. */
+export const ChatterDigestCodec = wire.object({
+  listener: wire.string,
+  name: wire.string,
+  after: wire.integer({ min: 0 }),
+  through: wire.integer({ min: 0 }),
+  builtAt: wire.nullable(wire.date),
+  model: wire.nullable(wire.string),
+  muted: wire.boolean,
+  heard: wire.array(ChatterHeardCodec),
+  left: wire.array(ChatterLeftCodec),
+});
+export type ChatterDigest = InputOf<typeof ChatterDigestCodec>;
+
+/** Who hears one post, from the digests built over it: the author's level (null for a person, who has no strip), each
+ * listener whose digest has it with why, and each whose digest left it out with why not. */
+export const ChatterHearingsCodec = wire.object({
+  level: wire.nullable(wire.enum(CHATTER_LEVELS)),
+  heard: wire.array(wire.object({ listener: wire.string, name: wire.string, via: wire.enum(['floor', 'pick']), reason: wire.string, strong: wire.boolean })),
+  missed: wire.array(wire.object({ listener: wire.string, name: wire.string, why: wire.string })),
+});
+export type ChatterHearings = InputOf<typeof ChatterHearingsCodec>;
+
+/** How a post's author reads in a digest line: a workspace's phase, a person, the project agent, or GitSpace. */
+function digestAuthor(post: ChatterPost): string {
+  if (post.author.kind === 'person') return `${post.author.name} (person, ${post.kind})`;
+  if (post.author.kind === 'project') return `the project agent (${post.kind})`;
+  if (post.author.kind === 'gitspace') return `GitSpace for ${post.author.name} (${post.kind})`;
+  return `${post.author.name} (${post.phase ?? 'workspace'}, ${post.kind})`;
+}
+
+/**
+ * The digest a turn carries (docs/CHATTER-DESIGN.md §3): the posts always heard, then the picked topics, each under its
+ * topic in stream order and quoted as written (`<topic>:` then `<time> <author> (<phase or person or project agent>,
+ * <kind>): <text>`), a floor post with its reason and a picked topic with the model's; then the rest as one count. Null
+ * when there is nothing to say.
+ */
+export function chatterDigestText(input: { entries: readonly { post: ChatterPost; heard: ChatterHeard }[]; others: number; otherTopics: number }): string | null {
+  if (input.entries.length === 0 && input.others === 0) return null;
+  const section = (title: string, entries: readonly { post: ChatterPost; heard: ChatterHeard }[]): string[] => {
+    if (entries.length === 0) return [];
+    const topics = new Map<string, { post: ChatterPost; heard: ChatterHeard }[]>();
+    for (const entry of [...entries].sort((left, right) => left.post.offset - right.post.offset)) topics.set(entry.post.topicKey, [...topics.get(entry.post.topicKey) ?? [], entry]);
+    const lines = [title];
+    for (const posts of topics.values()) {
+      const [first] = posts;
+      if (!first) continue;
+      lines.push(first.heard.via === 'pick' ? `${first.post.topic}: (picked: ${first.heard.reason})` : `${first.post.topic}:`);
+      for (const { post, heard } of posts) lines.push(`  ${post.at.toISOString().slice(11, 16)} ${digestAuthor(post)}: ${post.text}${heard.via === 'floor' ? ` [${heard.reason}]` : ''}`);
+    }
+    return lines;
+  };
+  const rest = input.others === 0 ? [] : [`${input.others} other ${input.others === 1 ? 'post' : 'posts'} in ${input.otherTopics} ${input.otherTopics === 1 ? 'topic' : 'topics'} — chatter_read`];
+  return [
+    'Chatter since your last turn (times UTC):',
+    ...section('Always heard', input.entries.filter(entry => entry.heard.via === 'floor')),
+    ...section('Picked for you', input.entries.filter(entry => entry.heard.via === 'pick')),
+    ...rest,
+  ].join('\n');
+}
 
 /** A topic filed with GitSpace or shared as a GitHub issue draft: when, by whom, and where to. */
 export const ChatterFiledSchema = z.object({ at: z.iso.datetime(), by: z.string(), target: z.enum(['gitspace', 'repository']) }).strict();

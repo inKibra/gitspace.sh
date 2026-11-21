@@ -42,11 +42,11 @@ export interface GroupCall {
 
 export type ToolRun<T> = { tools: false; entry: T } | { tools: true; entries: T[] };
 
-/** Custom messages the runtime records as calls, the legacy `todo` call, calls whose takeover, secure-input or
- * lifecycle approval card shows in their place, and calls an MCP server paused for input (their cards follow them) stay
- * rows of their own. */
+/** Custom messages the runtime records as calls, the legacy `todo` call, `ghost_ask` calls (their question and answer
+ * show as a card), calls whose takeover, secure-input or lifecycle approval card shows in their place, and calls an MCP
+ * server paused for input (their cards follow them) stay rows of their own. */
 function groupable(item: TranscriptItem, cards: QuestionCards | null): boolean {
-  if (item.type !== 'tool-call' || item.tool === 'todo' || item.id.includes(':custom:')) return false;
+  if (item.type !== 'tool-call' || item.tool === 'todo' || item.tool === 'ghost_ask' || item.id.includes(':custom:')) return false;
   if (cards?.questions.some((question) => question.kind === 'mcp-elicitation' && question.mcpElicitation?.callId === item.toolCallId)) return false;
   if (item.tool === 'ask_takeover') return !cards?.questions.some((question) => question.kind === 'takeover' && question.takeover?.callId === item.toolCallId);
   if (item.tool === 'ask_secure_input') return !cards?.questions.some((question) => question.kind === 'secure-input' && question.secureInput?.callId === item.toolCallId);

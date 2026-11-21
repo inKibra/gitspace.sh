@@ -48,8 +48,8 @@ const events = [post(1, 'bun test hang', 'bun test never exits.', 'tooling'), po
 async function render(props: Partial<ChatterPaneProps> = {}) {
   const onPost = vi.fn<ChatterPaneProps['onPost']>(async input => ({ status: 'ok', topic: topic(input.topic.toLowerCase(), input.topic, 1), similar: null }));
   const all: ChatterPaneProps = {
-    projectName: 'demo', workspaceCount: 3, workspaceId: 'ws-1', state: mergeChatter(EMPTY_CHATTER, events, topics, { cursor: 4 }), active: topics, error: null,
-    onPost, onAct: vi.fn(async () => null), onLoadOlder: vi.fn(async () => undefined), ...props,
+    projectName: 'demo', workspaceCount: 3, workspaceId: 'ws-1', workspaces: [{ id: 'ws-2', name: 'Bo' }], state: mergeChatter(EMPTY_CHATTER, events, topics, { cursor: 4 }), active: topics, error: null,
+    onPost, onAct: vi.fn(async () => null), onLoadOlder: vi.fn(async () => undefined), onHearAs: vi.fn(async () => 'unread'), onHearings: vi.fn(async () => 'unread'), ...props,
   };
   await act(() => root.render(<TooltipProvider><ChatterPane {...all} /></TooltipProvider>));
   return all;
@@ -98,6 +98,35 @@ it('shows a returned post on its own between the topics, in order, and not under
   await act(() => [...document.querySelectorAll('button')].find(element => element.textContent?.includes('workaround'))!.click());
   expect(document.querySelector('[data-returned]')).toBeNull();
   expect([...document.querySelectorAll<HTMLElement>('[data-topic]')].map(element => element.dataset.topic)).toEqual(['sqlite 2 mb cap']);
+});
+
+it('shows who hears a post on click, and hearing as an agent dims what its digest left out and says why it heard the rest', async () => {
+  const onHearings = vi.fn<ChatterPaneProps['onHearings']>(async () => ({ level: null, heard: [{ listener: 'ws-2', name: 'Bo', via: 'pick', reason: 'it may hit the same problem', strong: true }], missed: [{ listener: 'project', name: 'the project agent', why: 'the model passed it over' }] }));
+  const onHearAs = vi.fn<ChatterPaneProps['onHearAs']>(async () => ({
+    listener: 'ws-2', name: 'Bo', after: 0, through: 4, builtAt: at, model: 'cloudflare/clef-flash', muted: false,
+    heard: [{ offset: 2, via: 'pick', reason: 'it may hit the same problem', strong: true }, { offset: 4, via: 'floor', reason: 'mentions it', strong: false }],
+    left: [{ offset: 1, why: 'its author is muted' }, { offset: 3, why: 'its author is muted' }],
+  }));
+  await open({ onHearings, onHearAs });
+  await act(() => document.querySelector<HTMLElement>('[data-post="post-2"] [role="button"]')!.click());
+  expect(onHearings).toHaveBeenCalledWith(2);
+  const panel = document.querySelector<HTMLElement>('[data-who-hears="2"]')!;
+  expect(panel.textContent).toContain('Ada is a person: no strip, heard as Normal.');
+  expect(panel.textContent).toContain('In 1 digest');
+  expect(panel.textContent).toContain('the project agentthe model passed it over');
+  await act(() => [...panel.querySelectorAll('button')].find(element => element.textContent?.startsWith('Bo'))!.click());
+  expect(onHearAs).toHaveBeenCalledWith('ws-2');
+  expect(document.querySelector('[data-hearing="ws-2"]')!.textContent).toContain('Hearing as Bo: 1 always heard, 1 topic picked by the model');
+  expect(Object.fromEntries([...document.querySelectorAll<HTMLElement>('[data-post]')].map(element => [element.dataset.post, element.dataset.heard]))).toEqual({ 'post-1': 'no', 'post-2': 'pick', 'post-3': 'no', 'post-4': 'floor' });
+  expect(document.querySelector('[data-post="post-1"]')!.getAttribute('title')).toBe('its author is muted');
+  expect(document.querySelector('[data-post="post-4"] [data-reason]')!.textContent).toBe('always heard · mentions it');
+});
+
+it('shows volume changes and the project mute as lines under no topic', async () => {
+  const volume: ChatterEvent = { type: 'volume', offset: 5, id: 'volume-5', at, topicKey: '', author: ada, strip: 'ws-2', name: 'Bo', level: 'high', muted: false, from: 'normal', wasMuted: false };
+  const mute: ChatterEvent = { type: 'project-mute', offset: 6, id: 'mute-6', at, topicKey: '', author: ada, on: true };
+  await open({ state: mergeChatter(EMPTY_CHATTER, [...events, volume, mute], topics, { cursor: 6 }) });
+  expect([...document.querySelectorAll<HTMLElement>('[data-volume-line]')].map(element => element.textContent?.replace(/\d{1,2}:\d{2}.*$/u, ''))).toEqual(['Ada set Bo to High (was Normal)', 'Ada muted Chatter for the project: no agent gets a digest']);
 });
 
 it('suggests a topic from the text, autocompletes active topics, and names a similar one', async () => {

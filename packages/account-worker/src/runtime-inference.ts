@@ -257,6 +257,10 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
     /** The `decide` tool: a decision's answers, the model that gave them, what they cost, and why the fast model
      * answered when it did. */
     decide,
+    /** The inference profile `conversationId`'s admitted run uses: an agent's ghost answers on it (`ghost_ask`). */
+    async profileId(conversationId: string, signal?: AbortSignal): Promise<string> {
+      return (signal ? scopes.get(signal)?.admission ?? await active(conversationId) : await active(conversationId)).profile.id;
+    },
     /** Codemode's `completion` and `judge`: `judge` is a decision's answers alone. */
     async modelHelper(input: RuntimeModelHelperInput) {
       if (input.operation === 'judge') return (await decide(input)).answers;

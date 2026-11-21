@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { RuntimeContentSchema, RuntimeIdentitySchema, RuntimeJsonSchema, RuntimeMachineIdSchema } from './base.js';
+import { GHOST_QUESTION_MAX } from './ghost.js';
 import { RuntimeJobHandleSchema } from './execution-contracts.js';
 import { RuntimeDispatchSelectionSchema, RuntimeMachineNeedsSchema } from './scheduling.js';
 import { LifecycleRunRequestSchema, LifecycleMutationSchema, ServiceTokenRequestSchema } from '@gitspace/protocol-environment';
@@ -105,7 +106,7 @@ export const RuntimeAgentsArgumentsSchema = z.union([
   RuntimeChildAgentsArgumentsSchema,
 ]);
 export function runtimeOperationIsReadOnly(name: string, args: z.infer<typeof RuntimeJsonSchema>): boolean {
-  if (['read', 'grep', 'code_search', 'find', 'web_search', 'web_fetch', 'history_search', 'history_read', 'chatter_read', 'ast_grep', 'mcp_discover', 'workspace_status', 'wait', 'blocks', 'decide'].includes(name)) return true;
+  if (['read', 'grep', 'code_search', 'find', 'web_search', 'web_fetch', 'history_search', 'history_read', 'chatter_read', 'ghost_ask', 'ast_grep', 'mcp_discover', 'workspace_status', 'wait', 'blocks', 'decide'].includes(name)) return true;
   if (!args || typeof args !== 'object' || Array.isArray(args)) return false;
   if (['machines', 'agents', 'bash', 'proc', 'sync_machine'].includes(name)) return ['list', 'status', 'describe', 'logs', 'wait', 'diff'].includes(String(args.op));
   if (name === 'sync') return ['status', 'diff', 'backups'].includes(String(args.method));
@@ -225,6 +226,16 @@ export const RuntimeChatterReadArgumentsSchema = z.object({
   limit: z.number().int().min(1).max(100).optional().describe('Posts to return, newest first; 30 by default, at most 100.'),
 }).strict();
 export type RuntimeChatterReadArguments = z.infer<typeof RuntimeChatterReadArgumentsSchema>;
+/** `ghost_ask` (docs/GHOSTS-DESIGN.md §5.1): a new ghost of one session of the project (this conversation when both ids
+ * are left out; a workspace's main conversation when only `conversationId` is), or with `ghostId` alone a follow-up to a
+ * live ghost this conversation started. */
+export const RuntimeGhostAskArgumentsSchema = z.object({
+  question: z.string().trim().min(1).max(GHOST_QUESTION_MAX).describe('What to ask the ghost about the session, up to 4,000 characters.'),
+  workspaceId: path.optional().describe('A workspace of this project whose conversation the ghost reads; this workspace when omitted.'),
+  conversationId: path.optional().describe('One conversation of that workspace (an earlier one, a subagent\'s); its main conversation when omitted, and this conversation when workspaceId is omitted too.'),
+  ghostId: z.uuid().optional().describe('Ask a live ghost this conversation started again, by the ghostId its last answer returned; leave workspaceId and conversationId out.'),
+}).strict().refine(args => args.ghostId === undefined || (args.workspaceId === undefined && args.conversationId === undefined), { message: 'A follow-up names only ghostId: the ghost already reads its session', path: ['ghostId'] });
+export type RuntimeGhostAskArguments = z.infer<typeof RuntimeGhostAskArgumentsSchema>;
 export const RuntimeCheckpointArgumentsSchema = z.object({ goal: z.string().describe('What the exploration is for.') });
 export const RuntimeRewindArgumentsSchema = z.object({ checkpoint: z.string().describe('The checkpoint id checkpoint returned.'), report: z.string().describe('What the exploration found; it replaces the exploration in context.') });
 /** The longest a `wait` call holds the conversation. */

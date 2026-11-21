@@ -336,6 +336,17 @@ describe('messages delivered on others\' behalf', () => {
       expect.objectContaining({ type: 'interruption', reason: 'machine', title: 'Workspace board', detail: 'The workspace board could not be read at 2026-11-08T21:57:04.903Z: Network connection lost.', body: failed }),
     ]);
   });
+
+  it('shows a turn\'s Chatter digest as one card: what it holds, the digest folded underneath, never as the user', () => {
+    const digest = 'Chatter since your last turn (times UTC):\nAlways heard\nschema change:\n  10:02 Accounts (code, discovery): The users table gains a tenant column. [its stack\'s head]\n2 other posts in 2 topics — chatter_read';
+    const turns = reduceTranscriptToTurns([
+      { sessionId: 's1', ordinal: 1, kind: 'message_end', payload: { message: { role: 'user', content: [{ type: 'text', text: 'Carry on.' }] } } },
+      { sessionId: 's1', ordinal: 2, kind: 'message_end', payload: { message: { role: 'custom', customType: 'gitspace.chatter-digest', display: true, content: digest, details: { floor: 1, picked: 2, others: 2, tokens: 60, fullTokens: 180 } } } },
+    ]);
+    expect(turns).toHaveLength(1);
+    expect(turns[0]?.user).toMatchObject({ text: 'Carry on.' });
+    expect(turns[0]?.items).toEqual([expect.objectContaining({ type: 'interruption', reason: 'machine', title: 'Chatter since its last turn', detail: '1 always heard · 2 picked by the model · 2 other posts — chatter_read · ~60 tokens instead of ~180', body: digest })]);
+  });
 });
 
 describe('todo lists and proposed plans', () => {

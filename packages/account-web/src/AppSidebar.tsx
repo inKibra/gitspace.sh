@@ -40,6 +40,7 @@ import { converging, latestLaunchProgress, launchPhaseLabel, machineConvergence,
 import { PRODUCT_ROUTE_LABELS, type AppView, type ProductRoute } from './routes.js';
 import { operationActive } from './OperationProgress.js';
 import { PHASE_LABEL, PHASES, STATUS_COLOR, StatusDot, workspaceStatusColor, workspaceStatusLabel, WorkspaceStatusDot, type AgentScopeView, type ProjectAgentView, type ProjectLifecycleView, type WorkspaceCreationState, type WorkspaceView } from './GitSpaceShell.js';
+import { ProjectAgentVolume, StripVolume } from './chatter/ChatterVolume.js';
 import { blocks, lit, relation, type Lit, type Relation } from './sidebar/graph.js';
 import { ACCENT, DOWNSTREAM_TONE, GroupHeading, HeadTag, LabelText, PhaseTag, PrChips, StackCaption, StackMarker, UPSTREAM_TONE } from './sidebar/parts.js';
 import type { ProjectGraph } from './sidebar/project-graph.js';
@@ -491,10 +492,13 @@ function Ring({ chosen }: { chosen: boolean }) {
  * row selects nothing; double-clicking the name starts it. While choosing (`target`), only its second line and right
  * edge change: the source says what the change would make of it, a refused row says why, a choice shows its ring.
  */
-function WorkspaceRow({ item, kin, selected, inset, guides, caption, meta, override, flags, dimmed, title, target, actions, renaming, onStartRename, onHover, onClick, drag }: {
+function WorkspaceRow({ item, kin, selected, inset, guides, caption, meta, override, flags, dimmed, title, target, actions, volume, renaming, onStartRename, onHover, onClick, drag }: {
   item: RowItem; kin: Relation; selected: boolean; inset: number; guides: readonly number[]; caption: ReactNode; meta: ReactNode; override: ReactNode; flags: ReactNode; dimmed: boolean; title: string;
   target: Target | null; actions: ReactNode; renaming?: { onDone(name: string | null): void }; onStartRename?(): void; onHover(id: string | null): void; onClick(): void;
   drag?: { draggable: boolean; start(): void; drop(): void; end(): void };
+  /** The Chatter volume indicator, under the status dot on the second line; outside the row's button, which it would
+   * otherwise nest in. */
+  volume?: ReactNode;
 }) {
   const { summary } = item;
   const tone = kin === 'upstream' ? UPSTREAM_TONE : kin === 'downstream' ? DOWNSTREAM_TONE : null;
@@ -530,6 +534,7 @@ function WorkspaceRow({ item, kin, selected, inset, guides, caption, meta, overr
         onDragOver={drag ? (event) => event.preventDefault() : undefined} onDrop={drag ? (event) => { event.preventDefault(); drag.drop(); } : undefined} onDragEnd={drag?.end}
         onMouseEnter={() => onHover(item.id)} onMouseLeave={() => onHover(null)} onFocus={() => onHover(item.id)} onBlur={() => onHover(null)} onClick={onClick}
         className={className} style={style}>{body}</button>}
+    {renaming || target ? null : volume}
     {renaming || target ? null : <SidebarMenuActions showOnHover className="top-1/2 -translate-y-1/2">{actions}</SidebarMenuActions>}
   </SidebarMenuSubItem>;
 }
@@ -647,6 +652,7 @@ function ProjectRows({ project, archived: projectArchived, collapsed, onCollapse
       meta={archivedRow ? <PhaseTag phase={item.phase} /> : <><PhaseTag phase={item.phase} /><PrChips pulls={graph?.pullRequests?.[item.id] ?? []} /><StackMarker position={position} ahead={item.aheadOfParent} /><LabelText waits={waits} blocks={blocked} /></>}
       override={choosing?.role === 'source' ? sourceLine() : choosing?.role === 'refused' ? <><Lock01 width={11} height={11} className="shrink-0" /><span className="truncate">{choosing.why}</span></> : null}
       renaming={renamed} onStartRename={startRename}
+      volume={archivedRow ? null : <StripVolume projectId={project.id} strip={item.id} name={item.name} phase={item.phase} className="absolute bottom-[6px] z-10 flex" style={{ left: stacked ? INSET.stacked : INSET.first }} />}
       drag={edit && editable ? { draggable: !picker.mode && renaming !== item.id, start: () => { picker.setDragging(item.id); picker.start(item, 'stack'); }, drop: () => { if (picker.dragging) picker.pick(item.id); picker.setDragging(null); }, end: () => { picker.setDragging(null); if (picker.dragging) picker.leave(); } } : undefined}
       flags={<>{item.workspace.definition?.remote?.behind ? <BehindOriginGlyph branch={item.branch} /> : null}{launchedFrom(deployment, item.id) ? <LaunchedGlyph /> : null}{released ? <span className="ml-1 shrink-0 text-caption text-muted-foreground/70">· released</span> : null}</>}
       actions={<>
@@ -672,6 +678,7 @@ function ProjectRows({ project, archived: projectArchived, collapsed, onCollapse
         {project.operations?.length ? <ProjectOperationsGlyph operations={project.operations} /> : null}{project.remote?.behind ? <BehindOriginGlyph branch={base?.branch ?? null} /> : null}{baseReleased ? <span className="ml-1 truncate text-caption text-muted-foreground/70">· released</span> : null}
       </SidebarMenuButton>
     </SpaceSummaryContext.Provider>
+    {projectArchived ? null : <ProjectAgentVolume projectId={project.id} />}
     <SidebarMenuActions showOnHover={open}>
       <SidebarMenuAction aria-label={`${open ? 'Collapse' : 'Expand'} ${project.name}`} aria-expanded={open} onClick={() => onCollapse(project.id, open)}><ChevronRight width={16} height={16} strokeWidth={1.5} className={open ? 'rotate-90 transition-[rotate] duration-80' : 'transition-[rotate] duration-80'} /></SidebarMenuAction>
       {createWorkspace ? <Tooltip content="New workspace" side="top"><SidebarMenuAction className={open ? undefined : FOLDED_ACTION_REVEAL} aria-label={`New workspace in ${project.name}`} onClick={createWorkspace}><Plus width={16} height={16} strokeWidth={1.5} /></SidebarMenuAction></Tooltip> : null}

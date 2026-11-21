@@ -1,11 +1,11 @@
 import { DurableObject } from 'cloudflare:workers';
 import { z } from 'zod';
 import { DEVICE_SOCKET_PROTOCOL, scopeAllowsWorkspace, socketProtocolProof } from '@gitspace/protocol';
-import { GhostQuerySchema, RuntimeIdentitySchema } from '@gitspace/protocol-runtime';
+import { GHOST_QUESTION_MAX, GhostQuerySchema, RuntimeIdentitySchema, type GhostAskResult } from '@gitspace/protocol-runtime';
 import { accountAccessResponse, activeAccount } from './account-access.js';
 import { DEVICE_AUTHORITY_UNAVAILABLE, withDeviceAuthority } from './device-authority.js';
 import { requireWorkspaceAccess } from './runtime-access.js';
-import type { GhostSession } from './ghost-session.js';
+import type { AgentGhost, GhostSession } from './ghost-session.js';
 
 /** The request the account worker forwards to a new ghost's object: who opened it and what it reads, already authorized. */
 const GHOST_SPEC_HEADER = 'x-gitspace-ghost';
@@ -14,6 +14,27 @@ export const GhostSpecSchema = z.strictObject({
   deviceId: z.string().min(1), archived: z.boolean(),
 });
 export type GhostSpec = z.infer<typeof GhostSpecSchema>;
+
+const id = z.string().min(1);
+/** The agent conversation that asks a ghost (`ghost_ask`): only it may ask that ghost again. */
+export const GhostAskerSchema = z.strictObject({ projectId: id, workspaceId: id, conversationId: id });
+export type GhostAsker = z.infer<typeof GhostAskerSchema>;
+/**
+ * One `ghost_ask` question, as the asking workspace's object sends it to the ghost's, already authorized: the session is
+ * a workspace of the asker's project. `open` starts the ghost (the session it reads, that workspace's name, whether it
+ * is archived, and the asking conversation's inference profile); without it the question is a follow-up.
+ */
+export const GhostAgentRequestSchema = z.strictObject({
+  ghostId: z.uuid(), asker: GhostAskerSchema, question: z.string().trim().min(1).max(GHOST_QUESTION_MAX),
+  open: z.strictObject({ workspaceId: id, workspace: z.string(), conversationId: id.nullable(), archived: z.boolean(), profileId: id }).nullable(),
+});
+export type GhostAgentRequest = z.infer<typeof GhostAgentRequestSchema>;
+/** How a `ghost_ask` question ended: answered, refused because no ghost of this asker lives here, or failed (with when
+ * the ghost fades, when it still lives). */
+export type GhostAgentReply =
+  | { status: 'answered'; result: GhostAskResult }
+  | { status: 'faded' }
+  | { status: 'failed'; message: string; expiresAt: string | null };
 
 function fail(status: number, code: string, message: string) { return Response.json({ status: 'error', error: { code, message } }, { status, headers: { 'cache-control': 'private, no-store' } }); }
 
@@ -50,15 +71,17 @@ export async function serveGhost(request: Request, env: Env): Promise<Response> 
 
 /**
  * One ghost (`${ACCOUNT_ID}:ghost:<id>`): its conversation lives in this object's memory and nowhere else. It never
- * writes storage; its one alarm is the deadline, and the alarm, `close` or the socket closing ends it. An object that
- * restarts has lost its ghost, which is what fading means anyway. The model loop and its read tools load on the first
- * socket, so the account worker's startup carries none of it.
+ * writes storage; its one alarm is the deadline. A person's ghost lives on one socket, and the alarm, `close` or the
+ * socket closing ends it; an agent's ghost answers `ask` calls from the conversation that started it until the alarm.
+ * An object that restarts has lost its ghost, which is what fading means anyway. The model loop and its read tools load
+ * on the first socket or question, so the account worker's startup carries none of it.
  */
 export class GhostDO extends DurableObject<Env> {
   #session: GhostSession | null = null;
+  #agent: AgentGhost | null = null;
 
   async fetch(request: Request): Promise<Response> {
-    if (this.#session) return fail(409, 'GHOST_OPEN', 'This ghost is already open');
+    if (this.#session || this.#agent) return fail(409, 'GHOST_OPEN', 'This ghost is already open');
     const spec = GhostSpecSchema.safeParse(JSON.parse(request.headers.get(GHOST_SPEC_HEADER) ?? 'null'));
     if (!spec.success || request.headers.get('upgrade')?.toLowerCase() !== 'websocket') return fail(400, 'GHOST_INVALID', 'Ghosts open from the account worker');
     const [client, server] = Object.values(new WebSocketPair());
@@ -70,6 +93,29 @@ export class GhostDO extends DurableObject<Env> {
     return new Response(null, { status: 101, webSocket: client });
   }
 
+  /**
+   * One question of an agent's ghost (`ghost_ask`, docs/GHOSTS-DESIGN.md §5.1). With `open` it starts the ghost, which
+   * then answers only the conversation that started it; a follow-up finding no such ghost here (it faded, its object
+   * restarted, or another conversation asks) is answered `faded`.
+   */
+  async ask(raw: GhostAgentRequest): Promise<GhostAgentReply> {
+    const request = GhostAgentRequestSchema.parse(raw);
+    // Loaded here, not at startup, as in `fetch`.
+    const { askAgentGhost, openAgentGhost } = await import('./ghost-session.js');
+    if (request.open) {
+      if (this.#session || this.#agent) return { status: 'failed', message: 'This ghost is already open', expiresAt: null };
+      let opened: AgentGhost | null = null;
+      try {
+        opened = await openAgentGhost({ ctx: this.ctx, env: this.env, ghostId: request.ghostId, asker: request.asker, open: request.open, ended: () => { if (this.#agent === opened) this.#agent = null; } });
+      } catch (error) { return { status: 'failed', message: error instanceof Error ? error.message : String(error), expiresAt: null }; }
+      this.#agent = opened;
+    }
+    const agent = this.#agent;
+    const { asker } = request;
+    if (!agent || agent.asker.projectId !== asker.projectId || agent.asker.workspaceId !== asker.workspaceId || agent.asker.conversationId !== asker.conversationId) return { status: 'faded' };
+    return askAgentGhost(agent, request.question);
+  }
+
   /** The deadline: the ghost fades. */
-  async alarm(): Promise<void> { this.#session?.fade(); }
+  async alarm(): Promise<void> { this.#session?.fade(); this.#agent?.session.fade(); }
 }

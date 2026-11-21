@@ -135,12 +135,44 @@ Milestone 4 is built (2026-11-20, not deployed): a person's ghost of a workspace
   the web (the socket takes `conversationId`; no entry point sends one yet); "New workspace with it" (milestone 6). A
   live ghost keeps the code it started on until it ends: it is not in the release restart list, having no registry.
 
-What is missing:
-
-- **Inference is admitted per workspace conversation.** `runtime-inference.ts` `active(conversationId)` reads the
-  admission from the workspace object's storage; a person's ghost has no conversation there (an agent's ghost uses the
-  asking conversation's, §5.1).
-- **No home for a memory-only chat.** Nothing in the account worker runs a model loop that is never stored.
+Milestone 5 is built (2026-11-21, not deployed): agents ask ghosts with `ghost_ask` (§5.1).
+- **The tool.** `ghost_ask { question, workspaceId?, conversationId?, ghostId? }` (`RuntimeGhostAskArgumentsSchema`,
+  `protocol-runtime/src/tool-arguments.ts`). Both ids left out, the ghost reads the asking conversation itself; only
+  `workspaceId`, that workspace's main conversation; `ghostId` alone asks a live ghost again. It is offered to main
+  conversations and the project agent as a direct tool, not code-only as §5.1 planned: its call is then a row of its
+  own, which the transcript draws as a ghost card, and its answer enters the asker's context whole. Scripts can call it
+  too. Subagents can't (it is not a subagent tool). Replay is safe: it changes nothing.
+- **Where it runs.** The asking workspace's object (`runtime-services.ts` `ghostAsk`) checks the session with the rule
+  `history_read` uses, then calls `GhostDO.ask` through `acrossRelease`. The ghost is the same `GhostSession` a person's
+  is, in its own object `${ACCOUNT_ID}:ghost:<id>`, with the same three bound read tools and the drive at its start;
+  its instructions name an agent as the asker and cap answers at 8,000 characters (`GHOST_ANSWER_MAX`, cut and marked
+  `truncated` beyond it). With no socket it hears each question as one `ask` call and returns the answer whole.
+- **Follow-ups.** The ghost's object keeps the asker (project, workspace, conversation) and answers only that
+  conversation; a follow-up from anyone else, after the deadline or after the object restarted is answered `faded`, and
+  the tool says "That ghost has faded; ask without ghostId to start a new one." Each answer moves the deadline 10 minutes
+  on (the one alarm), and the ghost keeps its earlier turns and reads, so a follow-up sends them again as its prefix.
+- **Caps.** Six tool rounds per answer and one question at a time, as for people; at most 3 live ghosts per asking
+  conversation (`GHOST_AGENT_LIVE_MAX`), counted in the asking object's memory (a reset forgets the count; the ghosts'
+  objects still refuse other askers).
+- **Paid by the asker.** The ghost resolves the `fast` role (else `default`) in the inference profile the asking
+  conversation's admitted run uses (`profileId` in `runtime-inference.ts`), on its own catalog with credential pins in
+  memory, as a person's ghost does with the default profile. Each answer's usage goes to the vault's `service_usage` as
+  service `ghost` with the asking workspace (`ServiceUsage.workspaceId`, column `workspace_id`; '' for a person's
+  ghost and for rows recorded before, which move in once), and into the result's `usage`, so the asking conversation's
+  transcript holds it too.
+- **Result.** `GhostAskResult` (`protocol-runtime/src/ghost.ts`): `ghostId`, `expiresAt`, `session` (workspace id and
+  name, conversation, title, whether it is the main one, archived), `answer` citing inline as the ghost wrote it,
+  `cites` with a `ref` each (`history://<workspace>/<conversation>#<entry>[-<entry>]`; a drive file as the asker reads
+  it, another workspace's under `drive://workspaces/<id>/`), `reads`, `driveAsOf`, `draft`, `rounds`, `truncated`,
+  `usage` (model, requests, tokens, cost). Asked to act, the answer is the refusal and `draft` the message the agent may
+  send or post itself (CHATTER-DESIGN.md §11).
+- **Web.** A `ghost_ask` call is a card of its own in the asking transcript (`account-web/src/ghost/GhostAskCall.tsx`):
+  the session asked about, the question, the answer with citation chips, the draft with Copy, what it read, model, cost
+  and when it fades. A chip opens the asked workspace and jumps to the entry, as a person's ghost's do; entries of a
+  conversation the workspace view doesn't show (an earlier one, a subagent's) are named, not linked. Drive chips open
+  the Drive at the lines.
+- **Not yet.** `until` (milestone 8) and `driveNote` (the drive-history note reaches the ghost in its read, not the
+  result).
 
 ## 4. Data model and storage
 
@@ -166,7 +198,7 @@ Cite = { entry: { conversationId, from, to? } } | { drive: { path, lines?, gener
 | The deadline | One alarm at `deadline` that drops the state and closes the socket | A deadline the work names, the only kind of alarm AGENTS.md allows; no polling |
 | What it reads | Where it is today: the target workspace's object (transcript, kept outputs) and the tenant R2 store (drive manifests and files) | Nothing is copied or indexed for ghosts |
 | Drive history | `artifact_scope_history` in `ProjectAuthorityDO`, beside `artifact_scopes` (§4.1) | Written in the commit that moves the generation, so it can't disagree with it |
-| Usage | A person's ghost: token counts per model in the account's usage. An agent's ghost: in the asking workspace's usage, under the asking conversation. No text either way | Cost must be visible and land on whoever asked (§8) |
+| Usage | A person's ghost: token counts per model in the account's usage. An agent's ghost: the same row keyed by the asking workspace (`service_usage.workspace_id`), and the answer's counts in its tool result, so in the asking conversation's transcript. No text either way | Cost must be visible and land on whoever asked (§8) |
 | The browser's ghost list, placement, which is open | Browser memory | Matches the ghost; a reload ends every ghost |
 
 Sizes: a ghost holds its turns, a few reads each. Reads are bounded by the tools (a `history_read` page, a search
@@ -245,25 +277,30 @@ conversation, to get back what a compaction left out (the entries before a compa
 
 ```
 ghost_ask {
-  workspaceId?   // a workspace of the asker's project; default: the asker's own
-  conversationId?// default: that workspace's main conversation
   question       // up to 4,000 characters
-  until?         // an ordinal of that conversation; the ghost reads nothing after it
+  workspaceId?   // a workspace of the asker's project; default: the asker's own
+  conversationId?// default: that workspace's main conversation, or the asking conversation when workspaceId is left out too
   ghostId?       // a follow-up to a live ghost this conversation started; the fields above then must be left out
 }
 → {
-  ghostId, expiresAt,           // for follow-ups; 10 minutes after this question
-  answer,                       // text with citations inline: [#118], [#93–117], [drive://workspace/notes/plan.md:19–20 @g42]
-  cites,                        // the same citations, structured (Cite above)
+  ghostId, expiresAt,           // for follow-ups; 10 minutes after this answer
+  session,                      // the workspace (id, name), conversation, title, main, archived
+  answer,                       // text with citations inline, as the ghost wrote them: [#118], [#93-117], [drive://workspace/notes/plan.md:19-20]
+  cites,                        // the same citations, structured, each with ref: history://<workspace>/<conversation>#118, or the drive:// path the asker reads
   reads,                        // what it read: searches with hit counts, transcript ranges, drive files
-  driveAsOf, driveNote?,        // the drive time it read, and the note when history starts later
-  draft?,                       // asked to act: the refusal is the answer, and the message it would send is here
-  rounds, truncated             // tool rounds used; true when the round cap cut it short
+  driveAsOf,                    // the drive time it read
+  draft,                        // asked to act: the refusal is the answer, and the message it would send is here; else null
+  rounds, truncated,            // tool rounds used; true when the round cap or the 8,000-character cap cut it short
+  usage                         // model, requests, input and output tokens, cost
 }
 ```
 
-- **Who has it:** main conversations and the project agent, from codemode, like the history tools
-  (`CODE_ONLY_TOOLS`, `runtime-core/src/tools.ts`). Subagents are not offered it; the agent that started them can ask.
+`until` (an ordinal the ghost reads nothing after) comes with milestone 8; `driveNote` is not in the result (the note
+reaches the ghost in its read).
+
+- **Who has it:** main conversations and the project agent, as a direct tool (scripts can call it too), so each ask is
+  a row of its own that the transcript draws as a ghost card. Subagents are not offered it; the agent that started them
+  can ask.
 - **Bound to the asker's project.** `workspaceId` must pass the rule `history_read` uses (`requireProjectWorkspace`);
   the asker's own conversation is allowed, and is the default target when both ids are left out. The ghost is bound to
   that one session and the drive `asOf`, exactly as a person's ghost is.
@@ -274,9 +311,8 @@ ghost_ask {
 - **Cost guard.** At most 6 tool rounds per answer (a ghost at the cap answers with what it has and says
   `truncated`), one question at a time per ghost, at most 3 live ghosts per asking conversation, and an answer of at
   most 8,000 characters, so a result fits the asker's context.
-- **Paid by the asker.** The ghost's model requests run on the asking conversation's admitted inference
-  (`active(conversationId)` in `runtime-inference.ts`), with the role chosen by decision 1, and count in the asking
-  workspace's usage under that conversation.
+- **Paid by the asker.** The ghost resolves the role chosen by decision 1 in the inference profile of the asking
+  conversation's admitted run (`profileId` in `runtime-inference.ts`), and its usage counts for the asking workspace.
 - **Kept where the asker keeps it.** The ghost keeps nothing; its answer is a tool result in the asker's transcript,
   kept there like any other.
 - **Read-only.** `ghost_ask` changes nothing, so a replay after a reset may run it again; a follow-up whose ghost was
@@ -341,7 +377,7 @@ ghost_ask {
   what it has. People: at most 6 live ghosts each, as the mock. Agents: at most 3 live ghosts per asking conversation
   and answers of at most 8,000 characters (§5.1).
 - **Who pays**: a person's ghost, the person's inference profile (decision 1), shown in the account's usage as
-  "ghosts"; an agent's ghost, the asking conversation's admitted inference, counted in the asking workspace's usage.
+  "ghosts"; an agent's ghost, the asking conversation's inference profile, counted under the asking workspace.
 
 ## 9. Milestones
 
@@ -356,6 +392,7 @@ Each step ships alone.
    start, floating window, the sidebar row and topbar entry points, citations that jump, the fade and tombstone, the
    draft card with Copy and Put in composer.
 5. **Agents ask ghosts.** `ghost_ask` with follow-ups by `ghostId`, the caps, and usage counted to the asker (§5.1).
+   Built (§3).
 6. **Entry points everywhere.** Per-entry "Ask a ghost about this", Inspector Sessions list, subagent entries, the
    archived banner, New workspace with it.
 7. **Several ghosts and the dock.** Pills, idle rings, the docked column with tabs and its start page.

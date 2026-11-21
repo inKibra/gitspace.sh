@@ -39,7 +39,7 @@ import {
   AutomationViewCodec,
   automationErrors,
 } from './automations-contract.js';
-import { CHATTER_KINDS, ChatterFileActionCodec, ChatterPageCodec, ChatterPostCodec, ChatterTopicActionCodec, ChatterTopicCodec, ChatterTopicLineCodec, chatterErrors } from './chatter-contract.js';
+import { CHATTER_KINDS, CHATTER_LEVELS, ChatterDigestCodec, ChatterFileActionCodec, ChatterHearingsCodec, ChatterPageCodec, ChatterPostCodec, ChatterProjectMuteLineCodec, ChatterTopicActionCodec, ChatterTopicCodec, ChatterTopicLineCodec, ChatterVolumeLineCodec, ChatterVolumesCodec, chatterErrors } from './chatter-contract.js';
 import {
   AppendJournalEntryInputCodec,
   AppendRubricJudgmentInputCodec,
@@ -1945,6 +1945,50 @@ export const chatterFileIssueContract = gitspaceRpc
   .errors({ ProjectNotFound: rpcErrors.projectNotFound, TopicNotFound: chatterErrors.topicNotFound, ChatterInvalid: chatterErrors.chatterInvalid, OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
+/** The project's Chatter volumes for the sidebar's indicators: the strips people set, the project mute and who posted in
+ * the last few seconds (docs/CHATTER-DESIGN.md §7). */
+export const chatterVolumesContract = gitspaceRpc
+  .procedure()
+  .input(wire.object(chatterProject))
+  .output(ChatterVolumesCodec)
+  .errors({ ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed })
+  .query();
+
+/** Sets a strip's fader notch (`level`), its M (`muted`), or both: `strip` is a workspace of the project or `project`
+ * for the project agent. A change writes a volume line into the stream; `line` is null when nothing changed. */
+export const chatterSetVolumeContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ ...chatterProject, strip: wire.string, level: wire.optional(wire.enum(CHATTER_LEVELS)), muted: wire.optional(wire.boolean) }))
+  .output(wire.object({ volumes: ChatterVolumesCodec, line: wire.nullable(ChatterVolumeLineCodec) }))
+  .errors({ ProjectNotFound: rpcErrors.projectNotFound, ChatterInvalid: chatterErrors.chatterInvalid, OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
+/** Mutes (`on`) or unmutes Chatter for the project: posts stay in the stream and in `chatter_read`, and no agent gets
+ * a digest while it is muted. A change writes a line into the stream; `line` is null when nothing changed. */
+export const chatterSetProjectMuteContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ ...chatterProject, on: wire.boolean }))
+  .output(wire.object({ volumes: ChatterVolumesCodec, line: wire.nullable(ChatterProjectMuteLineCodec) }))
+  .errors({ ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
+/** Who hears one post (`offset`), read from the digests built over it. */
+export const chatterHearingsContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ ...chatterProject, offset: wire.integer({ min: 1 }) }))
+  .output(ChatterHearingsCodec)
+  .errors({ ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed })
+  .query();
+
+/** Hear as: one listener's digest (`listener` a workspace id or `project` for the project agent), the latest the
+ * Chatter object built for it, or, when none is built, its floor and the newest topics since it last heard. */
+export const chatterDigestPreviewContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ ...chatterProject, listener: wire.string }))
+  .output(ChatterDigestCodec)
+  .errors({ ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed })
+  .query();
+
 const inspectorSpaceRequestCodec = wire.object({
   spaceId: wire.string,
   expectedGeneration: wire.integer({ min: 0 }),
@@ -2733,7 +2777,10 @@ export const gitspaceContract = gitspaceRpc.contract({
     overview: automationsOverviewContract,
     exceptions: { list: listAutomationExceptionsContract, set: setAutomationExceptionContract },
   },
-  chatter: { watch: chatterWatchContract, post: chatterPostContract, topics: chatterTopicsContract, topicAct: chatterTopicActContract, issues: chatterIssuesContract, fileIssue: chatterFileIssueContract },
+  chatter: {
+    watch: chatterWatchContract, post: chatterPostContract, topics: chatterTopicsContract, topicAct: chatterTopicActContract, issues: chatterIssuesContract, fileIssue: chatterFileIssueContract,
+    volumes: chatterVolumesContract, setVolume: chatterSetVolumeContract, setProjectMute: chatterSetProjectMuteContract, hearings: chatterHearingsContract, digestPreview: chatterDigestPreviewContract,
+  },
   skills: { list: listSkillsContract, update: updateSkillContract },
   inspector: {
     view: inspectorViewContract,

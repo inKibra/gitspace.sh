@@ -1,6 +1,6 @@
 import { planQuestions } from './approval.js';
 import { providerErrorText } from './provider-error.js';
-import { WORKSPACE_REPORT_ENTRY, askAnswererSchema, mediaPinsSchema, messageCorrectionsSchema, workspaceTurnReportSchema, type AskBlock, type MessageImage, type RichContentBlock, type ToolCallBlock, type TransportBlock, type TurnBlock, type todoBlockSchema } from './model.js';
+import { CHATTER_DIGEST_ENTRY, WORKSPACE_REPORT_ENTRY, askAnswererSchema, chatterDigestDetailsSchema, mediaPinsSchema, messageCorrectionsSchema, workspaceTurnReportSchema, type AskBlock, type MessageImage, type RichContentBlock, type ToolCallBlock, type TransportBlock, type TurnBlock, type todoBlockSchema } from './model.js';
 import type { z } from 'zod';
 import type { TranscriptItem } from './history.js';
 import { executionIdentity, executionSettled, extractExecutions, mergeExecution } from './execution.js';
@@ -500,6 +500,18 @@ export class TranscriptProjector {
         const board = contentText(message.content);
         const [head = ''] = board.split('\n', 1);
         this.#write({ id: `${turn.id}:board:${event.ordinal}`, type: 'interruption', reason: 'machine', title: 'Workspace board', detail: head.replace(/:$/u, ''), ...(head.length < board.length ? { body: board } : {}), ...createdAt(event) });
+        return;
+      }
+      // A turn's Chatter digest: what it holds shows, the digest it quoted folds underneath.
+      if (message.role === 'custom' && message.customType === CHATTER_DIGEST_ENTRY && message.display === true) {
+        const counts = chatterDigestDetailsSchema.safeParse(message.details).data;
+        const detail = counts ? [
+          counts.floor ? `${counts.floor} always heard` : null,
+          counts.picked ? `${counts.picked} picked by the model` : null,
+          counts.others ? `${counts.others} other ${counts.others === 1 ? 'post' : 'posts'} — chatter_read` : null,
+          counts.fullTokens > counts.tokens ? `~${counts.tokens} tokens instead of ~${counts.fullTokens}` : null,
+        ].filter(Boolean).join(' · ') : '';
+        this.#write({ id: `${turn.id}:chatter:${event.ordinal}`, type: 'interruption', reason: 'machine', title: 'Chatter since its last turn', detail, body: contentText(message.content), ...createdAt(event) });
         return;
       }
       if (message.role === 'custom' && message.customType === WORKSPACE_REPORT_ENTRY && message.display === true) {

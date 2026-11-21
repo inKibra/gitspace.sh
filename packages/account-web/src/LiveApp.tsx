@@ -26,8 +26,9 @@ import { LiveEnvironment } from './environment/LiveEnvironment.js';
 import { Inspector } from './inspector/index.js';
 import type { InspectorDrive } from './inspector/DriveSurface.js';
 import { useWorkspaceIssues } from './inspector/useWorkspaceIssues.js';
-import { ACCOUNT_DIRECTORY_CHANGED, AUTOMATIONS_PROJECT_PARAM, AUTOMATIONS_RUN_PARAM, PRODUCT_ROUTE_LABELS, automationsUrl, isGlobalView, navigateProductUrl, productRouteFromLocation, setProductRoute, type AppView, type ProductRoute } from './routes.js';
+import { ACCOUNT_DIRECTORY_CHANGED, AUTOMATIONS_PROJECT_PARAM, AUTOMATIONS_RUN_PARAM, PRODUCT_ROUTE_LABELS, automationsUrl, isGlobalView, navigateProductUrl, productRouteFromLocation, selectInspection, setProductRoute, type AppView, type ProductRoute } from './routes.js';
 import { AccountSidebarContext, AppSidebar, sidebarWorkspaceSummary, type AppSidebarProps, type SidebarArchive, type SidebarProject } from './AppSidebar.js';
+import { ChatterVolumesProvider } from './chatter/ChatterVolume.js';
 import type { StackRestack } from '@gitspace/protocol-workspace';
 import { accountHandleFromUrl, browserInvitationStatus, canConnectBrowser, cancelBrowserInvitation, createBrowserInvitation, enrollmentTokenForLocation, prepareBrowserInvitation, recoverAccountBrowser } from './browser-enrollment.js';
 import { AccountConnectPage } from './AccountConnectPage.js';
@@ -531,6 +532,7 @@ function AccountFrame({ children }: { children: ReactNode }) {
   return <AccountWorkActionsContext.Provider value={actions}><ProjectSettingsContext.Provider value={projectSettings}><AccountSidebarContext.Provider value={setRuntimeSidebar}><AccountDirectoryContext.Provider value={accountDirectory}><ProjectGraphsContext.Provider value={graphs}><StackToasts>
     {graphReaders}
     <SidebarProvider className="gitspace-shell" persist={false} width="19rem">
+      <ChatterVolumesProvider projectIds={sidebarProjects.map((project) => project.id)}>
       <AppSidebar {...(live ?? globalSidebar)} view={frameView} onView={navigate} selected={route === 'agent' && projectId ? { projectId, workspaceId } : null} projects={sidebarProjects} machines={(machineValues ?? []).filter((machine) => machine.state === 'online' && machine.rpcEndpoint !== null).map(({ id, label }) => ({ id, label }))} onSelectProject={(id) => selectInspection(id, null)} onSelectWorkspace={(workspace) => selectInspection(workspace.projectId, workspace.id)} onOpenSettings={(section) => navigate('settings', section)} user={settingsValue ? { name: settingsValue.profile.displayName, handle: settingsValue.profile.handle } : undefined}
         releasePendingSpaceId={releasePendingSpaceId}
         onReleaseMachines={async (spaceId) => {
@@ -551,6 +553,7 @@ function AccountFrame({ children }: { children: ReactNode }) {
         onSetPhase={setPhase}
         onAskGhost={(workspace) => summonGhost({ projectId: workspace.projectId, workspaceId: workspace.id, workspaceName: workspace.name, archived: workspace.closedAt !== null })}
       />
+      </ChatterVolumesProvider>
       <SidebarInset className="min-w-0 overflow-hidden">
         {!live ? <SidebarInsetTopbar><nav aria-label="Location" className="min-w-0"><span aria-current="page" className="truncate text-body font-medium">{frameView === 'agent' ? projectValues.find((project) => project.id === projectId)?.name ?? 'Your account' : PRODUCT_ROUTE_LABELS[frameView]}</span></nav></SidebarInsetTopbar> : null}
         {children}
@@ -569,15 +572,6 @@ function AccountFrame({ children }: { children: ReactNode }) {
 }
 
 type LiveWorkspaceProps = { onOpenSettings: (section?: 'source' | 'github') => void };
-
-function selectInspection(projectId: string, workspaceId: string | null): void {
-  const url = new URL(window.location.href);
-  url.searchParams.set('project', projectId);
-  if (workspaceId) url.searchParams.set('workspace', workspaceId);
-  else url.searchParams.delete('workspace');
-  navigateProductUrl(setProductRoute(url, 'agent'));
-}
-
 
 function LiveWorkspace(props: LiveWorkspaceProps) {
   const location = useProductLocation();

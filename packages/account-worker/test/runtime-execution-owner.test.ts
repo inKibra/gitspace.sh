@@ -20,6 +20,7 @@ import { emptyWorkspaceStatus } from '@gitspace/protocol-workspace';
 import { ServiceTokenGrantSchema } from '@gitspace/protocol-environment';
 import { decodeJwt } from 'jose';
 import type { ProfileDecision } from '@gitspace/runtime-core/inference';
+import { GhostDO, type GhostAgentReply, type GhostAgentRequest } from '../src/ghost.js';
 
 const unsupported = async (): Promise<never> => { throw new Error('Unexpected external operation'); };
 
@@ -58,7 +59,7 @@ async function ownerFixture(ctx: DurableObjectState, identity = RuntimeIdentityS
     };
     let runtime: WorkspaceRuntime | undefined;
     const attachRequests: string[] = [];
-    const services = createRuntimeServices({ ctx, env, identity, images: { store: async image => image, load: async image => image }, runtime: () => { if (!runtime) throw new Error('Runtime not initialized'); return runtime; }, schedule: async () => {}, model: unsupported, generateImage: unsupported, webSearch: unsupported, decide, judge: unsupported, instructionLoader: { read: unsupported, loadInstructions: async () => '' }, async requestAttachment(machineId) {
+    const services = createRuntimeServices({ ctx, env, identity, images: { store: async image => image, load: async image => image }, runtime: () => { if (!runtime) throw new Error('Runtime not initialized'); return runtime; }, schedule: async () => {}, model: unsupported, generateImage: unsupported, webSearch: unsupported, decide, judge: unsupported, profileId: async () => 'conversation-profile', instructionLoader: { read: unsupported, loadInstructions: async () => '' }, async requestAttachment(machineId) {
       if (!runtime) throw new Error('Runtime not initialized');
       attachRequests.push(machineId);
       return runtime.attachments.requestCache({ ...identity, machineId, checkout: { kind: 'shared', branch: 'main' }, capabilities: [...executorCapabilities] }, true);
@@ -899,5 +900,62 @@ test('an agent\'s chatter_post lands under its workspace; a hand-off is returned
     const read = z.object({ topics: z.array(z.object({ topic: z.string(), posts: z.number(), state: z.string().nullable() })), posts: z.array(z.object({ author: z.string(), text: z.string() })) }).parse(JSON.parse(text(await invoke('chatter_read', { issue: true }))));
     expect(read.topics).toEqual([{ topic: 'bun test hangs on the watcher · bash', posts: 2, state: 'open' }]);
     expect(read.posts[0]).toEqual({ author: 'Parser', text: 'The schema has no invoice column yet.' });
+  });
+});
+
+test('ghost_ask reaches a ghost of a session in its project, on the conversation\'s inference profile; another project\'s workspace is refused, live ghosts are capped, a faded one says so', async () => {
+  const projectId = `ghosts-${crypto.randomUUID()}`;
+  const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`);
+  await authority.bootstrap({ id: projectId, name: 'Ghost project', repositoryReference: null, baseBranch: 'main', createdBy: 'user' });
+  for (const [id, name, lifecycle] of [[`${projectId}-parser`, 'Parser', 'active'], [`${projectId}-billing`, 'Billing', 'archived']] as const) {
+    await authority.putWorkspace({ id, projectId, kind: 'worktree', name, branch: id, phase: null, sourceKind: 'branch', sourceRef: 'main', sourceCommit: null, lifecycle, goalId: null, expectedRevision: 0 });
+  }
+  const identity = RuntimeIdentitySchema.parse({ projectId, workspaceId: `${projectId}-parser` });
+  const asked: GhostAgentRequest[] = [];
+  let fades = true;
+  const answer = (request: GhostAgentRequest): GhostAgentReply => ({ status: 'answered', result: {
+    ghostId: request.ghostId, expiresAt: new Date(Date.now() + 600_000).toISOString(),
+    session: { workspaceId: request.open?.workspaceId ?? 'followed', workspace: request.open?.workspace ?? 'followed', conversationId: 'main', title: 'Main', main: true, archived: false },
+    answer: 'It chose the archive bucket [#2].', cites: [{ kind: 'entry', from: 2, ref: 'history://w/main#2' }], reads: [{ kind: 'read', from: 0, to: 2 }], driveAsOf: new Date().toISOString(),
+    draft: null, rounds: 1, truncated: false, usage: { model: 'openai/fake', requests: 2, input: 200, output: 40, costUsd: 0.01 },
+  } });
+  vi.spyOn(GhostDO.prototype, 'ask').mockImplementation(async request => {
+    asked.push(request);
+    return request.open === null && fades ? { status: 'faded' } : answer(request);
+  });
+  await runInDurableObject(env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.workspaceId}`), async (_instance, ctx) => {
+    const { runtime, root, invoke, text } = await ownerFixture(ctx, identity);
+    const ghostId = (result: RuntimeToolResult) => z.object({ ghostId: z.string() }).parse(JSON.parse(text(result))).ghostId;
+    try {
+      const outside = await invoke('ghost_ask', { workspaceId: 'another-project-workspace', question: 'What did it decide?' });
+      expect(outside.status).toBe('failed');
+      expect(text(outside)).toBe('Workspace another-project-workspace is outside this project');
+      expect(asked).toEqual([]);
+
+      const asker = { projectId, workspaceId: identity.workspaceId, conversationId: String(root.id) };
+      const billing = await invoke('ghost_ask', { workspaceId: `${projectId}-billing`, question: 'Why the archive bucket?' });
+      expect(billing.status).toBe('completed');
+      const own = await invoke('ghost_ask', { question: 'What did my compaction leave out?' });
+      await invoke('ghost_ask', { workspaceId: projectId, question: 'What does the project agent plan?' });
+      expect(asked).toEqual([
+        { ghostId: ghostId(billing), asker, question: 'Why the archive bucket?', open: { workspaceId: `${projectId}-billing`, workspace: 'Billing', conversationId: null, archived: true, profileId: 'conversation-profile' } },
+        { ghostId: ghostId(own), asker, question: 'What did my compaction leave out?', open: { workspaceId: identity.workspaceId, workspace: 'Parser', conversationId: String(root.id), archived: false, profileId: 'conversation-profile' } },
+        { ghostId: expect.any(String), asker, question: 'What does the project agent plan?', open: { workspaceId: projectId, workspace: 'Ghost project', conversationId: null, archived: false, profileId: 'conversation-profile' } },
+      ]);
+
+      const capped = await invoke('ghost_ask', { workspaceId: `${projectId}-billing`, question: 'One more?' });
+      expect(capped.status).toBe('failed');
+      expect(text(capped)).toContain('already has 3 live ghosts');
+      expect(asked).toHaveLength(3);
+      expect((await invoke('ghost_ask', { ghostId: ghostId(billing), workspaceId: `${projectId}-billing`, question: 'And then?' })).status).toBe('failed');
+
+      const faded = await invoke('ghost_ask', { ghostId: ghostId(billing), question: 'And then?' });
+      expect(asked.at(-1)).toEqual({ ghostId: ghostId(billing), asker, question: 'And then?', open: null });
+      expect(text(faded)).toBe('That ghost has faded; ask without ghostId to start a new one.');
+      // The faded ghost's place is free again; a live one answers its follow-up.
+      expect((await invoke('ghost_ask', { workspaceId: `${projectId}-billing`, question: 'Why the archive bucket?' })).status).toBe('completed');
+      fades = false;
+      expect(JSON.parse(text(await invoke('ghost_ask', { ghostId: ghostId(own), question: 'And before that?' })))).toMatchObject({ ghostId: ghostId(own), answer: 'It chose the archive bucket [#2].' });
+    } finally { await runtime.harness.close(BACKGROUND_CONTEXT); }
   });
 });

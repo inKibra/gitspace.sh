@@ -1,7 +1,10 @@
 import { deviceCanAdminister, scopeAllowsProject, type DeviceCapability, type GitSpaceRpcContext } from '@gitspace/protocol';
-import { ChatterFileActionSchema, type ChatterAuthor } from '@gitspace/protocol/chatter-contract';
+import { CHATTER_PROJECT_STRIP, ChatterFileActionSchema, type ChatterAuthor } from '@gitspace/protocol/chatter-contract';
 import { GITSPACE_SOURCE_REPOSITORY } from '@gitspace/protocol/project-authority';
-import { chatterFileIssueContract, chatterIssuesContract, chatterPostContract, chatterTopicActContract, chatterTopicsContract, chatterWatchContract } from '@gitspace/protocol/rpc-contract';
+import {
+  chatterDigestPreviewContract, chatterFileIssueContract, chatterHearingsContract, chatterIssuesContract, chatterPostContract, chatterSetProjectMuteContract, chatterSetVolumeContract,
+  chatterTopicActContract, chatterTopicsContract, chatterVolumesContract, chatterWatchContract,
+} from '@gitspace/protocol/rpc-contract';
 import { err, ok } from 'result-rpc';
 import { serverRpc } from 'result-rpc/server';
 import { DEVICE_AUTHORITY_UNAVAILABLE_MESSAGE, deviceAuthority } from './device-authority.js';
@@ -120,5 +123,61 @@ export function chatterCloudProcedures(env: Env, userId: string, deviceId: strin
       return err(errors.OperationFailed({ operation: 'file a Chatter issue', message: message(error) }));
     }
   });
-  return { watch, post, topics, topicAct, issues, fileIssue };
+  /** A strip as its volume line and digest name it: the project agent, or a workspace of the project with its phase. */
+  const strip = async (projectId: string, id: string): Promise<{ name: string; phase: string | null } | null> => {
+    if (id === CHATTER_PROJECT_STRIP) return { name: 'the project agent', phase: null };
+    const workspace = await acrossRelease(() => env.PROJECT_AUTHORITY.getByName(`${userId}:${projectId}`).getWorkspace(id));
+    return workspace && workspace.kind === 'worktree' ? { name: workspace.name, phase: workspace.phase ?? null } : null;
+  };
+  const volumes = server.implement(chatterVolumesContract).handler(async ({ input, errors }) => {
+    try {
+      const { object } = await chatter(input.projectId, ['rpc.read']);
+      return ok(await acrossRelease(() => object.volumes()));
+    } catch (error) {
+      if (error instanceof ChatterProjectMissing) return err(errors.ProjectNotFound({ projectId: input.projectId }));
+      return err(errors.OperationFailed({ operation: 'read Chatter volumes', message: message(error) }));
+    }
+  });
+  const setVolume = server.implement(chatterSetVolumeContract).handler(async ({ input, errors }) => {
+    try {
+      const { object } = await chatter(input.projectId, ['rpc.write']);
+      const named = await strip(input.projectId, input.strip);
+      if (!named) return err(errors.ChatterInvalid({ field: 'strip', message: 'That is not a workspace of this project' }));
+      const author = await person();
+      return ok(await acrossRelease(async () => await object.setVolume({ projectId: input.projectId, strip: input.strip, name: named.name, phase: named.phase, level: input.level, muted: input.muted, author })));
+    } catch (error) {
+      if (error instanceof ChatterProjectMissing) return err(errors.ProjectNotFound({ projectId: input.projectId }));
+      return err(errors.OperationFailed({ operation: 'set a Chatter volume', message: message(error) }));
+    }
+  });
+  const setProjectMute = server.implement(chatterSetProjectMuteContract).handler(async ({ input, errors }) => {
+    try {
+      const { object } = await chatter(input.projectId, ['rpc.write']);
+      const author = await person();
+      return ok(await acrossRelease(async () => await object.setProjectMute({ projectId: input.projectId, on: input.on, author })));
+    } catch (error) {
+      if (error instanceof ChatterProjectMissing) return err(errors.ProjectNotFound({ projectId: input.projectId }));
+      return err(errors.OperationFailed({ operation: 'mute Chatter for the project', message: message(error) }));
+    }
+  });
+  const hearings = server.implement(chatterHearingsContract).handler(async ({ input, errors }) => {
+    try {
+      const { object } = await chatter(input.projectId, ['rpc.read']);
+      return ok(await acrossRelease(() => object.hearings(input.offset)));
+    } catch (error) {
+      if (error instanceof ChatterProjectMissing) return err(errors.ProjectNotFound({ projectId: input.projectId }));
+      return err(errors.OperationFailed({ operation: 'read who hears a post', message: message(error) }));
+    }
+  });
+  const digestPreview = server.implement(chatterDigestPreviewContract).handler(async ({ input, errors }) => {
+    try {
+      const { object } = await chatter(input.projectId, ['rpc.read']);
+      const named = await strip(input.projectId, input.listener);
+      return ok(await acrossRelease(() => object.digestPreview({ listener: input.listener, name: named?.name ?? input.listener })));
+    } catch (error) {
+      if (error instanceof ChatterProjectMissing) return err(errors.ProjectNotFound({ projectId: input.projectId }));
+      return err(errors.OperationFailed({ operation: 'hear Chatter as an agent', message: message(error) }));
+    }
+  });
+  return { watch, post, topics, topicAct, issues, fileIssue, volumes, setVolume, setProjectMute, hearings, digestPreview };
 }

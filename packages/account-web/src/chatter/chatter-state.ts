@@ -1,4 +1,7 @@
-import type { ChatterEvent, ChatterKind, ChatterPost, ChatterReturnedLine, ChatterTopic, ChatterTopicLine } from '@gitspace/protocol/chatter-contract';
+import type { ChatterEvent, ChatterKind, ChatterPost, ChatterProjectMuteLine, ChatterReturnedLine, ChatterTopic, ChatterTopicLine, ChatterVolumeLine } from '@gitspace/protocol/chatter-contract';
+
+/** A line under no topic: a returned post, a volume change or the project mute. */
+export type ChatterLooseLine = ChatterReturnedLine | ChatterVolumeLine | ChatterProjectMuteLine;
 
 /** The part of a project's Chatter this tab has read: events oldest first, the rows of their topics, the newest offset
  * read (the next `after`), and whether older events remain. */
@@ -21,7 +24,7 @@ export function mergeChatter(state: ChatterState, events: readonly ChatterEvent[
   for (const event of byOffset.values()) if (event.type === 'topic' && event.change.kind === 'merge') moved.set(event.change.from, event.topicKey);
   const merged = [...byOffset.values()].sort((left, right) => left.offset - right.offset).map(event => {
     const into = moved.get(event.topicKey);
-    return into === undefined || event.type === 'returned' ? event : { ...event, topicKey: into };
+    return into === undefined || (event.type !== 'post' && event.type !== 'topic') ? event : { ...event, topicKey: into };
   });
   const rows = new Map(state.topics);
   for (const topic of topics) rows.set(topic.key, topic);
@@ -39,16 +42,16 @@ export interface ChatterGroup {
   latest: number;
 }
 
-/** One group per topic, and the returned lines (which belong to no topic) on their own, ordered by their newest event:
- * the most recently active at the bottom next to the composer. Filtering by a kind keeps that kind's posts and drops
- * topic and returned lines; a topic with nothing left is not shown. */
-export function groupChatter(state: ChatterState, filter: ChatterKind | 'all'): (ChatterGroup | ChatterReturnedLine)[] {
+/** One group per topic, and the lines under no topic (returned posts, volume changes, the project mute) on their own,
+ * ordered by their newest event: the most recently active at the bottom next to the composer. Filtering by a kind keeps
+ * that kind's posts and drops every line; a topic with nothing left is not shown. */
+export function groupChatter(state: ChatterState, filter: ChatterKind | 'all'): (ChatterGroup | ChatterLooseLine)[] {
   const groups = new Map<string, { items: (ChatterPost | ChatterTopicLine)[]; posts: number; latest: number }>();
-  const returned: ChatterReturnedLine[] = [];
+  const loose: ChatterLooseLine[] = [];
   for (const event of state.events) {
     if (filter !== 'all' && (event.type !== 'post' || event.kind !== filter)) continue;
-    if (event.type === 'returned') {
-      returned.push(event);
+    if (event.type !== 'post' && event.type !== 'topic') {
+      loose.push(event);
       continue;
     }
     const group = groups.get(event.topicKey) ?? { items: [], posts: 0, latest: 0 };
@@ -60,7 +63,7 @@ export function groupChatter(state: ChatterState, filter: ChatterKind | 'all'): 
   const topics = [...groups.entries()]
     .filter(([, group]) => group.posts > 0)
     .map(([key, group]) => ({ key, topic: state.topics.get(key) ?? null, ...group }));
-  return [...topics, ...returned].sort((left, right) => ('type' in left ? left.offset : left.latest) - ('type' in right ? right.offset : right.latest));
+  return [...topics, ...loose].sort((left, right) => ('type' in left ? left.offset : left.latest) - ('type' in right ? right.offset : right.latest));
 }
 
 /** Posts per kind among those this tab holds. */

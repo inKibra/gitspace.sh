@@ -3,17 +3,19 @@
 // active topic at the bottom by the composer; a topic header carries its count, participants and issue state, and its
 // actions. The composer suggests a topic from the text's first words, autocompletes the active topics and names a
 // similar active one before a new topic is posted. Scrolling up pauses auto-scroll.
-import { DropdownContent, DropdownMenu, DropdownTrigger, MenuItem, Tooltip, badgeColors, type IconComponent } from '@gitspace/ui';
+import { DropdownContent, DropdownLabel, DropdownMenu, DropdownTrigger, MenuItem, Tooltip, badgeColors, type IconComponent } from '@gitspace/ui';
 import {
-  CHATTER_KINDS, normalizeChatterTopic, similarChatterTopic, suggestChatterTopic,
-  type ChatterKind, type ChatterPost, type ChatterReturnedLine, type ChatterTopic, type ChatterTopicAction, type ChatterTopicLine,
+  CHATTER_KINDS, CHATTER_MAX_PICKS, CHATTER_PROJECT_STRIP, normalizeChatterTopic, similarChatterTopic, suggestChatterTopic,
+  type ChatterDigest, type ChatterHeard, type ChatterHearings, type ChatterKind, type ChatterLeft, type ChatterPost, type ChatterProjectMuteLine, type ChatterReturnedLine, type ChatterTopic,
+  type ChatterTopicAction, type ChatterTopicLine, type ChatterVolumeLine,
 } from '@gitspace/protocol/chatter-contract';
-import { Activity, ArrowDown, ChevronDown, ChevronUp, CpuChip01, DotsHorizontal, Hash02, InfoCircle, Lightbulb02, MessageChatCircle, PauseCircle, PlayCircle, Route, Send01, Tool02, Users01 } from '@untitledui/icons';
+import { Activity, ArrowDown, ChevronDown, ChevronUp, CpuChip01, DotsHorizontal, Hash02, Headphones01, InfoCircle, Lightbulb02, MessageChatCircle, PauseCircle, PlayCircle, Route, Send01, Tool02, Users01 } from '@untitledui/icons';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { StatusDot } from '../GitSpaceShell.js';
 import { glyph } from '../glyph.js';
 import { chatterKindCounts, groupChatter, type ChatterGroup, type ChatterState } from './chatter-state.js';
+import { LEVEL_LABEL } from './ChatterVolume.js';
 import type { ChatterPostOutcome } from './useChatter.js';
 
 type Glyph = ComponentType<{ width?: number; height?: number; strokeWidth?: number; className?: string }>;
@@ -49,15 +51,26 @@ export interface ChatterPaneProps {
   /** The open workspace. Posts it is the author of (its agent, the project agent in the base workspace, GitSpace for its
    * failures) don't count as unread. */
   workspaceId: string;
+  /** The project's workspaces whose main agents Hear as can pick, after the project agent. */
+  workspaces: readonly { id: string; name: string }[];
   state: ChatterState;
   active: readonly ChatterTopic[];
   error: string | null;
   onPost(input: { topic: string; kind: ChatterKind; text: string }): Promise<ChatterPostOutcome>;
   onAct(key: string, action: ChatterTopicAction): Promise<string | null>;
   onLoadOlder(topic?: string): Promise<void>;
+  /** One listener's digest for Hear as; a string says why it could not be read. */
+  onHearAs(listener: string): Promise<ChatterDigest | string>;
+  /** Who hears one post; a string says why it could not be read. */
+  onHearings(offset: number): Promise<ChatterHearings | string>;
 }
 
-export function ChatterPane({ projectName, workspaceCount, workspaceId, state, active, error, onPost, onAct, onLoadOlder }: ChatterPaneProps) {
+/** What a digest Hear as shows did with each post: heard (with why) or left out (with why not), by offset. */
+type HearingView = { heard: ReadonlyMap<number, ChatterHeard>; left: ReadonlyMap<number, ChatterLeft> };
+/** Who hears one post, while it is read and once it is. */
+type WhoView = { offset: number; hearings: ChatterHearings | null; error: string | null };
+
+export function ChatterPane({ projectName, workspaceCount, workspaceId, workspaces, state, active, error, onPost, onAct, onLoadOlder, onHearAs, onHearings }: ChatterPaneProps) {
   const [open, setOpen] = useState(false);
   const [placement, setPlacement] = useState<{ top: number; left: number; width: number; height: number } | null>(null);
   const [filter, setFilter] = useState<ChatterKind | 'all'>('all');
@@ -72,6 +85,22 @@ export function ChatterPane({ projectName, workspaceCount, workspaceId, state, a
   const inside = useRef(false);
   const refocus = useRef(false);
   const groups = useMemo(() => groupChatter(state, filter), [state, filter]);
+  const [hearing, setHearing] = useState<{ listener: string; name: string; digest: ChatterDigest | null; error: string | null } | null>(null);
+  const [who, setWho] = useState<WhoView | null>(null);
+  const heardBy = useMemo((): HearingView | null => hearing?.digest ? { heard: new Map(hearing.digest.heard.map(entry => [entry.offset, entry])), left: new Map(hearing.digest.left.map(entry => [entry.offset, entry])) } : null, [hearing]);
+  const listeners = [{ id: CHATTER_PROJECT_STRIP, name: 'the project agent' }, ...workspaces];
+  const hearAs = (listener: string, name: string): void => {
+    setHearing({ listener, name, digest: null, error: null });
+    void onHearAs(listener).then(digest => setHearing(current => current?.listener !== listener ? current
+      : typeof digest === 'string' ? { ...current, error: digest } : { ...current, name: digest.name, digest }));
+  };
+  const showWho = (offset: number): void => {
+    setFollowing(false);
+    if (who?.offset === offset) { setWho(null); return; }
+    setWho({ offset, hearings: null, error: null });
+    void onHearings(offset).then(result => setWho(current => current?.offset !== offset ? current
+      : typeof result === 'string' ? { ...current, error: result } : { ...current, hearings: result }));
+  };
   const counts = useMemo(() => chatterKindCounts(state.events), [state.events]);
   const posts = useMemo(() => state.events.filter((event): event is ChatterPost => event.type === 'post'), [state.events]);
   const newest = posts.at(-1)?.offset ?? 0;
@@ -175,14 +204,27 @@ export function ChatterPane({ projectName, workspaceCount, workspaceId, state, a
       <span className="text-[13px] font-semibold">Chatter</span>
       <span className="truncate text-[11.5px] text-muted-foreground">{projectName}{workspaceCount === null ? '' : ` · ${workspaceCount} ${workspaceCount === 1 ? 'workspace' : 'workspaces'}`}</span>
       <span className="ml-auto flex items-center">
+        <DropdownMenu>
+          <DropdownTrigger render={<button type="button" aria-label={hearing ? `Hearing as ${hearing.name}` : 'Hear as an agent'} aria-pressed={hearing !== null}
+            className={`flex size-7 items-center justify-center rounded-lg ${hearing ? 'bg-active text-foreground' : 'text-muted-foreground hover:bg-hover hover:text-foreground'}`}><Headphones01 {...ICON} /></button>} />
+          <DropdownContent className="w-[230px]" align="end" side="bottom" sideOffset={4}>
+            <DropdownLabel>Hear as</DropdownLabel>
+            {listeners.map((listener, index) => <MenuItem key={listener.id} index={index} label={listener.name} checked={hearing?.listener === listener.id} onSelect={() => hearAs(listener.id, listener.name)} />)}
+            {hearing ? <MenuItem index={listeners.length} label="Stop hearing as" onSelect={() => setHearing(null)} /> : null}
+          </DropdownContent>
+        </DropdownMenu>
         <HeaderButton label={following ? 'Pause auto-scroll' : 'Resume auto-scroll'} pressed={!following} onClick={() => following ? setFollowing(false) : resume()}>{following ? <PauseCircle {...ICON} /> : <PlayCircle {...ICON} />}</HeaderButton>
         <HeaderButton label="Collapse" onClick={collapse}><ChevronUp {...ICON} /></HeaderButton>
       </span>
     </header>
-    <div className="flex shrink-0 items-start gap-1.5 border-b border-border bg-muted/40 px-3 py-1.5 text-[11px] leading-[15px] text-muted-foreground">
+    {hearing ? <div data-hearing={hearing.listener} className="flex shrink-0 items-start gap-1.5 border-b border-border px-3 py-1.5 text-[11px] leading-[15px] text-muted-foreground" style={{ background: `color-mix(in oklab, ${badgeColors.violet} 9%, transparent)` }}>
+      <Headphones01 width={12} height={12} strokeWidth={2} className="mt-px shrink-0" style={{ color: badgeColors.violet }} />
+      <span className="min-w-0 flex-1">{hearingSummary(hearing, state)}</span>
+      <button type="button" onClick={() => setHearing(null)} className="shrink-0 font-medium text-foreground underline decoration-border underline-offset-2 hover:decoration-foreground">Stop</button>
+    </div> : <div className="flex shrink-0 items-start gap-1.5 border-b border-border bg-muted/40 px-3 py-1.5 text-[11px] leading-[15px] text-muted-foreground">
       <InfoCircle width={12} height={12} strokeWidth={2} className="mt-px shrink-0" />
-      <span>Ambient: everyone in {projectName} hears it, and the project agent acts on it. Not a direct message; it can’t assign work. Posts with the same topic are one thread.</span>
-    </div>
+      <span>Ambient: everyone in {projectName} hears it, and the project agent acts on it. Not a direct message; it can’t assign work. Posts with the same topic are one thread. Click a post to see who hears it.</span>
+    </div>}
     <div className="flex shrink-0 items-center gap-0.5 overflow-x-auto border-b border-border px-1.5 py-1 [scrollbar-width:none]">
       <Pill pressed={filter === 'all'} onClick={() => setFilter('all')}>All</Pill>
       {CHATTER_KINDS.map(kind => counts.get(kind) ? <Pill key={kind} pressed={filter === kind} onClick={() => setFilter(filter === kind ? 'all' : kind)}>
@@ -193,9 +235,10 @@ export function ChatterPane({ projectName, workspaceCount, workspaceId, state, a
       <div ref={scroller} onScroll={onScroll} className="h-full overflow-y-auto overscroll-contain px-2 pb-2 pt-1">
         {state.older ? <button type="button" onClick={() => void onLoadOlder()} className="mx-auto my-1 block text-[11px] font-medium text-muted-foreground underline decoration-border underline-offset-2 hover:text-foreground">Load earlier posts</button> : null}
         {groups.length
-          ? groups.map(group => 'type' in group ? <ReturnedLine key={group.id} line={group} /> : <TopicGroup key={group.key} group={group} active={active} expanded={!!expanded[group.key]}
+          ? groups.map(group => 'type' in group ? group.type === 'returned' ? <ReturnedLine key={group.id} line={group} /> : <VolumeLine key={group.id} line={group} /> : <TopicGroup key={group.key} group={group} active={active} expanded={!!expanded[group.key]}
             onToggle={() => { setFollowing(false); setExpanded(current => { const next = { ...current }; if (next[group.key]) delete next[group.key]; else next[group.key] = true; return next; }); }}
-            onReply={topic => setReply({ topic, serial: (reply?.serial ?? 0) + 1 })} onAct={onAct} onLoadOlder={onLoadOlder} />)
+            onReply={topic => setReply({ topic, serial: (reply?.serial ?? 0) + 1 })} onAct={onAct} onLoadOlder={onLoadOlder}
+            hearing={heardBy} who={who} onWho={showWho} onHearAs={hearAs} />)
           : <p className="px-3 py-8 text-center text-[12px] text-muted-foreground">{error ?? `No ${filter === 'all' ? '' : `${filter} `}posts yet. Name a topic and say what you found.`}</p>}
       </div>
       {!following ? <button type="button" onClick={resume}
@@ -229,9 +272,10 @@ function Rich({ text }: { text: string }): ReactNode {
     : <span key={index}>{part}</span>);
 }
 
-function TopicGroup({ group, active, expanded, onToggle, onReply, onAct, onLoadOlder }: {
+function TopicGroup({ group, active, expanded, onToggle, onReply, onAct, onLoadOlder, hearing, who, onWho, onHearAs }: {
   group: ChatterGroup; active: readonly ChatterTopic[]; expanded: boolean;
   onToggle(): void; onReply(topic: string): void; onAct(key: string, action: ChatterTopicAction): Promise<string | null>; onLoadOlder(topic: string): Promise<void>;
+  hearing: HearingView | null; who: WhoView | null; onWho(offset: number): void; onHearAs(listener: string, name: string): void;
 }) {
   const [panel, setPanel] = useState<'fixed' | 'merge' | null>(null);
   const [fixedIn, setFixedIn] = useState('');
@@ -270,7 +314,9 @@ function TopicGroup({ group, active, expanded, onToggle, onReply, onAct, onLoadO
     {hidden > 0 || expanded ? <button type="button" onClick={onToggle} className="ml-[18px] mt-0.5 text-[10.5px] font-medium text-muted-foreground hover:text-foreground">{expanded ? 'Show the latest only' : `Show ${hidden} earlier`}</button> : null}
     {expanded && total > group.posts ? <button type="button" onClick={() => void onLoadOlder(group.key)} className="ml-[18px] mt-0.5 block text-[10.5px] font-medium text-muted-foreground hover:text-foreground">Load {total - group.posts} more from before</button> : null}
     <div className="mt-0.5 flex flex-col">
-      {shown.map(item => item.type === 'post' ? <PostLine key={item.offset} post={item} /> : <TopicLine key={item.offset} line={item} />)}
+      {shown.map(item => item.type === 'post'
+        ? <PostLine key={item.offset} post={item} hearing={hearing} onWho={() => onWho(item.offset)} who={who?.offset === item.offset ? <WhoHears post={item} who={who} onHearAs={onHearAs} /> : null} />
+        : <TopicLine key={item.offset} line={item} />)}
     </div>
     {panel === 'fixed' ? <form className="ml-[18px] mt-1 flex items-center gap-1" onSubmit={event => { event.preventDefault(); void act({ kind: 'state', state: 'resolved', fixedIn: fixedIn.trim() || null }); }}>
       <input autoFocus value={fixedIn} onChange={event => setFixedIn(event.currentTarget.value)} placeholder="Fixed in (commit)" aria-label="Fixed in commit" className="h-7 min-w-0 flex-1 rounded-md bg-muted/60 px-2 font-mono text-[11.5px] outline-none focus:bg-muted" />
@@ -288,20 +334,69 @@ function TopicGroup({ group, active, expanded, onToggle, onReply, onAct, onLoadO
   </div>;
 }
 
-function PostLine({ post }: { post: ChatterPost }) {
+/** A post; clicking it shows who hears it. While hearing as an agent, a post its digest left out is dim (why not on
+ * hover) and one it heard says why. */
+function PostLine({ post, hearing, who, onWho }: { post: ChatterPost; hearing: HearingView | null; who: ReactNode; onWho(): void }) {
   const Icon = KIND[post.kind].icon;
-  return <div data-post={post.id} className="rounded-lg py-[3px] pl-[18px] pr-1 hover:bg-[color-mix(in_oklab,var(--foreground)_3%,transparent)]">
-    <div className="flex items-center gap-1.5">
-      <span className="flex size-4 shrink-0 items-center justify-center rounded-full bg-foreground text-[9px] font-semibold text-background">{post.author.name.slice(0, 1).toUpperCase()}</span>
-      <span className="min-w-0 truncate text-[12px] font-semibold">{post.author.name}</span>
-      {normalizeChatterTopic(post.topic) !== post.topicKey ? <span className="min-w-0 truncate text-[10.5px] text-muted-foreground">as {post.topic}</span> : null}
-      <time className="ml-auto shrink-0 text-[10.5px] tabular-nums text-muted-foreground">{post.at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>
+  const heard = hearing?.heard.get(post.offset);
+  const left = hearing?.left.get(post.offset);
+  return <div data-post={post.id} data-heard={hearing ? heard?.via ?? 'no' : undefined} title={left?.why}
+    className={`rounded-lg py-[3px] pl-[18px] pr-1 hover:bg-[color-mix(in_oklab,var(--foreground)_3%,transparent)] ${hearing && !heard ? 'opacity-40' : ''}`}>
+    <div role="button" tabIndex={0} aria-expanded={who !== null} aria-label={`Who hears ${post.author.name}'s post`} onClick={onWho}
+      onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onWho(); } }} className="cursor-pointer rounded outline-none focus-visible:ring-2 focus-visible:ring-foreground/20">
+      <div className="flex items-center gap-1.5">
+        <span className="flex size-4 shrink-0 items-center justify-center rounded-full bg-foreground text-[9px] font-semibold text-background">{post.author.name.slice(0, 1).toUpperCase()}</span>
+        <span className="min-w-0 truncate text-[12px] font-semibold">{post.author.name}</span>
+        {normalizeChatterTopic(post.topic) !== post.topicKey ? <span className="min-w-0 truncate text-[10.5px] text-muted-foreground">as {post.topic}</span> : null}
+        <time className="ml-auto shrink-0 text-[10.5px] tabular-nums text-muted-foreground">{post.at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>
+      </div>
+      <p className="text-[12.5px] leading-[18px] text-foreground [overflow-wrap:anywhere]">
+        <span className="mr-1 inline-flex translate-y-[-1px] items-center gap-0.5 align-middle text-[10.5px] font-medium" style={{ color: KIND[post.kind].color }}><Icon width={11} height={11} strokeWidth={2} />{post.kind}</span>
+        <Rich text={post.text} />
+      </p>
+      {heard ? <p data-reason={heard.via} className="mt-0.5 flex items-center gap-1 text-[10.5px]" style={{ color: badgeColors.violet }}>
+        <Headphones01 width={10} height={10} strokeWidth={2} className="shrink-0" />
+        {heard.via === 'floor' ? `always heard · ${heard.reason}` : `picked by the model${heard.strong ? ' (strong)' : ''} · ${heard.reason}`}
+      </p> : null}
     </div>
-    <p className="text-[12.5px] leading-[18px] text-foreground [overflow-wrap:anywhere]">
-      <span className="mr-1 inline-flex translate-y-[-1px] items-center gap-0.5 align-middle text-[10.5px] font-medium" style={{ color: KIND[post.kind].color }}><Icon width={11} height={11} strokeWidth={2} />{post.kind}</span>
-      <Rich text={post.text} />
-    </p>
+    {who}
   </div>;
+}
+
+/** Who hears a post: its author's level, the digests it is in with why, and the ones that left it out with why not.
+ * Clicking an agent hears as it. */
+function WhoHears({ post, who, onHearAs }: { post: ChatterPost; who: WhoView; onHearAs(listener: string, name: string): void }) {
+  if (who.error !== null) return <p role="alert" className="mt-1 text-[11px] text-destructive">{who.error}</p>;
+  if (who.hearings === null) return <p className="mt-1 text-[11px] text-muted-foreground">Reading who hears it…</p>;
+  const { level, heard, missed } = who.hearings;
+  const speaker = post.author.kind === 'project' ? 'The project agent' : post.author.kind === 'gitspace' ? `GitSpace for ${post.author.name}` : post.author.name;
+  return <div data-who-hears={post.offset} className="mt-1 flex flex-col gap-0.5 rounded-lg border border-border p-1.5 text-[11px] text-muted-foreground">
+    <p>{level === null ? `${post.author.name} is a person: no strip, heard as Normal.` : `${speaker} speaks at ${LEVEL_LABEL[level]}.`}</p>
+    {heard.length + missed.length === 0 ? <p>No digest has been built over this post yet. Digests are built about 30 s after posts settle, for agents that ran in the last two hours.</p> : null}
+    {heard.length ? <p className="mt-0.5 font-medium text-foreground">In {heard.length} {heard.length === 1 ? 'digest' : 'digests'}, quoted as written</p> : null}
+    {heard.map(entry => <button key={entry.listener} type="button" onClick={() => onHearAs(entry.listener, entry.name)} className="flex min-w-0 gap-1 rounded px-1 text-left hover:bg-hover">
+      <span className="shrink-0 font-medium text-foreground">{entry.name}</span>
+      <span className="min-w-0">{entry.via === 'floor' ? entry.reason : `the model's pick: ${entry.reason}`}{entry.strong ? ' (strong)' : ''}</span>
+    </button>)}
+    {missed.length ? <p className="mt-0.5 font-medium text-foreground">Not in {missed.length}</p> : null}
+    {missed.map(entry => <button key={entry.listener} type="button" onClick={() => onHearAs(entry.listener, entry.name)} className="flex min-w-0 gap-1 rounded px-1 text-left hover:bg-hover">
+      <span className="shrink-0 font-medium text-foreground">{entry.name}</span>
+      <span className="min-w-0">{entry.why}</span>
+    </button>)}
+  </div>;
+}
+
+/** The banner while hearing as an agent: what its digest holds, or why there is none. */
+function hearingSummary(hearing: { name: string; digest: ChatterDigest | null; error: string | null }, state: ChatterState): string {
+  if (hearing.error !== null) return `Hear as ${hearing.name}: ${hearing.error}`;
+  const digest = hearing.digest;
+  if (digest === null) return `Hearing as ${hearing.name}…`;
+  if (digest.muted) return `Hearing as ${hearing.name}: Chatter is muted for the project, so no agent gets a digest.`;
+  const topics = new Map(state.events.map(event => [event.offset, event.topicKey]));
+  const floor = digest.heard.filter(entry => entry.via === 'floor').length;
+  const picked = new Set(digest.heard.flatMap(entry => entry.via === 'pick' ? [topics.get(entry.offset) ?? String(entry.offset)] : [])).size;
+  const built = digest.builtAt ? ` Built ${digest.builtAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}${digest.model ? ` by ${digest.model}` : ''}.` : ' Not built yet: the floor and the newest topics.';
+  return `Hearing as ${hearing.name}: ${floor} always heard, ${picked} ${picked === 1 ? 'topic' : 'topics'} picked by the model (up to ${CHATTER_MAX_PICKS}), ${digest.left.length} other ${digest.left.length === 1 ? 'post' : 'posts'} left to chatter_read. Dim posts didn't reach it.${built}`;
 }
 
 function TopicLine({ line }: { line: ChatterTopicLine }) {
@@ -325,6 +420,19 @@ function ReturnedLine({ line }: { line: ChatterReturnedLine }) {
       <time className="shrink-0 tabular-nums">{line.at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>
     </div>
     <p className="line-clamp-2 [overflow-wrap:anywhere]" title={line.text}>{line.topic}: {line.text.replaceAll('`', '')}</p>
+  </div>;
+}
+
+/** A person's volume change, or the project mute; it belongs to no topic. */
+function VolumeLine({ line }: { line: ChatterVolumeLine | ChatterProjectMuteLine }) {
+  const name = line.type === 'volume' ? <span className="font-medium text-foreground">{line.name}</span> : null;
+  const what = line.type === 'project-mute' ? line.on ? 'muted Chatter for the project: no agent gets a digest' : 'unmuted Chatter for the project'
+    : line.muted && !line.wasMuted ? <>muted {name}</>
+      : !line.muted && line.wasMuted && line.level === line.from ? <>unmuted {name}</>
+        : <>set {name} to {LEVEL_LABEL[line.level]} (was {line.wasMuted ? 'muted' : LEVEL_LABEL[line.from]})</>;
+  return <div data-volume-line={line.id} className="mt-1.5 flex items-center gap-1.5 px-1.5 py-0.5 text-[11px] text-muted-foreground">
+    <span className="min-w-0 flex-1"><span className="font-medium text-foreground">{line.author.name}</span> {what}</span>
+    <time className="shrink-0 tabular-nums">{line.at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>
   </div>;
 }
 

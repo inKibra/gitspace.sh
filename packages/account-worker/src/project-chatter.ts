@@ -1,12 +1,17 @@
 import {
-  CHATTER_ACTIVE_MS, CHATTER_ACTIVE_TOPICS, CHATTER_ISSUE_STATES, CHATTER_KINDS, CHATTER_PAGE_EVENTS, CHATTER_RETENTION_MS,
+  CHATTER_ACTIVE_MS, CHATTER_ACTIVE_TOPICS, CHATTER_ISSUE_STATES, CHATTER_KINDS, CHATTER_LEVELS, CHATTER_MAX_PICKS, CHATTER_PAGE_EVENTS, CHATTER_PROJECT_STRIP, CHATTER_RETENTION_MS,
   CHATTER_TEXT_CHARACTERS, CHATTER_TOPIC_CHARACTERS, ChatterAuthorSchema, ChatterChangeSchema, ChatterFiledSchema, ChatterSpotSchema, ChatterTopicActionSchema,
-  displayChatterTopic, normalizeChatterTopic, runtimeFailureChatterTopic, similarChatterTopic,
-  type ChatterAuthor, type ChatterChange, type ChatterEvent, type ChatterFiled, type ChatterIssueState, type ChatterKind, type ChatterPage,
-  type ChatterPost, type ChatterReturnedLine, type ChatterSpot, type ChatterTopic, type ChatterTopicAction, type ChatterTopicLine,
+  defaultChatterLevel, displayChatterTopic, normalizeChatterTopic, runtimeFailureChatterTopic, similarChatterTopic,
+  type ChatterAuthor, type ChatterChange, type ChatterDigest, type ChatterEvent, type ChatterFiled, type ChatterHeard, type ChatterHearings, type ChatterIssueState, type ChatterKind,
+  type ChatterLeft, type ChatterLevel, type ChatterPage, type ChatterPost, type ChatterProjectMuteLine, type ChatterReturnedLine, type ChatterSpot, type ChatterTopic, type ChatterTopicAction,
+  type ChatterTopicLine, type ChatterVolumeLine, type ChatterVolumes,
 } from '@gitspace/protocol/chatter-contract';
 import { projectLiveKey } from '@gitspace/protocol/live-notice';
 import { z } from 'zod';
+import {
+  ChatterListenerSchema, chatterStrip, digestPicks, digestQuestion, pickDigest, projectDecider, stripLevel, weighDigest,
+  type ChatterListener, type ChatterMix, type DigestDecide, type TopicPick,
+} from './chatter-digest.js';
 import { notifyBrowsers } from './live-notices.js';
 import { BudgetedDurableObject } from './storage-quarantine.js';
 
@@ -45,6 +50,25 @@ interface TopicRow extends Record<string, SqlStorageValue> {
 
 interface Participant extends ChatterAuthor { posts: number; lastAt: string }
 
+interface VolumeRow extends Record<string, SqlStorageValue> { strip: string; level: string | null; muted: number; by: string; at: string }
+interface SettingsRow extends Record<string, SqlStorageValue> { id: number; project_id: string | null; project_muted: number; by: string | null; at: string | null; build_at: number | null; build_since: number | null }
+/** A listener: its description and position (`heard`, the newest offset it was told; `heard_at`, its last turn start),
+ * and its latest built digest of the posts after `after_offset` through `through`. */
+interface DigestRow extends Record<string, SqlStorageValue> {
+  listener: string;
+  profile_json: string;
+  heard: number;
+  heard_at: string;
+  after_offset: number | null;
+  through: number | null;
+  digest_json: string | null;
+  built_at: string | null;
+}
+type VolumeChange = { strip: string; name: string; level: ChatterLevel; muted: boolean; from: ChatterLevel; wasMuted: boolean };
+/** What a turn start hears: its digest, the posts it heard (oldest first), how many others in how many topics, and the
+ * characters every new post but its own would take quoted whole (what the digest saves against). */
+export interface ChatterHearing { digest: ChatterDigest; posts: ChatterPost[]; others: number; otherTopics: number; fullCharacters: number }
+
 export type ChatterInvalid = { kind: 'invalid'; field: string; message: string };
 export type ChatterFailure = ChatterInvalid | { kind: 'notFound'; key: string };
 export type ChatterOutcome<T, F extends ChatterFailure = ChatterFailure> = { status: 'ok'; value: T } | { status: 'error'; failure: F };
@@ -62,6 +86,22 @@ const WORKSPACE_ISSUES = 100;
 const ISSUE_POSTS = 3;
 /** Authors that are a workspace: its agent, the project agent (the base workspace), or GitSpace for its runtime. */
 const WORKSPACE_AUTHOR_KINDS = "('workspace','project','gitspace')";
+/** Posts one digest weighs, the newest; older ones are left to `chatter_read`. */
+const DIGEST_POSTS = 300;
+/** A conversation that never heard starts with the posts of this last stretch. */
+const FIRST_HEARING_MS = 24 * 60 * 60_000;
+/** Digests are built for listeners that started a turn this recently; an idle one is built for when it next runs. */
+const LISTENER_ACTIVE_MS = 2 * 60 * 60_000;
+/** A build runs this long after the last post of a burst… */
+const BUILD_SETTLE_MS = 30_000;
+/** …and no later than this after the first. */
+const BUILD_LONGEST_MS = 2 * 60_000;
+/** A listener in a long run (no turn start since its last build) is rebuilt at most this often. */
+const REBUILD_MS = 10 * 60_000;
+/** Posts this recent make their author's sidebar indicator glow. */
+const RECENT_POST_MS = 15_000;
+/** Characters a quoted post's line takes besides its text: time, author, phase, kind and reason. */
+const DIGEST_LINE_CHARACTERS = 60;
 
 /**
  * A project's Chatter (docs/CHATTER-DESIGN.md §5), named `${ACCOUNT_ID}:${projectId}`. Every post has a topic; posts
@@ -72,6 +112,12 @@ const WORKSPACE_AUTHOR_KINDS = "('workspace','project','gitspace')";
  */
 export class ProjectChatterDO extends BudgetedDurableObject {
   private readonly participantsSchema = z.array(ChatterAuthorSchema.extend({ posts: z.number().int().nonnegative(), lastAt: z.string() }));
+  private readonly volumeChangeSchema = z.object({ strip: z.string(), name: z.string(), level: z.enum(CHATTER_LEVELS), muted: z.boolean(), from: z.enum(CHATTER_LEVELS), wasMuted: z.boolean() });
+  private readonly builtSchema = z.object({
+    heard: z.array(z.object({ offset: z.number().int(), via: z.enum(['floor', 'pick']), reason: z.string(), strong: z.boolean() })),
+    left: z.array(z.object({ offset: z.number().int(), why: z.string() })),
+    model: z.string().nullable(),
+  });
   private readonly postSchema = z.object({
     projectId: z.string().min(1),
     id: z.string().min(1).max(128),
@@ -88,16 +134,17 @@ export class ProjectChatterDO extends BudgetedDurableObject {
     ctx.blockConcurrencyWhile(async () => {
       const sql = this.ctx.storage.sql;
       const events = this.rows<{ sql: string }>("SELECT sql FROM sqlite_master WHERE type='table' AND name='chatter_events'")[0]?.sql ?? null;
-      // Milestone 2's table allowed only posts and topic lines, and had no phase or spot: it is rebuilt once.
-      const legacy = events !== null && !events.includes("'returned'");
+      // An earlier table allowed fewer line types (milestone 2 also lacked a phase and spot): it is rebuilt once, keeping
+      // the columns it had.
+      const legacy = events !== null && !events.includes("'project-mute'");
       this.ctx.storage.transactionSync(() => {
-        if (legacy) sql.exec('ALTER TABLE chatter_events RENAME TO chatter_events_m2; DROP INDEX IF EXISTS chatter_events_topic; DROP INDEX IF EXISTS chatter_events_at');
+        if (legacy) sql.exec('ALTER TABLE chatter_events RENAME TO chatter_events_old; DROP INDEX IF EXISTS chatter_events_topic; DROP INDEX IF EXISTS chatter_events_at');
         sql.exec(`
           CREATE TABLE IF NOT EXISTS chatter_events(
             seq INTEGER PRIMARY KEY AUTOINCREMENT,
             id TEXT NOT NULL UNIQUE,
             at TEXT NOT NULL,
-            type TEXT NOT NULL CHECK (type IN ('post', 'topic', 'returned')),
+            type TEXT NOT NULL CHECK (type IN ('post', 'topic', 'returned', 'volume', 'project-mute')),
             topic_key TEXT NOT NULL,
             topic TEXT NOT NULL,
             author_kind TEXT NOT NULL,
@@ -129,11 +176,23 @@ export class ProjectChatterDO extends BudgetedDurableObject {
           CREATE INDEX IF NOT EXISTS chatter_topics_last ON chatter_topics(last_at);
           CREATE INDEX IF NOT EXISTS chatter_topics_state ON chatter_topics(state, last_at);
           CREATE INDEX IF NOT EXISTS chatter_topics_alias ON chatter_topics(alias_of);
+          CREATE TABLE IF NOT EXISTS chatter_volumes(strip TEXT PRIMARY KEY, level TEXT CHECK (level IN ('mute', 'low', 'normal', 'high')), muted INTEGER NOT NULL, by TEXT NOT NULL, at TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS chatter_settings(id INTEGER PRIMARY KEY CHECK (id = 1), project_id TEXT, project_muted INTEGER NOT NULL DEFAULT 0, by TEXT, at TEXT, build_at INTEGER, build_since INTEGER);
+          CREATE TABLE IF NOT EXISTS digests(
+            listener TEXT PRIMARY KEY,
+            profile_json TEXT NOT NULL,
+            heard INTEGER NOT NULL,
+            heard_at TEXT NOT NULL,
+            after_offset INTEGER,
+            through INTEGER,
+            digest_json TEXT,
+            built_at TEXT
+          );
         `);
         if (legacy) {
-          sql.exec(`INSERT INTO chatter_events(seq, id, at, type, topic_key, topic, author_kind, author_id, author_name, kind, text, change_json)
-            SELECT seq, id, at, type, topic_key, topic, author_kind, author_id, author_name, kind, text, change_json FROM chatter_events_m2`);
-          sql.exec('DROP TABLE chatter_events_m2');
+          const kept = this.rows<{ name: string }>('PRAGMA table_info(chatter_events_old)').map(column => column.name).join(', ');
+          sql.exec(`INSERT INTO chatter_events(${kept}) SELECT ${kept} FROM chatter_events_old`);
+          sql.exec('DROP TABLE chatter_events_old');
         }
         if (!this.rows<{ name: string }>('PRAGMA table_info(chatter_topics)').some(column => column.name === 'repeats')) sql.exec('ALTER TABLE chatter_topics ADD COLUMN repeats INTEGER NOT NULL DEFAULT 0');
       });
@@ -207,6 +266,7 @@ export class ProjectChatterDO extends BudgetedDurableObject {
       this.ctx.storage.sql.exec("UPDATE chatter_topics SET state = 'open', state_by = ?, state_at = ? WHERE key = ?", input.author.name, at, key);
       return this.insert({ id: `${input.id}:open`, at, type: 'topic', topicKey: key, topic: display, author: input.author, kind: null, text: null, change: { kind: 'state', state: 'open', from: issueState(existing?.state ?? null), fixedIn: null }, phase: null, spot: null });
     });
+    this.buildSoon(input.projectId);
     await this.changed(input.projectId, seq);
     const events = this.rows<EventRow>('SELECT * FROM chatter_events WHERE id IN (?, ?) ORDER BY seq', input.id, `${input.id}:open`).map(row => this.eventView(row));
     const post = events.find(event => event.type === 'post');
@@ -378,15 +438,162 @@ export class ProjectChatterDO extends BudgetedDurableObject {
     return this.acted(into.key, id);
   }
 
+  /**
+   * A listening agent's turn start (docs/CHATTER-DESIGN.md §6): its digest of the posts after `after`, its
+   * conversation's position (null for a conversation that never heard: the listener's own position, else the last day).
+   * The precomputed row is used when it covers that position; what came after the build gets the floor and the newest
+   * topics. Never a model call. Records the listener's description and position, so the next build is made for it.
+   */
+  hear(raw: { listener: ChatterListener; after: number | null }): ChatterHearing {
+    const listener = ChatterListenerSchema.parse(raw.listener);
+    const now = Date.now();
+    const row = this.rows<DigestRow>('SELECT * FROM digests WHERE listener = ?', listener.listener)[0];
+    const cursor = this.cursor();
+    const after = Math.min(raw.after ?? row?.heard ?? this.offsetSince(now - FIRST_HEARING_MS), cursor);
+    const settings = this.settings();
+    const posts = new Map(after < cursor && !settings.muted ? this.digestPosts(after, cursor).map(post => [post.offset, post]) : []);
+    let heard: ChatterHeard[] = [];
+    let left: ChatterLeft[] = [];
+    let builtAt: Date | null = null;
+    let model: string | null = null;
+    if (posts.size) {
+      const built = row ? this.built(row) : null;
+      let from = after;
+      if (built && built.after <= after && built.through > after) {
+        heard = built.heard.filter(entry => posts.has(entry.offset));
+        left = built.left.filter(entry => posts.has(entry.offset));
+        ({ builtAt, model } = built);
+        from = built.through;
+      }
+      if (from < cursor) {
+        const picked = new Set(heard.flatMap(entry => entry.via === 'pick' ? [posts.get(entry.offset)?.topicKey ?? ''] : [])).size;
+        const fresh = pickDigest(weighDigest(listener, [...posts.values()].filter(post => post.offset > from), this.mix()), null, CHATTER_MAX_PICKS - picked);
+        heard = [...heard, ...fresh.heard];
+        left = [...left, ...fresh.left];
+      }
+    }
+    this.ctx.storage.sql.exec(
+      'INSERT INTO digests(listener, profile_json, heard, heard_at) VALUES (?, ?, ?, ?) ON CONFLICT(listener) DO UPDATE SET profile_json = excluded.profile_json, heard = MAX(digests.heard, excluded.heard), heard_at = excluded.heard_at',
+      listener.listener, JSON.stringify(listener), cursor, new Date(now).toISOString(),
+    );
+    return {
+      digest: { listener: listener.listener, name: listener.name, after, through: cursor, builtAt, model, muted: settings.muted, heard, left },
+      posts: heard.flatMap(entry => posts.get(entry.offset) ?? []),
+      others: left.length,
+      otherTopics: new Set(left.map(entry => posts.get(entry.offset)?.topicKey ?? '')).size,
+      fullCharacters: [...heard, ...left].reduce((total, entry) => total + (posts.get(entry.offset)?.text.length ?? 0) + DIGEST_LINE_CHARACTERS, 0),
+    };
+  }
+
+  /** Hear as: the latest digest built for `listener`, or, when none is built, its floor and the newest topics since it
+   * last heard (the last day for a listener that never did). `name` names a listener this object has not heard yet. */
+  digestPreview(input: { listener: string; name: string }): ChatterDigest {
+    const row = this.rows<DigestRow>('SELECT * FROM digests WHERE listener = ?', input.listener)[0];
+    const built = row ? this.built(row) : null;
+    const listener: ChatterListener = row ? ChatterListenerSchema.parse(JSON.parse(row.profile_json)) : { listener: input.listener, name: input.name, phase: null, goal: '', head: null, stack: [], waitsOn: [] };
+    if (this.settings().muted) return { listener: input.listener, name: listener.name, after: row?.heard ?? 0, through: this.cursor(), builtAt: null, model: null, muted: true, heard: [], left: [] };
+    if (built) return { listener: input.listener, name: listener.name, after: built.after, through: built.through, builtAt: built.builtAt, model: built.model, muted: false, heard: built.heard, left: built.left };
+    const cursor = this.cursor();
+    const after = Math.min(row?.heard ?? this.offsetSince(Date.now() - FIRST_HEARING_MS), cursor);
+    const fresh = pickDigest(weighDigest(listener, this.digestPosts(after, cursor), this.mix()), null);
+    return { listener: input.listener, name: listener.name, after, through: cursor, builtAt: null, model: null, muted: false, heard: fresh.heard, left: fresh.left };
+  }
+
+  /** Who hears the post at `offset`: its author's level, and every built digest over it that has it or left it out. */
+  hearings(offset: number): ChatterHearings {
+    const row = this.rows<EventRow>("SELECT * FROM chatter_events WHERE seq = ? AND type = 'post'", offset)[0];
+    const post = row ? this.eventView(row) : null;
+    if (post?.type !== 'post') return { level: null, heard: [], missed: [] };
+    const strip = chatterStrip(post.author);
+    const heard: ChatterHearings['heard'][number][] = [];
+    const missed: ChatterHearings['missed'][number][] = [];
+    for (const digest of this.rows<DigestRow>('SELECT * FROM digests WHERE digest_json IS NOT NULL AND after_offset < ? AND through >= ?', offset, offset)) {
+      const built = this.built(digest);
+      const name = ChatterListenerSchema.parse(JSON.parse(digest.profile_json)).name;
+      const got = built?.heard.find(entry => entry.offset === offset);
+      const left = built?.left.find(entry => entry.offset === offset);
+      if (got) heard.push({ listener: digest.listener, name, via: got.via, reason: got.reason, strong: got.strong });
+      else if (left) missed.push({ listener: digest.listener, name, why: left.why });
+    }
+    return { level: strip === null ? null : stripLevel(this.mix(), strip, post.phase), heard, missed };
+  }
+
+  /** The project's volumes: the strips people set, the project mute, and the strips that posted in the last few seconds. */
+  volumes(): ChatterVolumes {
+    const settings = this.settings();
+    const recent = this.rows<{ author_kind: string; author_id: string; at: string }>(
+      `SELECT author_kind, author_id, MAX(at) AS at FROM chatter_events WHERE type = 'post' AND at >= ? AND author_kind IN ${WORKSPACE_AUTHOR_KINDS} GROUP BY author_kind, author_id`,
+      new Date(Date.now() - RECENT_POST_MS).toISOString(),
+    );
+    return {
+      strips: this.rows<VolumeRow>('SELECT * FROM chatter_volumes').map(row => ({ strip: row.strip, level: chatterLevel(row.level), muted: row.muted === 1, by: row.by, at: new Date(row.at) })),
+      projectMuted: settings.by === null || settings.at === null ? null : { on: settings.muted, by: settings.by, at: new Date(settings.at) },
+      recent: recent.map(entry => ({ strip: entry.author_kind === 'project' ? CHATTER_PROJECT_STRIP : entry.author_id, at: new Date(entry.at) })),
+    };
+  }
+
+  /** A person sets a strip's notch, its M, or both (`phase` is a workspace strip's, for its default): a change writes a
+   * volume line and rebuilds the digests soon, since levels shape them. */
+  async setVolume(input: { projectId: string; strip: string; name: string; phase: string | null; level?: ChatterLevel; muted?: boolean; author: ChatterAuthor }): Promise<{ volumes: ChatterVolumes; line: ChatterVolumeLine | null }> {
+    const author = ChatterAuthorSchema.parse(input.author);
+    const current = this.rows<VolumeRow>('SELECT * FROM chatter_volumes WHERE strip = ?', input.strip)[0];
+    const set = chatterLevel(current?.level ?? null);
+    const from = set ?? defaultChatterLevel(input.phase);
+    const wasMuted = current?.muted === 1;
+    const level = input.level ?? set;
+    const muted = input.muted ?? wasMuted;
+    if ((level ?? from) === from && muted === wasMuted) return { volumes: this.volumes(), line: null };
+    const at = new Date().toISOString();
+    const id = crypto.randomUUID();
+    const seq = this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec('INSERT INTO chatter_volumes(strip, level, muted, by, at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(strip) DO UPDATE SET level = excluded.level, muted = excluded.muted, by = excluded.by, at = excluded.at',
+        input.strip, level, muted ? 1 : 0, author.name, at);
+      return this.insert({ id, at, type: 'volume', topicKey: '', topic: '', author, kind: null, text: null, change: { strip: input.strip, name: input.name, level: level ?? from, muted, from, wasMuted }, phase: null, spot: null });
+    });
+    this.buildSoon(input.projectId);
+    await this.changed(input.projectId, seq);
+    const line = this.rows<EventRow>('SELECT * FROM chatter_events WHERE id = ?', id)[0];
+    const view = line ? this.eventView(line) : null;
+    return { volumes: this.volumes(), line: view?.type === 'volume' ? view : null };
+  }
+
+  /** A person mutes or unmutes Chatter for the project: posts stay in the stream and `chatter_read`, and no agent gets a
+   * digest while it is muted. A change writes a line; unmuting rebuilds the digests soon. */
+  async setProjectMute(input: { projectId: string; on: boolean; author: ChatterAuthor }): Promise<{ volumes: ChatterVolumes; line: ChatterProjectMuteLine | null }> {
+    const author = ChatterAuthorSchema.parse(input.author);
+    if (this.settings().muted === input.on) return { volumes: this.volumes(), line: null };
+    const at = new Date().toISOString();
+    const id = crypto.randomUUID();
+    const seq = this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec('INSERT INTO chatter_settings(id, project_id, project_muted, by, at) VALUES (1, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET project_id = excluded.project_id, project_muted = excluded.project_muted, by = excluded.by, at = excluded.at',
+        input.projectId, input.on ? 1 : 0, author.name, at);
+      return this.insert({ id, at, type: 'project-mute', topicKey: '', topic: '', author, kind: null, text: null, change: { on: input.on }, phase: null, spot: null });
+    });
+    if (!input.on) this.buildSoon(input.projectId);
+    await this.changed(input.projectId, seq);
+    const line = this.rows<EventRow>('SELECT * FROM chatter_events WHERE id = ?', id)[0];
+    const view = line ? this.eventView(line) : null;
+    return { volumes: this.volumes(), line: view?.type === 'project-mute' ? view : null };
+  }
+
+  /** Answers a build's decisions with the project's inference profile; a test puts its own in. */
+  decider: (projectId: string) => Promise<DigestDecide> = projectId => projectDecider(this.env, projectId);
+
   /** The project is deleted: its posts, topics and alarm go with it. */
   async erase(): Promise<void> {
     await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
   }
 
-  /** Each topic whose last post is 90 days old goes, with its events and the aliases pointing at it; so does each
-   * returned line 90 days old. */
+  /** A digest build that is due runs first. Then each topic whose last post is 90 days old goes, with its events and the
+   * aliases pointing at it; so does each line without a topic 90 days old. */
   async alarm(): Promise<void> {
+    const due = this.settings().buildAt;
+    if (due !== null && due <= Date.now()) {
+      this.ctx.storage.sql.exec('UPDATE chatter_settings SET build_at = NULL, build_since = NULL WHERE id = 1');
+      try { await this.build(); }
+      catch (error) { console.error(JSON.stringify({ event: 'chatter_digest_build_failed', message: error instanceof Error ? error.message : String(error) })); }
+    }
     const cutoff = new Date(Date.now() - CHATTER_RETENTION_MS).toISOString();
     const expired = this.rows<{ key: string }>('SELECT key FROM chatter_topics WHERE alias_of IS NULL AND last_at <= ?', cutoff);
     this.ctx.storage.transactionSync(() => {
@@ -399,22 +606,109 @@ export class ProjectChatterDO extends BudgetedDurableObject {
     await this.reschedule();
   }
 
+  /**
+   * The precomputed digests (docs/CHATTER-DESIGN.md §5, decision 2): for each listener that started a turn in the last
+   * LISTENER_ACTIVE_MS and has posts it has not heard, its floor plus the topics one Decisions call picks for it among
+   * the rest (one call per listener, every offered topic a question of it); a failed call leaves the floor plus the
+   * newest topics. An idle listener is built for when it next runs. A listener that has not started a turn since its
+   * last build (a long run) is rebuilt at most once per REBUILD_MS, the skipped build scheduled for then. While Chatter
+   * is muted for the project, nothing is.
+   */
+  private async build(): Promise<void> {
+    const settings = this.settings();
+    const projectId = settings.projectId;
+    if (settings.muted || projectId === null) return;
+    const now = Date.now();
+    const cursor = this.cursor();
+    const mix = this.mix();
+    const listeners: DigestRow[] = [];
+    let later: number | null = null;
+    for (const row of this.rows<DigestRow>('SELECT * FROM digests WHERE heard_at >= ? AND heard < ?', new Date(now - LISTENER_ACTIVE_MS).toISOString(), cursor)) {
+      if (row.through === cursor && row.after_offset === row.heard) continue;
+      const rebuild = row.built_at === null || row.built_at <= row.heard_at ? now : Date.parse(row.built_at) + REBUILD_MS;
+      if (rebuild <= now) listeners.push(row);
+      else later = Math.min(later ?? rebuild, rebuild);
+    }
+    if (later !== null) this.ctx.storage.sql.exec('UPDATE chatter_settings SET build_at = COALESCE(MIN(build_at, ?), ?) WHERE id = 1', later, later);
+    let decide: Promise<DigestDecide> | null = null;
+    await Promise.all(listeners.map(async row => {
+      const listener = ChatterListenerSchema.parse(JSON.parse(row.profile_json));
+      const weighed = weighDigest(listener, this.digestPosts(row.heard, cursor), mix);
+      const question = digestQuestion(listener, weighed.candidates);
+      let picks: Map<string, TopicPick> | null = new Map();
+      let model: string | null = null;
+      if (question) {
+        try {
+          decide ??= this.decider(projectId);
+          const answer = await (await decide)(question.args);
+          picks = digestPicks(question.keys, answer.answers);
+          model = answer.model;
+        } catch (error) {
+          picks = null;
+          console.warn(JSON.stringify({ event: 'chatter_digest_unpicked', listener: listener.listener, message: error instanceof Error ? error.message : String(error) }));
+        }
+      }
+      const { heard, left } = pickDigest(weighed, picks);
+      this.ctx.storage.sql.exec('UPDATE digests SET after_offset = ?, through = ?, digest_json = ?, built_at = ? WHERE listener = ?',
+        row.heard, cursor, JSON.stringify({ heard, left, model }), new Date().toISOString(), row.listener);
+    }));
+  }
+
   private async changed(projectId: string, seq: number): Promise<void> {
     await this.reschedule();
     await notifyBrowsers(this.env, [{ ...projectLiveKey(projectId, 'chatter'), version: seq }]);
   }
 
-  /** The alarm follows the oldest topic's or returned line's expiry. */
+  /** Posts settle before a build: it runs BUILD_SETTLE_MS after the last of a burst, and no later than BUILD_LONGEST_MS
+   * after the first, so a steady stream still builds. The caller reschedules the alarm. */
+  private buildSoon(projectId: string): void {
+    const now = Date.now();
+    const since = this.settings().buildSince ?? now;
+    this.ctx.storage.sql.exec('INSERT INTO chatter_settings(id, project_id, build_at, build_since) VALUES (1, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET project_id = excluded.project_id, build_at = excluded.build_at, build_since = excluded.build_since',
+      projectId, Math.min(since + BUILD_LONGEST_MS, now + BUILD_SETTLE_MS), since);
+  }
+
+  /** The alarm follows the next digest build, or the oldest topic's or topic-less line's expiry. */
   private async reschedule(): Promise<void> {
     const oldest = this.rows<{ at: string | null }>(
       "SELECT MIN(at) AS at FROM (SELECT MIN(last_at) AS at FROM chatter_topics WHERE alias_of IS NULL UNION ALL SELECT MIN(at) AS at FROM chatter_events WHERE topic_key = '')",
     )[0]?.at ?? null;
-    if (oldest === null) {
+    const build = this.settings().buildAt;
+    const expiry = oldest === null ? null : Date.parse(oldest) + CHATTER_RETENTION_MS;
+    const due = build === null ? expiry : expiry === null ? build : Math.min(build, expiry);
+    if (due === null) {
       await this.ctx.storage.deleteAlarm();
       return;
     }
-    const due = Date.parse(oldest) + CHATTER_RETENTION_MS;
     if (await this.ctx.storage.getAlarm() !== due) await this.ctx.storage.setAlarm(due);
+  }
+
+  private settings(): { projectId: string | null; muted: boolean; by: string | null; at: string | null; buildAt: number | null; buildSince: number | null } {
+    const row = this.rows<SettingsRow>('SELECT * FROM chatter_settings WHERE id = 1')[0];
+    return { projectId: row?.project_id ?? null, muted: row?.project_muted === 1, by: row?.by ?? null, at: row?.at ?? null, buildAt: row?.build_at ?? null, buildSince: row?.build_since ?? null };
+  }
+
+  private mix(): ChatterMix {
+    return { strips: new Map(this.rows<VolumeRow>('SELECT * FROM chatter_volumes').map(row => [row.strip, { level: chatterLevel(row.level), muted: row.muted === 1 }])) };
+  }
+
+  /** A listener's precomputed digest, or null when none is built. */
+  private built(row: DigestRow): { after: number; through: number; builtAt: Date; model: string | null; heard: ChatterHeard[]; left: ChatterLeft[] } | null {
+    if (row.digest_json === null || row.after_offset === null || row.through === null || row.built_at === null) return null;
+    const stored = this.builtSchema.parse(JSON.parse(row.digest_json));
+    return { after: row.after_offset, through: row.through, builtAt: new Date(row.built_at), ...stored };
+  }
+
+  /** The posts after `after` through `through`, oldest first; past DIGEST_POSTS, only the newest. */
+  private digestPosts(after: number, through: number): ChatterPost[] {
+    return this.rows<EventRow>("SELECT * FROM chatter_events WHERE type = 'post' AND seq > ? AND seq <= ? ORDER BY seq DESC LIMIT ?", after, through, DIGEST_POSTS)
+      .reverse().flatMap(row => { const view = this.eventView(row); return view.type === 'post' ? [view] : []; });
+  }
+
+  /** The offset just before the first event at or after `at` (ms); the newest offset when there is none. */
+  private offsetSince(at: number): number {
+    const first = this.rows<{ seq: number | null }>('SELECT MIN(seq) AS seq FROM chatter_events WHERE at >= ?', new Date(at).toISOString())[0]?.seq ?? null;
+    return first === null ? this.cursor() : first - 1;
   }
 
   private acted(key: string, id: string): ChatterOutcome<ChatterActResult> {
@@ -425,7 +719,7 @@ export class ProjectChatterDO extends BudgetedDurableObject {
     return { status: 'ok', value: { topic: this.topicView(topic), line: view.type === 'topic' ? view : null } };
   }
 
-  private insert(event: { id: string; at: string; type: 'post' | 'topic' | 'returned'; topicKey: string; topic: string; author: ChatterAuthor; kind: ChatterKind | null; text: string | null; change: ChatterChange | null; phase: string | null; spot: ChatterSpot | null; to?: string }): number {
+  private insert(event: { id: string; at: string; type: ChatterEvent['type']; topicKey: string; topic: string; author: ChatterAuthor; kind: ChatterKind | null; text: string | null; change: ChatterChange | VolumeChange | { on: boolean } | null; phase: string | null; spot: ChatterSpot | null; to?: string }): number {
     const change = event.to !== undefined ? { to: event.to } : event.change;
     return this.ctx.storage.sql.exec<{ seq: number }>(
       'INSERT INTO chatter_events(id, at, type, topic_key, topic, author_kind, author_id, author_name, kind, text, change_json, author_phase, spot_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING seq',
@@ -491,6 +785,11 @@ export class ProjectChatterDO extends BudgetedDurableObject {
     if (row.type === 'post') {
       return { type: 'post', offset: row.seq, id: row.id, at, topicKey: row.topic_key, topic: row.topic, author, phase: row.author_phase, kind: z.enum(CHATTER_KINDS).parse(row.kind), text: row.text ?? '', spot: row.spot_json === null ? null : ChatterSpotSchema.parse(JSON.parse(row.spot_json)) };
     }
+    if (row.type === 'volume') {
+      const { strip, name, level, muted, from, wasMuted } = this.volumeChangeSchema.parse(JSON.parse(row.change_json ?? 'null'));
+      return { type: 'volume', offset: row.seq, id: row.id, at, topicKey: '', author, strip, name, level, muted, from, wasMuted };
+    }
+    if (row.type === 'project-mute') return { type: 'project-mute', offset: row.seq, id: row.id, at, topicKey: '', author, on: z.object({ on: z.boolean() }).parse(JSON.parse(row.change_json ?? 'null')).on };
     if (row.type === 'returned') {
       return { type: 'returned', offset: row.seq, id: row.id, at, topicKey: '', topic: row.topic, author, kind: z.enum(CHATTER_KINDS).parse(row.kind), text: row.text ?? '', to: z.object({ to: z.string() }).parse(JSON.parse(row.change_json ?? '{}')).to };
     }
@@ -508,4 +807,8 @@ function invalid(field: string, message: string): { status: 'error'; failure: Ch
 
 function issueState(value: string | null): ChatterIssueState | null {
   return CHATTER_ISSUE_STATES.find(state => state === value) ?? null;
+}
+
+function chatterLevel(value: string | null): ChatterLevel | null {
+  return CHATTER_LEVELS.find(level => level === value) ?? null;
 }

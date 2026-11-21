@@ -159,11 +159,16 @@ export function dismissGhost(): void {
 export function citeGhost(cite: GhostCite): GhostSubject | null {
   const ghost = state.ghost;
   if (!ghost) return null;
-  const workspaceId = ghost.subject.workspaceId;
+  showGhostCite(ghost.subject.workspaceId, cite);
+  return ghost.subject;
+}
+
+/** Asks `workspaceId`'s view, once it shows, for a citation: its main transcript at the entry, or its drive at the
+ * lines. An agent's ghost's answer (`ghost_ask`) cites this way too. */
+export function showGhostCite(workspaceId: string, cite: GhostCite): void {
   set({ ...state, request: cite.kind === 'entry'
     ? { serial: ++serials, workspaceId, kind: 'entry', ordinal: cite.from * GHOST_ENTRY_ORDINALS }
     : { serial: ++serials, workspaceId, kind: 'drive', url: cite.lines ? `${cite.url}:${cite.lines[0]}-${cite.lines[1]}` : cite.url } });
-  return ghost.subject;
 }
 
 /** The ghost's draft in its workspace's composer, for the person to send. */

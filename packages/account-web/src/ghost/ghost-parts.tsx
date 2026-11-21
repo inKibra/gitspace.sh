@@ -1,6 +1,7 @@
-// Small pieces a ghost draws in several places: its glyph, a citation chip, and inline text with `code` and **bold**.
+// Small pieces a ghost draws in several places: its glyph, a citation chip, a read's label, and inline text with `code`
+// and **bold**.
 import { Tooltip } from '@gitspace/ui';
-import type { GhostCite } from '@gitspace/protocol-runtime';
+import type { GhostCite, GhostRead } from '@gitspace/protocol-runtime';
 import { File02, MessageTextSquare01 } from '@untitledui/icons';
 
 /** The ghost's tint: a soft lavender, kept off the product's blue (selection) and violet (upstream). */
@@ -23,18 +24,27 @@ export function citeLabel(cite: GhostCite): string {
   return cite.lines ? `${name}:${cite.lines[0] === cite.lines[1] ? cite.lines[0] : `${cite.lines[0]}–${cite.lines[1]}`}` : name;
 }
 
-/** A citation: an entry (#118, #93–117) or a drive file's lines. Clicking shows it in the workspace. */
-export function CiteChip({ cite, onCite }: { cite: GhostCite; onCite(cite: GhostCite): void }) {
+/** One read of a ghost: `searched “polling” · 9 hits`, `read transcript 93–117`, `read drive://…/plan.md`. */
+export function readLabel(read: GhostRead): string {
+  if (read.kind === 'search') return `searched “${read.query}”${read.hits === null ? '' : ` · ${read.hits} ${read.hits === 1 ? 'hit' : 'hits'}`}`;
+  if (read.kind === 'read') return read.from === null ? 'reading the transcript' : read.from === read.to ? `read entry ${read.from}` : `read transcript ${read.from}–${read.to}`;
+  return `read ${read.url}`;
+}
+
+/** A citation: an entry (#118, #93–117) or a drive file's lines. Clicking shows it in the workspace; without `onCite`
+ * (an entry of a conversation the workspace view doesn't show) it only names it. */
+export function CiteChip({ cite, onCite }: { cite: GhostCite; onCite?(cite: GhostCite): void }) {
   const Icon = cite.kind === 'entry' ? MessageTextSquare01 : File02;
   const label = citeLabel(cite);
-  const preview = cite.kind === 'entry'
-    ? `Show ${cite.to === undefined ? `entry ${cite.from}` : `entries ${cite.from}–${cite.to}`} in the transcript`
-    : `Open ${label} in the Drive${cite.generation === null ? '' : ` · the ghost read generation ${cite.generation}`}`;
+  const entries = cite.kind === 'entry' ? cite.to === undefined ? `entry ${cite.from}` : `entries ${cite.from}–${cite.to}` : null;
+  const preview = !onCite ? `${entries ?? label} of the session the ghost read`
+    : entries ? `Show ${entries} in the transcript`
+    : `Open ${label} in the Drive${cite.kind === 'drive' && cite.generation !== null ? ` · the ghost read generation ${cite.generation}` : ''}`;
+  const className = 'ghost-chip mx-0.5 inline-flex h-[19px] translate-y-[-1px] items-center gap-1 rounded-full px-1.5 align-middle font-mono text-[10.5px] font-medium leading-none transition-colors';
+  const content = <><Icon width={11} height={11} strokeWidth={1.75} className="shrink-0 opacity-80" />{label}</>;
   return <Tooltip content={<span className="block max-w-[280px] whitespace-normal">{preview}</span>} side="top">
-    <button type="button" onClick={() => onCite(cite)} data-cite={label} aria-label={preview}
-      className="ghost-chip mx-0.5 inline-flex h-[19px] translate-y-[-1px] items-center gap-1 rounded-full px-1.5 align-middle font-mono text-[10.5px] font-medium leading-none transition-colors">
-      <Icon width={11} height={11} strokeWidth={1.75} className="shrink-0 opacity-80" />{label}
-    </button>
+    {onCite ? <button type="button" onClick={() => onCite(cite)} data-cite={label} aria-label={preview} className={className}>{content}</button>
+      : <span data-cite={label} aria-label={preview} className={className}>{content}</span>}
   </Tooltip>;
 }
 

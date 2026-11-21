@@ -48,6 +48,8 @@ const MACHINE_NOTICE = 'gitspace.machine-notice';
 const COMPACTION = CompactionEntry.kind;
 /** The project agent's workspace board reaches it as context but shows as one quiet row, the board under a fold. */
 const WORKSPACE_BOARD = 'gitspace.workspace-board';
+/** A turn's Chatter digest reaches the agent as context but shows as one card: its counts, the digest under a fold. */
+const CHATTER_DIGEST = 'gitspace.chatter-digest';
 /** Titles of user-role entries no input placed (a retained rule's instruction, a rewind's report, a restore notice):
  * they belong to the turn they land in and show there as notices. */
 const IN_TURN_TITLE: Readonly<Record<string, string>> = { 'pi.user': 'Instruction', 'gitspace.rewind': 'Context rewound', 'gitspace.lfs-restored': 'Files restored' };
@@ -93,6 +95,7 @@ export function entryEvents(entry: EntryRecord, executorResult?: ExecutorResultR
       return { ordinal: base + index, kind: 'message_end', payload: { message: { role: 'custom', customType: MACHINE_NOTICE, display: true, title, content: source.content }, entryId: String(entry.id) }, createdAt: new Date(source.timestamp).toISOString() };
     }
     if (entry.kind === WORKSPACE_BOARD) return { ordinal: base + index, kind: 'message_end', payload: { message: { role: 'custom', customType: WORKSPACE_BOARD, display: true, title: 'Workspace board', content: source.content }, entryId: String(entry.id) }, createdAt: new Date(source.timestamp).toISOString() };
+    if (entry.kind === CHATTER_DIGEST) return { ordinal: base + index, kind: 'message_end', payload: { message: { role: 'custom', customType: CHATTER_DIGEST, display: true, content: source.content, details: entry.data ?? null }, entryId: String(entry.id) }, createdAt: new Date(source.timestamp).toISOString() };
     if (entry.kind === WORKSPACE_REPORT_ENTRY) return { ordinal: base + index, kind: 'message_end', payload: { message: workspaceReportMessage(entry), entryId: String(entry.id) }, createdAt: new Date(source.timestamp).toISOString() };
     if (entry.kind === COMPACTION) return { ordinal: base + index, kind: 'compaction', payload: compactionPayload(entry, source), createdAt: new Date(source.timestamp).toISOString() };
     // A failed model attempt (pi retries it, or the turn ends with its error) shows as one notice: its partial reply was
