@@ -76,14 +76,6 @@ export const GhostServerMessageSchema = z.discriminatedUnion('type', [
 ]);
 export type GhostServerMessage = z.infer<typeof GhostServerMessageSchema>;
 
-const count = z.number().int().nonnegative();
-/** What one answer of a person's ghost spent, for the account's usage: token counts on one model, never text. */
-export const GhostUsageSchema = z.strictObject({
-  profileId: z.string().min(1), model: z.string().min(1), questions: count, requests: count,
-  input: count, output: count, cacheRead: count, cacheWrite: count, costUsd: z.number().nonnegative(),
-});
-export type GhostUsage = z.infer<typeof GhostUsageSchema>;
-
 /** `[#118]`, `[#93-117]` (or an en dash), `[drive://workspace/notes/plan.md:19-20]`: how an answer cites, inline. */
 const CITE = /\[(?:#(\d+)(?:\s*[-–]\s*#?(\d+))?|(drive:\/\/[^\]\s]+?)(?::(\d+)(?:[-–](\d+))?)?)\]/gu;
 

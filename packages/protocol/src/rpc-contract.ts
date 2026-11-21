@@ -1581,11 +1581,12 @@ export const revokeDeviceContract = gitspaceRpc
   .output(wire.object({ deviceId: wire.string, revokedAt: wire.string }))
   .errors({ OperationFailed: rpcErrors.operationFailed })
   .mutation();
-/** `models`: the profile's chat models; `imageModels`: its image models (`contextWindow` null; `images`: takes input images). */
+/** `models`: the profile's chat models; `imageModels`: its image models and `decisionModels` its classifier models
+ * (both `contextWindow` null; `images`: takes input images). */
 export const listAvailableModelsContract = gitspaceRpc
   .procedure()
   .input(wire.object({ profileId: wire.string }))
-  .output(wire.object({ models: wire.array(AvailableModelCodec), imageModels: wire.array(AvailableModelCodec) }))
+  .output(wire.object({ models: wire.array(AvailableModelCodec), imageModels: wire.array(AvailableModelCodec), decisionModels: wire.array(AvailableModelCodec) }))
   .errors({ OperationFailed: rpcErrors.operationFailed })
   .query();
 

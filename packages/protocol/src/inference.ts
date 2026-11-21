@@ -37,17 +37,19 @@ const namedEntryMaps: Record<string, true> = {
 
 const inferenceRootSections: Record<string, InferenceSettingSection> = {
   modelRoles: 'Models', contextLimits: 'Models', enabledModels: 'Models', visionFallback: 'Models', providers: 'Providers',
-  search: 'Services', dictation: 'Services', images: 'Services', speech: 'Services',
+  search: 'Services', dictation: 'Services', images: 'Services', speech: 'Services', decisions: 'Services',
 };
-/** A service selector (`search`, `dictation`, `images`, `speech`): `cloudflare/<option>` runs on the platform's Cloudflare account,
- * `<provider>/<modelId>` on one of the profile's own credentials for that pi-ai provider. `SERVICE_OFF` turns it off. */
+/** A service selector (`search`, `dictation`, `images`, `speech`, `decisions`): `cloudflare/<option>` runs on the platform's
+ * Cloudflare account, `<provider>/<modelId>` on one of the profile's own credentials for that pi-ai provider. `SERVICE_OFF`
+ * turns it off. */
 export function parseServiceSelector(value: string): { provider: string; id: string } | null {
   const slash = value.indexOf('/');
   if (slash <= 0 || slash === value.length - 1) return null;
   return { provider: value.slice(0, slash), id: value.slice(slash + 1) };
 }
 /** The `search`, `dictation`, `images` or `speech` value that turns the service off: its agent tool (web_search, generate_image) is
- * not offered to the profile's conversations, the composer shows no microphone, and walkthroughs play captions only. */
+ * not offered to the profile's conversations, the composer shows no microphone, and walkthroughs play captions only.
+ * `decisions` off answers every decision with structured output on the profile's `fast` chat model. */
 export const SERVICE_OFF = 'off';
 /** Web search on Cloudflare's Web Search API, by its provider. */
 export const CLOUDFLARE_SEARCH_PROVIDERS: Readonly<Record<string, true>> = { ceramic: true, linkup: true, exa: true };
@@ -73,6 +75,14 @@ export const imagesSelectorSchema = z.string().refine(value => {
   const selector = parseServiceSelector(value);
   return value === SERVICE_OFF || (selector !== null && (selector.provider !== 'cloudflare' || Object.hasOwn(CLOUDFLARE_IMAGE_MODELS, selector.id)));
 }, 'Images is off, cloudflare/flux-2-klein-9b, cloudflare/flux-2-klein-4b, cloudflare/flux-2-dev, cloudflare/flux-1-schnell, or a provider/model image model of the profile');
+/** Decisions on Cloudflare Workers AI: Cloudflare's Clef models (`@cf/cloudflare/clef-flash`, `@cf/cloudflare/clef`)
+ * and TypeSafe's Jev hosted there (`typesafe/jev`). */
+export const CLOUDFLARE_DECISION_MODELS: Readonly<Record<string, true>> = { 'clef-flash': true, clef: true, jev: true };
+export const DEFAULT_DECISIONS_SELECTOR = 'cloudflare/clef-flash';
+export const decisionsSelectorSchema = z.string().refine(value => {
+  const selector = parseServiceSelector(value);
+  return value === SERVICE_OFF || (selector !== null && (selector.provider !== 'cloudflare' || Object.hasOwn(CLOUDFLARE_DECISION_MODELS, selector.id)));
+}, 'Decisions is off, cloudflare/clef-flash, cloudflare/clef, cloudflare/jev, or a provider/model decision model of the profile');
 /** One voice a speech model speaks with: `id` is what the request names, `description` one line for a picker. */
 export interface SpeechVoice { id: string; label: string; description?: string }
 /** Deepgram Aura-2 English on Cloudflare Workers AI (`@cf/deepgram/aura-2-en`), by speaker: the model's `speaker` enum,
@@ -142,7 +152,7 @@ export const speechSelectorSchema = z.string().refine(value => {
   const selector = parseSpeechSelector(value);
   return value === SERVICE_OFF || (selector !== null && speechVoices(selector.provider, selector.model).some(voice => voice.id === selector.voice));
 }, 'Speech is off, cloudflare/aura-2-en:<voice> with an Aura-2 voice, or openai/<tts model>:<voice>');
-const serviceSelectors: Readonly<Record<string, z.ZodType<string>>> = { search: searchSelectorSchema, dictation: dictationSelectorSchema, images: imagesSelectorSchema, speech: speechSelectorSchema };
+const serviceSelectors: Readonly<Record<string, z.ZodType<string>>> = { search: searchSelectorSchema, dictation: dictationSelectorSchema, images: imagesSelectorSchema, speech: speechSelectorSchema, decisions: decisionsSelectorSchema };
 /** One ownership map shared by migration, editors and isolated runtime composition. */
 export function inferenceSettingSection(path: string): InferenceSettingSection | null {
   const dot = path.indexOf('.');
@@ -245,6 +255,7 @@ export const inferenceSettingMetadata: readonly RuntimeSettingSchemaItem[] = [
   { path: 'dictation', tab: 'Services', label: 'Dictation', kind: 'string', value: DEFAULT_DICTATION_SELECTOR, defaultJson: JSON.stringify(DEFAULT_DICTATION_SELECTOR), credential: false, description: `Transcribes the composer's microphone. ${SERVICE_OFF}: the composer has no microphone.` },
   { path: 'images', tab: 'Services', label: 'Images', kind: 'string', value: '', defaultJson: '""', credential: false, description: `Runs the agents' generate_image tool. Unset: the profile's first image model, else ${DEFAULT_IMAGES_SELECTOR}. ${SERVICE_OFF}: generate_image is not offered.` },
   { path: 'speech', tab: 'Services', label: 'Speech', kind: 'string', value: DEFAULT_SPEECH_SELECTOR, defaultJson: JSON.stringify(DEFAULT_SPEECH_SELECTOR), credential: false, description: `Narrates walkthroughs in the voice it names. ${SERVICE_OFF}: walkthroughs show captions only.` },
+  { path: 'decisions', tab: 'Services', label: 'Decisions', kind: 'string', value: DEFAULT_DECISIONS_SELECTOR, defaultJson: JSON.stringify(DEFAULT_DECISIONS_SELECTOR), credential: false, description: `Answers typed questions for judge and the agents' decide tool. ${SERVICE_OFF}, or a failed answer: the profile's fast model answers.` },
 ];
 
 const profileIdSchema = z.string().min(1).max(160).regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/u);

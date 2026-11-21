@@ -271,6 +271,12 @@ const CLOUDFLARE_IMAGE_OPTIONS: readonly ModelOption[] = [
   { value: 'cloudflare/flux-2-dev', label: 'Cloudflare · FLUX.2 [dev]' },
   { value: 'cloudflare/flux-1-schnell', label: 'Cloudflare · FLUX.1 [schnell] · no input images' },
 ];
+/** Decisions on Cloudflare Workers AI, run on GitSpace's account. */
+const CLOUDFLARE_DECISION_OPTIONS: readonly ModelOption[] = [
+  { value: 'cloudflare/clef-flash', label: 'Cloudflare · Clef-flash · fastest' },
+  { value: 'cloudflare/clef', label: 'Cloudflare · Clef · most accurate, reads images' },
+  { value: 'cloudflare/jev', label: 'Cloudflare · Jev · TypeSafe\'s model on Workers AI' },
+];
 /** A service's provider: one of `options`, or a stored selector this profile can no longer run, shown as such. */
 function ServicePicker({ label, value, options, modelsReady, disabled, onChange }: { label: string; value: string; options: readonly ModelOption[]; modelsReady: boolean; disabled: boolean; onChange(value: string): void }) {
   const known = options.some((option) => option.value === value);
@@ -307,7 +313,7 @@ function ContextLimitSlider({ label, modelWindow, value, disabled, onCommit }: {
       }} />
   </span>;
 }
-export function RuntimeSettingsEditor({ runtimeSettings, runtimeGeneration, onSetRuntimeSetting, saving, providers, models = [], imageModels = [], modelsReady = false, profileId = DEFAULT_INFERENCE_PROFILE_ID, sections, tab, onTabChange }: Pick<SettingsPageProps, 'runtimeSettings' | 'runtimeGeneration' | 'onSetRuntimeSetting' | 'saving'> & { providers?: ProvidersSectionProps; models?: readonly AvailableModel[]; imageModels?: readonly AvailableModel[]; modelsReady?: boolean; /** The profile being edited: its credentials speak voice samples. */ profileId?: string; sections: readonly SettingsTab[]; tab: SettingsTab; onTabChange?(tab: SettingsTab): void }) {
+export function RuntimeSettingsEditor({ runtimeSettings, runtimeGeneration, onSetRuntimeSetting, saving, providers, models = [], imageModels = [], decisionModels = [], modelsReady = false, profileId = DEFAULT_INFERENCE_PROFILE_ID, sections, tab, onTabChange }: Pick<SettingsPageProps, 'runtimeSettings' | 'runtimeGeneration' | 'onSetRuntimeSetting' | 'saving'> & { providers?: ProvidersSectionProps; models?: readonly AvailableModel[]; imageModels?: readonly AvailableModel[]; decisionModels?: readonly AvailableModel[]; modelsReady?: boolean; /** The profile being edited: its credentials speak voice samples. */ profileId?: string; sections: readonly SettingsTab[]; tab: SettingsTab; onTabChange?(tab: SettingsTab): void }) {
   const rolesItem = runtimeSettings.find((item) => item.path === 'modelRoles');
   const roles = rolesItem ? parseValue(rolesItem) as Record<string, string> : {};
   const limitsItem = runtimeSettings.find((item) => item.path === 'contextLimits');
@@ -334,6 +340,8 @@ export function RuntimeSettingsEditor({ runtimeSettings, runtimeGeneration, onSe
   const images = (imagesItem ? String(parseValue(imagesItem) ?? '') : '') || (firstImageModel ? `${firstImageModel.provider}/${firstImageModel.id}` : DEFAULT_IMAGES_SELECTOR);
   const speechItem = runtimeSettings.find((item) => item.path === 'speech');
   const speech = speechItem ? String(parseValue(speechItem) ?? '') : '';
+  const decisionsItem = runtimeSettings.find((item) => item.path === 'decisions');
+  const decisions = decisionsItem ? String(parseValue(decisionsItem) ?? '') : '';
   const openAiKey = providers?.providers.some((provider) => provider.credentialProvider === 'openai' && provider.accounts.some((account) => account.type === 'api_key' && !account.disabled)) ?? false;
   // A role added here shows once named and is stored when a model is chosen for it.
   const [addedRoles, setAddedRoles] = useState<readonly string[]>([]);
@@ -409,6 +417,9 @@ export function RuntimeSettingsEditor({ runtimeSettings, runtimeGeneration, onSe
         </SettingRow> : null}
         {speechItem ? <SettingRow title="Speech" description="Narrates walkthroughs: Deepgram Aura-2 on Cloudflare Workers AI on GitSpace's account, or OpenAI with this profile's OpenAI API key. A player can switch to another voice in one browser. Off, walkthroughs show captions only.">
           <SpeechServicePicker value={speech} profileId={profileId} openAiKey={openAiKey} disabled={saving} onChange={(value) => settle(onSetRuntimeSetting(speechItem.path, value))} />
+        </SettingRow> : null}
+        {decisionsItem ? <SettingRow title="Decisions" description="Answers typed questions: history search's ranking, codemode's judge and the agents' decide tool. Cloudflare models run on GitSpace's Cloudflare account; the others on this profile's credentials. Off, or when the model fails, the profile's Fast model answers.">
+          <ServicePicker label="Decisions" value={decisions} options={[OFF_OPTION, ...CLOUDFLARE_DECISION_OPTIONS, ...modelOptions(decisionModels)]} modelsReady={modelsReady} disabled={saving} onChange={(value) => settle(onSetRuntimeSetting(decisionsItem.path, value))} />
         </SettingRow> : null}
       </SettingRows>
     </Group>;

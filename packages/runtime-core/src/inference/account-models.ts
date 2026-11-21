@@ -77,11 +77,11 @@ export function listCloudModels(settings: InferenceProfile['settings'], catalog:
   }).map(({ model, unavailable }) => ({ provider: model.provider, id: model.id, name: model.name, contextWindow: model.contextWindow, images: model.input.includes('image'), unavailable }));
 }
 
-/** The image models a profile offers, for the Images service's picker (`offeredModels`); `images` says whether a model
- * takes input images. */
-export function listCloudImageModels(settings: InferenceProfile['settings'], catalog: ProfileCatalog, accounts: readonly CredentialAccount[], now: number) {
+/** The image or classifier models a profile offers, for the Images and Decisions services' pickers (`offeredModels`);
+ * `images` says whether a model takes input images. */
+export function listCloudModelsOfType(type: 'image' | 'classifier', settings: InferenceProfile['settings'], catalog: ProfileCatalog, accounts: readonly CredentialAccount[], now: number) {
   return offeredModels(settings, catalog, accounts, now, provider => {
-    const models = (provider.getAllModels?.() ?? []).filter(model => isModelType(model, 'image'));
-    return provider.filterAllModels?.(models, undefined).filter(model => isModelType(model, 'image')) ?? models;
+    const models = (provider.getAllModels?.() ?? []).filter(model => isModelType(model, type));
+    return provider.filterAllModels?.(models, undefined).filter(model => isModelType(model, type)) ?? models;
   }).map(({ model, unavailable }) => ({ provider: model.provider, id: model.id, name: model.name, contextWindow: null, images: model.input.includes('image'), unavailable }));
 }

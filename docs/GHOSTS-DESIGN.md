@@ -116,9 +116,10 @@ Milestone 4 is built (2026-11-20, not deployed): a person's ghost of a workspace
   reload or a lost connection ends it with no registry of ghosts.
 - **Admitted and billed.** The model is the account's default inference profile (`DEFAULT_INFERENCE_PROFILE_ID`),
   role `fast` with `default` as fallback (`resolveModelSelection`), on a catalog built in the ghost's object with
-  credential pins in memory; requests run in that object's isolate. Each answer's token counts go to the vault's
-  `ghost_usage` (day, profile, model; `CredentialVaultDO.recordGhostUsage`, through `acrossRelease`, logged when it
-  fails). The usage view does not show them yet, and `history_search`'s judge calls are not counted.
+  credential pins in memory; requests run in that object's isolate. Each answer's tokens and cost go to the vault's
+  `service_usage` as service `ghost` (day, profile, service, model; `CredentialVaultDO.recordServiceUsage`, through
+  `acrossRelease`, logged when it fails). `history_search`'s judge calls are decisions, counted there as service
+  `decision` by the model that answered. The usage view does not show them yet.
 - **Bound tools.** `history_search`, `history_read` and `read`, closed over the target workspace, conversation and
   `driveAsOf` (the ghost's start); their schemas take no workspace or conversation, and arguments naming another are
   refused. `read` takes the target workspace's drive (`drive://workspace/…`, the project drive only for the project

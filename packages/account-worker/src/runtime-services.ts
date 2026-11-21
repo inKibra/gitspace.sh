@@ -34,6 +34,7 @@ import { workspaceLiveKey } from '@gitspace/protocol/live-notice';
 import { servicesBlock } from './workspace-service-urls.js';
 import { createCloudCodemode } from './runtime-codemode.js';
 import type { RuntimeModelHelper, RuntimeWebSearchInput, RuntimeWebSearchResult } from './runtime-inference.js';
+import type { ProfileDecision } from '@gitspace/runtime-core/inference';
 import { PROCESS_MACHINE_DETACHED, RuntimeBlocksArgumentsSchema, RuntimeProcArgumentsSchema, RuntimeCodeSearchArgumentsSchema, questionState } from '@gitspace/protocol-runtime';
 import { fetchInternalService, isHostedServiceHostname } from './service-access.js';
 import { mintServiceToken } from './service-tokens.js';
@@ -62,6 +63,8 @@ type ServicesOptions = {
   model: RuntimeModelHelper;
   /** Runs a web search with the profile's search selector. */
   webSearch(input: RuntimeWebSearchInput): Promise<RuntimeWebSearchResult>;
+  /** Runs the decide tool with the profile's Decisions service. */
+  decide(input: { args: z.infer<typeof RuntimeJsonSchema>; conversationId: string; signal?: AbortSignal }): Promise<ProfileDecision>;
   instructionLoader: RuntimeInstructionLoader;
   /** Requests a workspace attachment of the machine through the human cache-request path; returns before setup. */
   requestAttachment(machineId: string): Promise<{ attachment: RuntimeAttachment }>;
@@ -850,6 +853,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
         }, (state, questions) => options.judge(input.conversationId, state, questions), request.cursor));
       }
       if (input.tool === 'web_search') return completed(input, await options.webSearch({ ...input, args: RuntimeWebSearchArgumentsSchema.parse(input.args) }));
+      if (input.tool === 'decide') return completed(input, await options.decide(input));
       if (input.tool === 'web_fetch') {
         const request = RuntimeWebFetchArgumentsSchema.parse(input.args);
         const page = await fetchWeb({ url: request.url, ...(request.format ? { format: request.format } : {}) }, { binding: env.AI, ...(input.signal ? { signal: input.signal } : {}) });

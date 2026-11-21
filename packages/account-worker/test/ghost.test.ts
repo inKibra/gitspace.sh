@@ -88,7 +88,7 @@ async function ghost(identity: z.infer<typeof RuntimeIdentitySchema>, model: Gho
     send: message => sent.push(GhostServerMessageSchema.parse(message)),
     close() {},
     alarm: { set: async () => {}, clear: async () => {} },
-    recordUsage: async spent => { recorded.push(spent); await env.CREDENTIALS.getByName(env.ACCOUNT_ID).recordGhostUsage(spent); },
+    recordUsage: async spent => { recorded.push(spent); await env.CREDENTIALS.getByName(env.ACCOUNT_ID).recordServiceUsage(spent); },
     ended() {},
   });
   const target = { ...identity, conversationId: 'main' };
@@ -236,9 +236,28 @@ describe('a ghost of one session', () => {
     const { answer, recorded } = await ghost(identity, model);
 
     await answer('Where do exports go?');
-    expect(recorded).toEqual([{ profileId: 'default', model: 'openai/fake', questions: 1, requests: 2, input: 200, output: 40, cacheRead: 0, cacheWrite: 0, costUsd: 0.006 }]);
-    const rows = await runInDurableObject(env.CREDENTIALS.getByName(env.ACCOUNT_ID), (_instance, state) => state.storage.sql.exec('SELECT * FROM ghost_usage').toArray());
-    expect(rows).toEqual([{ day: new Date().toISOString().slice(0, 10), profile_id: 'default', model: 'openai/fake', questions: 1, requests: 2, input: 200, output: 40, cache_read: 0, cache_write: 0, cost_usd: 0.006 }]);
+    expect(recorded).toEqual([{ service: 'ghost', profileId: 'default', model: 'openai/fake', requests: 2, input: 200, output: 40, costUsd: 0.006 }]);
+    const rows = await runInDurableObject(env.CREDENTIALS.getByName(env.ACCOUNT_ID), (_instance, state) => state.storage.sql.exec('SELECT * FROM service_usage').toArray());
+    expect(rows).toEqual([{ day: new Date().toISOString().slice(0, 10), profile_id: 'default', service: 'ghost', model: 'openai/fake', requests: 2, input: 200, output: 40, cost_usd: 0.006 }]);
+  });
+
+  test('moves the account\'s ghost_usage rows into its service usage once, and adds decisions beside them', async () => {
+    const vault = env.CREDENTIALS.getByName(env.ACCOUNT_ID);
+    await runInDurableObject(vault, (_instance, state) => {
+      state.storage.sql.exec('CREATE TABLE ghost_usage(day TEXT NOT NULL, profile_id TEXT NOT NULL, model TEXT NOT NULL, questions INTEGER NOT NULL, requests INTEGER NOT NULL, input INTEGER NOT NULL, output INTEGER NOT NULL, cache_read INTEGER NOT NULL, cache_write INTEGER NOT NULL, cost_usd REAL NOT NULL, PRIMARY KEY(day, profile_id, model))');
+      state.storage.sql.exec("INSERT INTO ghost_usage VALUES('2026-11-01', 'default', 'openai/fake', 3, 5, 100, 20, 30, 10, 0.5)");
+    });
+    await vault.recordServiceUsage({ service: 'decision', profileId: 'default', model: 'cloudflare/clef-flash', requests: 1, input: 120, output: 0, costUsd: 0.0001 });
+    await vault.recordServiceUsage({ service: 'decision', profileId: 'default', model: 'cloudflare/clef-flash', requests: 1, input: 80, output: 0, costUsd: 0.0001 });
+    const { rows, ghostTable } = await runInDurableObject(vault, (_instance, state) => ({
+      rows: state.storage.sql.exec('SELECT * FROM service_usage ORDER BY day').toArray(),
+      ghostTable: state.storage.sql.exec("SELECT name FROM sqlite_master WHERE name = 'ghost_usage'").toArray().length,
+    }));
+    expect(ghostTable).toBe(0);
+    expect(rows).toEqual([
+      { day: '2026-11-01', profile_id: 'default', service: 'ghost', model: 'openai/fake', requests: 5, input: 140, output: 20, cost_usd: 0.5 },
+      { day: new Date().toISOString().slice(0, 10), profile_id: 'default', service: 'decision', model: 'cloudflare/clef-flash', requests: 2, input: 200, output: 0, cost_usd: 0.0002 },
+    ]);
   });
 });
 

@@ -9,7 +9,7 @@ import { RuntimeBrowserConnectedTabSchema, RuntimeBrowserShareExpirySchema, Runt
 import { RuntimeBrowserCommentAnchorSchema, RuntimeBrowserCommentPageSchema, RuntimeBrowserCommentSourceSchema, RuntimeBrowserCommentStatusSchema, RuntimeBrowserCommentTextSchema, RuntimeBrowserCommentThreadSchema, RuntimeBrowserCommentThreadViewSchema } from './browser-comments.js';
 import { RuntimeBrowserCaptureShareExpirySchema, RuntimeBrowserCaptureShareSchema } from './browser-capture-share.js';
 import { CommentAnchorSchema, CommentIdSchema, CommentLookupSchema, CommentNoteSchema, OPEN_DOCUMENT_KINDS, STAGED_ANSWERS_MAX, STAGED_COMMENTS_MAX, SentAnswerSchema } from './comments.js';
-export { SessionUsageReportSchema, UsageTotalsSchema, type SessionUsageReport, type UsageTotals } from './usage.js';
+export { SessionUsageReportSchema, ServiceUsageSchema, UsageTotalsSchema, type SessionUsageReport, type ServiceUsage, type UsageTotals } from './usage.js';
 
 export const ModelSelectionIntentSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('default') }),

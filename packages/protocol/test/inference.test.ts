@@ -105,5 +105,7 @@ describe('inference profile configuration boundaries', () => {
     for (const images of ['cloudflare/stable-diffusion-xl', 'cloudflare/', 'flux-2-klein-9b', '/gpt-image-1', '']) expect(accepts({ images })).toBe(false);
     for (const speech of ['off', 'cloudflare/aura-2-en:athena', 'cloudflare/aura-2-en:asteria', 'cloudflare/aura-2-en:zeus', 'openai/gpt-4o-mini-tts:coral']) expect(accepts({ speech })).toBe(true);
     for (const speech of ['cloudflare/aura-2-en', 'cloudflare/aura-2-en:stella', 'cloudflare/aura-1:asteria', 'openai/gpt-4o-mini-tts:athena', 'anthropic/claude:athena', 'athena', '']) expect(accepts({ speech })).toBe(false);
+    for (const decisions of ['off', 'cloudflare/clef-flash', 'cloudflare/clef', 'cloudflare/jev', 'typesafe/jev-latest', 'openai/gpt-6-luna', 'openrouter/typesafe/jev-1.14']) expect(accepts({ decisions })).toBe(true);
+    for (const decisions of ['cloudflare/clef-omni', 'cloudflare/typesafe/jev', 'cloudflare/', 'clef-flash', '/gpt-6-luna', '']) expect(accepts({ decisions })).toBe(false);
   });
 });

@@ -48,6 +48,15 @@ flowchart LR
   its profile turns off (`withoutTools`: `web_search` for search, `generate_image` for images), and the harness
   configures the conversation without them, so the model is not offered them from its next turn; `web_fetch` stays.
   Dictation off, the composer shows no microphone and the dictation socket refuses a recording.
+- **Decisions:** the profile's `decisions` service answers typed questions (bool, choice with criteria, score with
+  criteria) about a state: history search's ranking (`historyJudgment`, in workspaces and ghosts), codemode's `judge`
+  and the code-only `decide` tool (`runProfileDecision`). `cloudflare/clef-flash` (the default), `cloudflare/clef`
+  and `cloudflare/jev` run on the platform's Cloudflare account: pi-ai's Workers AI System One transport with the
+  worker's AI binding as its `fetch` (`workers-ai-decisions.ts`, loaded on the first decision). `<provider>/<model>`
+  is a classifier model of the profile's own credentials, through pi-ai's `classify` (TypeSafe, OpenAI Decisions,
+  OpenRouter and the other catalogs with classifiers). Off, or a model that fails or answers out of shape, the
+  profile's `fast` chat model answers with structured output and the decision's `fallback` says why. Each decision
+  adds its tokens and cost to the vault's `service_usage` as service `decision`, by the model that answered.
 
 ## The attempt boundary
 

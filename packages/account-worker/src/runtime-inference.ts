@@ -2,15 +2,17 @@ import { z } from 'zod';
 import type { Message, Models } from '@earendil-works/pi-ai';
 import { DEFAULT_WEB_SEARCH_DESCRIPTION_CHARS, DEFAULT_WEB_SEARCH_LIMIT, createAIWebSearch, type WebSearchProvider } from 'agents/websearch';
 import { DEFAULT_IMAGES_SELECTOR, DEFAULT_SEARCH_SELECTOR, MODEL_ROLE_LABELS, SERVICE_OFF, applyInferenceSettings, inferenceProfileSchema, modelRoleThinkingSchema, parseServiceSelector, type InferenceProfile } from '@gitspace/protocol/inference';
-import { RuntimeGenerateImageArgumentsSchema, RuntimeJsonSchema, RuntimeWebSearchArgumentsSchema, type RuntimeSnapshot, type RuntimeToolResult } from '@gitspace/protocol-runtime';
+import { RuntimeGenerateImageArgumentsSchema, RuntimeJsonSchema, RuntimeWebSearchArgumentsSchema, type RuntimeSnapshot, type RuntimeToolResult, type ServiceUsage } from '@gitspace/protocol-runtime';
 import { ModelSelectionIntentSchema, type ModelSelectionIntent, type SessionControlView } from '@gitspace/protocol-runtime/session-controls';
 import {
   createVaultModels, createRunModelsRouter, createRequestGate,
-  resolveModelSelection, resolveProfileModel, resolveAvailableProfileModel, StoredPiModelSchema, ProfileCatalogSchema, modelAvailability, modelEditTool, chooseProfileImageModel, generateProfileImage, runProfileModelHelper, describeImagesForModel,
-  type AttemptRunner, type CredentialPins, type ProfileModels, type VaultModels, type WebSearchAnswer, type WebSearchHit,
+  resolveModelSelection, resolveProfileModel, resolveAvailableProfileModel, StoredPiModelSchema, ProfileCatalogSchema, modelAvailability, modelEditTool, chooseProfileImageModel, generateProfileImage, runProfileCompletion, runProfileDecision, describeImagesForModel,
+  type AttemptRunner, type CredentialPins, type ProfileDecision, type ProfileModels, type VaultModels, type WebSearchAnswer, type WebSearchHit,
 } from '@gitspace/runtime-core/inference';
 import { InMemoryModelsStore } from '@earendil-works/pi-ai';
 import { workersAiImage } from './workers-ai-images.js';
+import { workersAiDecisions } from './workers-ai-decisions.js';
+import { acrossRelease } from './release-worker.js';
 
 export type RuntimeModelHelperInput = { operation: 'completion' | 'judge'; args: z.infer<typeof RuntimeJsonSchema>; conversationId: string; signal?: AbortSignal };
 export type RuntimeModelHelper = (input: RuntimeModelHelperInput) => Promise<z.infer<typeof RuntimeJsonSchema>>;
@@ -28,6 +30,14 @@ export async function historyJudgment(judge: (args: z.infer<typeof RuntimeJsonSc
     scores[id] = answer.bool;
   }
   return scores;
+}
+/** Adds one decision's spending to the account's usage, under `decision` by the model that answered; a failed write is
+ * logged, never the decision's failure. */
+export function recordDecisionUsage(env: Env, profileId: string, decision: ProfileDecision): void {
+  const usage: ServiceUsage = { service: 'decision', profileId, model: decision.model, requests: 1, input: decision.usage?.input ?? 0, output: decision.usage?.output ?? 0, costUsd: decision.usage?.costUsd ?? 0 };
+  // The vault method is new in this release.
+  void acrossRelease(() => env.CREDENTIALS.getByName(env.ACCOUNT_ID).recordServiceUsage(usage))
+    .catch((error: unknown) => console.error(JSON.stringify({ event: 'decision_usage_unrecorded', model: decision.model, message: error instanceof Error ? error.message : String(error) })));
 }
 /** Cloudflare's Web Search API providers, by the selector's option. */
 const CLOUDFLARE_SEARCH: Readonly<Record<string, WebSearchProvider>> = { ceramic: 'ceramic', linkup: 'linkup', exa: 'exa' };
@@ -137,6 +147,14 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
     if (value === undefined) throw new Error('Conversation has no admitted inference run');
     return admissionSchema.parse(value);
   }
+  /** Answers `args` with the profile's Decisions service (`runProfileDecision`) and records what it spent. */
+  async function decide(input: { args: z.infer<typeof RuntimeJsonSchema>; conversationId: string; signal?: AbortSignal }): Promise<ProfileDecision> {
+    const admission = input.signal ? scopes.get(input.signal)?.admission ?? await active(input.conversationId) : await active(input.conversationId);
+    const models = await admittedView(input.conversationId, admission, false).models;
+    const decision = await runProfileDecision(models, input.args, { settings: admission.profile.settings, cloudflare: workersAiDecisions(env.AI), ...(input.signal ? { signal: input.signal } : {}) });
+    recordDecisionUsage(env, admission.profile.id, decision);
+    return decision;
+  }
   async function bindInferenceConversation(conversationId: string, signal: AbortSignal, _submissionIds: readonly string[], requestIds: readonly string[], serving: { fastMode: boolean }): Promise<void> {
     signal.throwIfAborted();
     const admittedRequests: Admission[] = [];
@@ -236,10 +254,15 @@ export async function createCloudRuntimeInference(ctx: DurableObjectState, env: 
         throw new Error(`Image generation uses ${selector}: ${error instanceof Error ? error.message : String(error)}. ${where}`);
       }
     },
+    /** The `decide` tool: a decision's answers, the model that gave them, what they cost, and why the fast model
+     * answered when it did. */
+    decide,
+    /** Codemode's `completion` and `judge`: `judge` is a decision's answers alone. */
     async modelHelper(input: RuntimeModelHelperInput) {
+      if (input.operation === 'judge') return (await decide(input)).answers;
       const admission = input.signal ? scopes.get(input.signal)?.admission ?? await active(input.conversationId) : await active(input.conversationId);
       const models = await admittedView(input.conversationId, admission, false).models;
-      return runProfileModelHelper(models, input.operation, input.args, input.signal, admission.profile.settings);
+      return runProfileCompletion(models, input.args, input.signal, admission.profile.settings);
     },
     /** Runs the web_search tool with the profile's search selector: Cloudflare's Web Search API, or a model's built-in
      * search on the profile's own credentials. A failure names the selector and where to change it. */

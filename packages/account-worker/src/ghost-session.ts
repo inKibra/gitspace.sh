@@ -3,14 +3,15 @@ import { InMemoryModelsStore } from '@earendil-works/pi-ai';
 import { DEFAULT_INFERENCE_PROFILE_ID } from '@gitspace/protocol/inference';
 import {
   GHOST_ENTRY_ORDINALS, GHOST_LIFETIME_MS, GHOST_MAX_ROUNDS, GhostClientMessageSchema, ghostParts, RuntimeIdentitySchema, RuntimeSnapshotSchema,
-  type GhostServerMessage, type GhostUsage,
+  type GhostServerMessage, type ServiceUsage,
 } from '@gitspace/protocol-runtime';
-import { ProfileCatalogSchema, createRequestGate, createVaultModels, resolveModelSelection, runProfileModelHelper, type CredentialPin, type CredentialPins } from '@gitspace/runtime-core/inference';
+import { ProfileCatalogSchema, createRequestGate, createVaultModels, resolveModelSelection, runProfileDecision, type CredentialPin, type CredentialPins } from '@gitspace/runtime-core/inference';
 import { createDocumentMarkdown } from './document-markdown.js';
 import { createGhostTools, type GhostTarget, type GhostTools } from './ghost-tools.js';
 import type { GhostSpec } from './ghost.js';
 import { acrossRelease } from './release-worker.js';
-import { historyJudgment } from './runtime-inference.js';
+import { historyJudgment, recordDecisionUsage } from './runtime-inference.js';
+import { workersAiDecisions } from './workers-ai-decisions.js';
 import { readRuntimeTranscript } from './runtime-transcript-reader.js';
 
 /** The model answering for a ghost: `provider/model`, and one streamed request. */
@@ -24,7 +25,7 @@ export type GhostSessionOptions = {
   close(): void;
   /** The object's one alarm: the deadline. */
   alarm: { set(at: number): Promise<void>; clear(): Promise<void> };
-  recordUsage(usage: GhostUsage): Promise<void>;
+  recordUsage(usage: ServiceUsage): Promise<void>;
   /** The ghost ended; its object drops it. */
   ended(): void;
 };
@@ -189,7 +190,8 @@ export class GhostSession {
       this.#running = null;
       console.info(JSON.stringify({ event: 'ghost_answer', ghostId: this.#options.ghostId, turn, rounds, reads, ...spent, ms: Date.now() - started }));
       if (spent.requests > 0) {
-        await this.#options.recordUsage({ profileId: ready.profileId, model: ready.model.name, questions: 1, ...spent })
+        // Input counts every prompt token: cached reads and writes too.
+        await this.#options.recordUsage({ service: 'ghost', profileId: ready.profileId, model: ready.model.name, requests: spent.requests, input: spent.input + spent.cacheRead + spent.cacheWrite, output: spent.output, costUsd: spent.costUsd })
           .catch((error: unknown) => console.error(JSON.stringify({ event: 'ghost_usage_unrecorded', ghostId: this.#options.ghostId, message: message(error) })));
       }
     }
@@ -224,7 +226,7 @@ export function openGhost(input: { ctx: DurableObjectState; env: Env; spec: Ghos
     close() { if (socket.readyState === WebSocket.OPEN) socket.close(1000, 'The ghost ended'); },
     alarm: { set: at => ctx.storage.setAlarm(at), clear: () => ctx.storage.deleteAlarm() },
     // The account's usage, under ghosts: the vault method is new in this release.
-    recordUsage: usage => acrossRelease(() => env.CREDENTIALS.getByName(env.ACCOUNT_ID).recordGhostUsage(usage)),
+    recordUsage: usage => acrossRelease(() => env.CREDENTIALS.getByName(env.ACCOUNT_ID).recordServiceUsage(usage)),
     ended: input.ended,
   });
   socket.addEventListener('message', event => session.receive(event.data));
@@ -280,7 +282,11 @@ async function prepareGhost(env: Env, spec: GhostSpec): Promise<GhostReady> {
     },
     tools: createGhostTools({
       env, target, driveAsOf, documentMarkdown: createDocumentMarkdown(null, env.AI),
-      judge: (state, questions) => historyJudgment(args => runProfileModelHelper(models, 'judge', args, undefined, profile.settings), state, questions),
+      judge: (state, questions) => historyJudgment(async args => {
+        const decision = await runProfileDecision(models, args, { settings: profile.settings, cloudflare: workersAiDecisions(env.AI) });
+        recordDecisionUsage(env, profile.id, decision);
+        return decision.answers;
+      }, state, questions),
     }),
   };
 }

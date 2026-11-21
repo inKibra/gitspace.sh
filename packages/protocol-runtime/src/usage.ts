@@ -9,3 +9,12 @@ export const SessionUsageReportSchema = z.object({
 });
 export type SessionUsageReport = z.infer<typeof SessionUsageReportSchema>;
 export type UsageTotals = z.infer<typeof UsageTotalsSchema>;
+const count = z.number().int().nonnegative();
+/** What one use of a Service spent, for the account's usage (`service_usage`, by UTC day, profile, service and model):
+ * `ghost` a person's ghost's answer, `decision` one answer of the Decisions service or its fast-model fallback. Token
+ * counts and cost only, never text. */
+export const ServiceUsageSchema = z.strictObject({
+  service: z.enum(['ghost', 'decision']), profileId: z.string().min(1), model: z.string().min(1), requests: count,
+  input: count, output: count, costUsd: z.number().nonnegative(),
+});
+export type ServiceUsage = z.infer<typeof ServiceUsageSchema>;

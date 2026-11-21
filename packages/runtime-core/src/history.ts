@@ -32,8 +32,9 @@ const SNIPPET_CHARACTERS = 800;
  * the judge could not answer). */
 type HistorySearchResult = { workspaceId: string; conversationId: string; ordinal: number; createdAt: string; snippet: string; content: { mode: 'content'; workspaceId: string; conversationId: string; ordinal: number; contentOffset: number }; relevance: number | null };
 /** Bounded newest-first scan of Pi transcripts; nothing is indexed or copied. A "quoted phrase" in the query must appear
- * exactly (case aside); the other words rank matches. A judge then keeps the substantive matches; when it cannot answer
- * (no classifier, a reply that is not JSON) the matches come back ranked by terms alone, with `judged: false` and why. */
+ * exactly (case aside); the other words rank matches. A judge (the profile's Decisions service, else its fast model) then
+ * keeps the substantive matches; when it cannot answer (no fast model, a reply that is not JSON) the matches come back
+ * ranked by terms alone, with `judged: false` and why. */
 export async function searchHistory(query: string, source: HistorySearchSource, judge: HistoryJudge, cursor?: string, limit = 20) {
   const phrases = [...query.matchAll(/["“”]([^"“”]+)["“”]/gu)].map(match => match[1]!.trim().toLowerCase()).filter(Boolean);
   const words = query.replace(/["“”][^"“”]*["“”]/gu, ' ');

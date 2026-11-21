@@ -12,7 +12,7 @@ import { FiledIssueListInputSchema, FiledIssueResolveInputSchema } from '@gitspa
 import { beginLogin, respondLogin, pollLogin, publicLogin, loginStateSchema, workerOAuthProviderSchema, gitspaceOAuthProviderSchema, type LoginState, type UpstreamOAuthProvider } from '@gitspace/provider-auth';
 import { isUpstreamOAuthProvider, tokenEmail, loopbackCallback, refreshUpstreamCredential, storedUpstreamCredential, upstreamLoginEvent, upstreamOAuth, upstreamPromptText, upstreamRequestAuth } from './upstream-oauth.js';
 import { collectUsage, ProviderUsageError, providerUsageReportSchema, usageObservation, type UsageObservation } from '@gitspace/provider-auth';
-import { describeCloudProviders, listCloudImageModels, listCloudModels, publishedProviderSource, withListedModels, createDurableModelsStore, noAmbientAuth } from '@gitspace/runtime-core/inference';
+import { describeCloudProviders, listCloudModels, listCloudModelsOfType, publishedProviderSource, withListedModels, createDurableModelsStore, noAmbientAuth } from '@gitspace/runtime-core/inference';
 import type { AccountFailure, CredentialAccount, ProfileCatalog, ResolvedCredential } from '@gitspace/runtime-core/inference';
 import { createModels, type AnyModel } from '@earendil-works/pi-ai';
 import { listAccountModels, accountModelSchema, ACCOUNT_MODEL_PROVIDERS, type AccountModel } from '@gitspace/provider-auth';
@@ -88,7 +88,7 @@ import { createManagedKey, ManagedKeySchema, mintServiceToken, signManagedToken,
 import { LiveChanges } from './live-changes.js';
 import { sendSized, tenantNamespace, tenantStore, TenantObjectIntegrityError, verifying, type TenantNamespace } from './tenant-store.js';
 import { requireWorkspaceAccess } from './runtime-access.js';
-import { GhostUsageSchema, RuntimeIdentitySchema, RuntimeSecureInputQuestionSchema } from '@gitspace/protocol-runtime';
+import { RuntimeIdentitySchema, RuntimeSecureInputQuestionSchema, ServiceUsageSchema } from '@gitspace/protocol-runtime';
 import type { SecureInputRecord } from './secure-input.js';
 import { migratedRoleSettings } from './inference-role-migration.js';
 import { accountLiveKey } from '@gitspace/protocol/live-notice';
@@ -2030,15 +2030,21 @@ export class CredentialVaultDO extends BudgetedDurableObject {
     });
   }
 
-  /** A person's ghost answered: its token counts join the account's usage under ghosts, by UTC day, profile and model.
-   * No text is kept. */
-  recordGhostUsage(raw: unknown): void {
-    const usage = GhostUsageSchema.parse(raw);
-    this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS ghost_usage(day TEXT NOT NULL, profile_id TEXT NOT NULL, model TEXT NOT NULL, questions INTEGER NOT NULL, requests INTEGER NOT NULL, input INTEGER NOT NULL, output INTEGER NOT NULL, cache_read INTEGER NOT NULL, cache_write INTEGER NOT NULL, cost_usd REAL NOT NULL, PRIMARY KEY(day, profile_id, model))');
-    this.ctx.storage.sql.exec(`INSERT INTO ghost_usage(day, profile_id, model, questions, requests, input, output, cache_read, cache_write, cost_usd) VALUES(?,?,?,?,?,?,?,?,?,?)
-      ON CONFLICT(day, profile_id, model) DO UPDATE SET questions=questions+excluded.questions, requests=requests+excluded.requests, input=input+excluded.input, output=output+excluded.output,
-      cache_read=cache_read+excluded.cache_read, cache_write=cache_write+excluded.cache_write, cost_usd=cost_usd+excluded.cost_usd`,
-    new Date().toISOString().slice(0, 10), usage.profileId, usage.model, usage.questions, usage.requests, usage.input, usage.output, usage.cacheRead, usage.cacheWrite, usage.costUsd);
+  /** A Service's spending joins the account's usage by UTC day, profile, service (`ghost`, `decision`) and model: tokens
+   * and cost, no text. The rows of the `ghost_usage` table it replaces move in once, as `ghost`, their cached prompt
+   * tokens counted as input. */
+  recordServiceUsage(raw: unknown): void {
+    const usage = ServiceUsageSchema.parse(raw);
+    const sql = this.ctx.storage.sql;
+    sql.exec('CREATE TABLE IF NOT EXISTS service_usage(day TEXT NOT NULL, profile_id TEXT NOT NULL, service TEXT NOT NULL, model TEXT NOT NULL, requests INTEGER NOT NULL, input INTEGER NOT NULL, output INTEGER NOT NULL, cost_usd REAL NOT NULL, PRIMARY KEY(day, profile_id, service, model))');
+    if (sql.exec("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ghost_usage'").toArray().length) this.ctx.storage.transactionSync(() => {
+      sql.exec(`INSERT INTO service_usage(day, profile_id, service, model, requests, input, output, cost_usd)
+        SELECT day, profile_id, 'ghost', model, requests, input + cache_read + cache_write, output, cost_usd FROM ghost_usage`);
+      sql.exec('DROP TABLE ghost_usage');
+    });
+    sql.exec(`INSERT INTO service_usage(day, profile_id, service, model, requests, input, output, cost_usd) VALUES(?,?,?,?,?,?,?,?)
+      ON CONFLICT(day, profile_id, service, model) DO UPDATE SET requests=requests+excluded.requests, input=input+excluded.input, output=output+excluded.output, cost_usd=cost_usd+excluded.cost_usd`,
+    new Date().toISOString().slice(0, 10), usage.profileId, usage.service, usage.model, usage.requests, usage.input, usage.output, usage.costUsd);
   }
 
   /** Each account's usage: a report or why its read failed. API keys report none, so they are not read. */
@@ -2135,13 +2141,14 @@ export class CredentialVaultDO extends BudgetedDurableObject {
     await this.putBrowserApiKey(input.profileId, descriptor.credentialProvider, input.key);
   }
 
-  /** The profile's chat and image models for pickers: those its accounts offer, each with when it is unavailable and why. */
+  /** The profile's chat, image and decision models for pickers: those its accounts offer, each with when it is
+   * unavailable and why. */
   async cloudModels(profileId: string) {
     const catalog = await this.profileCatalog(profileId);
     const accounts = await this.cloudCredentialAccounts(profileId);
     const settings = this.requireInferenceProfile(profileId).settings;
     const now = Date.now();
-    return { models: listCloudModels(settings, catalog, accounts, now), imageModels: listCloudImageModels(settings, catalog, accounts, now) };
+    return { models: listCloudModels(settings, catalog, accounts, now), imageModels: listCloudModelsOfType('image', settings, catalog, accounts, now), decisionModels: listCloudModelsOfType('classifier', settings, catalog, accounts, now) };
   }
 
   /** pi.dev's published rows, by provider shard, shared by every profile of the account (pi keeps their 4-hour TTL). */

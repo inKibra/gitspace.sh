@@ -72,3 +72,22 @@ it('shows a service stored as off as Off, a choice of every Services row', async
   // Off is a choice, not a model this profile cannot run.
   expect(container.querySelector('[role="alert"]')).toBeNull();
 });
+
+it('offers Decisions on Cloudflare and on the profile\'s own decision models', async () => {
+  const render = async (value: string, decisionModels: { provider: string; id: string; name: string; contextWindow: null; images: boolean }[]) => {
+    const item: RuntimeSettingView = { path: 'decisions', label: 'Decisions', tab: 'services', description: null, kind: 'string', valueJson: JSON.stringify(value), options: [], credential: false };
+    await act(() => root.render(<RuntimeSettingsEditor sections={['Services']} tab="Services" runtimeSettings={[item]} runtimeGeneration={1} models={[]} decisionModels={decisionModels} modelsReady saving={false} onSetRuntimeSetting={async () => undefined} />));
+  };
+  const jev = { provider: 'typesafe', id: 'jev-latest', name: 'Jev', contextWindow: null, images: true };
+  const picker = () => container.querySelector<HTMLInputElement>('[aria-label="Decisions"]');
+  await render('cloudflare/clef-flash', []);
+  expect(picker()?.value).toBe('Cloudflare · Clef-flash · fastest');
+  expect(container.textContent).toContain('GitSpace\'s Cloudflare account');
+  expect(container.querySelector('[role="alert"]')).toBeNull();
+  await render('typesafe/jev-latest', [jev]);
+  expect(picker()?.value).toBe('Jev');
+  expect(container.querySelector('[role="alert"]')).toBeNull();
+  // A decision model the profile's credentials no longer reach is shown as such.
+  await render('typesafe/jev-latest', []);
+  expect(container.querySelector('[role="alert"]')).not.toBeNull();
+});

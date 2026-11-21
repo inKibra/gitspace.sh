@@ -105,7 +105,7 @@ export const RuntimeAgentsArgumentsSchema = z.union([
   RuntimeChildAgentsArgumentsSchema,
 ]);
 export function runtimeOperationIsReadOnly(name: string, args: z.infer<typeof RuntimeJsonSchema>): boolean {
-  if (['read', 'grep', 'code_search', 'find', 'web_search', 'web_fetch', 'history_search', 'history_read', 'ast_grep', 'mcp_discover', 'workspace_status', 'wait', 'blocks'].includes(name)) return true;
+  if (['read', 'grep', 'code_search', 'find', 'web_search', 'web_fetch', 'history_search', 'history_read', 'ast_grep', 'mcp_discover', 'workspace_status', 'wait', 'blocks', 'decide'].includes(name)) return true;
   if (!args || typeof args !== 'object' || Array.isArray(args)) return false;
   if (['machines', 'agents', 'bash', 'proc', 'sync_machine'].includes(name)) return ['list', 'status', 'describe', 'logs', 'wait', 'diff'].includes(String(args.op));
   if (name === 'sync') return ['status', 'diff', 'backups'].includes(String(args.method));
@@ -215,6 +215,18 @@ export function discoveredMcpTools(tools: ReadonlyArray<{ name: string; descript
 }
 const imageInput = RuntimeContentSchema.options[1];
 export const RuntimeGenerateImageArgumentsSchema = z.object({ prompt: path.describe('What to draw, in detail; say what each input image is for.'), model: path.optional().describe('An image model: cloudflare/<model> on Workers AI or an admitted provider/model; the profile\'s Images service when omitted.'), images: z.array(imageInput.extend({ type: imageInput.shape.type.describe('Always image.'), data: imageInput.shape.data.describe('Base64 bytes, or a stored image\'s reference from a tool result.'), mimeType: imageInput.shape.mimeType.describe('The image\'s type, such as image/png.') })).optional().describe('Images to edit or draw from.') }).strict();
+const decisionInstructions = z.string().min(1).describe('What to decide about the state.');
+/** One question a decision answers: `bool` yes or no, `choice` one of its labels, `score` a level of an ordered scale. */
+export const RuntimeDecisionQuestionSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('bool').describe('Yes or no, answered as the probability of true.'), instructions: decisionInstructions, criteria: z.object({ true: z.string().optional().describe('What true means.'), false: z.string().optional().describe('What false means.') }).optional().describe('What true and false mean; Yes and No when omitted.') }),
+  z.object({ type: z.literal('choice').describe('One label, answered with the choice, each label\'s probability and a confidence.'), instructions: decisionInstructions, criteria: z.record(z.string(), z.string().nullable()).refine(value => Object.keys(value).length >= 2, 'Choice questions require at least two labels').describe('Each label and what it means; null when the label says it.') }),
+  z.object({ type: z.literal('score').describe('A level of an ordered scale, answered with the probability-weighted level index, each level\'s probability and a confidence.'), instructions: decisionInstructions, criteria: z.array(z.string()).min(2).describe('The levels, lowest first.') }),
+]);
+/** `decide` and codemode's `judge`: typed questions about one state, each answered independently. */
+export const RuntimeDecideArgumentsSchema = z.object({
+  state: RuntimeJsonSchema.describe('What the questions are about: text or JSON.'),
+  questions: z.record(z.string(), RuntimeDecisionQuestionSchema).refine(value => Object.keys(value).length > 0, 'At least one question is required').describe('The questions, by id.'),
+}).strict();
 export const RuntimeSpacePhaseArgumentsSchema = RuntimeDispatchSelectionSchema.extend({ phase: z.enum(['plan', 'code', 'review', 'ship']).describe('The workspace\'s new phase.') });
 const machinePath = path.describe('Path on the machine: relative to the checkout, or absolute under /tmp.');
 export const RuntimeSpaceArtifactsArgumentsSchema = z.discriminatedUnion('method', [
