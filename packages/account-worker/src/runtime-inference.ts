@@ -17,6 +17,18 @@ export type RuntimeModelHelper = (input: RuntimeModelHelperInput) => Promise<z.i
 export type RuntimeWebSearchInput = { args: z.infer<typeof RuntimeWebSearchArgumentsSchema>; conversationId: string; signal?: AbortSignal };
 /** The web_search tool's result: `provider` is the profile's search selector that ran it. */
 export type RuntimeWebSearchResult = { query: string; provider: string; answer: string | null; results: WebSearchHit[] };
+/** `history_search`'s judge: each question about `state` asked as a yes/no of a profile's `judge` helper, answered as a
+ * 0–1 score by question key. */
+export async function historyJudgment(judge: (args: z.infer<typeof RuntimeJsonSchema>) => Promise<z.infer<typeof RuntimeJsonSchema>>, state: string, questions: Record<string, string>): Promise<Record<string, number>> {
+  const answers = z.record(z.string(), z.object({ bool: z.number().min(0).max(1) })).parse(await judge({ state, questions: Object.fromEntries(Object.entries(questions).map(([id, instructions]) => [id, { type: 'bool', instructions }])) }));
+  const scores: Record<string, number> = {};
+  for (const id of Object.keys(questions)) {
+    const answer = answers[id];
+    if (!answer) throw new Error(`Judge omitted question ${id}`);
+    scores[id] = answer.bool;
+  }
+  return scores;
+}
 /** Cloudflare's Web Search API providers, by the selector's option. */
 const CLOUDFLARE_SEARCH: Readonly<Record<string, WebSearchProvider>> = { ceramic: 'ceramic', linkup: 'linkup', exa: 'exa' };
 /** A Cloudflare search answers in seconds; a model's searches and its answer take longer. */
