@@ -45,9 +45,7 @@ import type { AutomationProjectSummary, AutomationRunView } from '@gitspace/prot
 import { z } from 'zod';
 import { WorkspaceJournalLinesSchema, type WorkspaceJournalLine } from '@gitspace/protocol-runtime';
 import { BudgetedDurableObject } from './storage-quarantine.js';
-import { RuntimeQaItemSchema } from '@gitspace/protocol-runtime/workspace-controls';
 import { acrossRelease } from './release-worker.js';
-import type { RuntimeQaMovedItem } from './runtime-qa.js';
 import type { WorkspaceServiceUrl } from './workspace-service-urls.js';
 
 const LfsRecheckSchema = z.object({ after: z.number(), cursor: z.string() });
@@ -1109,16 +1107,10 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
       this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS workspace_relations(workspace_id TEXT PRIMARY KEY,relations_json TEXT NOT NULL)');
       this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS stack_comparisons(workspace_id TEXT PRIMARY KEY,source TEXT NOT NULL,result_json TEXT NOT NULL)');
       this.ctx.storage.sql.exec('DROP TABLE IF EXISTS lfs_origin_confirmations');
-      // One-time: a workspace runtime reported every retry of a failing step as a QA item, each with a fresh provider
-      // reference, about 5,500 in one project. Those reports (unattributed, no tool, the provider's internal-error text)
-      // are removed; every workspace snapshot carried them.
-      if (!this.ctx.storage.sql.exec("SELECT 1 FROM sqlite_master WHERE type='table' AND name='qa_retry_reports_purged'").toArray().length) {
-        this.ctx.storage.transactionSync(() => {
-          this.ctx.storage.sql.exec(`DELETE FROM project_events WHERE entity='qa' AND json_extract(payload_json,'$.item.title') LIKE 'internal error; reference = %'
-            AND json_extract(payload_json,'$.item.tool') IS NULL AND json_extract(payload_json,'$.item.model')='unattributed'`);
-          this.ctx.storage.sql.exec('CREATE TABLE qa_retry_reports_purged(done INTEGER)');
-        });
-      }
+      // Issues are Chatter topics (docs/CHATTER-DESIGN.md §5.1): the QA items this log kept are dropped (exported once
+      // for analysis on 2026-11-21, not backfilled).
+      this.ctx.storage.sql.exec("DELETE FROM project_events WHERE entity='qa'");
+      this.ctx.storage.sql.exec('DROP TABLE IF EXISTS qa_retry_reports_purged');
       this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS origin_check(id INTEGER PRIMARY KEY CHECK(id=1),interval TEXT NOT NULL,attempted_at INTEGER)');
       await this.armAlarm();
     });
@@ -1195,88 +1187,13 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
     return !this.ctx.storage.sql.exec("SELECT 1 FROM sqlite_master WHERE type='table' AND name='legacy_events_purged'").toArray().length;
   }
 
-  /** True while this log still holds QA items: workspaces keep their own, and the alarm moves these to them. */
-  private qaPending(): boolean {
-    return this.ctx.storage.sql.exec("SELECT 1 FROM project_events WHERE entity='qa' LIMIT 1").toArray().length > 0;
-  }
-
-  /** When the QA move may next run, and how many runs in a row left a workspace that could not take its items: the
-   * next run waits a minute, doubling to an hour. */
-  private qaMoveAfter = 0;
-  private qaMoveFailures = 0;
-
-  /** The alarm wakes at once for a background operation, else for the earliest of the legacy purge's next batch, the QA
-   * move and the next origin check, or not at all. */
+  /** The alarm wakes at once for a background operation, else for the earlier of the legacy purge's next batch and the
+   * next origin check, or not at all. */
   private async armAlarm(purgeAt: number | null = null): Promise<void> {
     if (this.nextQueuedOperation()) { await this.ctx.storage.setAlarm(Date.now()); return; }
-    const due = Math.min(purgeAt ?? (this.legacyEventsPending() ? Date.now() + 1_000 : Infinity), this.qaPending() ? this.qaMoveAfter : Infinity, this.nextOriginCheck() ?? Infinity);
+    const due = Math.min(purgeAt ?? (this.legacyEventsPending() ? Date.now() + 1_000 : Infinity), this.nextOriginCheck() ?? Infinity);
     if (due === Infinity) await this.ctx.storage.deleteAlarm();
     else await this.ctx.storage.setAlarm(Math.max(Date.now() + 1_000, due));
-  }
-
-  /**
-   * Workspaces keep their own QA items (`runtime-qa.ts`). The items this log kept move to each workspace that still
-   * exists, each in its latest state with when it was recorded, in chunks; a workspace's events are deleted once it took
-   * them all. Only the alarm runs this, never a request. Right after a release a workspace may still run code without
-   * `runtimeQaImport`: `acrossRelease` retries it briefly, and a workspace that still cannot take its items keeps them
-   * here and is tried again a minute later. Events written meanwhile (by code from before the move) wait for the next
-   * run. Each workspace logs `qa_move_workspace` or `qa_move_failed`, and each run `qa_move_finished`.
-   */
-  private async moveQaToWorkspaces(): Promise<void> {
-    const rows = this.ctx.storage.sql.exec<{ offset: number; payload_json: string; created_at: string }>("SELECT offset,payload_json,created_at FROM project_events WHERE entity='qa' ORDER BY offset").toArray();
-    const project = this.getProject();
-    const byWorkspace = new Map<string, { last: number; items: Map<string, RuntimeQaMovedItem> }>();
-    const orphans: number[] = [];
-    for (const row of rows) {
-      const payload = QaEventPayloadSchema.safeParse(JSON.parse(row.payload_json));
-      // Items with no workspace, or of a deleted one, have no one to show them.
-      if (!payload.success || !project || !this.keepsQa(project.id, payload.data.workspaceId)) { orphans.push(row.offset); continue; }
-      const entry = byWorkspace.get(payload.data.workspaceId) ?? { last: 0, items: new Map<string, RuntimeQaMovedItem>() };
-      entry.last = row.offset;
-      entry.items.set(payload.data.item.id, { item: payload.data.item, at: row.created_at });
-      byWorkspace.set(payload.data.workspaceId, entry);
-    }
-    if (orphans.length) this.ctx.storage.transactionSync(() => { for (const offset of orphans) this.ctx.storage.sql.exec('DELETE FROM project_events WHERE offset=?', offset); });
-    let moved = 0, items = 0;
-    const failed: string[] = [];
-    for (const [workspaceId, entry] of byWorkspace) {
-      const all = [...entry.items.values()];
-      try {
-        const workspace = this.env.SPACE_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${workspaceId}`);
-        for (let start = 0; start < all.length; start += QA_MOVE_CHUNK) {
-          const chunk = all.slice(start, start + QA_MOVE_CHUNK);
-          const done = start + QA_MOVE_CHUNK >= all.length;
-          await acrossRelease(() => workspace.runtimeQaImport({ projectId: project?.id, workspaceId }, chunk, done));
-        }
-        this.ctx.storage.sql.exec("DELETE FROM project_events WHERE entity='qa' AND offset<=? AND json_extract(payload_json,'$.workspaceId')=?", entry.last, workspaceId);
-        moved++;
-        items += all.length;
-        console.log(JSON.stringify({ event: 'qa_move_workspace', projectId: project?.id, workspaceId, items: all.length }));
-      } catch (error) {
-        failed.push(workspaceId);
-        console.error(JSON.stringify({ event: 'qa_move_failed', projectId: project?.id, workspaceId, items: all.length, message: error instanceof Error ? error.message : String(error) }));
-      }
-    }
-    this.qaMoveFailures = failed.length ? this.qaMoveFailures + 1 : 0;
-    this.qaMoveAfter = failed.length ? Date.now() + Math.min(QA_MOVE_RETRY_MAX_MS, QA_MOVE_RETRY_MS * 2 ** (this.qaMoveFailures - 1)) : 0;
-    console.log(JSON.stringify({ event: 'qa_move_finished', projectId: project?.id, workspaces: moved, items, orphaned: orphans.length, failed: failed.length, left: this.ctx.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM project_events WHERE entity='qa'").one().count }));
-  }
-
-  /** Whether QA items recorded for `workspaceId` still have a workspace to show them: the base, or a live workspace. */
-  private keepsQa(projectId: string, workspaceId: string): boolean {
-    if (workspaceId === projectId) return true;
-    return this.getWorkspace(workspaceId) !== null && this.ctx.storage.sql.exec('SELECT 1 FROM deleted_workspaces WHERE workspace_id=?', workspaceId).toArray().length === 0;
-  }
-
-  /** The QA items this log still keeps for one workspace, each in its latest state with when it was recorded: what the
-   * workspace shows until the move reaches it. One indexed scan of this project's QA events, read in the object. */
-  workspaceQa(workspaceId: string): { items: RuntimeQaMovedItem[] } {
-    const items = new Map<string, RuntimeQaMovedItem>();
-    for (const row of this.ctx.storage.sql.exec<{ payload_json: string; created_at: string }>("SELECT payload_json,created_at FROM project_events WHERE entity='qa' AND json_extract(payload_json,'$.workspaceId')=? ORDER BY offset", workspaceId)) {
-      const payload = QaEventPayloadSchema.safeParse(JSON.parse(row.payload_json));
-      if (payload.success) items.set(payload.data.item.id, { item: payload.data.item, at: row.created_at });
-    }
-    return { items: [...items.values()] };
   }
 
   /** True while this instance's alarm runs background operations. */
@@ -1298,7 +1215,6 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
         }
       } finally { this.drainingOperations = false; }
     }
-    if (this.qaPending() && Date.now() >= this.qaMoveAfter) await this.moveQaToWorkspaces();
     let purgeAt: number | null = null;
     // Legacy machines mirrored every local fact (streamed transcript updates, agent activity, generations) into this
     // log; the cloud runtime reads none of it. Delete it in batches of 1,000 every 10 seconds: each event is about two
@@ -2479,8 +2395,6 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
     ).one().offset;
     return Response.json(this.readEventRecords(offset - 1, 1)[0]!);
     });
-    // Only a workspace on code from before workspaces kept their own QA items writes one; the alarm moves it there.
-    if (input.entity === 'qa') void this.armAlarm().catch((error: unknown) => console.error(JSON.stringify({ event: 'qa_move_alarm_failed', message: error instanceof Error ? error.message : String(error) })));
     return response;
   }
 
@@ -2493,12 +2407,6 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
   /** One page after `afterOffset`; callers continue from the last returned offset. */
   listEvents(afterOffset: number): Response {
     return Response.json(this.readEventRecords(afterOffset, PROJECT_EVENT_PAGE));
-  }
-
-  /** One page of an entity's events after `afterOffset`, served by `project_events_entity`: never scans the whole project
-   * log. Workspaces on code from before they kept their own QA items page their items with it during a release. */
-  listEntityEvents(entity: string, afterOffset = 0, limit = PROJECT_EVENT_PAGE): ProjectEvent[] {
-    return this.ctx.storage.sql.exec<ProjectEventRow>('SELECT * FROM project_events WHERE entity=? AND offset>? ORDER BY offset LIMIT ?', entity, afterOffset, Math.min(Math.max(1, Math.trunc(limit)), PROJECT_EVENT_PAGE)).toArray().map(projectEventRecord);
   }
 
   private readEventRecords(afterOffset: number, limit: number): ProjectEvent[] {
@@ -2517,15 +2425,8 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
 
 /** Most project events one list call reads. */
 const PROJECT_EVENT_PAGE = 500;
-/** A QA event: an item as one workspace's runtime, agents or the relay recorded it before workspaces kept their own. */
-const QaEventPayloadSchema = z.object({ workspaceId: z.string(), item: RuntimeQaItemSchema });
-/** QA items sent to a workspace per call by the move. */
-const QA_MOVE_CHUNK = 200;
-const QA_MOVE_RETRY_MS = 60_000;
-const QA_MOVE_RETRY_MAX_MS = 60 * 60_000;
-/** Entities the cloud app writes to `project_events`; every other entity is legacy machine history. `qa` stays until
- * the QA move has taken each event to its workspace, so the legacy purge never deletes one. */
-const CURRENT_EVENT_ENTITIES = ['qa', 'goal', 'workflow', 'rubric', 'journal', 'change-guide', 'review-thread', 'agent-incident', 'artifact', 'mcp-grant'];
+/** Entities the cloud app writes to `project_events`; every other entity is legacy machine history. */
+const CURRENT_EVENT_ENTITIES = ['goal', 'workflow', 'rubric', 'journal', 'change-guide', 'review-thread', 'agent-incident', 'artifact', 'mcp-grant'];
 /** How long a background operation that ended stays in the views (the base branch row's "Switched from … just now"). */
 const RECENT_OPERATION_MS = 10 * 60_000;
 /** How long one alarm keeps starting background operations; Cloudflare stops an alarm after 15 minutes. */

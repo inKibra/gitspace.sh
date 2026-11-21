@@ -47,7 +47,7 @@ const samples: Record<string, ToolCall['arguments']> = {
   space_workflow: { method: 'get' }, space_rubric: { method: 'get' }, space_journal: { method: 'list' }, space_guide: { method: 'get' }, space_review: { method: 'list' },
   web_search: { query: 'TypeScript documentation' }, web_fetch: { url: 'https://www.typescriptlang.org/docs/' }, generate_image: { prompt: 'A blue square' }, decide: { state: 'A one-line fix', questions: { risky: { type: 'bool', instructions: 'Is it risky?' } } }, ast_grep: { pattern: 'foo($A)', path: 'src', language: 'typescript' },
   ast_edit: { ops: [{ pat: 'foo($A)', out: 'bar($A)' }], paths: ['src/main.ts'], language: 'typescript' }, ast_resolve: { proposalId: 'proposal', action: 'reject' },
-  history_search: { query: 'decision' }, history_read: { conversationId: 'conversation' }, report_issue: { message: 'Observed concrete failure' }, blocks: { op: 'changeSet' },
+  history_search: { query: 'decision' }, history_read: { conversationId: 'conversation' }, chatter_post: { topic: 'bun test hang', kind: 'workaround', text: 'A longer timeout gets past it.' }, chatter_read: { topic: 'bun test hang' }, blocks: { op: 'changeSet' },
   checkpoint: { goal: 'Inspect implementation' }, rewind: { checkpoint: 'checkpoint', report: 'Findings' }, wait: { timeoutMs: 1000 },
   mcp_discover: {}, mcp_invoke: { connectionId: 'connection', name: 'lookup', arguments: { query: 'hello' } }, web_browser: { action: 'tabs' },
   todo: { items: [{ id: 'proof', text: 'Exercise registrations', status: 'completed' }] }, propose_plan: { prompt: 'Implement the selected plan', choices: ['Approve', 'Reject'], steps: [{ id: 'implement', title: 'Implement the selected plan', detail: 'The selected path.' }] },

@@ -28,7 +28,6 @@ export const reviewedAnnotations: Record<string, ToolAnnotation> = {
   "runtime.session": { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
   "runtime.services": { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
   "runtime.sync": { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
-  "runtime.qa": { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
   "runtime.attachment.cache.request": { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
   "runtime.attachment.detach": { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
   "machines": {
@@ -621,6 +620,16 @@ export const reviewedAnnotations: Record<string, ToolAnnotation> = {
     "destructiveHint": true,
     "idempotentHint": true,
     "openWorldHint": false
+  },
+  "chatter.issues": {
+    "readOnlyHint": true,
+    "openWorldHint": false
+  },
+  "chatter.fileIssue": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": true
   },
   "skills.list": {
     "readOnlyHint": true,

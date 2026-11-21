@@ -33,7 +33,7 @@ async function project() {
 }
 
 /** A device enrolled with `scope`, and a signed single-call RPC. */
-async function device(scope: DeviceScope, capabilities: DeviceCapability[] = ['rpc.read', 'rpc.write']) {
+async function device(scope: DeviceScope, capabilities: DeviceCapability[] = ['rpc.read', 'rpc.write', 'session.prompt']) {
   const userId = env.ACCOUNT_ID;
   const vault = env.CREDENTIALS.getByName(userId);
   await vault.bootstrap({ userId, rootPublicKey: env.AUTH_PUBLIC_KEY, vaultKey: credentialProtocolBase64.encode(new Uint8Array(32).fill(71)) });
@@ -170,5 +170,47 @@ describe('chatter RPC', () => {
     expect(await workspace('chatter.watch', { projectId: mine })).toMatchObject({ status: 'error' });
     const reader = await device({ kind: 'project', projectId: mine }, ['rpc.read']);
     expect(await reader('chatter.post', { projectId: mine, id: 'y', topic: 'a topic', kind: 'status', text: 'hello' })).toMatchObject({ status: 'error' });
+  });
+});
+
+describe('issues in Chatter', () => {
+  const failure = (projectId: string, workspace: { id: string; name: string }, message = 'Network connection lost (ref 0fea5eaeb2ba)') =>
+    env.PROJECT_CHATTER.getByName(`${env.ACCOUNT_ID}:${projectId}`).runtimeFailure({ projectId, workspace, source: 'model request', message });
+
+  it('posts a runtime failure as GitSpace under a fixed topic, folds a repeat from the same workspace into counts, and posts again once resolved', async () => {
+    const { projectId, object } = chatter();
+    const parser = { id: 'ws-parser', name: 'Parser' };
+    expect(await failure(projectId, parser)).toMatchObject({ kind: 'posted', post: { author: { kind: 'gitspace', id: 'ws-parser', name: 'Parser' }, spot: { tool: 'model request', reference: 'history://ws-parser' } }, topic: { key: 'model request network connection lost ref', state: 'open', posts: 1 } });
+    // Another occurrence, with a different reference id in its text: the same topic, counted.
+    expect(await failure(projectId, parser, 'Network connection lost (ref 77aa00cc11dd)')).toMatchObject({ kind: 'repeated', topic: { posts: 1, repeats: 1 } });
+    expect(await failure(projectId, { id: 'ws-billing', name: 'Billing' })).toMatchObject({ kind: 'posted', topic: { posts: 2, repeats: 1 } });
+    await object.act({ projectId, key: 'model request network connection lost ref', action: { kind: 'state', state: 'resolved', fixedIn: null }, author: person });
+    expect(await failure(projectId, parser)).toMatchObject({ kind: 'posted', topic: { posts: 3, state: 'open' } });
+  });
+
+  it('reads the issue topics a workspace posted in, with its tooling posts, and the active topics for agents', async () => {
+    const { projectId, object, post } = chatter();
+    const agent: ChatterAuthor = { kind: 'workspace', id: 'ws-a', name: 'Parser' };
+    await object.post({ projectId, id: 'tooling-a', topic: 'sync drops files · sync', kind: 'tooling', text: 'sync now left 3 files', author: agent, phase: 'code', spot: { tool: 'sync', reference: 'history://ws-a/main#4', machine: 'm-1' } });
+    await object.post({ projectId, id: 'status-a', topic: 'release notes', kind: 'status', text: 'Moved the changelog.', author: agent, phase: 'code' });
+    await post('other issue', 'Someone else broke it.', 'tooling');
+    await failure(projectId, { id: 'ws-a', name: 'Parser' });
+    const issues = await object.issues('ws-a');
+    expect(issues.topics.map(topic => topic.key)).toEqual(['model request network connection lost ref', 'sync drops files sync']);
+    expect(issues.posts.map(entry => [entry.topicKey, entry.phase, entry.spot?.machine ?? null])).toEqual([['model request network connection lost ref', null, null], ['sync drops files sync', 'code', 'm-1']]);
+    expect((await object.read({ issue: true })).topics.map(topic => topic.key).sort()).toEqual(['model request network connection lost ref', 'other issue', 'sync drops files sync']);
+    expect((await object.read({ kind: 'status' })).posts.map(entry => entry.text)).toEqual(['Moved the changelog.']);
+    expect((await object.read({})).topics).toHaveLength(4);
+  });
+
+  it('lists a workspace\'s issues to a person, resolves one through topicAct, and needs session.prompt to post', async () => {
+    const projectId = await project();
+    await env.PROJECT_CHATTER.getByName(`${env.ACCOUNT_ID}:${projectId}`).post({ projectId, id: 'tooling', topic: 'proc watch failed', kind: 'tooling', text: 'proc watch lost the process', author: { kind: 'workspace', id: 'ws-a', name: 'Parser' }, spot: { tool: 'proc', reference: 'history://ws-a', machine: null } });
+    const rpc = await device({ kind: 'project', projectId });
+    expect(await rpc('chatter.issues', { projectId, workspaceId: 'ws-a' })).toMatchObject({ status: 'ok', value: { topics: [{ key: 'proc watch failed', state: 'open' }], posts: [{ text: 'proc watch lost the process' }] } });
+    expect(await rpc('chatter.topicAct', { projectId, key: 'proc watch failed', action: { kind: 'state', state: 'resolved', fixedIn: 'abc1234' } })).toMatchObject({ status: 'ok', value: { topic: { state: 'resolved', fixedIn: 'abc1234' } } });
+    expect(await rpc('chatter.issues', { projectId, workspaceId: 'ws-a' })).toMatchObject({ status: 'ok', value: { topics: [{ key: 'proc watch failed', state: 'resolved' }] } });
+    const writer = await device({ kind: 'project', projectId }, ['rpc.read', 'rpc.write']);
+    expect(await writer('chatter.post', { projectId, id: 'z', topic: 'a topic', kind: 'status', text: 'hello' })).toMatchObject({ status: 'error' });
   });
 });

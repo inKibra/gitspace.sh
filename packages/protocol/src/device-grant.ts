@@ -542,7 +542,8 @@ export function verifyRpcDigestSignature(header: SignedRpcHeader, input: Pick<Rp
 
 /** The capability a procedure needs, derived from its kind unless the path is special-cased. */
 export function requiredCapability(procedurePath: string, kind: 'query' | 'mutation' | 'subscription'): DeviceCapability {
-  if (procedurePath === 'runtime.submit' || procedurePath === 'runtime.cancel' || procedurePath === 'runtime.answer') return 'session.prompt';
+  // A Chatter post reaches agents' context, as a prompt does (docs/CHATTER-DESIGN.md §8).
+  if (procedurePath === 'runtime.submit' || procedurePath === 'runtime.cancel' || procedurePath === 'runtime.answer' || procedurePath === 'chatter.post') return 'session.prompt';
   // The command handler checks the stronger capability for each mutation.
   if (procedurePath === 'runtime.session' || procedurePath === 'runtime.services') return 'rpc.read';
   if (procedurePath.startsWith('machine.image.') && kind === 'mutation') return 'deployment.control';
@@ -585,12 +586,12 @@ const OPERATOR_PROCEDURES: Readonly<Record<string, true>> = {
   'github.request.cancel': true, 'github.installation.confirm': true, 'github.installation.uninstall': true,
   'github.uninstalled.dismiss': true, 'github.removed.clear': true, 'github.person.set': true,
   'storageIncidents.resume': true, 'storageIncidents.pause': true, 'storageIncidents.inspect': true,
+  'chatter.fileIssue': true,
 };
 export const OPERATOR_SESSION_COMMANDS = [
   'answerAsk', 'stageAnswer', 'browserEverything', 'browserTakeOver', 'browserResume', 'browserTabGroup', 'browserShareCreate', 'browserShareConnect',
   'browserCaptureShareCreate', 'browserCommentAdd', 'browserCommentReply', 'browserCommentResolve',
 ] as const;
-export const OPERATOR_QA_ACTIONS = ['file', 'share'] as const;
 /** Whether a call decides as the person: then the caller needs `operator.decide` beside its ordinary capability. */
 export function requiresOperatorDecision(path: string, input?: unknown): boolean {
   if (OPERATOR_PROCEDURES[path]) return true;
@@ -599,11 +600,6 @@ export function requiresOperatorDecision(path: string, input?: unknown): boolean
     const command = Reflect.get(input, 'command');
     const type = command && typeof command === 'object' ? Reflect.get(command, 'type') : undefined;
     return OPERATOR_SESSION_COMMANDS.some(name => name === type);
-  }
-  if (path === 'runtime.qa') {
-    const action = Reflect.get(input, 'action');
-    const kind = action && typeof action === 'object' ? Reflect.get(action, 'kind') : undefined;
-    return OPERATOR_QA_ACTIONS.some(name => name === kind);
   }
   return false;
 }

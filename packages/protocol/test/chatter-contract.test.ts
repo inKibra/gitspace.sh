@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { normalizeChatterTopic, similarChatterTopic, suggestChatterTopic } from '../src/chatter-contract.js';
+import { normalizeChatterTool, normalizeChatterTopic, runtimeFailureChatterTopic, similarChatterTopic, suggestChatterTopic, toolingChatterTopic } from '../src/chatter-contract.js';
 import { scopeAllowsProject } from '../src/device-grant.js';
 
 describe('Chatter topics', () => {
@@ -34,5 +34,27 @@ describe('scopeAllowsProject', () => {
     expect(scopeAllowsProject({ kind: 'projects', projectIds: ['a', 'b'] }, 'b')).toBe(true);
     expect(scopeAllowsProject({ kind: 'projects', projectIds: ['a', 'b'] }, 'c')).toBe(false);
     expect(scopeAllowsProject({ kind: 'workspace', workspaceId: 'a' }, 'a')).toBe(false);
+  });
+});
+
+describe('issue topics', () => {
+  it('folds tool names written another way into one', () => {
+    for (const tool of ['Bash', 'bash tool', 'shell', 'mcp__machine__bash']) expect(normalizeChatterTool(tool)).toBe('bash');
+    expect(normalizeChatterTool('web_browser')).toBe('web browser');
+  });
+
+  it('names a tooling post\'s topic by its title and tool, cut so the tool fits', () => {
+    expect(toolingChatterTopic('Bun test hangs!', 'Bash tool')).toBe('bun test hangs · bash');
+    expect(toolingChatterTopic('Bun test hangs', null)).toBe('bun test hangs');
+    const long = toolingChatterTopic('word '.repeat(40), 'sync');
+    expect(long.length).toBeLessThanOrEqual(80);
+    expect(long.endsWith(' · sync')).toBe(true);
+  });
+
+  it('gives every occurrence of a runtime failure one topic, whatever ids and counts it carries', () => {
+    expect(runtimeFailureChatterTopic('model request', 'Network connection lost.\nstack')).toBe('model request: Network connection lost.');
+    const topic = runtimeFailureChatterTopic('conversation', 'Conversation 1 could not resume: tree 0fea5eaeb2ba7d9f for machine m-021d0c06 in 3f2504e0-4f89-11d3-9a0c-0305e82c3301');
+    expect(runtimeFailureChatterTopic('conversation', 'Conversation 12 could not resume: tree 77aa00cc11dd for machine m-99bb88aa in 9b2504e0-4f89-11d3-9a0c-0305e82c3302')).toBe(topic);
+    expect(normalizeChatterTopic(topic)).not.toMatch(/\d/u);
   });
 });

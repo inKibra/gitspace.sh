@@ -20,7 +20,7 @@ import { questionState, type RuntimeSecureFillResult } from '@gitspace/protocol-
 import { approvedBrowserSites, browserOriginMatches } from '@gitspace/protocol-environment';
 import { secureFillTab, type SecureInputRecord } from './secure-input.js';
 import { createAccountWorkspaceRuntime, ensureProjectCodeRepository } from './account-runtime-host.js';
-import { createRuntimeQaServices, importRuntimeQa, type RuntimeQaMovedItem } from './runtime-qa.js';
+import { runtimeFailureReporter } from './runtime-failures.js';
 import { RuntimeSessionInputSchema, type PendingAskAnswer } from '@gitspace/protocol-runtime/session-controls';
 import { RuntimeTranscriptRangeSchema } from '@gitspace/runtime-core/history';
 import { RuntimeDraftSaveInputSchema } from '@gitspace/protocol-runtime/draft';
@@ -28,7 +28,7 @@ import { RuntimeServiceInputSchema } from '@gitspace/protocol-runtime/services';
 import { RuntimeSyncRequestInputSchema, RuntimeSyncRequestResultSchema, type RuntimeSyncRequestResult } from '@gitspace/protocol-runtime/tool-arguments';
 import { runtimeServiceControl } from './runtime-service-control.js';
 import { importRefThroughBaseMachine } from './runtime-ref-import.js';
-import { RuntimeGitCheckpointSchema, RuntimeQaActionInputSchema, RuntimeSnapshotCommitInputSchema } from '@gitspace/protocol-runtime/workspace-controls';
+import { RuntimeGitCheckpointSchema, RuntimeSnapshotCommitInputSchema } from '@gitspace/protocol-runtime/workspace-controls';
 import { RuntimeAttachmentReadyInputSchema, RuntimeAssignmentsInputSchema, RuntimeCacheAttachmentRequestInputSchema, RuntimeAttachmentDetachRequestInputSchema } from '@gitspace/protocol-runtime/attachment-controls';
 import { RuntimeHeartbeatInputSchema, RuntimeDetachInputSchema } from '@gitspace/protocol-runtime/machine-controls';
 import { CheckoutSourceFactsSchema, RuntimeAttachmentController, machineCapabilities } from './runtime-attachments.js';
@@ -124,6 +124,8 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS portable_lfs_outbox(snapshot_id TEXT PRIMARY KEY,inventory TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0)');
     if (!this.ctx.storage.sql.exec<{ name: string }>('PRAGMA table_info(portable_lfs_outbox)').toArray().some(column => column.name === 'attempts')) this.ctx.storage.sql.exec('ALTER TABLE portable_lfs_outbox ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0');
     this.ctx.storage.sql.exec('DROP TABLE IF EXISTS base_branch_steps');
+    // Issues are Chatter topics (docs/CHATTER-DESIGN.md §5.1): the workspace's own QA items are gone.
+    this.ctx.storage.sql.exec('DROP TABLE IF EXISTS runtime_qa_items; DROP TABLE IF EXISTS runtime_qa_moved');
     // Owners of earlier releases have no handler: their wakes would fire forever.
     this.ctx.storage.sql.exec("DELETE FROM runtime_alarms WHERE owner NOT IN ('runtime','lfs','presence','presence-notice')");
     createWorkspaceMetadataTables(this.ctx.storage);
@@ -1138,34 +1140,6 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     return { algorithm, publicKey };
   }
 
-  async runtimeQa(raw: unknown, actor: { deviceId: string; canApprove: boolean }) {
-    const input = RuntimeQaActionInputSchema.parse(raw);
-    return (await this.getRuntime(input)).qa(input, actor);
-  }
-
-  /** The workspace this object holds, or none yet; another workspace's identity is refused. */
-  private async ownIdentity(raw: unknown) {
-    const identity = RuntimeIdentitySchema.parse(raw);
-    const stored = await this.ctx.storage.get('runtime.identity');
-    if (stored !== undefined && RuntimeIdentitySchema.parse(stored).workspaceId !== identity.workspaceId) throw new Error('Runtime actor identity mismatch');
-    return identity;
-  }
-
-  /** A failure reported from outside the runtime (the relay could not record a machine's presence here): a QA item of
-   * this workspace unless the same failure is open. An open runtime shows it at once. */
-  async runtimeQaReport(raw: unknown, message: string): Promise<void> {
-    createRuntimeQaServices(this.ctx.storage, this.env, await this.ownIdentity(raw)).report(message);
-    void this.runtime?.then(runtime => { runtime.publish(); }, () => {});
-  }
-
-  /** QA items the project object kept for this workspace, sent by its move (`ProjectAuthorityDO` alarm). Writes storage
-   * only: it never opens the runtime, and an open one shows them at once. */
-  async runtimeQaImport(raw: unknown, items: RuntimeQaMovedItem[], done: boolean): Promise<void> {
-    await this.ownIdentity(raw);
-    importRuntimeQa(this.ctx.storage, items, done);
-    void this.runtime?.then(runtime => { runtime.publish(); }, () => {});
-  }
-
   async runtimeSnapshotCommit(raw: unknown) {
     const input = RuntimeSnapshotCommitInputSchema.parse(raw);
     // The failing step is logged with the error: callers see only its message, often the runtime's bare "internal error".
@@ -1412,7 +1386,7 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
           await this.scheduleAlarm('lfs', Date.now() + Math.min(3_600_000, 1_000 * 2 ** row.attempts));
           return;
         }
-        createRuntimeQaServices(this.ctx.storage, this.env, RuntimeIdentitySchema.parse({ projectId: state.projectId, workspaceId: state.spaceId })).report(`LFS retention of snapshot ${row.snapshot_id} stopped retrying after ${row.attempts + 1} failures: ${message}. Its LFS objects stay retained.`);
+        await runtimeFailureReporter(this.env, RuntimeIdentitySchema.parse({ projectId: state.projectId, workspaceId: state.spaceId }))('lfs retention', new Error(`LFS retention of snapshot ${row.snapshot_id} stopped retrying after ${row.attempts + 1} failures: ${message}. Its LFS objects stay retained.`));
       }
     }
     await this.scheduleAlarm('lfs', null);

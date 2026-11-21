@@ -1,15 +1,16 @@
-// The Chatter cut-out: the project's ambient chat, docked bottom-left of the main panel like a stream chat over a video
-// (docs/CHATTER-DESIGN.md §7). Posts group by topic, the most recently active topic at the bottom by the composer; a
-// topic header carries its count, participants and issue state, and its actions. The composer suggests a topic from the
-// text's first words, autocompletes the active topics and names a similar active one before a new topic is posted.
-// Scrolling up pauses auto-scroll; collapsing keeps an unread count.
+// The Chatter button and pane: the project's ambient chat, a button in the workspace header next to Ask a ghost with
+// an unread badge, whose pane drops down under it (docs/CHATTER-DESIGN.md §7). Posts group by topic, the most recently
+// active topic at the bottom by the composer; a topic header carries its count, participants and issue state, and its
+// actions. The composer suggests a topic from the text's first words, autocompletes the active topics and names a
+// similar active one before a new topic is posted. Scrolling up pauses auto-scroll.
 import { DropdownContent, DropdownMenu, DropdownTrigger, MenuItem, Tooltip, badgeColors, type IconComponent } from '@gitspace/ui';
 import {
   CHATTER_KINDS, normalizeChatterTopic, similarChatterTopic, suggestChatterTopic,
-  type ChatterKind, type ChatterPost, type ChatterTopic, type ChatterTopicAction, type ChatterTopicLine,
+  type ChatterKind, type ChatterPost, type ChatterReturnedLine, type ChatterTopic, type ChatterTopicAction, type ChatterTopicLine,
 } from '@gitspace/protocol/chatter-contract';
-import { Activity, ArrowDown, ChevronDown, ChevronUp, CpuChip01, DotsHorizontal, Hash02, InfoCircle, Lightbulb02, PauseCircle, PlayCircle, Route, Send01, Tool02, Users01 } from '@untitledui/icons';
+import { Activity, ArrowDown, ChevronDown, ChevronUp, CpuChip01, DotsHorizontal, Hash02, InfoCircle, Lightbulb02, MessageChatCircle, PauseCircle, PlayCircle, Route, Send01, Tool02, Users01 } from '@untitledui/icons';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import { StatusDot } from '../GitSpaceShell.js';
 import { glyph } from '../glyph.js';
 import { chatterKindCounts, groupChatter, type ChatterGroup, type ChatterState } from './chatter-state.js';
@@ -34,43 +35,110 @@ const LATEST_ITEMS = 3;
 /** Active topics the autocomplete lists at once. */
 const SUGGESTIONS = 6;
 const ICON = { width: 15, height: 15, strokeWidth: 1.75 };
+/** The pane's size and placement: at most this wide and tall, this far under the button and inside the panel's edges
+ * and the composer, and as wide as the panel (less the margins) when the panel is narrower than `NARROW_PANEL`. */
+const PANE_WIDTH = 392;
+const PANE_HEIGHT = 600;
+const PANE_GAP = 6;
+const PANE_MARGIN = 12;
+const NARROW_PANEL = 640;
 
 export interface ChatterPaneProps {
   projectName: string;
   workspaceCount: number | null;
+  /** The open workspace. Posts it is the author of (its agent, the project agent in the base workspace, GitSpace for its
+   * failures) don't count as unread. */
+  workspaceId: string;
   state: ChatterState;
   active: readonly ChatterTopic[];
   error: string | null;
-  collapsed: boolean;
-  onCollapsed(collapsed: boolean): void;
   onPost(input: { topic: string; kind: ChatterKind; text: string }): Promise<ChatterPostOutcome>;
   onAct(key: string, action: ChatterTopicAction): Promise<string | null>;
   onLoadOlder(topic?: string): Promise<void>;
 }
 
-export function ChatterPane({ projectName, workspaceCount, state, active, error, collapsed, onCollapsed, onPost, onAct, onLoadOlder }: ChatterPaneProps) {
+export function ChatterPane({ projectName, workspaceCount, workspaceId, state, active, error, onPost, onAct, onLoadOlder }: ChatterPaneProps) {
+  const [open, setOpen] = useState(false);
+  const [placement, setPlacement] = useState<{ top: number; left: number; width: number; height: number } | null>(null);
   const [filter, setFilter] = useState<ChatterKind | 'all'>('all');
   const [following, setFollowing] = useState(true);
   const [seen, setSeen] = useState<number | null>(null);
   const [expanded, setExpanded] = useState<Readonly<Record<string, true>>>({});
   const [reply, setReply] = useState<{ topic: string; serial: number } | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  /** Set by a pointerdown on the button or inside the pane (portaled menus included), read by the document's
+   * outside-click listener. */
+  const inside = useRef(false);
+  const refocus = useRef(false);
   const groups = useMemo(() => groupChatter(state, filter), [state, filter]);
   const counts = useMemo(() => chatterKindCounts(state.events), [state.events]);
   const posts = useMemo(() => state.events.filter((event): event is ChatterPost => event.type === 'post'), [state.events]);
   const newest = posts.at(-1)?.offset ?? 0;
 
-  // What arrived before the pane first had posts counts as seen; after, posts arriving while it is collapsed or scrolled
-  // up are unread until it follows again.
-  const watching = !collapsed && following;
+  // What arrived before the pane first had posts counts as seen; after, posts from other authors arriving while it is
+  // closed or scrolled up are unread until it follows again.
+  const watching = open && following;
   useEffect(() => { if (watching || (seen === null && newest > 0)) setSeen(newest); }, [watching, newest, seen]);
-  const unread = posts.filter(post => post.offset > (seen ?? newest));
+  const unread = posts.filter(post => post.offset > (seen ?? newest) && (post.author.kind === 'person' || post.author.id !== workspaceId));
   const unreadTooling = unread.some(post => post.kind === 'tooling');
+
+  // The pane hangs under the button, right-aligned to it, inside the workspace panel and above its composer.
+  useLayoutEffect(() => {
+    const button = trigger.current;
+    const panel = button?.closest('[data-workspace-panel]');
+    if (!open || !button || !panel) return;
+    const composer = panel.querySelector('[data-composer-overlay]');
+    const place = (): void => {
+      const at = button.getBoundingClientRect();
+      const frame = panel.getBoundingClientRect();
+      const top = at.bottom + PANE_GAP;
+      const floor = Math.min(frame.bottom, composer?.getBoundingClientRect().top ?? frame.bottom) - PANE_MARGIN;
+      const height = Math.max(0, Math.min(PANE_HEIGHT, frame.height * 0.6, floor - top));
+      const width = frame.width < NARROW_PANEL ? frame.width - 2 * PANE_MARGIN : Math.min(PANE_WIDTH, at.right - frame.left - PANE_MARGIN);
+      setPlacement({ top, height, width, left: frame.width < NARROW_PANEL ? frame.left + PANE_MARGIN : at.right - width });
+    };
+    place();
+    const observer = new ResizeObserver(place);
+    observer.observe(panel);
+    if (composer) observer.observe(composer);
+    window.addEventListener('resize', place);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', place);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) {
+      if (refocus.current) trigger.current?.focus();
+      refocus.current = false;
+      return;
+    }
+    // A pointerdown on the button that opened it ran before this listener existed.
+    inside.current = false;
+    const pointer = (): void => {
+      if (inside.current) inside.current = false;
+      else setOpen(false);
+    };
+    const key = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape' || event.defaultPrevented) return;
+      if (event.target instanceof Element && event.target.closest('[role="menu"]')) return;
+      refocus.current = true;
+      setOpen(false);
+    };
+    document.addEventListener('pointerdown', pointer);
+    document.addEventListener('keydown', key);
+    return () => {
+      document.removeEventListener('pointerdown', pointer);
+      document.removeEventListener('keydown', key);
+    };
+  }, [open]);
 
   useLayoutEffect(() => {
     const element = scroller.current;
     if (element && following) element.scrollTop = element.scrollHeight;
-  }, [groups, following, collapsed, expanded]);
+  }, [groups, following, placement, expanded]);
 
   const onScroll = (): void => {
     const element = scroller.current;
@@ -83,27 +151,32 @@ export function ChatterPane({ projectName, workspaceCount, state, active, error,
     const element = scroller.current;
     if (element) element.scrollTop = element.scrollHeight;
   };
-  const latest = posts.at(-1);
+  const collapse = (): void => {
+    refocus.current = true;
+    setOpen(false);
+  };
 
-  if (collapsed) {
-    return <button type="button" onClick={() => { setFollowing(true); onCollapsed(false); }} aria-label={`Open Chatter${unread.length ? `, ${unread.length} unread` : ''}`}
-      className="pointer-events-auto absolute bottom-5 left-4 z-30 flex h-11 w-[272px] max-w-[calc(100%-2rem)] items-center gap-2 rounded-2xl border border-border bg-background/90 px-3 text-left shadow-[0_12px_40px_-14px_rgba(0,0,0,0.35)] backdrop-blur-md hover:bg-background">
-      <StatusDot color="green" />
-      <span className="text-[13px] font-semibold">Chatter</span>
-      {unread.length ? <span data-unread className="flex h-[18px] min-w-[18px] items-center justify-center rounded-full px-1.5 text-[10.5px] font-semibold tabular-nums text-white" style={{ background: unreadTooling ? badgeColors.rose : badgeColors.blue }}>{unread.length}</span> : null}
-      {latest ? <span className="min-w-0 flex-1 truncate text-[12px] text-muted-foreground"><span className="font-medium text-foreground">{latest.author.name}</span>: {latest.text.replaceAll('`', '')}</span> : <span className="flex-1" />}
-      <ChevronUp {...ICON} className="shrink-0 text-muted-foreground" />
-    </button>;
-  }
-
-  return <section aria-label="Chatter" className="pointer-events-auto absolute bottom-4 left-4 z-30 flex h-[min(600px,calc(100%-2rem))] w-[392px] max-w-[calc(100%-2rem)] flex-col overflow-hidden rounded-2xl border border-border bg-background/[0.94] shadow-[0_16px_48px_-16px_rgba(0,0,0,0.4)] backdrop-blur-md">
+  const label = `Chatter${unread.length ? `, ${unread.length} unread` : ''}`;
+  return <>
+    <Tooltip content={`Chatter · what everyone in ${projectName} is saying`} side="bottom">
+      <button ref={trigger} type="button" aria-label={label} aria-expanded={open} aria-haspopup="dialog"
+        onPointerDownCapture={() => { inside.current = true; }}
+        onClick={() => { if (open) collapse(); else { setFollowing(true); setOpen(true); } }}
+        className={`inline-flex h-7 shrink-0 items-center gap-1 rounded-full px-2.5 text-[11.5px] font-medium text-foreground shadow-[inset_0_0_0_1px_var(--border)] transition-colors max-sm:px-2 ${open ? 'bg-active' : 'bg-background hover:bg-hover'}`}>
+        <MessageChatCircle width={14} height={14} strokeWidth={1.75} />
+        <span className="max-sm:sr-only">Chatter</span>
+        {unread.length ? <span data-unread={unreadTooling ? 'tooling' : 'other'} aria-hidden className="flex h-4 min-w-4 items-center justify-center rounded-full px-1 text-[10px] font-semibold tabular-nums text-white" style={{ background: unreadTooling ? badgeColors.rose : badgeColors.blue }}>{unread.length}</span> : null}
+      </button>
+    </Tooltip>
+    {open && placement ? createPortal(<section aria-label="Chatter" role="dialog" onPointerDownCapture={() => { inside.current = true; }} style={placement}
+      className="fixed z-40 flex origin-top-right flex-col overflow-hidden rounded-2xl border border-border bg-background/[0.96] shadow-[0_16px_48px_-16px_rgba(0,0,0,0.4)] backdrop-blur-md transition-[opacity,scale] duration-150 ease-out starting:scale-[0.97] starting:opacity-0 motion-reduce:transition-none">
     <header className="flex h-11 shrink-0 items-center gap-2 border-b border-border pl-3 pr-1.5">
       <StatusDot color="green" />
       <span className="text-[13px] font-semibold">Chatter</span>
       <span className="truncate text-[11.5px] text-muted-foreground">{projectName}{workspaceCount === null ? '' : ` · ${workspaceCount} ${workspaceCount === 1 ? 'workspace' : 'workspaces'}`}</span>
       <span className="ml-auto flex items-center">
         <HeaderButton label={following ? 'Pause auto-scroll' : 'Resume auto-scroll'} pressed={!following} onClick={() => following ? setFollowing(false) : resume()}>{following ? <PauseCircle {...ICON} /> : <PlayCircle {...ICON} />}</HeaderButton>
-        <HeaderButton label="Collapse" onClick={() => onCollapsed(true)}><ChevronDown {...ICON} /></HeaderButton>
+        <HeaderButton label="Collapse" onClick={collapse}><ChevronUp {...ICON} /></HeaderButton>
       </span>
     </header>
     <div className="flex shrink-0 items-start gap-1.5 border-b border-border bg-muted/40 px-3 py-1.5 text-[11px] leading-[15px] text-muted-foreground">
@@ -120,7 +193,7 @@ export function ChatterPane({ projectName, workspaceCount, state, active, error,
       <div ref={scroller} onScroll={onScroll} className="h-full overflow-y-auto overscroll-contain px-2 pb-2 pt-1">
         {state.older ? <button type="button" onClick={() => void onLoadOlder()} className="mx-auto my-1 block text-[11px] font-medium text-muted-foreground underline decoration-border underline-offset-2 hover:text-foreground">Load earlier posts</button> : null}
         {groups.length
-          ? groups.map(group => <TopicGroup key={group.key} group={group} active={active} expanded={!!expanded[group.key]}
+          ? groups.map(group => 'type' in group ? <ReturnedLine key={group.id} line={group} /> : <TopicGroup key={group.key} group={group} active={active} expanded={!!expanded[group.key]}
             onToggle={() => { setFollowing(false); setExpanded(current => { const next = { ...current }; if (next[group.key]) delete next[group.key]; else next[group.key] = true; return next; }); }}
             onReply={topic => setReply({ topic, serial: (reply?.serial ?? 0) + 1 })} onAct={onAct} onLoadOlder={onLoadOlder} />)
           : <p className="px-3 py-8 text-center text-[12px] text-muted-foreground">{error ?? `No ${filter === 'all' ? '' : `${filter} `}posts yet. Name a topic and say what you found.`}</p>}
@@ -133,11 +206,12 @@ export function ChatterPane({ projectName, workspaceCount, state, active, error,
     </div>
     {error && groups.length ? <p role="alert" className="shrink-0 border-t border-border px-3 py-1 text-[11px] text-destructive">{error}</p> : null}
     <Composer projectName={projectName} active={active} known={state.topics} reply={reply} onPost={onPost} onAct={onAct} />
-  </section>;
+  </section>, document.body) : null}
+  </>;
 }
 
 function HeaderButton({ label, pressed, onClick, children }: { label: string; pressed?: boolean; onClick(): void; children: ReactNode }) {
-  return <Tooltip content={label} side="top">
+  return <Tooltip content={label} side="bottom">
     <button type="button" aria-label={label} aria-pressed={pressed} onClick={onClick}
       className={`flex size-7 items-center justify-center rounded-lg ${pressed ? 'bg-active text-foreground' : 'text-muted-foreground hover:bg-hover hover:text-foreground'}`}>{children}</button>
   </Tooltip>;
@@ -243,6 +317,17 @@ function TopicLine({ line }: { line: ChatterTopicLine }) {
   </div>;
 }
 
+/** An agent's post the hand-off check returned; it belongs to no topic. */
+function ReturnedLine({ line }: { line: ChatterReturnedLine }) {
+  return <div data-returned={line.id} className="mt-1.5 px-1.5 py-0.5 text-[11px] text-muted-foreground">
+    <div className="flex items-center gap-1.5">
+      <span className="min-w-0 flex-1">Returned to <span className="font-medium text-foreground">{line.author.name}</span>: it asked {line.to} to do work. Chatter is ambient and can’t assign work.</span>
+      <time className="shrink-0 tabular-nums">{line.at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>
+    </div>
+    <p className="line-clamp-2 [overflow-wrap:anywhere]" title={line.text}>{line.topic}: {line.text.replaceAll('`', '')}</p>
+  </div>;
+}
+
 function Composer({ projectName, active, known, reply, onPost, onAct }: {
   projectName: string; active: readonly ChatterTopic[]; known: ReadonlyMap<string, ChatterTopic>; reply: { topic: string; serial: number } | null;
   onPost(input: { topic: string; kind: ChatterKind; text: string }): Promise<ChatterPostOutcome>; onAct(key: string, action: ChatterTopicAction): Promise<string | null>;
@@ -304,7 +389,7 @@ function Composer({ projectName, active, known, reply, onPost, onAct }: {
           if (event.key === 'ArrowDown') { event.preventDefault(); setHighlight((highlight + 1) % suggestions.length); }
           else if (event.key === 'ArrowUp') { event.preventDefault(); setHighlight((highlight - 1 + suggestions.length) % suggestions.length); }
           else if (event.key === 'Enter' || event.key === 'Tab') { const entry = suggestions[highlight]; if (entry) { event.preventDefault(); pick(entry); } }
-          else if (event.key === 'Escape') setFocused(false);
+          else if (event.key === 'Escape') { event.preventDefault(); setFocused(false); }
         }}
         className={`h-7 min-w-0 flex-1 rounded-md bg-transparent px-1 text-[12px] font-medium outline-none placeholder:font-normal placeholder:text-muted-foreground ${written === null ? 'text-muted-foreground' : 'text-foreground'}`} />
       {written === null && topic ? <span className="shrink-0 pr-1 text-[10px] text-muted-foreground">suggested</span> : null}

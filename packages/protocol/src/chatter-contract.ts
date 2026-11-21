@@ -1,11 +1,13 @@
 import { defineErrors, type InputOf } from 'result-rpc';
 import { z } from 'zod';
+import { CHATTER_KINDS } from '@gitspace/protocol-runtime/tool-arguments';
+import { FILED_ISSUE_EXCERPT_MAX } from '@gitspace/protocol-runtime/workspace-controls';
 import { wire } from './json-wire.js';
 
 // Chatter: a project's ambient chat (docs/CHATTER-DESIGN.md). Every post has a topic; posts whose topics normalize the
 // same are one thread, and an issue is a topic with a state.
 
-export const CHATTER_KINDS = ['status', 'discovery', 'tooling', 'workaround', 'resource', 'coordination'] as const;
+export { CHATTER_KINDS };
 export type ChatterKind = typeof CHATTER_KINDS[number];
 export const CHATTER_ISSUE_STATES = ['open', 'resolved', 'dismissed'] as const;
 export type ChatterIssueState = typeof CHATTER_ISSUE_STATES[number];
@@ -42,6 +44,35 @@ export function displayChatterTopic(topic: string): string {
 export function suggestChatterTopic(text: string): string {
   const sentence = text.replaceAll('`', '').split(/[.!?\n](?:\s|$)|\n/u)[0] ?? '';
   return displayChatterTopic(sentence.split(/\s+/u).filter(Boolean).slice(0, SUGGESTED_TOPIC_WORDS).join(' ').replace(/[\p{P}]+$/u, ''));
+}
+
+/** Tool names written another way that mean the same tool. */
+const TOOL_ALIASES: Readonly<Record<string, string>> = { shell: 'bash', sh: 'bash', terminal: 'bash' };
+
+/** A tool name as a tooling post's topic carries it: normalized like a topic, without an MCP prefix (`mcp__server__`)
+ * or a trailing `tool`, known aliases folded (`Bash`, `bash tool`, `shell` → `bash`). */
+export function normalizeChatterTool(tool: string): string {
+  const name = normalizeChatterTopic(tool.replace(/^mcp__.*?__/u, '')).replace(/ tool$/u, '');
+  return TOOL_ALIASES[name] ?? name;
+}
+
+/** A tooling post's default topic: its normalized title, then its normalized tool (`bun test hangs · bash`), the title
+ * cut so the tool fits; without a tool, the title alone. */
+export function toolingChatterTopic(title: string, tool: string | null): string {
+  const named = tool === null ? '' : normalizeChatterTool(tool);
+  if (named === '') return displayChatterTopic(normalizeChatterTopic(title));
+  const room = Math.max(CHATTER_TOPIC_CHARACTERS - named.length - 3, 0);
+  return displayChatterTopic(`${normalizeChatterTopic(title).slice(0, room).trim()} · ${named}`);
+}
+
+/** The fixed topic of a failure GitSpace's runtime records: its source, then the error's first line with ids and
+ * numbers left out (`model request: Network connection lost.`), so every occurrence of one failure is one topic. */
+export function runtimeFailureChatterTopic(source: string, message: string): string {
+  const error = (message.split('\n')[0] ?? '')
+    .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/giu, '…')
+    .replace(/\b(?=[0-9a-f]*\d)[0-9a-f]{7,}\b/giu, '…')
+    .replace(/\d+/gu, '…');
+  return displayChatterTopic(`${source}: ${error}`);
 }
 
 const STOP_WORDS: Readonly<Record<string, true>> = {
@@ -121,6 +152,12 @@ export const ChatterChangeSchema = z.discriminatedUnion('kind', [
 export type ChatterChange = z.infer<typeof ChatterChangeSchema>;
 export const ChatterChangeCodec = wire.serializable((value): value is ChatterChange => ChatterChangeSchema.safeParse(value).success, { id: 'gitspace/chatter-change/v1', jsonSchema: ChatterChangeSchema });
 
+/** Where a tooling post's failure happened: the tool, a history:// or result:// reference, and the machine (null when
+ * none). */
+export const ChatterSpotSchema = z.object({ tool: z.string().min(1), reference: z.string().min(1), machine: z.string().nullable() }).strict();
+export type ChatterSpot = z.infer<typeof ChatterSpotSchema>;
+export const ChatterSpotCodec = wire.serializable((value): value is ChatterSpot => ChatterSpotSchema.safeParse(value).success, { id: 'gitspace/chatter-spot/v1', jsonSchema: ChatterSpotSchema });
+
 export const ChatterPostCodec = wire.object({
   type: wire.literal('post'),
   offset: wire.integer({ min: 1 }),
@@ -131,8 +168,12 @@ export const ChatterPostCodec = wire.object({
   /** The topic as this post's author wrote it. */
   topic: wire.string,
   author: ChatterAuthorCodec,
+  /** A workspace author's phase when it posted; null for anyone else. */
+  phase: wire.nullable(wire.string),
   kind: wire.enum(CHATTER_KINDS),
   text: wire.string,
+  /** A tooling post's tool, reference and machine; null for other posts and for a person's. */
+  spot: wire.nullable(ChatterSpotCodec),
 });
 export type ChatterPost = InputOf<typeof ChatterPostCodec>;
 
@@ -147,8 +188,29 @@ export const ChatterTopicLineCodec = wire.object({
 });
 export type ChatterTopicLine = InputOf<typeof ChatterTopicLineCodec>;
 
-export const ChatterEventCodec = wire.union([ChatterPostCodec, ChatterTopicLineCodec]);
+/** An agent's post the hand-off check returned: it asked `to` (a workspace's name, or "another workspace") to do work,
+ * so it was not posted. It belongs to no topic (`topicKey` is empty); `topic` is the one the agent gave. */
+export const ChatterReturnedLineCodec = wire.object({
+  type: wire.literal('returned'),
+  offset: wire.integer({ min: 1 }),
+  id: wire.string,
+  at: wire.date,
+  topicKey: wire.literal(''),
+  topic: wire.string,
+  author: ChatterAuthorCodec,
+  kind: wire.enum(CHATTER_KINDS),
+  text: wire.string,
+  to: wire.string,
+});
+export type ChatterReturnedLine = InputOf<typeof ChatterReturnedLineCodec>;
+
+export const ChatterEventCodec = wire.union([ChatterPostCodec, ChatterTopicLineCodec, ChatterReturnedLineCodec]);
 export type ChatterEvent = InputOf<typeof ChatterEventCodec>;
+
+/** A topic filed with GitSpace or shared as a GitHub issue draft: when, by whom, and where to. */
+export const ChatterFiledSchema = z.object({ at: z.iso.datetime(), by: z.string(), target: z.enum(['gitspace', 'repository']) }).strict();
+export type ChatterFiled = z.infer<typeof ChatterFiledSchema>;
+export const ChatterFiledCodec = wire.serializable((value): value is ChatterFiled => ChatterFiledSchema.safeParse(value).success, { id: 'gitspace/chatter-filed/v1', jsonSchema: ChatterFiledSchema });
 
 export const ChatterTopicCodec = wire.object({
   key: wire.string,
@@ -164,6 +226,11 @@ export const ChatterTopicCodec = wire.object({
   stateBy: wire.nullable(wire.string),
   stateAt: wire.nullable(wire.date),
   fixedIn: wire.nullable(wire.string),
+  /** Runtime failures that recurred from a workspace already posted under it with the same reference: counted, not
+   * posted. */
+  repeats: wire.integer({ min: 0 }),
+  /** The last filing with GitSpace or GitHub draft shared; null when never. */
+  filed: wire.nullable(ChatterFiledCodec),
 });
 export type ChatterTopic = InputOf<typeof ChatterTopicCodec>;
 
@@ -186,6 +253,15 @@ export const ChatterTopicActionSchema = z.discriminatedUnion('kind', [
 ]);
 export type ChatterTopicAction = z.input<typeof ChatterTopicActionSchema>;
 export const ChatterTopicActionCodec = wire.serializable((value): value is ChatterTopicAction => ChatterTopicActionSchema.safeParse(value).success, { id: 'gitspace/chatter-topic-action/v1', jsonSchema: ChatterTopicActionSchema });
+
+/** A person's decision to send an issue topic out: file it with GitSpace (the reviewed excerpt goes to GitSpace's
+ * issue list), or open a GitHub issue draft at GitSpace's or the project's repository with the redacted excerpt. */
+export const ChatterFileActionSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('file'), excerpt: z.string().trim().min(1).max(FILED_ISSUE_EXCERPT_MAX) }).strict(),
+  z.object({ kind: z.literal('share'), target: z.enum(['gitspace', 'repository']), redactedExcerpt: z.string().trim().min(1).max(FILED_ISSUE_EXCERPT_MAX), confirmed: z.literal(true) }).strict(),
+]);
+export type ChatterFileAction = z.input<typeof ChatterFileActionSchema>;
+export const ChatterFileActionCodec = wire.serializable((value): value is ChatterFileAction => ChatterFileActionSchema.safeParse(value).success, { id: 'gitspace/chatter-file-action/v1', jsonSchema: ChatterFileActionSchema });
 
 export const chatterErrors = defineErrors('gitspace-chatter', {
   chatterInvalid: { data: wire.object({ field: wire.string, message: wire.string }), httpStatus: 400 },

@@ -37,7 +37,7 @@ async function decisionsFixture(ctx: DurableObjectState, failFirst = false) {
     lfs: { has: unsupported, get: unsupported, put: unsupported }, retainLfs: async () => {},
     retainedRules: { loadRules: async () => [] }, editTool: () => 'edit',
     admitInference: async () => ({ provider: 'fixture', modelId: 'fixture', thinking: 'high' }), bindInferenceConversation: async () => undefined, refuseRequest: () => {},
-    session: { catalog: async () => ({ models: [], roles: [] }), reload: async () => {} }, qa: { list: async () => [], act: unsupported },
+    session: { catalog: async () => ({ models: [], roles: [] }), reload: async () => {} },
     attachments: { seal: async value => value, open: async value => value, dispatch: unsupported },
     onReport: error => { failures.push(error); }, waitUntil: promise => { waits.push(promise); }, schedule: async () => {},
     recordMessageDecisions: async message => {

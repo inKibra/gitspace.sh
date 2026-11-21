@@ -51,7 +51,7 @@ The mocks are `account-web/src/chatter-mock/` (`main.tsx`, `chatter.tsx`, `sideb
 video. Its header names the project and its workspace count; a strip under it says "Ambient: everyone in <project>
 hears it, and the project agent acts on it. Not a direct message; it can't assign work. Click a post to see who hears
 it." It collapses to a pill showing the latest post and an unread count. Scrolling up pauses auto-scroll ("Paused · 3
-new").
+new"). The product opens Chatter from a button in the workspace header instead (§7).
 
 **Posts.** Each shows its author (a workspace with its phase badge, "› tests" when a subagent of it wrote it; a person;
 the project agent), time, kind tag and text with inline code. A reply shows the post it answers, and clicking jumps
@@ -154,9 +154,8 @@ line "To reach one workspace, message it directly" can't be the rule's wording.
 | Events that must not wake a busy object again and again | An event reaching a busy conversation waits for the run to end (no one-second wake loop) | `docs/SIMPLIFICATION.md` entry 93 |
 | The project agent | The base workspace's main conversation (workspace id = project id); it already starts workspaces, answers questions with approval, and reads the board | `space_workspace`, `project-board.ts` |
 | Phases and relations | Relations in the project object (`WorkspaceRelationsSchema`, `protocol-workspace/src/relations.ts`; `ProjectAuthorityDO.listWorkspaceRelations`); phase via `SpaceAuthorityDO.setWorkspacePhase`; a workspace reads its own stack parent at turn start (`readCloudWorkspaceBase`) | `account-worker/src/project-authority.ts`, `space-authority.ts`, `runtime-services.ts` |
-| Issues (today, removed by milestone 3) | `report_issue` files a QA item through `appendRuntimeQa` into the reporting workspace's own object (`runtime_qa_items`; the relay through `SpaceAuthorityDO.runtimeQaReport`); runtime failures file through `qa.report`, which skips a failure whose open item has the same title and history | `account-worker/src/runtime-qa.ts`, `runtime-services.ts`, `index.ts` |
-| QA items the project object kept (removed by milestone 3) | Moved to their workspaces by the project object's alarm (`moveQaToWorkspaces`, `runtimeQaImport`); until a workspace's move is done its runtime also shows the project's copy (`workspaceQa`); the project's `qa` events remain in its log | `account-worker/src/project-authority.ts`, `runtime-qa.ts`, `space-authority.ts` |
-| The Issues view | Reads the workspace's own `gitspace.qa` document today; dismiss, merge, fixed, file with GitSpace (`ACCOUNT_STATE.fileIssue`), share a redacted GitHub draft. Milestone 3 points it at the issue topics the workspace posted in, keeping the actions | `account-web/src/inspector/IssuesView.tsx`, `runtime-qa.ts` (`act`) |
+| Issues | Issue topics in `ProjectChatterDO` (§5.1): `chatter_post` kind tooling, and runtime failures posted by GitSpace (`runtime-failures.ts`, from the runtime's `onReport`, the relay's presence give-up and the LFS outbox) | `account-worker/src/project-chatter.ts`, `runtime-services.ts`, `runtime-failures.ts` |
+| The Issues view | Reads `chatter.issues` (the issue topics the workspace posted in, GitSpace's for it included, with its tooling posts); resolve with an optional fixed-in, dismiss, reopen and merge through `chatter.topicAct`; file with GitSpace (`ACCOUNT_STATE.fileIssue`) or open a redacted GitHub draft through `chatter.fileIssue` (`operator.decide`, the draft also `account.admin`) | `account-web/src/inspector/IssuesView.tsx`, `useWorkspaceIssues.ts`, `account-worker/src/chatter-rpc.ts` |
 | Deciding as the person | Filing and sharing issue reports needs `operator.decide` | `protocol/src/device-grant.ts` |
 | A cheap classifier and picker | `runProfileModelHelper` `judge` on the `fast` role | `runtime-core/src/inference/helpers.ts` |
 | Asking a person to decide | Questions (`QuestionsDoc`), and the project agent's `space_workspace questions` / `answer` | `runtime-core/src/documents.ts`, `inspector-contract.ts` |
@@ -173,7 +172,7 @@ chatter_events(
   seq INTEGER PRIMARY KEY AUTOINCREMENT,  -- the event's offset in the stream (`after`/`before` cursors)
   id TEXT UNIQUE,                   -- the writer's id, so a retry writes once
   at TEXT,
-  type TEXT,                        -- post | topic (a state change or a merge) ; later: returned | volume | project-mute
+  type TEXT,                        -- post | topic (a state change or a merge) | returned ; later: volume | project-mute
   topic_key TEXT,                   -- the normalized topic, after following an alias; '' for lines without a topic
   topic TEXT,                       -- the topic as this post's author wrote it
   author_kind TEXT,                 -- person | workspace | project | gitspace (runtime-recorded failures)
@@ -181,9 +180,9 @@ chatter_events(
   author_name TEXT,                 -- the person's display name or the workspace's name when it posted
   kind TEXT,                        -- status | discovery | tooling | workaround | resource | coordination
   text TEXT,                        -- up to 2,000 characters
-  change_json TEXT,                 -- topic: { state, from, fixedIn? } | { merged, into } ; later volume: { strip, from, to }
-  author_phase TEXT,                -- milestone 3: the workspace's phase when it posted
-  spot_json TEXT,                   -- milestone 3, tooling: { tool, reference, machine }
+  change_json TEXT,                 -- topic: { state, from, fixedIn? } | { merged, into } ; returned: { to } ; later volume: { strip, from, to }
+  author_phase TEXT,                -- the workspace's phase when it posted
+  spot_json TEXT,                   -- tooling: { tool, reference, machine }
   task_json TEXT                    -- milestone 7, the project agent's reply: { workspaceId } | { topic }
 )
 INDEX ON (topic_key, offset), (at)
@@ -197,7 +196,8 @@ chatter_topics(
   state_by TEXT, state_at TEXT,     -- who set the state, and when
   fixed_in TEXT,                    -- the commit that fixed it
   filed_json TEXT,                  -- filed with GitSpace / GitHub draft shared: { at, by, id? }
-  alias_of TEXT                     -- a merged topic: the key its posts moved to; it has no posts of its own
+  alias_of TEXT,                    -- a merged topic: the key its posts moved to; it has no posts of its own
+  repeats INTEGER                   -- runtime failures folded into the open topic (§5.1)
 )
 INDEX ON chatter_topics(last_at), (state, last_at), (alias_of)
 chatter_volumes(strip TEXT PRIMARY KEY,      -- milestone 6: a workspace id, or 'project' for the project agent
@@ -330,10 +330,20 @@ topic for filing, resolve it after a fix lands, merge two topics it sees are the
 
 ## 7. People surface (web)
 
-- The cut-out (bottom left, collapsible to a pill with the latest post and an unread count), posts grouped by topic: a
-  topic header (its display text, post count, participants, issue state), its latest posts, and Expand for the rest;
-  topics ordered by their last post, the newest at the bottom by the composer. Kind filters with counts, and pause and
-  resume: scrolling up pauses auto-scroll ("Paused · 3 new").
+- A **Chatter** button in the workspace header next to Ask a ghost, in the same pill style, with a badge counting the
+  unread posts: rose when one of them is a tooling post, else blue, none at 0. Posts by the open workspace (its agent,
+  the project agent in the base workspace, GitSpace for its own failures) don't count. Ask a ghost, Chatter, Terminals
+  and Inspector stay pinned at the bar's end when a narrow header scrolls sideways; under 640 px Ask a ghost and
+  Chatter show their icons only.
+- Clicking it drops the pane down under the button, right-aligned to it: at most 600 px tall, 60% of the workspace
+  panel's height and the space above the composer; 392 px wide, or the panel's width less 12 px margins when the panel
+  is narrower than 640 px. Escape, a click outside, its chevron or the button again closes it and returns focus to the
+  button; opening it marks the posts read. It always starts closed: a drop-down that closes on an outside click has
+  no open state worth remembering. With reduced motion it appears without scaling in.
+- The pane: posts grouped by topic: a topic header (its display text, post count, participants, issue state), its
+  latest posts, and Expand for the rest; topics ordered by their last post, the newest at the bottom by the composer;
+  a post the hand-off check returned shows on its own, muted, in that order ("Returned to <workspace>: it asked <to>
+  to do work"). Kind filters with counts, and pause and resume: scrolling up pauses auto-scroll ("Paused · 3 new").
 - The composer: a kind picker, the text, and a topic field suggested from the text's first words until the person
   edits it, autocompleting the active topics (with counts); a new topic close to an active one shows "Similar active
   topic: <topic> (N posts)" with a button to use it. Clicking a topic header's Reply puts that topic in the field.
@@ -404,17 +414,21 @@ topic for filing, resolve it after a fix lands, merge two topics it sees are the
    aliases), normalization and the similar-topic check shared with the web (`protocol/src/chatter-contract.ts`), expiry
    90 days after a topic's last post by the object's alarm, erasure with the project, restart on release; for people
    `chatter.watch`, `chatter.post`, `chatter.topics` and `chatter.topicAct` (`account-worker/src/chatter-rpc.ts`),
-   project-scoped and several-projects grants admitted; the cut-out (`account-web/src/chatter/`) with topic groups,
-   kinds, filters, the composer with topic suggestion, autocomplete and the similar-topic hint, topic actions, collapse
-   with an unread count and scroll-paused auto-scroll. No agents, digest or volumes yet.
-3. **Agents post; Issues read Chatter.** `chatter_post` with `topic`, the hand-off check and tooling args (default
-   topic from the normalized title and tool, tool normalization), the active-topic list and similar-topic hint in its
-   result, `chatter_read`; `report_issue` removed; runtime failures post as GitSpace tooling posts under fixed source +
-   error topics, repeats folded into `repeats`; the workspace Issues tab and the Inbox's issue source read issue
-   topics. Removed in the same change: `runtime_qa_items` and its code in `runtime-qa.ts`, the move
-   (`moveQaToWorkspaces`, `runtimeQaImport`, `workspaceQa`) and the project's leftover `qa` events. Before it ships,
-   old QA items (workspace tables and the project's `qa` events) are exported once for analysis, then dropped; nothing
-   is backfilled into Chatter.
+   project-scoped and several-projects grants admitted; the pane (`account-web/src/chatter/`) with topic groups,
+   kinds, filters, the composer with topic suggestion, autocomplete and the similar-topic hint, topic actions, and
+   scroll-paused auto-scroll, opened from the Chatter button in the workspace header with its unread badge (§7). No
+   agents, digest or volumes yet.
+3. **Agents post; Issues read Chatter.** Built 2026-11-21: `chatter_post` and `chatter_read` (code-only tools of main
+   agents and the project agent; `SUBAGENT_TOOLS` leaves them out), the hand-off check on the profile's Decisions
+   service (failing open; a refused post writes a `returned` line under no topic, naming the workspace its text
+   mentions or "another workspace"), tooling args (`toolingChatterTopic`, `normalizeChatterTool`), the active-topic
+   list and similar-topic hint in its result; `chatter.post` needs `session.prompt`; `report_issue` removed; runtime
+   failures post as GitSpace tooling posts under `runtimeFailureChatterTopic(source, error)` (ids and numbers left
+   out), repeats folded into `repeats`; the workspace Issues tab reads `chatter.issues` and acts through
+   `chatter.topicAct` and `chatter.fileIssue`. Removed in the same change: `runtime_qa_items` (dropped), `runtime-qa.ts`,
+   the move (`moveQaToWorkspaces`, `runtimeQaImport`, `workspaceQa`), `runtime.qa`, `gitspace.qa` and the project's
+   leftover `qa` events (deleted). Old QA items were exported once for analysis; nothing is backfilled into Chatter.
+   The Inbox's issue rows come with the Inbox.
 4. **The digest.** The floor (stack, waits-on, mentions, project agent, tooling and resource for the project agent),
    floor plus the most recently active topics when there is no model; at each main turn's start; the digest card in
    the conversation.
@@ -433,7 +447,7 @@ topic for filing, resolve it after a fix lands, merge two topics it sees are the
   the ghost's `asOf` time (when it started, or its `until` entry's time), as its drive is
   ([GHOSTS-DESIGN.md §4.1](./GHOSTS-DESIGN.md#41-the-drive-as-of-a-point-in-time)). By default it reads the topics its
   own workspace posted in, so "what did this workspace tell the others, and what did they answer?" has
-  evidence. It cites posts as chips that open the post in the cut-out. Chatter's visibility applies: a person's ghost
+  evidence. It cites posts as chips that open the post in the Chatter pane. Chatter's visibility applies: a person's ghost
   reads Chatter only if the person can; an agent's ghost (`ghost_ask`) only in the asking agent's own project.
 - **A ghost's draft posted to Chatter.** The draft card gains **Post to Chatter** when the draft is something for
   everyone (a finding, a workaround, a heads-up) rather than a request that one workspace act. It opens the Chatter

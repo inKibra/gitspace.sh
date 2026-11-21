@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest';
-import { RuntimeAgentsArgumentsSchema, SUBAGENT_READONLY_TOOLS, isSubagentToolCallAllowed } from '@gitspace/protocol-runtime';
+import { RuntimeAgentsArgumentsSchema, SUBAGENT_READONLY_TOOLS, SUBAGENT_TOOLS, isSubagentToolCallAllowed } from '@gitspace/protocol-runtime';
 import { parseCloudAgentDefinition } from './session-controls.js';
 
 test('agent files reject tools no subagent may use visibly when loaded', () => {
@@ -30,4 +30,8 @@ test('a child reads captures and replays one on the headless browser, but never 
   expect(isSubagentToolCallAllowed('browser', { action: 'replay', capture }, readOnly)).toBe(true);
   expect(isSubagentToolCallAllowed('browser', { action: 'replay', capture, source: 'relay' }, readOnly)).toBe(false);
   expect(isSubagentToolCallAllowed('browser', { action: 'captureSaved', capture, path: '.gitspace/skills/sign-in' }, readOnly)).toBe(false);
+});
+test('a subagent neither posts to nor reads Chatter, whatever its definition lists', () => {
+  for (const tool of ['chatter_post', 'chatter_read']) expect(isSubagentToolCallAllowed(tool, { topic: 'bun test hang', kind: 'status', text: 'Found it.' }, [...SUBAGENT_TOOLS, tool])).toBe(false);
+  expect(() => parseCloudAgentDefinition('.agents/agents/poster.md', '---\ntools: read, chatter_post\n---\nPost findings.')).toThrow(/cannot use: chatter_post/);
 });

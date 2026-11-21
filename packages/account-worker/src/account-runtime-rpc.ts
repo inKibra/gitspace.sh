@@ -2,7 +2,7 @@ import { deviceCanAdminister, deviceHasCapability, scopeAllowsWorkspace, type De
 import {
   runtimeSnapshotContract, runtimeSubmitContract, runtimeCancelContract,
   runtimeAnswerContract, runtimeWatchContract, runtimeSessionContract,
-  runtimeQaContract, runtimeCacheAttachmentRequestContract, runtimeAttachmentDetachRequestContract,
+  runtimeCacheAttachmentRequestContract, runtimeAttachmentDetachRequestContract,
   runtimeBrowserTrustContract, runtimeDraftContract,
   runtimeServicesContract, runtimeSyncContract,
 } from '@gitspace/protocol/rpc-contract';
@@ -100,13 +100,6 @@ export function runtimeCloudProcedures(env: Env, userId: string, deviceId: strin
       return ok(await authority.runtimeSync(input));
     } catch (error) { return err(errors.OperationFailed({ operation: `sync ${input.args.method}`, message: message(error) })); }
   }));
-  const qa = server.implement(runtimeQaContract).handler(observed('runtime.qa', async ({ input, errors }) => {
-    try {
-      const { authority, device } = await requireRuntimeAccess(env, userId, deviceId, input, 'rpc.write');
-      if (input.action.kind === 'share' && !deviceCanAdminister(device, 'account.admin')) throw new Error('Sharing a QA report requires account administration');
-      return ok(await authority.runtimeQa(input, { deviceId, canApprove: input.action.kind !== 'share' || (deviceHasCapability(device, 'operator.decide') && deviceCanAdminister(device, 'account.admin')) }));
-    } catch (error) { return err(errors.OperationFailed({ operation: 'review runtime QA report', message: message(error) })); }
-  }));
   const requestCacheAttachment = server.implement(runtimeCacheAttachmentRequestContract).handler(observed('runtime.attachment.cache.request', async ({ input, errors }) => {
     try {
       const { authority } = await requireRuntimeAccess(env, userId, deviceId, input, 'rpc.write');
@@ -125,5 +118,5 @@ export function runtimeCloudProcedures(env: Env, userId: string, deviceId: strin
       return ok(RuntimeWatchEventsSchema.parse(await (await authority.runtimeEvents(input)).json()));
     } catch (error) { return err(errors.OperationFailed({ operation: 'read cloud runtime events', message: message(error) })); }
   }));
-  return { snapshot, draft, submit, cancel, answer, browserTrust, session, services, sync, qa, attachment: { cache: { request: requestCacheAttachment }, detach: detachAttachment }, watch };
+  return { snapshot, draft, submit, cancel, answer, browserTrust, session, services, sync, attachment: { cache: { request: requestCacheAttachment }, detach: detachAttachment }, watch };
 }

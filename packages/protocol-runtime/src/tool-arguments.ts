@@ -105,7 +105,7 @@ export const RuntimeAgentsArgumentsSchema = z.union([
   RuntimeChildAgentsArgumentsSchema,
 ]);
 export function runtimeOperationIsReadOnly(name: string, args: z.infer<typeof RuntimeJsonSchema>): boolean {
-  if (['read', 'grep', 'code_search', 'find', 'web_search', 'web_fetch', 'history_search', 'history_read', 'ast_grep', 'mcp_discover', 'workspace_status', 'wait', 'blocks', 'decide'].includes(name)) return true;
+  if (['read', 'grep', 'code_search', 'find', 'web_search', 'web_fetch', 'history_search', 'history_read', 'chatter_read', 'ast_grep', 'mcp_discover', 'workspace_status', 'wait', 'blocks', 'decide'].includes(name)) return true;
   if (!args || typeof args !== 'object' || Array.isArray(args)) return false;
   if (['machines', 'agents', 'bash', 'proc', 'sync_machine'].includes(name)) return ['list', 'status', 'describe', 'logs', 'wait', 'diff'].includes(String(args.op));
   if (name === 'sync') return ['status', 'diff', 'backups'].includes(String(args.method));
@@ -193,7 +193,38 @@ export const RuntimeWebFetchArgumentsSchema = z.object({
   offset: z.number().int().nonnegative().optional().describe('Character offset to continue a long page from, as the previous result\'s header gives it.'),
   format: z.enum(['auto', 'raw']).optional().describe('auto (default) converts HTML, PDF and Office documents to Markdown and pretty-prints JSON; raw returns a text body as served.'),
 });
-export const RuntimeReportIssueArgumentsSchema = z.object({ message: z.string().min(1).max(16384).describe('What failed: the call, what happened and what was expected.'), tool: z.string().max(160).optional().describe('The tool that failed.'), model: z.string().max(256).optional().describe('The model in use when it failed.'), reference: z.string().max(2048).optional().describe('Where to look: a result:// reference, URL or file path.') });
+/** What a Chatter post is (docs/CHATTER-DESIGN.md §1). */
+export const CHATTER_KINDS = ['status', 'discovery', 'tooling', 'workaround', 'resource', 'coordination'] as const;
+/** Where a tooling post's failure is: a history:// reference or a result:// path. */
+const CHATTER_REFERENCE = /^(?:history|result):\/\/\S+$/u;
+/** `chatter_post`: a post to the project's Chatter under the workspace's name and phase. A tooling post needs `tool` and
+ * `reference`; its topic defaults to its title plus its tool. */
+export const RuntimeChatterPostArgumentsSchema = z.object({
+  topic: z.string().max(80).optional().describe('The one specific thing the post is about, in a few words (`bun test hang`, `SQLite 2 MB cap`); reuse an active topic to join its thread. Required except for tooling posts.'),
+  kind: z.enum(CHATTER_KINDS).describe('status, discovery, tooling (a tool or GitSpace failed: opens or joins the issue on its topic), workaround, resource (a machine or capacity you need) or coordination.'),
+  text: z.string().min(1).max(2_000).describe('What you found, did or need, for every agent and person in the project. Not a request to another workspace: Chatter can\'t assign work.'),
+  tool: z.string().min(1).max(160).optional().describe('Tooling: the tool that failed.'),
+  reference: z.string().max(2_048).regex(CHATTER_REFERENCE, 'A history:// reference or a result:// path').optional().describe('Tooling: where it failed, a history:// reference or a result:// path.'),
+  machine: z.string().max(160).optional().describe('Tooling: the machine it failed on; this workspace\'s default machine when omitted.'),
+  title: z.string().max(160).optional().describe('Tooling: a short title; the text\'s first line when omitted.'),
+}).strict().superRefine((value, context) => {
+  if (value.kind === 'tooling') {
+    if (value.tool === undefined) context.addIssue({ code: 'custom', path: ['tool'], message: 'A tooling post names the tool that failed' });
+    if (value.reference === undefined) context.addIssue({ code: 'custom', path: ['reference'], message: 'A tooling post names where it failed: a history:// reference or a result:// path' });
+  } else if (value.topic === undefined || value.topic.trim() === '') context.addIssue({ code: 'custom', path: ['topic'], message: 'A post names its topic' });
+});
+export type RuntimeChatterPostArguments = z.infer<typeof RuntimeChatterPostArgumentsSchema>;
+/** `chatter_read`: one topic's posts, or the project's posts and its active topics (issue topics with `issue` or
+ * `state`). */
+export const RuntimeChatterReadArgumentsSchema = z.object({
+  topic: z.string().max(160).optional().describe('Read this topic\'s posts and its row.'),
+  kind: z.enum(CHATTER_KINDS).optional().describe('Only posts of this kind.'),
+  issue: z.boolean().optional().describe('List issue topics (any state) instead of the active topics.'),
+  state: z.enum(['open', 'resolved', 'dismissed']).optional().describe('List issue topics in this state.'),
+  after: z.number().int().nonnegative().optional().describe('Only posts after this offset (a previous read\'s cursor).'),
+  limit: z.number().int().min(1).max(100).optional().describe('Posts to return, newest first; 30 by default, at most 100.'),
+}).strict();
+export type RuntimeChatterReadArguments = z.infer<typeof RuntimeChatterReadArgumentsSchema>;
 export const RuntimeCheckpointArgumentsSchema = z.object({ goal: z.string().describe('What the exploration is for.') });
 export const RuntimeRewindArgumentsSchema = z.object({ checkpoint: z.string().describe('The checkpoint id checkpoint returned.'), report: z.string().describe('What the exploration found; it replaces the exploration in context.') });
 /** The longest a `wait` call holds the conversation. */

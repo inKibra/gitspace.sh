@@ -3,7 +3,7 @@ import { CfWorkerJsonSchemaValidator } from '@modelcontextprotocol/server/valida
 import { createGitSpaceClient, type GitSpaceClient } from '@gitspace/protocol/client';
 import { gitspaceContract } from '@gitspace/protocol/rpc-contract';
 import { accountRpcAuthority, rpcCallTarget } from '@gitspace/protocol/account-rpc';
-import { OPERATOR_QA_ACTIONS, OPERATOR_SESSION_COMMANDS, requiredCapability, requiredAdministrativeCapability, requiresImageSelectionControl, requiresOperatorDecision, type DeviceScope } from '@gitspace/protocol/device-grant';
+import { OPERATOR_SESSION_COMMANDS, requiredCapability, requiredAdministrativeCapability, requiresImageSelectionControl, requiresOperatorDecision, type DeviceScope } from '@gitspace/protocol/device-grant';
 import { procedureJsonRepresentation } from '@gitspace/protocol/json-representation';
 import { DEFAULT_SKILLS } from '@gitspace/protocol/default-skills';
 import { reviewedAnnotations } from './annotations.js';
@@ -40,15 +40,12 @@ const excluded = (path: string) => path.startsWith('providers.login.') || [
   'mcp.composio.authorize', 'mcp.composio.reconnect', 'mcp.connections.signIn', 'terminals.live', 'runtime.browserTrust',
   'github.app.start', 'github.app.rotateKey', 'github.install.start', 'github.request.record',
 ].includes(path);
-/** Without `operator.decide`, a session command or QA action that decides as the person is left out of the schema. */
+/** Without `operator.decide`, a session command that decides as the person is left out of the schema. */
 function agentInputSchema(path: string, schema: Record<string, unknown>, decides: boolean): Record<string, unknown> {
-  if (decides || (path !== 'runtime.session' && path !== 'runtime.qa')) return schema;
-  const field = path === 'runtime.session' ? 'command' : 'action';
-  const discriminator = path === 'runtime.session' ? 'type' : 'kind';
-  const values: readonly string[] = path === 'runtime.session' ? OPERATOR_SESSION_COMMANDS : OPERATOR_QA_ACTIONS;
+  if (decides || path !== 'runtime.session') return schema;
   return { ...schema, allOf: [...(Array.isArray(schema.allOf) ? schema.allOf : []), {
-    properties: { [field]: { properties: { [discriminator]: { not: { enum: values } } }, required: [discriminator] } },
-    required: [field],
+    properties: { command: { properties: { type: { not: { enum: OPERATOR_SESSION_COMMANDS } } }, required: ['type'] } },
+    required: ['command'],
   }] };
 }
 const toolName = (path: string) => `gitspace_${path.replace(/([a-z0-9])([A-Z])/g, '$1_$2').replaceAll('.', '_').toLowerCase()}`;

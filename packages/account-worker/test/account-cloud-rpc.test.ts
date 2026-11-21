@@ -349,15 +349,14 @@ describe('deciding as the person', () => {
       single('runtime.answer', { ...identity, questionId: 'question', answer: 'yes' }),
       single('runtime.session', { ...identity, command: { type: 'answerAsk', id: 'question', answers: [] } }),
       single('runtime.session', { ...identity, command: { type: 'browserEverything', pairingId: crypto.randomUUID(), on: true } }),
-      single('runtime.qa', { ...identity, itemId: 'item', action: { kind: 'file', excerpt: 'what failed' } }),
+      single('chatter.fileIssue', { projectId, workspaceId: spaceId, key: 'proc watch failed', action: { kind: 'file', excerpt: 'what failed' } }),
     ];
     for (const decision of decisions) {
       const refused = await SELF.fetch(administrator.request(decision));
       expect([decision.path, refused.status, await refused.text()]).toEqual([decision.path, 403, expect.stringContaining('operator.decide')]);
     }
-    // An ordinary command or action of the same procedures passes admission (the QA item does not exist, so its handler
-    // then fails on its own terms).
-    for (const ordinary of [single('runtime.session', { ...identity, command: { type: 'usage' } }), single('runtime.qa', { ...identity, itemId: 'item', action: { kind: 'dismiss' } })]) {
+    // An ordinary command of the same procedure, or an ordinary Chatter action, passes admission.
+    for (const ordinary of [single('runtime.session', { ...identity, command: { type: 'usage' } }), single('chatter.topicAct', { projectId, key: 'proc watch failed', action: { kind: 'state', state: 'open', fixedIn: null } })]) {
       expect((await SELF.fetch(administrator.request(ordinary))).status).not.toBe(403);
     }
     const decider = await account(['rpc.read', 'rpc.write', 'session.prompt', 'account.admin', 'operator.decide'], 'client');

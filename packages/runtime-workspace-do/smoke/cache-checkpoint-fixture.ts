@@ -54,7 +54,6 @@ export class CacheCheckpointProof extends SpaceAuthorityDO {
       retainedRules: { loadRules: async () => [] }, editTool: () => 'edit',
       onReport: error => { throw error; }, admitInference: unsupported, bindInferenceConversation: async () => undefined, refuseRequest: unsupported,
       session: { catalog: async () => ({ models: [], roles: [] }), reload: unsupported },
-      qa: { list: async () => [], act: unsupported },
       attachments: { seal: async secret => secret, open: async secret => secret, dispatch: unsupported },
       waitUntil: promise => this.ctx.waitUntil(promise), schedule: async () => {},
     });

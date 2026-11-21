@@ -19,10 +19,11 @@ import { UI_BLOCK_BRIEF, UI_SKILL_DESCRIPTION, uiBlockPrompt } from '@gitspace/p
 import { emptyWorkspaceStatus } from '@gitspace/protocol-workspace';
 import { ServiceTokenGrantSchema } from '@gitspace/protocol-environment';
 import { decodeJwt } from 'jose';
+import type { ProfileDecision } from '@gitspace/runtime-core/inference';
 
 const unsupported = async (): Promise<never> => { throw new Error('Unexpected external operation'); };
 
-async function ownerFixture(ctx: DurableObjectState, identity = RuntimeIdentitySchema.parse({ projectId: 'owner-project', workspaceId: 'owner-workspace' })) {
+async function ownerFixture(ctx: DurableObjectState, identity = RuntimeIdentitySchema.parse({ projectId: 'owner-project', workspaceId: 'owner-workspace' }), decide: (input: { args: JsonValue }) => Promise<ProfileDecision> = unsupported) {
     const files = new Map([['hello.txt', 'cloud original\n'], ['src/a.ts', 'one\n'], ['src/nested/b.md', 'two\n'], ['other/c.ts', 'three\n']]);
     const trees = new Map<string, ArtifactsTreeEntry[]>();
     const blobs = new Map<string, Blob>();
@@ -57,7 +58,7 @@ async function ownerFixture(ctx: DurableObjectState, identity = RuntimeIdentityS
     };
     let runtime: WorkspaceRuntime | undefined;
     const attachRequests: string[] = [];
-    const services = createRuntimeServices({ ctx, env, identity, images: { store: async image => image, load: async image => image }, runtime: () => { if (!runtime) throw new Error('Runtime not initialized'); return runtime; }, schedule: async () => {}, model: unsupported, generateImage: unsupported, webSearch: unsupported, decide: unsupported, judge: unsupported, instructionLoader: { read: unsupported, loadInstructions: async () => '' }, async requestAttachment(machineId) {
+    const services = createRuntimeServices({ ctx, env, identity, images: { store: async image => image, load: async image => image }, runtime: () => { if (!runtime) throw new Error('Runtime not initialized'); return runtime; }, schedule: async () => {}, model: unsupported, generateImage: unsupported, webSearch: unsupported, decide, judge: unsupported, instructionLoader: { read: unsupported, loadInstructions: async () => '' }, async requestAttachment(machineId) {
       if (!runtime) throw new Error('Runtime not initialized');
       attachRequests.push(machineId);
       return runtime.attachments.requestCache({ ...identity, machineId, checkout: { kind: 'shared', branch: 'main' }, capabilities: [...executorCapabilities] }, true);
@@ -76,7 +77,7 @@ async function ownerFixture(ctx: DurableObjectState, identity = RuntimeIdentityS
       return stream;
     };
     models.setProvider({ id: 'fixture', name: 'Fixture', auth: { apiKey: { name: 'Fixture', resolve: async () => ({ auth: { apiKey: 'fixture' } }) } }, getModels: () => [{ id: 'fixture', name: 'Fixture', provider: 'fixture', api: 'fixture', baseUrl: 'https://fixture.invalid', input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, reasoning: false, contextWindow: 200000, maxTokens: 1024 }], stream: streamFixture, streamSimple: streamFixture });
-    runtime = await createWorkspaceRuntime({ ...services, onReport: error => { reports.push(error); }, storage: ctx.storage, identity, code, initialCheckpoint: async () => checkpoint, models, model: { provider: 'fixture', modelId: 'fixture' }, lfs: { has: unsupported, get: unsupported, put: unsupported }, retainLfs: async () => {}, retainedRules: { loadRules: async () => [] }, editTool: () => 'edit', admitInference: unsupported, bindInferenceConversation: async () => undefined, session: { catalog: async () => ({ models: [], roles: [] }), reload: unsupported }, qa: { list: async () => [], act: unsupported }, attachments: { seal: async value => value, open: async value => value, dispatch: unsupported }, waitUntil: value => ctx.waitUntil(value), schedule: async () => {} });
+    runtime = await createWorkspaceRuntime({ ...services, onReport: error => { reports.push(error); }, storage: ctx.storage, identity, code, initialCheckpoint: async () => checkpoint, models, model: { provider: 'fixture', modelId: 'fixture' }, lfs: { has: unsupported, get: unsupported, put: unsupported }, retainLfs: async () => {}, retainedRules: { loadRules: async () => [] }, editTool: () => 'edit', admitInference: unsupported, bindInferenceConversation: async () => undefined, session: { catalog: async () => ({ models: [], roles: [] }), reload: unsupported }, attachments: { seal: async value => value, open: async value => value, dispatch: unsupported }, waitUntil: value => ctx.waitUntil(value), schedule: async () => {} });
     const root = await runtime.harness.root(BACKGROUND_CONTEXT);
     const invoke = (tool: string, args: Parameters<typeof services.tools.invoke>[0]['args']) => services.tools.invoke({ tool, args, conversationId: String(root.id), taskId: 'proof', requestId: crypto.randomUUID(), attemptId: crypto.randomUUID(), replay: 'unsafe', signal: AbortSignal.timeout(500) });
     const text = (result: RuntimeToolResult) => result.content.filter(item => item.type === 'text').map(item => item.text).join('\n');
@@ -859,4 +860,44 @@ test('an agent\'s drive write is read as of the time the write returned on the w
       } finally { await runtime.harness.close(BACKGROUND_CONTEXT); }
     });
   } finally { vi.useRealTimers(); ahead.mockRestore(); }
+});
+
+test('an agent\'s chatter_post lands under its workspace; a hand-off is returned with a returned line, and a failing check lets the post through', async () => {
+  const projectId = `chatter-${crypto.randomUUID()}`;
+  const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`);
+  await authority.bootstrap({ id: projectId, name: 'Chatter project', repositoryReference: null, baseBranch: 'main', createdBy: 'user' });
+  for (const [id, name] of [[`${projectId}-parser`, 'Parser'], [`${projectId}-billing`, 'Billing']]) {
+    await authority.putWorkspace({ id, projectId, kind: 'worktree', name, branch: id, phase: null, sourceKind: 'branch', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
+  }
+  const identity = RuntimeIdentitySchema.parse({ projectId, workspaceId: `${projectId}-parser` });
+  let answer: number | Error = 0.1;
+  const asked: JsonValue[] = [];
+  const decide = async (input: { args: JsonValue }): Promise<ProfileDecision> => {
+    asked.push(input.args);
+    if (answer instanceof Error) throw answer;
+    return { answers: { handoff: { bool: answer } }, model: 'fixture', usage: null, fallback: null };
+  };
+  await runInDurableObject(env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.workspaceId}`), async (_instance, ctx) => {
+    const { invoke, text } = await ownerFixture(ctx, identity, decide);
+    expect(text(await invoke('chatter_post', { topic: 'bun test hang', kind: 'workaround', text: 'A longer timeout gets past it.' }))).toContain('posted under bun test hang (1 post)');
+    expect(text(await invoke('chatter_post', { kind: 'tooling', tool: 'Bash tool', reference: `history://${identity.workspaceId}/main#3`, text: 'bun test hangs on the watcher' }))).toContain('opened issue bun test hangs on the watcher · bash');
+    expect(text(await invoke('chatter_post', { kind: 'tooling', tool: 'shell', reference: `history://${identity.workspaceId}/main#9`, text: 'bun test hangs on the watcher' }))).toContain('joined issue bun test hangs on the watcher · bash (2 posts, 1 workspace)');
+    answer = 0.9;
+    expect(text(await invoke('chatter_post', { topic: 'invoice column', kind: 'coordination', text: '@billing please add an invoice column for me, I will wait.' })))
+      .toBe('Not posted: this asks Billing to do work. Chatter is ambient and can\'t assign or hand off work. Post what you found or what you need; the project agent reads Chatter and decides what gets done.');
+    answer = new Error('Decisions model unavailable');
+    expect(text(await invoke('chatter_post', { topic: 'invoice column', kind: 'discovery', text: 'The schema has no invoice column yet.' }))).toContain('posted under invoice column (1 post)');
+    expect(asked).toHaveLength(5);
+    const { events } = await env.PROJECT_CHATTER.getByName(`${env.ACCOUNT_ID}:${projectId}`).watch({});
+    expect(events.flatMap(event => event.type === 'post' ? [[event.author.kind, event.author.name, event.topicKey, event.spot?.tool ?? null]] : [])).toEqual([
+      ['workspace', 'Parser', 'bun test hang', null],
+      ['workspace', 'Parser', 'bun test hangs on the watcher bash', 'Bash tool'],
+      ['workspace', 'Parser', 'bun test hangs on the watcher bash', 'shell'],
+      ['workspace', 'Parser', 'invoice column', null],
+    ]);
+    expect(events.filter(event => event.type === 'returned')).toMatchObject([{ author: { kind: 'workspace', id: identity.workspaceId }, to: 'Billing', topic: 'invoice column', text: '@billing please add an invoice column for me, I will wait.' }]);
+    const read = z.object({ topics: z.array(z.object({ topic: z.string(), posts: z.number(), state: z.string().nullable() })), posts: z.array(z.object({ author: z.string(), text: z.string() })) }).parse(JSON.parse(text(await invoke('chatter_read', { issue: true }))));
+    expect(read.topics).toEqual([{ topic: 'bun test hangs on the watcher · bash', posts: 2, state: 'open' }]);
+    expect(read.posts[0]).toEqual({ author: 'Parser', text: 'The schema has no invoice column yet.' });
+  });
 });

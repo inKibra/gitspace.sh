@@ -74,7 +74,7 @@ export interface InspectorProps {
   threads: readonly ReviewThreadView[];
   services: readonly ServiceView[];
   runtimeServices?: ReactNode;
-  /** The workspace's own issues (its `gitspace.qa` document) and the actions on them. */
+  /** The workspace's issue topics in Chatter and the actions on them. */
   issues?: IssuesViewProps;
   subagents: readonly (ExecutionBlock | RuntimeSideAgentBlock)[];
   onStopSubagent?(conversationId: string): Promise<void>;
@@ -335,7 +335,7 @@ export function Inspector(props: InspectorProps) {
     void loadArtifact(reference);
   }, [props.driveFocus?.serial, artifacts]);
   const chooseMode = (mode: RepositoryMode): void => { if (!activeDocument || activeDocument.kind !== 'file') return; setFileModes((current) => ({ ...current, [activeDocument.id]: mode })); if (mode === 'current') props.onRequestRepositoryFile(activeDocument.target, mode); else props.onRequestRepositoryDiff(activeDocument.target, mode); };
-  const counts: Partial<Record<InspectorPermanentView, number>> = { browser: props.browserCount || undefined, subagents: props.subagents.length, files: props.repositoryEntries.filter((entry) => entry.kind === 'file' && entry.status !== 'clean').length, artifacts: artifacts.length, services: props.runtimeServices === undefined ? props.services.length : undefined, issues: props.issues ? openIssueCount(props.issues.document) : undefined };
+  const counts: Partial<Record<InspectorPermanentView, number>> = { browser: props.browserCount || undefined, subagents: props.subagents.length, files: props.repositoryEntries.filter((entry) => entry.kind === 'file' && entry.status !== 'clean').length, artifacts: artifacts.length, services: props.runtimeServices === undefined ? props.services.length : undefined, issues: props.issues ? openIssueCount(props.issues.issues) : undefined };
   for (const tab of permanentTabs) if (props.sectionErrors?.[tab.id] && !props.sectionErrors[tab.id]!.retained) delete counts[tab.id];
   useToasts(props.loading || props.error ? [] : permanentTabs.map((tab): Toast | null => {
     const failure = props.sectionErrors?.[tab.id];

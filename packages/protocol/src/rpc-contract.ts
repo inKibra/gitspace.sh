@@ -5,7 +5,6 @@ import {
   RuntimeWatchEventsSchema, RuntimeActionResultSchema,
 } from '@gitspace/protocol-runtime';
 import { RuntimeSessionInputSchema, RuntimeSessionResultSchema, AgentDefinitionDiagnosticSchema } from '@gitspace/protocol-runtime/session-controls';
-import { RuntimeQaActionInputSchema, RuntimeQaActionResultSchema } from '@gitspace/protocol-runtime/workspace-controls';
 import { RuntimeAttachmentReadyResultSchema, RuntimeCacheAttachmentRequestInputSchema, RuntimeAttachmentDetachRequestInputSchema } from '@gitspace/protocol-runtime/attachment-controls';
 import { RuntimeDraftSaveInputSchema, WorkspaceDraftSaveResultSchema } from '@gitspace/protocol-runtime/draft';
 import { RuntimeServiceInputSchema, RuntimeServiceResultSchema } from '@gitspace/protocol-runtime/services';
@@ -40,7 +39,7 @@ import {
   AutomationViewCodec,
   automationErrors,
 } from './automations-contract.js';
-import { CHATTER_KINDS, ChatterPageCodec, ChatterPostCodec, ChatterTopicActionCodec, ChatterTopicCodec, ChatterTopicLineCodec, chatterErrors } from './chatter-contract.js';
+import { CHATTER_KINDS, ChatterFileActionCodec, ChatterPageCodec, ChatterPostCodec, ChatterTopicActionCodec, ChatterTopicCodec, ChatterTopicLineCodec, chatterErrors } from './chatter-contract.js';
 import {
   AppendJournalEntryInputCodec,
   AppendRubricJudgmentInputCodec,
@@ -616,10 +615,6 @@ export const runtimeServicesContract = gitspaceRpc.procedure()
 export const runtimeSyncContract = gitspaceRpc.procedure()
   .input(runtimeWire(RuntimeSyncRequestInputSchema, 'gitspace/runtime-sync-input/v1'))
   .output(runtimeWire(RuntimeSyncRequestResultSchema, 'gitspace/runtime-sync-result/v1'))
-  .errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
-export const runtimeQaContract = gitspaceRpc.procedure()
-  .input(runtimeWire(RuntimeQaActionInputSchema, 'gitspace/runtime-qa-input/v1'))
-  .output(runtimeWire(RuntimeQaActionResultSchema, 'gitspace/runtime-qa-result/v1'))
   .errors({ OperationFailed: rpcErrors.operationFailed }).mutation();
 export const runtimeCacheAttachmentRequestContract = gitspaceRpc.procedure()
   .input(runtimeWire(RuntimeCacheAttachmentRequestInputSchema, 'gitspace/runtime-cache-attachment-request/v1'))
@@ -1903,7 +1898,8 @@ export const chatterWatchContract = gitspaceRpc
   .query();
 
 /** A person's post under a topic. `id` is the client's, so a retry posts once. `similar` names an active topic close to
- * a new one; `line` is the issue state change the post caused (a tooling post opening or reopening its topic). */
+ * a new one; `line` is the issue state change the post caused (a tooling post opening or reopening its topic). Posts
+ * reach agents' context, so posting needs `session.prompt` as `runtime.submit` does. */
 export const chatterPostContract = gitspaceRpc
   .procedure()
   .input(wire.object({ ...chatterProject, id: wire.string, topic: wire.string, kind: wire.enum(CHATTER_KINDS), text: wire.string }))
@@ -1926,6 +1922,26 @@ export const chatterTopicActContract = gitspaceRpc
   .procedure()
   .input(wire.object({ ...chatterProject, key: wire.string, action: ChatterTopicActionCodec }))
   .output(wire.object({ topic: ChatterTopicCodec, line: wire.nullable(ChatterTopicLineCodec) }))
+  .errors({ ProjectNotFound: rpcErrors.projectNotFound, TopicNotFound: chatterErrors.topicNotFound, ChatterInvalid: chatterErrors.chatterInvalid, OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
+/** A workspace's issue topics, for its Issues tab: the issue topics it posted in, and those GitSpace posted in for its
+ * runtime's failures; open first, then the most recently active. `posts` are their tooling posts by this workspace (or
+ * by GitSpace for it), newest first, a few per topic. */
+export const chatterIssuesContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ ...chatterProject, workspaceId: wire.string }))
+  .output(wire.object({ topics: wire.array(ChatterTopicCodec), posts: wire.array(ChatterPostCodec) }))
+  .errors({ ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed })
+  .query();
+
+/** Sends an issue topic out as the person: files it with GitSpace from `workspaceId`, or returns a GitHub issue draft
+ * link (`shareDraft`) at GitSpace's or the project's repository. Either is recorded on the topic as `filed`. Decides
+ * as the person (`operator.decide`); a draft also needs `account.admin`. */
+export const chatterFileIssueContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ ...chatterProject, workspaceId: wire.string, key: wire.string, action: ChatterFileActionCodec }))
+  .output(wire.object({ topic: ChatterTopicCodec, shareDraft: wire.nullable(wire.string) }))
   .errors({ ProjectNotFound: rpcErrors.projectNotFound, TopicNotFound: chatterErrors.topicNotFound, ChatterInvalid: chatterErrors.chatterInvalid, OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
@@ -2592,7 +2608,6 @@ export const gitspaceContract = gitspaceRpc.contract({
     session: runtimeSessionContract,
     services: runtimeServicesContract,
     sync: runtimeSyncContract,
-    qa: runtimeQaContract,
     attachment: { cache: { request: runtimeCacheAttachmentRequestContract }, detach: runtimeAttachmentDetachRequestContract },
   },
   machines: listMachinesContract,
@@ -2718,7 +2733,7 @@ export const gitspaceContract = gitspaceRpc.contract({
     overview: automationsOverviewContract,
     exceptions: { list: listAutomationExceptionsContract, set: setAutomationExceptionContract },
   },
-  chatter: { watch: chatterWatchContract, post: chatterPostContract, topics: chatterTopicsContract, topicAct: chatterTopicActContract },
+  chatter: { watch: chatterWatchContract, post: chatterPostContract, topics: chatterTopicsContract, topicAct: chatterTopicActContract, issues: chatterIssuesContract, fileIssue: chatterFileIssueContract },
   skills: { list: listSkillsContract, update: updateSkillContract },
   inspector: {
     view: inspectorViewContract,

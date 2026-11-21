@@ -222,7 +222,7 @@ export interface GitSpaceShellProps {
   /** `guideSection`: open the Change Guide at the section of this guide entity (`section:<id>`, `exhibit:<section id>:<path>`; a new `serial` opens it again). `driveFocus`: open the drive file a comment is on, scrolled to its anchor (a new `serial` opens it again). */
   renderInspector?: (onClose: () => void, initialView: 'environment' | 'browser' | 'goal' | undefined, resource: ResourceRequest | undefined, openTerminal: (name: string) => void, guideSection?: { entity: string; serial: number }, driveFocus?: { anchor: CommentAnchor; serial: number }) => ReactNode;
   renderEnvironmentStatus?: (onInspect: () => void, onRevealTerminal: (name: string) => void) => ReactNode;
-  /** The project's Chatter pane, docked bottom-left over the conversation above the composer. */
+  /** The project's Chatter button, in the header next to Ask a ghost; its pane drops down under it. */
   chatter?: ReactNode;
   /** Signed-in user shown in the sidebar footer. */
   user?: { name: string; handle?: string | null };
@@ -376,7 +376,7 @@ function RetryCountdown({ retry }: { retry: { at: string; error: string } }) {
 }
 
 // ── Agent canvas ──
-function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onRetryControls, onRetryAgent, onContinueAgent, turns, transcript, history, transport, onSend, draft, artifactUpload, sessionCommand, pending, error, providers, skills, access, chatter }: {
+function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onRetryControls, onRetryAgent, onContinueAgent, turns, transcript, history, transport, onSend, draft, artifactUpload, sessionCommand, pending, error, providers, skills, access }: {
   workspace: AgentScopeView;
   mainAgent: GitSpaceShellProps['mainAgent'];
   sessionControls?: SessionControlsProps;
@@ -397,7 +397,6 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onR
   providers?: readonly ProviderAuthView[];
   skills?: readonly SkillView[];
   access?: { card: ReactNode; notice: string };
-  chatter?: ReactNode;
 }) {
   const shape = useShape();
   const running = mainAgent ? mainAgent.state === 'running' || mainAgent.state === 'permission-needed' || mainAgent.state === 'retrying' : false;
@@ -523,7 +522,7 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onR
           ? <VirtualTranscript history={transcript} transport={transport} tail={<OutgoingMessages outbox={outbox} />} />
           : <TurnTranscript turns={turns} transport={transport} tail={<OutgoingMessages outbox={outbox} />} />}
     </ScrollArea>
-    <div ref={composerOverlay} className="pointer-events-none absolute inset-x-0 bottom-0 z-20 flex justify-center px-6 pb-4">
+    <div ref={composerOverlay} data-composer-overlay className="pointer-events-none absolute inset-x-0 bottom-0 z-20 flex justify-center px-6 pb-4">
       <div className="w-full max-w-xl">
         {standaloneAsk && pendingAsk && sessionControls
           ? <div className={`${shape.container} pointer-events-auto mb-2 flex max-h-[50dvh] flex-col gap-2 overflow-y-auto bg-surface-3 p-3 shadow-surface-3`}>
@@ -553,7 +552,6 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onR
             : <Composer workspace={workspace} draft={draft} artifactUpload={artifactUpload} sessionCommand={sessionCommand} controls={sessionControls} providers={providers} skills={skills} running={running} onSend={onSend} pending={pending} recovering={mainAgent?.recovering} error={error} outbox={outbox} />}
       </div>
     </div>
-    {chatter}
   </div>;
 }
 
@@ -866,7 +864,7 @@ function Shell({ project, projects, workspace, baseSpace, workspaces, mainAgent,
     return () => { cancelAnimationFrame(frame); window.clearTimeout(timer); row?.classList.remove('ghost-flash'); };
   }, [flashRow, transcript?.navigation]);
   const content = <BlockReferences.Provider value={referenceTargets}><ResourceFiles.Provider value={resolveResourceFile ?? null}><ResourceNavigation.Provider value={renderInspector ? (request) => { setResourceRequest({ spaceId: workspace.id, request }); setInspectorSection(undefined); setInspectorOpen(true); } : null}><GuideSectionNavigation.Provider value={renderInspector ? (id: string) => openGuideEntity(`section:${id}`) : null}><DocumentNavigation.Provider value={renderInspector ? openDocument : null}>
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+    <div data-workspace-panel className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
       <SidebarInsetTopbar className="pr-3">
         <nav aria-label="Location" className="flex flex-[1_0_auto] items-center gap-2 text-body">
           <span className="flex items-center gap-1.5 text-muted-foreground"><GitBranch01 width={14} height={14} strokeWidth={1.5} /><span className="max-w-48 truncate" title={workspace.projectName}>{workspace.projectName}</span><span>/</span><span className="max-w-64 truncate font-mono text-caption" title={workspace.branch}>{workspace.branch}</span></span>
@@ -882,10 +880,14 @@ function Shell({ project, projects, workspace, baseSpace, workspaces, mainAgent,
             {remote?.behind ? <BehindOrigin branch={workspace.branch} kind={workspace.kind} checkedAt={remote.checkedAt} onUpdate={workspace.kind === 'project' ? onUpdateBase : undefined} /> : null}
             {workspace.kind === 'workspace' && onSetWorkspacePhase ? <PhaseControl workspace={workspace} workspaces={workspaces} onSetPhase={onSetWorkspacePhase} /> : null}
             {sessionControls?.value.context ? <Tooltip content={`${Math.round(sessionControls.value.context.tokens).toLocaleString()} of ${Math.round(sessionControls.value.context.contextWindow).toLocaleString()} tokens`} side="bottom"><span className="tabular-nums px-2 text-caption text-muted-foreground">{Math.round(sessionControls.value.context.percent)}%</span></Tooltip> : null}
+        </div>
+        {/* Pinned to the bar's end: when the bar scrolls sideways on a narrow screen these stay in view, labels hidden. */}
+        <div className="sticky right-0 z-10 flex shrink-0 items-center gap-1 bg-background max-sm:pl-1">
             <Tooltip content={`Ask a ghost about ${workspace.kind === 'workspace' ? workspace.name : workspace.projectName} · reads, changes nothing`} side="bottom">
               <button type="button" aria-label="Ask a ghost" onClick={() => summonGhost({ projectId: workspace.projectId, workspaceId: workspace.id, workspaceName: workspace.kind === 'workspace' ? workspace.name : workspace.projectName, archived: workspace.closedAt !== null })}
-                className="ghost-ask inline-flex h-7 shrink-0 items-center gap-1 rounded-full px-2.5 text-[11.5px] font-medium transition-colors"><GhostGlyph size={14} />Ask a ghost</button>
+                className="ghost-ask inline-flex h-7 shrink-0 items-center gap-1 rounded-full px-2.5 text-[11.5px] font-medium transition-colors max-sm:px-2"><GhostGlyph size={14} /><span className="max-sm:sr-only">Ask a ghost</span></button>
             </Tooltip>
+            {chatter}
             {terminals ? <Tooltip content="Terminals" side="bottom"><Button variant="ghost" size="icon-compact" aria-label="Open terminals" aria-pressed={terminalOpen} onClick={() => setTerminalOpen((value) => !value)}><Terminal width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
             {renderInspector ? <Tooltip content="Inspector" side="bottom"><Button variant="ghost" size="icon-compact" aria-label="Open Inspector" aria-pressed={inspectorOpen} onClick={() => { if (inspectorOpen && inspectorFull) setInspectorFull(false); else setInspectorOpen((value) => !value); }}><LayoutRight width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
         </div>
@@ -894,7 +896,7 @@ function Shell({ project, projects, workspace, baseSpace, workspaces, mainAgent,
       <div className="workspace-workbench" data-terminal-open={terminalOpen && !!terminals || undefined} style={{ '--inspector-width': `${inspectorWidth}px`, '--terminal-height': `${terminalHeight}px` } as CSSProperties}>
             <div className="workspace-content" data-inspector-full={inspectorOpen && inspectorFull && !!renderInspector || undefined}>
               <div className="conversation-stage">
-                <AgentCanvas key={workspace.id} workspace={workspace} mainAgent={mainAgent} sessionControls={sessionControls} controlsError={controlsError} onRetryControls={onRetryControls} onRetryAgent={onRetryAgent} onContinueAgent={onContinueAgent} turns={turns} transcript={transcript} history={history} transport={transport} onSend={onSend} draft={draft} artifactUpload={artifactUpload} sessionCommand={sessionCommand} pending={sendPending} error={sendError} providers={providers} skills={skills} access={access ? { card: access.card(openEnvironment), notice: access.notice } : undefined} chatter={chatter} />
+                <AgentCanvas key={workspace.id} workspace={workspace} mainAgent={mainAgent} sessionControls={sessionControls} controlsError={controlsError} onRetryControls={onRetryControls} onRetryAgent={onRetryAgent} onContinueAgent={onContinueAgent} turns={turns} transcript={transcript} history={history} transport={transport} onSend={onSend} draft={draft} artifactUpload={artifactUpload} sessionCommand={sessionCommand} pending={sendPending} error={sendError} providers={providers} skills={skills} access={access ? { card: access.card(openEnvironment), notice: access.notice } : undefined} />
               </div>
               {inspectorOpen && renderInspector ? <InspectorResizeHandle width={inspectorWidth} onWidth={updateInspectorWidth} /> : null}
               {/* Opaque in every state: on narrow viewports the pane overlays the conversation, so a transparent loading or error state would still swallow its clicks. */}

@@ -1,14 +1,19 @@
 // @vitest-environment happy-dom
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import type { ChatterPost, ChatterTopic } from '@gitspace/protocol/chatter-contract';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { IssuesView, type IssuesViewProps } from './IssuesView.js';
+import { IssuesView, openIssueCount, type IssuesViewProps } from './IssuesView.js';
 
-const item = (id: string, title: string, extra: Record<string, unknown> = {}) => ({
-  id, title, description: `${title}\n\nDetails`, historyRef: 'history://workspace-a', tool: 'proc', model: 'opus', runtimeVersion: 'pi-1.0',
-  state: 'open', duplicateOf: null, createdAt: '2026-10-22T10:00:00.000Z', ...extra,
+const at = new Date('2026-11-21T10:00:00.000Z');
+const topic = (key: string, extra: Partial<ChatterTopic> = {}): ChatterTopic => ({
+  key, display: key, firstAt: at, lastAt: at, posts: 2, participants: [{ kind: 'workspace', id: 'workspace-a', name: 'Parser' }, { kind: 'workspace', id: 'workspace-b', name: 'Billing' }],
+  state: 'open', stateBy: 'Parser', stateAt: at, fixedIn: null, repeats: 0, filed: null, ...extra,
 });
-const commit = '0123456789abcdef0123456789abcdef01234567';
+const post = (topicKey: string, text: string): ChatterPost => ({
+  type: 'post', offset: 1, id: `post-${topicKey}`, at, topicKey, topic: topicKey, author: { kind: 'workspace', id: 'workspace-a', name: 'Parser' }, phase: 'code', kind: 'tooling', text,
+  spot: { tool: 'proc', reference: 'history://workspace-a/main#12', machine: 'm-1' },
+});
 
 // happy-dom has no Web Animations; the scroll area's viewport asks for them on a timer.
 if (!('getAnimations' in Element.prototype)) Object.defineProperty(Element.prototype, 'getAnimations', { configurable: true, value: () => [] });
@@ -28,56 +33,58 @@ afterEach(async () => {
 });
 
 const render = (props: IssuesViewProps) => act(async () => root.render(<IssuesView {...props} />));
-const button = (label: string) => {
-  const found = [...container.querySelectorAll('button')].find(candidate => candidate.textContent?.trim() === label);
-  if (!found) throw new Error(`No button "${label}"`);
+const button = (card: string, label: string) => {
+  const found = [...container.querySelectorAll(`[data-issue-key="${card}"] button`)].find(candidate => candidate.textContent?.trim() === label);
+  if (!found || !(found instanceof HTMLButtonElement)) throw new Error(`No button "${label}"`);
   return found;
 };
 const type = (element: HTMLInputElement | HTMLTextAreaElement, value: string) => act(async () => {
   Object.getOwnPropertyDescriptor(Object.getPrototypeOf(element), 'value')?.set?.call(element, value);
   element.dispatchEvent(new Event('input', { bubbles: true }));
 });
+const issues = { topics: [topic('proc watch failed'), topic('diff view broken · blocks', { state: 'resolved', fixedIn: 'abc1234', filed: { at: at.toISOString(), by: 'Ada', target: 'gitspace' } })], posts: [post('proc watch failed', 'proc watch lost the process after a restart')] };
 
-it('shows the workspace\'s issues with their state, and an invalid document as an alert', async () => {
-  await render({ document: { items: [item('a', 'Proc watch failed'), item('b', 'Diff view broken', { state: 'fixed', fixedIn: commit, filedAt: '2026-10-22T11:00:00.000Z' })] }, onAct: vi.fn() });
-  const cards = [...container.querySelectorAll('[data-issue-id]')];
+it('lists the workspace\'s issue topics with state, tool, reference and filing, and counts the open ones', async () => {
+  await render({ issues, error: null, onAct: vi.fn(), onFile: vi.fn() });
+  const cards = [...container.querySelectorAll('[data-issue-key]')];
   expect(cards).toHaveLength(2);
-  expect(cards[0]?.textContent).toContain('Proc watch failed');
-  expect(cards[0]?.textContent).toContain('proc · opus');
-  expect(cards[0]?.textContent).toContain('history://workspace-a');
-  expect(cards[1]?.textContent).toContain('Fixed in 01234567');
+  expect(cards[0]?.textContent).toContain('proc · 2 posts · 1 other workspace');
+  expect(cards[0]?.textContent).toContain('proc watch lost the process after a restart');
+  expect(cards[0]?.textContent).toContain('history://workspace-a/main#12');
+  expect(cards[1]?.textContent).toContain('Resolved in abc1234');
   expect(cards[1]?.textContent).toContain('Filed');
-  expect(container.querySelector('[role="alert"]')).toBeNull();
-
-  await render({ document: { items: [{ id: 'broken' }] }, onAct: vi.fn() });
-  expect(container.querySelector('[role="alert"]')?.textContent).toContain('invalid');
-  expect(container.querySelector('[data-issue-id]')).toBeNull();
+  expect(openIssueCount(issues)).toBe(1);
+  expect(openIssueCount(null)).toBeUndefined();
 });
 
-it('marks an issue fixed only with a full commit hash', async () => {
-  const onAct = vi.fn(async () => ({}));
-  await render({ document: { items: [item('a', 'Proc watch failed')] }, onAct });
-  await act(async () => button('Mark fixed…').click());
-  const input = container.querySelector<HTMLInputElement>('[data-issue-id="a"] input');
-  if (!input) throw new Error('No commit input');
-  await type(input, 'abc123');
-  expect(button('Mark fixed').disabled).toBe(true);
-  await act(async () => button('Mark fixed').click());
-  expect(onAct).not.toHaveBeenCalled();
-  await type(input, commit);
-  expect(button('Mark fixed').disabled).toBe(false);
-  await act(async () => button('Mark fixed').click());
-  expect(onAct).toHaveBeenCalledWith('a', { kind: 'fixed', commit });
+it('resolves an open topic with an optional fixed-in, dismisses it, and reopens a resolved one', async () => {
+  const onAct = vi.fn(async () => {});
+  await render({ issues, error: null, onAct, onFile: vi.fn() });
+  await act(async () => button('proc watch failed', 'Resolve…').click());
+  const input = container.querySelector<HTMLInputElement>('[data-issue-key="proc watch failed"] input');
+  if (!input) throw new Error('No fixed-in input');
+  await type(input, ' 0123abc ');
+  await act(async () => button('proc watch failed', 'Resolve').click());
+  expect(onAct).toHaveBeenLastCalledWith('proc watch failed', { kind: 'state', state: 'resolved', fixedIn: '0123abc' });
+  await act(async () => button('proc watch failed', 'Dismiss').click());
+  expect(onAct).toHaveBeenLastCalledWith('proc watch failed', { kind: 'state', state: 'dismissed', fixedIn: null });
+  await act(async () => button('diff view broken · blocks', 'Reopen').click());
+  expect(onAct).toHaveBeenLastCalledWith('diff view broken · blocks', { kind: 'state', state: 'open', fixedIn: null });
 });
 
-it('files the excerpt as reviewed, not the original report', async () => {
-  const onAct = vi.fn(async () => ({}));
-  await render({ document: { items: [item('a', 'Proc watch failed')] }, onAct });
-  await act(async () => button('Review').click());
+it('files the excerpt as reviewed, not the original post', async () => {
+  const onFile = vi.fn(async () => null);
+  await render({ issues, error: null, onAct: vi.fn(), onFile });
+  await act(async () => button('proc watch failed', 'Review').click());
   const excerpt = container.querySelector<HTMLTextAreaElement>('textarea[aria-label="Excerpt to send"]');
   if (!excerpt) throw new Error('No excerpt editor');
-  expect(excerpt.value).toBe('Proc watch failed\n\nDetails');
-  await type(excerpt, '  Proc watch failed (token removed)  ');
-  await act(async () => button('File with GitSpace').click());
-  expect(onAct).toHaveBeenCalledWith('a', { kind: 'file', excerpt: 'Proc watch failed (token removed)' });
+  expect(excerpt.value).toBe('proc watch lost the process after a restart');
+  await type(excerpt, '  proc watch lost the process (token removed)  ');
+  await act(async () => button('proc watch failed', 'File with GitSpace').click());
+  expect(onFile).toHaveBeenCalledWith('proc watch failed', { kind: 'file', excerpt: 'proc watch lost the process (token removed)' });
+});
+
+it('says why the issues could not be read', async () => {
+  await render({ issues: null, error: 'Project is outside the device scope', onAct: vi.fn(), onFile: vi.fn() });
+  expect(container.querySelector('[role="alert"]')?.textContent).toContain('Project is outside the device scope');
 });

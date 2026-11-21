@@ -25,6 +25,7 @@ import { InferencePage, onboardingInferenceGate } from './InferencePage.js';
 import { LiveEnvironment } from './environment/LiveEnvironment.js';
 import { Inspector } from './inspector/index.js';
 import type { InspectorDrive } from './inspector/DriveSurface.js';
+import { useWorkspaceIssues } from './inspector/useWorkspaceIssues.js';
 import { ACCOUNT_DIRECTORY_CHANGED, AUTOMATIONS_PROJECT_PARAM, AUTOMATIONS_RUN_PARAM, PRODUCT_ROUTE_LABELS, automationsUrl, isGlobalView, navigateProductUrl, productRouteFromLocation, setProductRoute, type AppView, type ProductRoute } from './routes.js';
 import { AccountSidebarContext, AppSidebar, sidebarWorkspaceSummary, type AppSidebarProps, type SidebarArchive, type SidebarProject } from './AppSidebar.js';
 import type { StackRestack } from '@gitspace/protocol-workspace';
@@ -130,6 +131,7 @@ export function LiveInspector({
   const journal = useResultQuery(rpcClient.inspector.journal.list, request, { enabled: secondaryQueries.journal });
   const threads = useResultQuery(rpcClient.inspector.review.list, request, { enabled: secondaryQueries.threads });
   const goalAutomations = useWorkspaceAutomations(projectId);
+  const workspaceIssues = useWorkspaceIssues(runtimeContext.snapshot.projectId, runtimeContext.snapshot.workspaceId);
   const overviewRead = useRetainedRead(overview, readKey);
   const artifactValue = useRetainedQueryValue(artifactCatalog, readKey);
   const repositoryValue = useRetainedQueryValue(repository, JSON.stringify([readKey, repositoryMode]));
@@ -346,14 +348,7 @@ export function LiveInspector({
     threads={threadsValue ?? []}
     services={[]}
     runtimeServices={<ScrollArea className="min-h-0 flex-1" viewportClassName="h-full"><RuntimeServices snapshot={runtimeContext.snapshot} machines={(serviceMachineValues ?? []).map(machine => ({ id: machine.id, label: machine.label }))} /></ScrollArea>}
-    issues={{
-      document: runtimeContext.snapshot.documents['gitspace.qa'],
-      onAct: async (itemId, action) => {
-        const result = await rpcClient.runtime.qa({ ...RuntimeIdentitySchema.parse(runtimeContext.snapshot), itemId, action });
-        if (result.status === 'error') throw result.error;
-        return result.value;
-      },
-    }}
+    issues={{ issues: workspaceIssues.issues, error: workspaceIssues.error, onAct: workspaceIssues.act, onFile: workspaceIssues.file }}
     subagents={runtimeInspector.subagents}
     onStopSubagent={async conversationId => {
       const result = await rpcClient.runtime.session({ projectId: runtimeContext.snapshot.projectId, workspaceId: runtimeContext.snapshot.workspaceId, conversationId, command: { type: 'stop' } });

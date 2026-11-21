@@ -48,7 +48,9 @@ export type RuntimeHarnessOptions = {
   operations: OperationalServices;
   retainedRules: RetainedRuleServices;
   editTool(model: ModelRef): 'edit' | 'apply_patch';
-  onReport(error: unknown): void;
+  /** A failure the runtime records: `source` names where it happened (a task's kind, `alarm`, `cloud publication`), so
+   * every occurrence of one failure files under one topic. */
+  onReport(error: unknown, source: string): void;
   /** When pi next needs this session to run, for a sleeping task (`at`); the host arms its own wake, pi keeps no timer. */
   onWake?(wake: Wake): void;
   admitInference(input: { conversationId: string; requestId: string; parentConversationId?: string; selection?: ModelSelectionIntent }): Promise<InferenceModelAdmission>;
@@ -167,7 +169,7 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
     const urls = embeddedDriveMedia(text);
     if (!urls.length || !driveVersions) return {};
     try { return await driveVersions(urls); }
-    catch (error) { options.onReport(error); return {}; }
+    catch (error) { options.onReport(error, 'drive pins'); return {}; }
   };
   // The project agent's turns carry the project's workspace board; a workspace agent's carry its stack board while it
   // heads a stack.
@@ -328,19 +330,19 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
   const harness = await Harness.open(options.storage, { models: options.models, registry, settings: { ...options.settings, extensions: options.settings?.extensions ?? registry.snapshot().installed().filter(item => item.name !== childExtension.name),
     // An idle conversation's parsed context (8 MB for a 250k-token conversation with screenshots) is dropped at once:
     // a workspace object holds many conversations, and re-reading one costs tens of milliseconds.
-    contextRetentionMs: 0 }, onReport: report => options.onReport(report.error), ...(options.onWake ? { onWake: options.onWake } : {}) }, BACKGROUND_CONTEXT);
+    contextRetentionMs: 0 }, onReport: report => options.onReport(report.error, 'task' in report && report.task ? report.task.kind : report.kind === 'host_error' ? `host ${report.callback}` : report.kind.replaceAll('_', ' ')), ...(options.onWake ? { onWake: options.onWake } : {}) }, BACKGROUND_CONTEXT);
   // A stored reply's required block asks become questions in the commit after the one that stored it, and again on
   // open for any a reset between the two commits left unposted (`repairBlockAsks`). Repairs run one at a time.
   let blockAsks = Promise.resolve();
   const repairAsks = (): Promise<void> => {
-    blockAsks = blockAsks.then(() => repairBlockAsks(harness, options.storage)).catch(options.onReport);
+    blockAsks = blockAsks.then(() => repairBlockAsks(harness, options.storage)).catch((error: unknown) => options.onReport(error, 'block asks'));
     return blockAsks;
   };
   // A stored message with comments or replies joins the comment lookup in the commit after the one that stored it, and
   // again on open for any a reset between the two left out (`repairCommentLookup`). Repairs run one at a time.
   let lookup = Promise.resolve();
   const repairLookup = (): Promise<void> => {
-    lookup = lookup.then(() => repairCommentLookup(harness, options.storage)).catch(options.onReport);
+    lookup = lookup.then(() => repairCommentLookup(harness, options.storage)).catch((error: unknown) => options.onReport(error, 'comment lookup'));
     return lookup;
   };
   harness.observeCommits({ end() {}, advance(publication) {
@@ -376,7 +378,7 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
     const selected = child ? offered.filter(tool => child.tools.includes(tool.name === BROWSER_TOOL_NAME ? 'browser' : tool.name)) : offered;
     await conversation.configure({ model: { provider: model.provider, modelId: model.modelId }, tools: selected, modelTools: child ? null : codeOnly, extensions: child ? { add: [childExtension] } : { remove: [childExtension] } }, BACKGROUND_CONTEXT);
   };
-  const lifecycle = createConversationLifecycle({ harness, storage: options.storage, admitInference: options.admitInference, configureModel, report: options.onReport, mcpCallTask });
+  const lifecycle = createConversationLifecycle({ harness, storage: options.storage, admitInference: options.admitInference, configureModel, report: error => options.onReport(error, 'conversation'), mcpCallTask });
   lifecycleReady.resolve(lifecycle);
   await harness.commit(async tx => {
     const workspace = await tx.doc(WorkspaceDoc);

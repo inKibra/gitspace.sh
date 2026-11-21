@@ -7,7 +7,7 @@ import { ArtifactsCodeStore, artifactsWorkspaceRepository, createWorkspaceRuntim
 import type { RuntimeAttachment, RuntimeGitCheckpoint } from '@gitspace/protocol-runtime';
 import { forwardTunnelRequest } from './relay-request.js';
 import { createRuntimeServices, type RuntimeIdentity } from './runtime-services.js';
-import { createRuntimeQaServices } from './runtime-qa.js';
+import { runtimeFailureReporter } from './runtime-failures.js';
 import { workspaceBrowsersDocument } from './runtime-browser.js';
 import { createCloudRuntimeInference, historyJudgment } from './runtime-inference.js';
 import { z } from 'zod';
@@ -132,9 +132,8 @@ export async function createAccountWorkspaceRuntime(
     return runtime;
   } });
   const lfs = await createAccountGitLfsStore(env, env.ACCOUNT_ID, identity.projectId, `runtime:${identity.workspaceId}`);
-  // QA items are in this object's storage; the project's copy, until its move reaches this workspace, is read in the
-  // background and shown by a later snapshot.
-  const qa = createRuntimeQaServices(ctx.storage, env, identity, { waitUntil: promise => waitUntil('qa project copy', promise), changed: () => runtime?.publish() });
+  // Failures the runtime records become GitSpace tooling posts in the project's Chatter, in the background.
+  const reportFailure = runtimeFailureReporter(env, identity);
   // A watched turn reports to the workspace that started it, the project's base or a stack's head; the report wakes that
   // workspace through its own alarm, never inline (`WorkspaceRuntime.workspaceReport`).
   const watch = projectWatchHooks(ctx.storage, identity, (report, onDone, to) => waitUntil('project report', env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${to}`).runtimeWorkspaceReport({ projectId: identity.projectId, workspaceId: to }, report, onDone).catch((error: unknown) => console.error('Workspace report was not sent', { workspaceId: identity.workspaceId, to, error }))));
@@ -223,9 +222,8 @@ export async function createAccountWorkspaceRuntime(
     version: WORKER_VERSION,
     waitUntil: promise => waitUntil('runtime', promise),
     schedule,
-    qa,
     browsers: () => workspaceBrowsersDocument(ctx.storage),
-    onReport: error => { qa.report(error instanceof Error ? error.message : String(error)); },
+    onReport: (error, source) => { waitUntil('runtime failure', reportFailure(source, error)); },
     attachments: {
       seal: (secret, scope) => env.CREDENTIALS.getByName(env.ACCOUNT_ID).sealRuntimeGrant(secret, scope),
       open: (ciphertext, scope) => env.CREDENTIALS.getByName(env.ACCOUNT_ID).openRuntimeGrant(ciphertext, scope),

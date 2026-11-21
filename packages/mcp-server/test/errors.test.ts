@@ -54,7 +54,7 @@ describe('MCP tool failure detail', () => {
       }
       for (const [name, payload] of [
         ['gitspace_runtime_session', { command: { type: 'answerAsk', id: 'q', answers: [] } }],
-        ['gitspace_runtime_qa', { itemId: 'q', action: { kind: 'share', target: 'repository', redactedExcerpt: 'secret', confirmed: true } }],
+        ['gitspace_chatter_file_issue', { key: 'bun test hang', action: { kind: 'share', target: 'repository', redactedExcerpt: 'secret', confirmed: true } }],
       ] as const) {
         const response = await client.callTool({ name, arguments: { projectId: 'p', workspaceId: 's', ...payload } }).catch(error => error);
         expect(response instanceof Error || response.isError === true).toBe(true);
@@ -84,9 +84,9 @@ describe('MCP tool failure detail', () => {
       for (const name of ['gitspace_terminals_live', 'gitspace_runtime_browser_trust', 'gitspace_providers_login_start', 'gitspace_github_app_start', 'gitspace_github_request_record']) expect(names).not.toContain(name);
       for (const [name, payload] of [
         ['gitspace_runtime_session', { command: { type: 'answerAsk', id: 'q', answers: [] } }],
-        ['gitspace_runtime_qa', { itemId: 'q', action: { kind: 'file', excerpt: 'what failed' } }],
+        ['gitspace_chatter_file_issue', { key: 'bun test hang', action: { kind: 'file', excerpt: 'what failed' } }],
       ] as const) await client.callTool({ name, arguments: { projectId: 'p', workspaceId: 's', ...payload } }).catch(error => error);
-      expect(forwarded).toEqual(['runtime.session', 'runtime.qa']);
+      expect(forwarded).toEqual(['runtime.session', 'chatter.fileIssue']);
     } finally { await client.close(); }
   });
 

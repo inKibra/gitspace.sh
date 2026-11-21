@@ -16,7 +16,6 @@ import {
 import { RuntimeAttachInputSchema, RuntimeIdentitySchema } from '@gitspace/protocol-runtime';
 import { ArtifactsCodeStore, AttachmentStore } from '@gitspace/runtime-workspace-do';
 import worker, { SpaceAuthorityDO, UserRelayDO } from '../src/index.js';
-import { createRuntimeQaServices } from '../src/runtime-qa.js';
 
 const rootKey = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
 const machineKey = Uint8Array.from({ length: 32 }, (_, index) => 100 + index);
@@ -205,7 +204,7 @@ describe('relay presence', () => {
     expect(await relayAlarm()).toBeNull();
   });
 
-  it('retries a presence report no workspace took with doubling backoff, then gives up into its QA inbox, and tries afresh on the next connection', async () => {
+  it('retries a presence report no workspace took with doubling backoff, then gives up into a GitSpace tooling post in Chatter, and tries afresh on the next connection', async () => {
     await settledRelay();
     const workspace = await attachedWorkspace('presence-retry');
     const relay = env.RELAY.getByName(env.RELAY_NAME);
@@ -227,10 +226,11 @@ describe('relay presence', () => {
         expect(await runDurableObjectAlarm(relay)).toBe(true);
       }
       expect(delays).toEqual([5_000, 10_000, 20_000, 40_000, 80_000, 160_000, 320_000]);
-      // The eighth failure gives up: no wake is left, and the workspace's QA inbox says so.
+      // The eighth failure gives up: no wake is left, and the project's Chatter has an issue for the workspace saying so.
       expect(await retries()).toEqual([]);
       expect(await relayAlarm()).toBeNull();
-      expect(await runInDurableObject(env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${workspace.workspaceId}`), async (_instance, state) => (await createRuntimeQaServices(state.storage, env, RuntimeIdentitySchema.parse(workspace)).list()).map(item => item.description))).toEqual([`GitSpace could not record that machine ${machineId} is online in this workspace after 8 tries over about 10 minutes (A workspace did not record the machine presence). It shows the old state until the machine next connects or disconnects.`]);
+      const { posts } = await env.PROJECT_CHATTER.getByName(`${env.ACCOUNT_ID}:${workspace.projectId}`).issues(workspace.workspaceId);
+      expect(posts.map(post => [post.author.kind, post.spot?.tool, post.text])).toEqual([['gitspace', 'machine presence', `GitSpace could not record that machine ${machineId} is online in this workspace after 8 tries over about 10 minutes (A workspace did not record the machine presence). It shows the old state until the machine next connects or disconnects.`]]);
     } finally { clock.mockRestore(); }
     refused.mockRestore();
     await connect({ notices: RELAY_NOTICE_MODE });
