@@ -114,7 +114,7 @@ export class ProjectChatterDO extends BudgetedDurableObject {
   private readonly participantsSchema = z.array(ChatterAuthorSchema.extend({ posts: z.number().int().nonnegative(), lastAt: z.string() }));
   private readonly volumeChangeSchema = z.object({ strip: z.string(), name: z.string(), level: z.enum(CHATTER_LEVELS), muted: z.boolean(), from: z.enum(CHATTER_LEVELS), wasMuted: z.boolean() });
   private readonly builtSchema = z.object({
-    heard: z.array(z.object({ offset: z.number().int(), via: z.enum(['floor', 'pick']), reason: z.string(), strong: z.boolean() })),
+    heard: z.array(z.object({ offset: z.number().int(), via: z.enum(['floor', 'pick', 'newest']), reason: z.string(), strong: z.boolean() })),
     left: z.array(z.object({ offset: z.number().int(), why: z.string() })),
     model: z.string().nullable(),
   });

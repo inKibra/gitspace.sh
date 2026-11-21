@@ -132,7 +132,7 @@ export function pickDigest(weighed: Weighed, picks: ReadonlyMap<string, TopicPic
       if (candidate.lowOnly) { leave(candidate.posts, 'Low, and no model picked it'); continue; }
       if (kept >= limit) { leave(candidate.posts, 'not among the newest topics (no model pick)'); continue; }
       kept++;
-      for (const post of candidate.posts) heard.push({ offset: post.offset, via: 'pick', reason: 'among the newest topics (no model pick)', strong: false });
+      for (const post of candidate.posts) heard.push({ offset: post.offset, via: 'newest', reason: 'among the newest topics', strong: false });
     }
   } else {
     const ranked: { candidate: DigestCandidate; pick: TopicPick }[] = [];

@@ -684,7 +684,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
     const text = chatterDigestText({ entries, others: hearing.others, otherTopics: hearing.otherTopics });
     return {
       text, through: hearing.digest.through, others: hearing.others,
-      floor: entries.filter(entry => entry.heard.via === 'floor').length, picked: entries.filter(entry => entry.heard.via === 'pick').length,
+      floor: entries.filter(entry => entry.heard.via === 'floor').length, picked: entries.filter(entry => entry.heard.via === 'pick').length, newest: entries.filter(entry => entry.heard.via === 'newest').length,
       tokens: Math.ceil((text?.length ?? 0) / 4), fullTokens: Math.ceil(hearing.fullCharacters / 4),
     };
   }

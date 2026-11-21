@@ -34,7 +34,7 @@ async function fixture() {
     if (chatter.fail) throw new Error('Chatter is restarting');
     const fresh = chatter.posts.slice(input.after ?? 0);
     const body = fresh.map(post => `  10:00 Parser (code, discovery): ${post} [its stack's head]`);
-    return { text: fresh.length ? ['Chatter since your last turn (times UTC):', 'Always heard', 'parser:', ...body].join('\n') : null, through: chatter.posts.length, floor: fresh.length, picked: 0, others: 0, tokens: 10, fullTokens: 10 };
+    return { text: fresh.length ? ['Chatter since your last turn (times UTC):', 'Always heard', 'parser:', ...body].join('\n') : null, through: chatter.posts.length, floor: fresh.length, picked: 0, newest: 0, others: 0, tokens: 10, fullTokens: 10 };
   };
   const { harness, root } = await createRuntimeHarness({
     identity: RuntimeIdentitySchema.parse({ projectId: 'project', workspaceId: 'billing' }), storage: new MemoryStorage(), models, model: { provider: 'test', modelId: model.id },

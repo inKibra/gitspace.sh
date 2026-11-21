@@ -356,7 +356,7 @@ function PostLine({ post, hearing, who, onWho }: { post: ChatterPost; hearing: H
       </p>
       {heard ? <p data-reason={heard.via} className="mt-0.5 flex items-center gap-1 text-[10.5px]" style={{ color: badgeColors.violet }}>
         <Headphones01 width={10} height={10} strokeWidth={2} className="shrink-0" />
-        {heard.via === 'floor' ? `always heard · ${heard.reason}` : `picked by the model${heard.strong ? ' (strong)' : ''} · ${heard.reason}`}
+        {heard.via === 'floor' ? `always heard · ${heard.reason}` : heard.via === 'newest' ? 'among the newest topics (no model picked)' : `picked by the model${heard.strong ? ' (strong)' : ''} · ${heard.reason}`}
       </p> : null}
     </div>
     {who}
@@ -376,7 +376,7 @@ function WhoHears({ post, who, onHearAs }: { post: ChatterPost; who: WhoView; on
     {heard.length ? <p className="mt-0.5 font-medium text-foreground">In {heard.length} {heard.length === 1 ? 'digest' : 'digests'}, quoted as written</p> : null}
     {heard.map(entry => <button key={entry.listener} type="button" onClick={() => onHearAs(entry.listener, entry.name)} className="flex min-w-0 gap-1 rounded px-1 text-left hover:bg-hover">
       <span className="shrink-0 font-medium text-foreground">{entry.name}</span>
-      <span className="min-w-0">{entry.via === 'floor' ? entry.reason : `the model's pick: ${entry.reason}`}{entry.strong ? ' (strong)' : ''}</span>
+      <span className="min-w-0">{entry.via === 'floor' ? entry.reason : entry.via === 'newest' ? 'among the newest topics (no model picked)' : `the model's pick: ${entry.reason}`}{entry.strong ? ' (strong)' : ''}</span>
     </button>)}
     {missed.length ? <p className="mt-0.5 font-medium text-foreground">Not in {missed.length}</p> : null}
     {missed.map(entry => <button key={entry.listener} type="button" onClick={() => onHearAs(entry.listener, entry.name)} className="flex min-w-0 gap-1 rounded px-1 text-left hover:bg-hover">
@@ -394,9 +394,13 @@ function hearingSummary(hearing: { name: string; digest: ChatterDigest | null; e
   if (digest.muted) return `Hearing as ${hearing.name}: Chatter is muted for the project, so no agent gets a digest.`;
   const topics = new Map(state.events.map(event => [event.offset, event.topicKey]));
   const floor = digest.heard.filter(entry => entry.via === 'floor').length;
-  const picked = new Set(digest.heard.flatMap(entry => entry.via === 'pick' ? [topics.get(entry.offset) ?? String(entry.offset)] : [])).size;
+  const chosenTopics = { pick: new Set<string>(), newest: new Set<string>() };
+  for (const entry of digest.heard) if (entry.via !== 'floor') chosenTopics[entry.via].add(topics.get(entry.offset) ?? String(entry.offset));
+  const picked = chosenTopics.pick.size;
+  const newest = chosenTopics.newest.size;
   const built = digest.builtAt ? ` Built ${digest.builtAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}${digest.model ? ` by ${digest.model}` : ''}.` : ' Not built yet: the floor and the newest topics.';
-  return `Hearing as ${hearing.name}: ${floor} always heard, ${picked} ${picked === 1 ? 'topic' : 'topics'} picked by the model (up to ${CHATTER_MAX_PICKS}), ${digest.left.length} other ${digest.left.length === 1 ? 'post' : 'posts'} left to chatter_read. Dim posts didn't reach it.${built}`;
+  const chosen = newest ? `${newest} of the newest ${newest === 1 ? 'topic' : 'topics'} (no model picked)` : `${picked} ${picked === 1 ? 'topic' : 'topics'} picked by the model (up to ${CHATTER_MAX_PICKS})`;
+  return `Hearing as ${hearing.name}: ${floor} always heard, ${chosen}, ${digest.left.length} other ${digest.left.length === 1 ? 'post' : 'posts'} left to chatter_read. Dim posts didn't reach it.${built}`;
 }
 
 function TopicLine({ line }: { line: ChatterTopicLine }) {

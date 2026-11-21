@@ -265,9 +265,10 @@ export const ChatterVolumesCodec = wire.object({
 });
 export type ChatterVolumes = InputOf<typeof ChatterVolumesCodec>;
 
-/** Why a post reached a digest: always heard (`floor`, with the floor's reason), or its topic picked by the model with a
- * one-line reason, `strong` when the model was sure. */
-export const ChatterHeardCodec = wire.object({ offset: wire.integer({ min: 1 }), via: wire.enum(['floor', 'pick']), reason: wire.string, strong: wire.boolean });
+/** Why a post reached a digest: always heard (`floor`, with the floor's reason), its topic picked by the model with a
+ * one-line reason (`pick`, `strong` when the model was sure), or, with no model answer, its topic among the newest
+ * (`newest`). */
+export const ChatterHeardCodec = wire.object({ offset: wire.integer({ min: 1 }), via: wire.enum(['floor', 'pick', 'newest']), reason: wire.string, strong: wire.boolean });
 export type ChatterHeard = InputOf<typeof ChatterHeardCodec>;
 /** Why a post did not reach a digest. */
 export const ChatterLeftCodec = wire.object({ offset: wire.integer({ min: 1 }), why: wire.string });
@@ -294,7 +295,7 @@ export type ChatterDigest = InputOf<typeof ChatterDigestCodec>;
  * listener whose digest has it with why, and each whose digest left it out with why not. */
 export const ChatterHearingsCodec = wire.object({
   level: wire.nullable(wire.enum(CHATTER_LEVELS)),
-  heard: wire.array(wire.object({ listener: wire.string, name: wire.string, via: wire.enum(['floor', 'pick']), reason: wire.string, strong: wire.boolean })),
+  heard: wire.array(wire.object({ listener: wire.string, name: wire.string, via: wire.enum(['floor', 'pick', 'newest']), reason: wire.string, strong: wire.boolean })),
   missed: wire.array(wire.object({ listener: wire.string, name: wire.string, why: wire.string })),
 });
 export type ChatterHearings = InputOf<typeof ChatterHearingsCodec>;
@@ -308,10 +309,10 @@ function digestAuthor(post: ChatterPost): string {
 }
 
 /**
- * The digest a turn carries (docs/CHATTER-DESIGN.md §3): the posts always heard, then the picked topics, each under its
- * topic in stream order and quoted as written (`<topic>:` then `<time> <author> (<phase or person or project agent>,
- * <kind>): <text>`), a floor post with its reason and a picked topic with the model's; then the rest as one count. Null
- * when there is nothing to say.
+ * The digest a turn carries (docs/CHATTER-DESIGN.md §3): the posts always heard, then the picked topics (or, with no
+ * model answer, the newest topics), each under its topic in stream order and quoted as written (`<topic>:` then `<time>
+ * <author> (<phase or person or project agent>, <kind>): <text>`), a floor post with its reason and a picked topic with
+ * the model's; then the rest as one count. Null when there is nothing to say.
  */
 export function chatterDigestText(input: { entries: readonly { post: ChatterPost; heard: ChatterHeard }[]; others: number; otherTopics: number }): string | null {
   if (input.entries.length === 0 && input.others === 0) return null;
@@ -333,6 +334,7 @@ export function chatterDigestText(input: { entries: readonly { post: ChatterPost
     'Chatter since your last turn (times UTC):',
     ...section('Always heard', input.entries.filter(entry => entry.heard.via === 'floor')),
     ...section('Picked for you', input.entries.filter(entry => entry.heard.via === 'pick')),
+    ...section('Newest topics (no model picked)', input.entries.filter(entry => entry.heard.via === 'newest')),
     ...rest,
   ].join('\n');
 }

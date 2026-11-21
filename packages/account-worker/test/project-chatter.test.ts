@@ -268,7 +268,7 @@ describe('Chatter digests', () => {
       [head]: 'its stack\'s head', [blocker]: 'it waits on this workspace', [mention]: 'mentions it', [agent]: 'the project agent',
       // No build yet: the newest topics up to the pick limit, and the oldest left to chatter_read.
       [others[0]!]: 'not among the newest topics (no model pick)',
-      ...Object.fromEntries(others.slice(1).map(offset => [offset, 'among the newest topics (no model pick)'])),
+      ...Object.fromEntries(others.slice(1).map(offset => [offset, 'among the newest topics'])),
     });
     expect(why(digest)[own]).toBeUndefined();
     expect(posts.map(post => post.offset)).toEqual([head, blocker, mention, agent, ...others.slice(1)]);
@@ -307,7 +307,7 @@ describe('Chatter digests', () => {
     // A failed decision leaves the floor plus the newest topics.
     const late = await say(workspace('ws-ui'), 'lint config', 'And on commit.');
     await build(async () => { throw new Error('Decisions is unavailable'); });
-    expect(await object.digestPreview({ listener: 'ws-billing', name: 'ws-billing' })).toMatchObject({ model: null, heard: [{ offset: late, via: 'pick', reason: 'among the newest topics (no model pick)' }] });
+    expect(await object.digestPreview({ listener: 'ws-billing', name: 'ws-billing' })).toMatchObject({ model: null, heard: [{ offset: late, via: 'newest', reason: 'among the newest topics' }] });
   });
 
   it('rebuilds a listener in a long run at most every 10 minutes, and builds nothing for one idle past 2 hours', async () => {

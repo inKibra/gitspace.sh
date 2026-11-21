@@ -508,6 +508,7 @@ export class TranscriptProjector {
         const detail = counts ? [
           counts.floor ? `${counts.floor} always heard` : null,
           counts.picked ? `${counts.picked} picked by the model` : null,
+          counts.newest ? `${counts.newest} from the newest topics` : null,
           counts.others ? `${counts.others} other ${counts.others === 1 ? 'post' : 'posts'} — chatter_read` : null,
           counts.fullTokens > counts.tokens ? `~${counts.tokens} tokens instead of ~${counts.fullTokens}` : null,
         ].filter(Boolean).join(' · ') : '';
