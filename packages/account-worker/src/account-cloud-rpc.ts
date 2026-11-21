@@ -33,6 +33,7 @@ import type { DeploymentStatus } from '@gitspace/protocol/deployment';
 import type { ProjectAuthorityDO, UserProjectIndexDO } from './project-authority.js';
 import type { UserSettingsDO } from './user-settings.js';
 import { inspectorCloudProcedures } from './account-inspector-rpc.js';
+import { chatterCloudProcedures } from './chatter-rpc.js';
 import { ensureAccountGitSpaceProject } from './gitspace-project.js';
 import { environmentCloudProcedures } from './account-environment-rpc.js';
 import { configurationCloudProcedures } from './account-configuration-rpc.js';
@@ -453,6 +454,7 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
     inference: { list: inferenceList, create: inferenceCreate, update: inferenceUpdate, delete: inferenceDelete, assign: inferenceAssign },
     speech: speechCloudProcedures(env, userId, deviceId),
     secrets: configuration.secrets, configuration: configuration.configuration, skills: configuration.skills, automations: configuration.automations,
+    chatter: chatterCloudProcedures(env, userId, deviceId),
     settings: { get: getSettings, update: updateSettings, reserveHandle, git: { get: getGit }, runtime: { get: getRuntime, set: setRuntime }, state: settingsState },
     machines, machine: { createSandbox, updateNotes, updateAgentAttach, sleep, resume, destroy, image: { list: images, set: setImage, retry: retryImage, cancel: cancelImage, recover: recoverImage, defaults: { get: imageDefault, set: setImageDefault } } }, project: { list: projects, create: createProject, ensureGitSpace, remote: { refresh: refreshRemote, checkInterval, setCheckInterval }, ...lifecycle.project },
     space: { view: spaceView }, workspace: { setRelations, rename, stackStatus, ...lifecycle.workspace }, incidents: { record: recordIncident },
@@ -532,8 +534,8 @@ export async function handleAccountCloudRpc(request: Request, env: Env, userId: 
     if (requiresImageSelectionControl(item.path, item.input) && !capabilities.includes('deployment.control')) capabilities.push('deployment.control');
   }
   const url = new URL(request.url);
-  // Runtime routing performs canonical project/workspace scope checks after this signature admission.
-  const accountScope = !items.every(item => item.path.startsWith('runtime.'));
+  // Runtime and Chatter routing perform canonical project/workspace scope checks after this signature admission.
+  const accountScope = !items.every(item => item.path.startsWith('runtime.') || item.path.startsWith('chatter.'));
   const authorized = await withDeviceAuthority(env, (view, now) => view.authorizeRequest({
     header: request.headers.get(RPC_DEVICE_HEADER), method: 'POST', target: `${url.pathname}${url.search}`, body, capabilities, accountScope,
   }, now));

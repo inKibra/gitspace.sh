@@ -15,7 +15,7 @@ milestones and the decisions still open.
 An earlier Inbox was replaced by Monitoring on 2026-10-27 (`docs/SIMPLIFICATION.md` entry 104). Its cards repeated
 what the sidebar shows: 19 of its 23 entries were "1 agent waiting" for agents that had only finished a turn. This
 design keeps that lesson. A row exists only for something with a recorded open state at its source: an open question,
-an unapproved declaration, a failed operation, an active incident, an open Chatter issue thread. A workspace's colour
+an unapproved declaration, a failed operation, an active incident, an open Chatter issue topic. A workspace's colour
 never makes a row.
 
 ## 1. Summary
@@ -101,7 +101,7 @@ After that the row leaves. The selection moves to the next row, so the keys keep
 | `problem` | Red or orange. Covers sync (push refused), update base failed, lifecycle script failed with its last log line, agent stopped on an error, machine offline. Each has one primary action (Ask the agent to drop it, Discard edit, Retry, Retry turn, Start machine) and one secondary. A GitSpace-side fault (`platform`) offers **Report to GitSpace** after 2 hours (`REPORT_AFTER`) |
 | `incident` | The Monitoring page's card: object, reason, the watchdog's signals ("1.2M rows written · 10 min"), class and id, **Open Monitoring**, Resume or Dismiss. Incidents the watchdog resolved in the last 7 days fold into one line under the Problems band (`ResolvedIncidents`) |
 | `alert` | Severity, source and service, first seen, last seen and count. Either "investigate-errors automation started fix-checkout-500s 4m ago" or nothing. The payload as it arrived, and **Ask an agent to investigate**: start a workspace from the base branch, or message an existing one ("Its agent gets the alert next turn"). Also Route with an automation, Acknowledge ("stays open in the alert source") and Resolve |
-| `issue` | One open Chatter issue thread (`CHATTER-DESIGN.md` §5.1): "Reported 5 times in 3 workspaces". A GitSpace badge or a "<project> code" badge (the thread's `scope`). A Reports tab draws the thread's tooling posts as the workspace Issues view does. A GitSpace issue has **What GitSpace gets** (the redacted outgoing fields, with "Code, transcripts, secrets · Stay here", and an editable excerpt). A project bug has **GitHub draft** and **Mark fixed** (pick the commit; it resolves the thread). Also Dismiss and Merge into… (attach to another thread) |
+| `issue` | One open Chatter issue topic (`CHATTER-DESIGN.md` §5.1): "7 posts from 3 workspaces". A GitSpace badge or a "<project> code" badge (the scope its tooling posts carry). A Reports tab draws the topic's tooling posts as the workspace Issues view does. A GitSpace issue has **What GitSpace gets** (the redacted outgoing fields, with "Code, transcripts, secrets · Stay here", and an editable excerpt). A project bug has **GitHub draft** and **Mark fixed** (pick the commit; it resolves the topic). Also Dismiss and Merge into… (moves its posts into another topic) |
 
 **Report** (`report.tsx`). Report opens from the header, from `r`, or from a problem that has sat too long. You write
 what went wrong, choose About (GitSpace, or the project's code and which project), and switch on or off each piece of
@@ -144,7 +144,7 @@ status row per workspace, and the browser's copy of that row carries only the co
 | **Automation proposed** | `automations.proposal_json` in `ProjectAutomationsDO`. It never runs until approved | **Count already account-wide**: `automation_summaries.proposed` in the directory, read by `automations.overview` | `automations.approve` / `automations.delete` | `automations/AutomationCard.tsx` |
 | **Watchdog incident** | `AccountStateDO` key `storage-incidents` (`account-worker/src/account-state.ts`). Written by an object's own breaker (`storage-quarantine.ts`) and by the platform watchdog's posts (`platform/src/storage-watchdog.ts`, `POST /__platform/storage`). Alerts resolve on their own (`healthy`) | `storageIncidents.list` plus live key `storage-incidents` | `storageIncidents.resume` (Resume, or Dismiss for an alert; snoozes that object's alerts 6 h), `.pause`, `.inspect`; all need `account.admin`. `list` needs only `rpc.read` | `MonitoringPage.tsx`, `StorageIncidents.tsx` |
 | **Infrastructure alert** | **Does not exist.** The only inbound webhook is the GitHub App's (`account-worker/src/github-app.ts`). `docs/AUTOMATIONS-DESIGN.md` lists other event sources as out of scope | — | — | — |
-| **Reported issue** | Today: `RuntimeQaItem` (`protocol-runtime/src/workspace-controls.ts`) in the workspace's own object, table `runtime_qa_items` (`account-worker/src/runtime-qa.ts`, Chatter milestone 1), from runtime failures (`qa.report`) and `report_issue` (in `CODE_ONLY_TOOLS`), with the project object's background move of the items it kept. Chatter decision 5 (2026-11-21) replaces all of it: issues are Chatter issue threads in `ProjectChatterDO` (`chatter_issues`), fed by `chatter_post { kind: 'tooling' }` and by runtime failures posted as GitSpace tooling posts; QA storage, the move, the project's `qa` events and `report_issue` are removed, and old items are exported once and dropped (Chatter milestone 3) | Today the workspace's `documents['gitspace.qa']`; after, `chatter.issues` | Today `runtime.qa` actions `dismiss`, `merge`, `fixed`, `file` (to `AccountStateDO.fileIssue`), `share` (a GitHub draft; `operator.decide` plus `account.admin`); after, the same actions on the thread through `chatter.issueAct` | `inspector/IssuesView.tsx` (the Inspector's Issues tab) |
+| **Reported issue** | Today: `RuntimeQaItem` (`protocol-runtime/src/workspace-controls.ts`) in the workspace's own object, table `runtime_qa_items` (`account-worker/src/runtime-qa.ts`, Chatter milestone 1), from runtime failures (`qa.report`) and `report_issue` (in `CODE_ONLY_TOOLS`), with the project object's background move of the items it kept. Chatter decisions 5 and 8 (2026-11-21) replace all of it: an issue is a Chatter topic with a state in `ProjectChatterDO` (`chatter_topics`), opened by `chatter_post { kind: 'tooling' }` and by runtime failures posted as GitSpace tooling posts; QA storage, the move, the project's `qa` events and `report_issue` are removed, and old items are exported once and dropped (Chatter milestone 3) | Today the workspace's `documents['gitspace.qa']`; after, `chatter.topics` / `chatter.watch { topic }` | Today `runtime.qa` actions `dismiss`, `merge`, `fixed`, `file` (to `AccountStateDO.fileIssue`), `share` (a GitHub draft; `operator.decide` plus `account.admin`); after, the same actions on the topic through `chatter.topicAct` | `inspector/IssuesView.tsx` (the Inspector's Issues tab) |
 
 Account-level items the mock leaves out also wait on the person, and already reach the browser:
 
@@ -185,7 +185,7 @@ next change or by one small read on reconnect").
 | Problem | The source's own retry: `project.operations.retry`/`.dismiss`, a turn retry, an environment re-run, machine start |
 | Incident | `storageIncidents.resume`; Inspect and Pause in the expanded row |
 | Automation | `automations.approve`. Run once first → a manual run |
-| Issue | `chatter.issueAct` on the thread. Mark fixed resolves the thread with the commit, for every workspace in it |
+| Issue | `chatter.topicAct` on the topic. Mark fixed resolves the topic with the commit, for every workspace that posted in it |
 
 **Undo.** The mock clears at once and offers Undo for 6 s. Most sources can't undo: an approved script runs, an
 answered question starts a turn. The Inbox therefore holds the call in the tab for the Undo window and sends it when
@@ -269,7 +269,7 @@ of the workspace, in the same report, through the same send, into the same row (
 waiting: {
   items: WaitingItem[]        // at most 20; counted items first, then oldest first
   more: number                // open items past the 20
-  issues: number              // open Chatter issue threads this workspace reported into (§6 Issues, below)
+  issues: number              // open Chatter issue topics this workspace posted in (§6 Issues, below)
 }
 WaitingItem {
   key                         // stable: question id, setup run id, execution hash, …
@@ -318,32 +318,32 @@ current list with a growing cursor, under the same rule as a workspace's report:
   approvals (#239 Part 2, `/approve/<id>`, recorded in `CredentialVaultDO`) and provider, plugin and GitHub problems.
   That is one row for the account in a small table beside `workspace_statuses` (`source_waiting(source, waiting_json,
   cursor)`, sources `account` and `chatter:<projectId>`), with the same shape as a workspace's `waiting`.
-- **Chatter mentions** (§8) and **issue threads** (§6 Issues) come from `ProjectChatterDO`, one list per project.
+- **Chatter mentions** (§8) and **issue topics** (§6 Issues) come from `ProjectChatterDO`, one list per project.
 
 Declarations are carried per workspace and grouped by hash in the browser into one row ("on develop and in 3
 workspaces"; the base branch is the base workspace, whose id is the project id).
 
-**Issues: Chatter issue threads per project, plus workspace status reports.** Issues live in one place, the project's
-`ProjectChatterDO` (`chatter_issues`, Chatter decision 5); there are no QA items in workspace objects any more. Two
-sources feed the Inbox:
+**Issues: Chatter issue topics per project, plus workspace status reports.** Issues live in one place, the project's
+`ProjectChatterDO` (`chatter_topics` with a state, Chatter decisions 5 and 8); there are no QA items in workspace
+objects any more. Two sources feed the Inbox:
 - **The project's Chatter source row** (`chatter:<projectId>`, the same row as its mentions) carries the heads of its
-  open threads, newest first, up to 20: key, title (≤ 120 characters), tool, scope, report count, workspace ids, last
-  report time, the newest post's id, and what the project agent did. `ProjectChatterDO` rewrites the row when a
-  thread opens, joins, or changes state. Each head is one issue row; grouping across workspaces is already done by the
-  thread (decision 7).
+  open issue topics, newest first, up to 20: key, display text (≤ 80 characters), tool and scope of the newest tooling
+  post, post count, participant workspace ids, last post time, the newest post's id, and what the project agent did.
+  `ProjectChatterDO` rewrites the row when an issue topic opens, gets a post, changes state or is merged. Each head is
+  one issue row; grouping across workspaces is already done by the topic (decision 7).
 - **Workspace status reports** keep carrying what is broken in the workspace (failures, setup and sync problems,
-  §6 above) as problem rows, plus `issues`, the count of open threads it reported into, which the sidebar can show
+  §6 above) as problem rows, plus `issues`, the count of open issue topics it posted in, which the sidebar can show
   without reading Chatter.
 
 There are two other ways to do this, and both are worse:
 - Per-workspace issue heads in each report (the earlier `qa: { open, heads }`) would group the same failure in the
-  browser by matching titles across workspaces, which the thread already does at the source, and would put issues
+  browser by matching titles across workspaces, which the topic already does at the source, and would put issues
   back into workspace objects.
 - Every report in the row would be an unbounded list. One project once held 1,261 QA items, 438 KB
   (SIMPLIFICATION 43).
 
-Expanding a row reads the thread's posts from `ProjectChatterDO` (`chatter.issues` / `chatter_read { issue }`), one
-object for the row opened. Issues are uncounted, so they never turn a workspace orange.
+Expanding a row reads the topic's posts from `ProjectChatterDO` (`chatter.watch { topic }` / `chatter_read { topic }`),
+one object for the row opened. Issues are uncounted, so they never turn a workspace orange.
 
 **What the browser gets.**
 - **On socket open:** `statuses` with each row's summary and the **heads** of its items: key, kind, title cut to 120
@@ -357,7 +357,7 @@ object for the row opened. Issues are uncounted, so they never turn a workspace 
   reads, and opens no project or workspace object.
 - **On expand only:** the conversation before a question, a lifecycle diff, a guide's sections, a report's text. These
   come from the source (`runtime.snapshot`/`history_read` of that conversation, `environment` views,
-  `inspector.overview`, a thread's posts from `ProjectChatterDO`): one object for the one row opened. It may wake that
+  `inspector.overview`, a topic's posts from `ProjectChatterDO`): one object for the one row opened. It may wake that
   workspace's object; it starts no agent.
 
 **Sizing (estimates), with the limits that bound them.**
@@ -366,7 +366,7 @@ Per workspace:
 - Today's report carries one question of at most 200 characters.
 - The new list carries at most 20 items of about 600 bytes each: a 200-character title, a detail of at most 400
   bytes, ids. The issue count adds a few bytes. That puts a workspace's `waiting` at about 12 KB at most; a project's
-  Chatter row with 20 thread heads of ~300 bytes is about 6 KB.
+  Chatter row with 20 topic heads of ~300 bytes is about 6 KB.
 - It is typically 0–3 items, so 0–2 KB.
 - A workspace with more open items says so (`more`). The row shows "and N more in this workspace · Open", and the
   workspace's own cards hold the rest.
@@ -435,24 +435,26 @@ Decision 10 covers which of these ship first.
   `WaitingItem` carries `entry`, computed when the report is built.
 - A ghost's **draft** goes into the row's note field instead of a workspace composer. The person sends it with the
   answer.
-- An issue row's thread posts each carry their `history://` or `result://` reference. Each offers "Ask a ghost about
+- An issue row's topic posts each carry their `history://` or `result://` reference. Each offers "Ask a ghost about
   this", as Chatter tooling posts do (`CHATTER-DESIGN.md` §11).
 - Requires Ghosts milestones 4 and 6.
 
 **Chatter** (`docs/CHATTER-DESIGN.md`):
-- **Issue threads → issue rows.** Under Chatter decision 5, `chatter_post { kind: 'tooling' }` replaces
-  `report_issue`, and tooling posts with the same key (or attached by the agent) form one issue thread in
-  `ProjectChatterDO`. Each open thread is one issue row from the project's Chatter source row (§6). The row shows the
-  thread's posts and what the project agent did ("started fix-sync-stall", "marked for filing"), as an alert row shows
-  `handledBy`. Filing with GitSpace stays the person's decision (`operator.decide`).
-- **@mentions of the person.** Chatter addresses no one, and a post that needs a person to choose is a question
-  (Chatter §4). A post that names the person (people's posts and agents' posts alike) makes an uncounted `mention` row
-  in Waiting on you, with Reply (the Chatter composer) and Open in Chatter. The row clears when the person replies or
-  opens the post. `ProjectChatterDO` keeps a per-person read offset and sends the project's open mentions as its list
-  in the directory (source `chatter:<projectId>`, §6; decision 12).
-- **Refused hand-offs.** A returned post (`type: 'returned'`) goes back to the agent, which works around it. The Inbox
-  makes no row per returned post. A project with returned hand-offs today shows one folded line ("3 hand-offs returned
-  today · Open Chatter") under its section when grouped by project (decision 12).
+- **Issue topics → issue rows.** Under Chatter decisions 5 and 8, `chatter_post { kind: 'tooling' }` replaces
+  `report_issue`; every post has a topic, and a tooling post opens an issue on its topic (by default its normalized
+  title plus its normalized tool), so reports of the same thing from different workspaces are one issue topic in
+  `ProjectChatterDO`. Each open issue topic is one issue row from the project's Chatter source row (§6). The row shows
+  the topic's posts and what the project agent did ("started fix-sync-stall", "marked for filing"), as an alert row
+  shows `handledBy`. Filing with GitSpace stays the person's decision (`operator.decide`).
+- **@mentions of the person, one row per topic.** Chatter addresses no one, and a post that needs a person to choose
+  is a question (Chatter §4). Posts that name the person (people's posts and agents' posts alike) make one uncounted
+  `mention` row per topic in Waiting on you ("mentioned in bun test hang · 2 posts"), with Reply (the Chatter composer,
+  that topic filled in) and Open in Chatter. The row clears when the person posts under the topic or opens it.
+  `ProjectChatterDO` keeps a per-person read offset and sends the project's open mention topics as its list in the
+  directory (source `chatter:<projectId>`, §6; decision 12).
+- **Refused hand-offs, one row per topic.** A returned post (`type: 'returned'`) goes back to the agent, which works
+  around it. The Inbox makes no row per returned post: returned hand-offs fold into one line per topic ("2 hand-offs
+  returned in schema migration · Open Chatter") under the project's section when grouped by project (decision 12).
 
 ## 9. Milestones
 
@@ -485,12 +487,13 @@ Each step ships alone.
    revision's head commit has no decision from the person while the workspace is in Review. The host carries them in
    the report. Accept and Reopen inline.
 7. **Issues.**
-   - Issue threads are in Chatter (Chatter milestone 3; the QA items in the workspace object of Chatter milestone 1
-     are superseded and removed there).
-   - The project's Chatter source row carries open thread heads; workspace reports carry `issues`. One row per thread.
-   - Dismiss, merge (attach), mark fixed (resolve), File with GitSpace, GitHub draft, through `chatter.issueAct`.
-   - The Report dialog posts a tooling post by the person into the selected project's Chatter, with `scope:
-     'gitspace' | 'project'` on the thread.
+   - Issues are Chatter topics with a state (Chatter milestone 3; the QA items in the workspace object of Chatter
+     milestone 1 are superseded and removed there).
+   - The project's Chatter source row carries open issue topic heads; workspace reports carry `issues`. One row per
+     topic.
+   - Dismiss, merge, mark fixed (resolve), File with GitSpace, GitHub draft, through `chatter.topicAct`.
+   - The Report dialog posts a tooling post by the person into the selected project's Chatter under a topic the
+     person can edit, with `scope: 'gitspace' | 'project'` on the post.
 8. **Today strip and context.** Tiles from existing data and the item heads, and project health chips. Goal-first
    identity: the goal's title, emoji and requirement counts are pushed to the directory as journals are
    (`setWorkspaceJournal`). The conversation before a question loads on expand.
@@ -564,10 +567,11 @@ slows the common case.
 *Recommendation:* a, as the mock. A project-scope approval is by hash already (`LifecycleState.approvals`). b shows
 the same script once per workspace and invites approving it piecemeal.
 
-**7. How reports become one issue row.** Settled by Chatter decision 5 (2026-11-21): one row per Chatter issue
-thread. Grouping v1 is the exact issue key (normalized title + tool, within a project) plus an agent's explicit
-attach and the person's Merge into…; a fast-role `judge` sameness check may come later if a project shows duplicates
-the key misses. One row per report would repeat the QA flood SIMPLIFICATION 43 cleaned up.
+**7. How reports become one issue row.** Settled by Chatter decisions 5 and 8 (2026-11-21): one row per Chatter issue
+topic. Grouping is the normalized topic (a tooling post's default is its normalized title plus its normalized tool;
+a runtime failure's is fixed by source and error), with the similar-topic hint at posting and the person's or project
+agent's Merge into…; a fast-role sameness check that suggests merges may come later. One row per report would repeat
+the QA flood SIMPLIFICATION 43 cleaned up.
 
 **8. Monitoring.**
 - a. Removed. Incidents become Problem rows with Inspect, Pause, Resume and Dismiss inline, and `/monitoring`
@@ -606,8 +610,8 @@ exist. The per-hour activity chart adds counters to every tool call for a pictur
 *Recommendation:* a. It is "the page" by decision. A workspace link and the sidebar still go straight to a workspace.
 
 **12. Chatter in the Inbox.**
-- a. Mentions of the person as uncounted rows, cleared on reply or open. Returned hand-offs as one folded line per
-  project.
+- a. Mentions of the person as uncounted rows, one per topic, cleared on posting under it or opening it. Returned
+  hand-offs as one folded line per topic.
 - b. A row for every returned hand-off.
 - c. Neither: Chatter stays in Chatter.
 

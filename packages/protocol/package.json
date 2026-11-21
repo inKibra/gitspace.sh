@@ -24,6 +24,7 @@
     "./default-release": "./src/default-release.ts",
     "./worker-bundle": "./src/worker-bundle.ts",
     "./automations-contract": "./src/automations-contract.ts",
+    "./chatter-contract": "./src/chatter-contract.ts",
     "./inspector-contract": "./src/inspector-contract.ts",
     "./gitspace-ui": "./src/gitspace-ui.ts",
     "./block-builders": "./src/block-builders.ts",

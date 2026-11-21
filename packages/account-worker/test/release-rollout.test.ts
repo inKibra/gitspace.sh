@@ -37,7 +37,7 @@ describe('objects left on older code by a release', () => {
     await restartObjectsForRelease(env, env.ACCOUNT_ID, 'next-release');
     expect(told.at(-1)).toBe('TenantReleasesDO');
     expect(told.slice(0, -1).sort()).toEqual([
-      'AccountStateDO', 'AccountStateDO', 'CredentialVaultDO', 'FleetCatalogDO', 'GitHubAppDO', 'ProjectAuthorityDO', 'ProjectAutomationsDO', 'ProjectSecretsDO',
+      'AccountStateDO', 'AccountStateDO', 'CredentialVaultDO', 'FleetCatalogDO', 'GitHubAppDO', 'ProjectAuthorityDO', 'ProjectAutomationsDO', 'ProjectChatterDO', 'ProjectSecretsDO',
       'SpaceAuthorityDO', 'UserMcpConnectionsDO', 'UserProjectIndexDO', 'UserRelayDO', 'UserSettingsDO', 'UserSkillsDO', 'UserStorageDO',
     ]);
   });

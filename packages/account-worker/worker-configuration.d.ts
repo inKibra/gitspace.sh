@@ -11,6 +11,7 @@ interface Env {
   USER_SETTINGS: DurableObjectNamespace<import('./src/index').UserSettingsDO>;
   PROJECT_SECRETS: DurableObjectNamespace<import('./src/index').ProjectSecretsDO>;
   PROJECT_AUTOMATIONS: DurableObjectNamespace<import('./src/index').ProjectAutomationsDO>;
+  PROJECT_CHATTER: DurableObjectNamespace<import('./src/index').ProjectChatterDO>;
   SPACE_CONTEXT: DurableObjectNamespace<import('./src/index').SpaceContextDO>;
   USER_SKILLS: DurableObjectNamespace<import('./src/index').UserSkillsDO>;
   USER_PROJECTS: DurableObjectNamespace<import('./src/index').UserProjectIndexDO>;

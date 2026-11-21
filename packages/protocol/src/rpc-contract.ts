@@ -40,6 +40,7 @@ import {
   AutomationViewCodec,
   automationErrors,
 } from './automations-contract.js';
+import { CHATTER_KINDS, ChatterPageCodec, ChatterPostCodec, ChatterTopicActionCodec, ChatterTopicCodec, ChatterTopicLineCodec, chatterErrors } from './chatter-contract.js';
 import {
   AppendJournalEntryInputCodec,
   AppendRubricJudgmentInputCodec,
@@ -1883,6 +1884,50 @@ export const setAutomationExceptionContract = gitspaceRpc
   .errors({ ProjectNotFound: rpcErrors.projectNotFound, AutomationNotFound: automationErrors.automationNotFound, AutomationInvalid: automationErrors.automationInvalid, OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
+const chatterProject = { projectId: wire.string };
+
+/** A project's Chatter, oldest first: the newest page, older events (`before`), newer events (`after`; a browser
+ * refetches when the live socket notices a project `chatter` change), or one topic's thread (`topic`). */
+export const chatterWatchContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({
+    ...chatterProject,
+    after: wire.optional(wire.integer({ min: 0 })),
+    before: wire.optional(wire.integer({ min: 1 })),
+    topic: wire.optional(wire.string),
+    limit: wire.optional(wire.integer({ min: 1, max: 100 })),
+  }))
+  .output(ChatterPageCodec)
+  .errors({ ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed })
+  .query();
+
+/** A person's post under a topic. `id` is the client's, so a retry posts once. `similar` names an active topic close to
+ * a new one; `line` is the issue state change the post caused (a tooling post opening or reopening its topic). */
+export const chatterPostContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ ...chatterProject, id: wire.string, topic: wire.string, kind: wire.enum(CHATTER_KINDS), text: wire.string }))
+  .output(wire.object({ post: ChatterPostCodec, topic: ChatterTopicCodec, similar: wire.nullable(ChatterTopicCodec), line: wire.nullable(ChatterTopicLineCodec) }))
+  .errors({ ProjectNotFound: rpcErrors.projectNotFound, ChatterInvalid: chatterErrors.chatterInvalid, OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
+/** The project's active topics with their counts (posted in the last 7 days, or open issues), newest first; with
+ * `query`, every live topic whose key contains its normalized form. */
+export const chatterTopicsContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ ...chatterProject, query: wire.optional(wire.string), limit: wire.optional(wire.integer({ min: 1, max: 100 })) }))
+  .output(wire.object({ topics: wire.array(ChatterTopicCodec) }))
+  .errors({ ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed })
+  .query();
+
+/** Sets a topic's issue state or merges it into another topic. `topic` is the topic acted on, or the one merged into;
+ * `line` is null when nothing changed. */
+export const chatterTopicActContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ ...chatterProject, key: wire.string, action: ChatterTopicActionCodec }))
+  .output(wire.object({ topic: ChatterTopicCodec, line: wire.nullable(ChatterTopicLineCodec) }))
+  .errors({ ProjectNotFound: rpcErrors.projectNotFound, TopicNotFound: chatterErrors.topicNotFound, ChatterInvalid: chatterErrors.chatterInvalid, OperationFailed: rpcErrors.operationFailed })
+  .mutation();
+
 const inspectorSpaceRequestCodec = wire.object({
   spaceId: wire.string,
   expectedGeneration: wire.integer({ min: 0 }),
@@ -2672,6 +2717,7 @@ export const gitspaceContract = gitspaceRpc.contract({
     overview: automationsOverviewContract,
     exceptions: { list: listAutomationExceptionsContract, set: setAutomationExceptionContract },
   },
+  chatter: { watch: chatterWatchContract, post: chatterPostContract, topics: chatterTopicsContract, topicAct: chatterTopicActContract },
   skills: { list: listSkillsContract, update: updateSkillContract },
   inspector: {
     view: inspectorViewContract,

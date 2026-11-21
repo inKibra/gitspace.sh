@@ -51,6 +51,11 @@
         "class_name": "ProjectAutomationsDO"
       },
       {
+        // One per project (src/project-chatter.ts): its Chatter posts and topics.
+        "name": "PROJECT_CHATTER",
+        "class_name": "ProjectChatterDO"
+      },
+      {
         "name": "SPACE_CONTEXT",
         "class_name": "SpaceContextDO"
       },
@@ -161,6 +166,10 @@
     {
       "tag": "account-v8-ghosts",
       "new_sqlite_classes": ["GhostDO"]
+    },
+    {
+      "tag": "account-v9-chatter",
+      "new_sqlite_classes": ["ProjectChatterDO"]
     }
   ],
   "vars": {

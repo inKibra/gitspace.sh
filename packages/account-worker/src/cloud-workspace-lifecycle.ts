@@ -613,7 +613,7 @@ export async function deleteCloudProject(env: Env, userId: string, projectId: st
   const authority = await requireProject(env, userId, projectId);
   const project = await requireProjectAt(authority, projectId, expectedRevision);
   if (project.role === GITSPACE_SOURCE_PROJECT_ROLE) throw new Error('The built-in GitSpace project cannot be deleted. Release its machine caches instead.');
-  return queueOperation(authority, { projectId, workspaceId: null, kind: 'project.delete', steps: labelled(['Erase workspaces', 'Delete project repository and automations']), summary: project.name });
+  return queueOperation(authority, { projectId, workspaceId: null, kind: 'project.delete', steps: labelled(['Erase workspaces', 'Delete project repository, automations and Chatter']), summary: project.name });
 }
 
 /** Every workspace's runtime state and repository go, then the project's, then its directory entry. The tombstone
@@ -634,6 +634,8 @@ async function runProjectDelete({ env, userId, authority, operation, advance }: 
   await code.deleteRepository(artifactsProjectRepository(projectId));
   // Its automations stop with it: their alarm goes, so no schedule fires into the deleted project.
   await env.PROJECT_AUTOMATIONS.getByName(`${userId}:${projectId}`).erase();
+  // Its Chatter goes with it: posts, topics and the expiry alarm.
+  await env.PROJECT_CHATTER.getByName(`${userId}:${projectId}`).erase();
   await env.USER_PROJECTS.getByName(userId).remove(projectId);
   // Every drive, workspace and LFS object of the project becomes unreadable with its scope's key.
   for (const scope of [`lfs:${projectId}`, `space:${projectId}`, ...workspaces.map(workspace => `space:${workspace.id}`)]) await forgetTenantScope(env, scope);

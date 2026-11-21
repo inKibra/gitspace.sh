@@ -222,6 +222,8 @@ export interface GitSpaceShellProps {
   /** `guideSection`: open the Change Guide at the section of this guide entity (`section:<id>`, `exhibit:<section id>:<path>`; a new `serial` opens it again). `driveFocus`: open the drive file a comment is on, scrolled to its anchor (a new `serial` opens it again). */
   renderInspector?: (onClose: () => void, initialView: 'environment' | 'browser' | 'goal' | undefined, resource: ResourceRequest | undefined, openTerminal: (name: string) => void, guideSection?: { entity: string; serial: number }, driveFocus?: { anchor: CommentAnchor; serial: number }) => ReactNode;
   renderEnvironmentStatus?: (onInspect: () => void, onRevealTerminal: (name: string) => void) => ReactNode;
+  /** The project's Chatter pane, docked bottom-left over the conversation above the composer. */
+  chatter?: ReactNode;
   /** Signed-in user shown in the sidebar footer. */
   user?: { name: string; handle?: string | null };
   /** Machine-local model provider auth state; drives the composer's not-connected notice. */
@@ -374,7 +376,7 @@ function RetryCountdown({ retry }: { retry: { at: string; error: string } }) {
 }
 
 // ── Agent canvas ──
-function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onRetryControls, onRetryAgent, onContinueAgent, turns, transcript, history, transport, onSend, draft, artifactUpload, sessionCommand, pending, error, providers, skills, access }: {
+function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onRetryControls, onRetryAgent, onContinueAgent, turns, transcript, history, transport, onSend, draft, artifactUpload, sessionCommand, pending, error, providers, skills, access, chatter }: {
   workspace: AgentScopeView;
   mainAgent: GitSpaceShellProps['mainAgent'];
   sessionControls?: SessionControlsProps;
@@ -395,6 +397,7 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onR
   providers?: readonly ProviderAuthView[];
   skills?: readonly SkillView[];
   access?: { card: ReactNode; notice: string };
+  chatter?: ReactNode;
 }) {
   const shape = useShape();
   const running = mainAgent ? mainAgent.state === 'running' || mainAgent.state === 'permission-needed' || mainAgent.state === 'retrying' : false;
@@ -550,6 +553,7 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onR
             : <Composer workspace={workspace} draft={draft} artifactUpload={artifactUpload} sessionCommand={sessionCommand} controls={sessionControls} providers={providers} skills={skills} running={running} onSend={onSend} pending={pending} recovering={mainAgent?.recovering} error={error} outbox={outbox} />}
       </div>
     </div>
+    {chatter}
   </div>;
 }
 
@@ -701,7 +705,7 @@ export function GitSpaceShell(props: GitSpaceShellProps) {
   return <Toasts><StackToasts><Shell {...props} /></StackToasts></Toasts>;
 }
 
-function Shell({ project, projects, workspace, baseSpace, workspaces, mainAgent, turns, transcript, history, transport, runtimeSummary, machines = [], onSend, draft, artifactUpload, sessionCommand, resolveResourceFile, sessionControls, controlsError, onRetryControls, onRetryAgent, onContinueAgent, onSetWorkspacePhase, onUpdateBase, projectOperation, sendPending = false, sendError, onSelectWorkspace, onSelectProject, onArchiveWorkspace, onCreateProject, onCreateWorkspace, onOpenSettings, onNavigateView, terminals, skills, renderInspector, renderEnvironmentStatus, user, providers, deployment, access }: GitSpaceShellProps) {
+function Shell({ project, projects, workspace, baseSpace, workspaces, mainAgent, turns, transcript, history, transport, runtimeSummary, machines = [], onSend, draft, artifactUpload, sessionCommand, resolveResourceFile, sessionControls, controlsError, onRetryControls, onRetryAgent, onContinueAgent, onSetWorkspacePhase, onUpdateBase, projectOperation, sendPending = false, sendError, onSelectWorkspace, onSelectProject, onArchiveWorkspace, onCreateProject, onCreateWorkspace, onOpenSettings, onNavigateView, terminals, skills, renderInspector, renderEnvironmentStatus, chatter, user, providers, deployment, access }: GitSpaceShellProps) {
   const accountSidebar = useContext(AccountSidebarContext);
   const accountDirectory = useContext(AccountDirectoryContext);
   // A link naming a capture (`?capture=<id>`, the extension's "Open in GitSpace") opens the Inspector's Browser tab,
@@ -890,7 +894,7 @@ function Shell({ project, projects, workspace, baseSpace, workspaces, mainAgent,
       <div className="workspace-workbench" data-terminal-open={terminalOpen && !!terminals || undefined} style={{ '--inspector-width': `${inspectorWidth}px`, '--terminal-height': `${terminalHeight}px` } as CSSProperties}>
             <div className="workspace-content" data-inspector-full={inspectorOpen && inspectorFull && !!renderInspector || undefined}>
               <div className="conversation-stage">
-                <AgentCanvas key={workspace.id} workspace={workspace} mainAgent={mainAgent} sessionControls={sessionControls} controlsError={controlsError} onRetryControls={onRetryControls} onRetryAgent={onRetryAgent} onContinueAgent={onContinueAgent} turns={turns} transcript={transcript} history={history} transport={transport} onSend={onSend} draft={draft} artifactUpload={artifactUpload} sessionCommand={sessionCommand} pending={sendPending} error={sendError} providers={providers} skills={skills} access={access ? { card: access.card(openEnvironment), notice: access.notice } : undefined} />
+                <AgentCanvas key={workspace.id} workspace={workspace} mainAgent={mainAgent} sessionControls={sessionControls} controlsError={controlsError} onRetryControls={onRetryControls} onRetryAgent={onRetryAgent} onContinueAgent={onContinueAgent} turns={turns} transcript={transcript} history={history} transport={transport} onSend={onSend} draft={draft} artifactUpload={artifactUpload} sessionCommand={sessionCommand} pending={sendPending} error={sendError} providers={providers} skills={skills} access={access ? { card: access.card(openEnvironment), notice: access.notice } : undefined} chatter={chatter} />
               </div>
               {inspectorOpen && renderInspector ? <InspectorResizeHandle width={inspectorWidth} onWidth={updateInspectorWidth} /> : null}
               {/* Opaque in every state: on narrow viewports the pane overlays the conversation, so a transparent loading or error state would still swallow its clicks. */}

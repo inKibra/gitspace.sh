@@ -261,6 +261,14 @@ export function scopeAllowsWorkspace(scope: DeviceScope, projectId: string, work
   return scope.kind === 'user' || scope.workspaceId === workspaceId;
 }
 
+/** Whether a device scope reaches a whole project (records spanning its workspaces, such as Chatter): account scope
+ * reaches every project, a project scope its own, several projects each of theirs; a workspace scope none. */
+export function scopeAllowsProject(scope: DeviceScope, projectId: string): boolean {
+  if (scope.kind === 'project') return scope.projectId === projectId;
+  if (scope.kind === 'projects') return scope.projectIds.includes(projectId);
+  return scope.kind === 'user';
+}
+
 /** URL-safe token form of a signed invite, for `?enroll=<token>` and pasted client keys. */
 export function encodeDeviceInviteToken(invite: SignedDeviceInvite): string {
   return toBase64Url(new TextEncoder().encode(JSON.stringify(invite)));

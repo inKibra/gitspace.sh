@@ -28,6 +28,7 @@ import { workspaceMachines, workspaceMachinesSummary, workspaceStatus } from './
 import { RELEASE_TARGETS } from './release.js';
 import { CanonicalLaunchDialog, LaunchMachineDialog, LaunchSheet } from './LaunchSheet.js';
 import { useRuntimeLaunch } from './useRuntimeLaunch.js';
+import { LiveChatter } from './chatter/LiveChatter.js';
 import type { ResourceRequest } from './ResourceNavigation.js';
 import type { WorkspaceTerminalMachine } from './WorkspaceTerminals.js';
 import type { RuntimeSessionCommand, SessionControlView } from '@gitspace/protocol-runtime/session-controls';
@@ -370,6 +371,7 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, reads, 
         stop: async (machineId, name) => { const result = await rpcClient.terminals.stop({ spaceId, machineId, name }); if (result.status === 'error') throw result.error; },
       }}
       renderInspector={(onClose, initialView, resourceRequest, openTerminal, guideSection, driveFocus) => props.renderInspector({ snapshot, conversationId, sessionId: value?.sessionId ?? conversationId ?? null, controls: value, turns, scope: scope.workspace, workspaces: scope.workspaces, onClose, onAskAgent: ask, onCompose: draft ? text => draft.onChange(/\S$/u.test(draft.text) ? `${draft.text} ${text}` : `${draft.text}${text}`) : undefined, onSetRelations: relationsEditable ? setRelations : undefined, initialView, resourceRequest, guideSection, driveFocus, onOpenTerminal: (machineId, name) => { selectTerminalMachine(machineId); openTerminal(name); } })}
+      chatter={<LiveChatter projectId={inspection.project.id} projectName={inspection.project.name} workspaceCount={scope.workspaces.filter(workspace => workspace.closedAt === null).length} />}
     />
     </SpeechProvider>
     </RequirementAcceptance.Provider>

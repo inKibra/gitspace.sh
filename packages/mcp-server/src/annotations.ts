@@ -602,6 +602,26 @@ export const reviewedAnnotations: Record<string, ToolAnnotation> = {
     "idempotentHint": true,
     "openWorldHint": false
   },
+  "chatter.watch": {
+    "readOnlyHint": true,
+    "openWorldHint": false
+  },
+  "chatter.post": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false
+  },
+  "chatter.topics": {
+    "readOnlyHint": true,
+    "openWorldHint": false
+  },
+  "chatter.topicAct": {
+    "readOnlyHint": false,
+    "destructiveHint": true,
+    "idempotentHint": true,
+    "openWorldHint": false
+  },
   "skills.list": {
     "readOnlyHint": true,
     "openWorldHint": false

@@ -24,7 +24,9 @@ export async function restartObjectsForRelease(env: Env, userId: string, sha: st
     [env.RELAY, env.RELAY_NAME], [env.CREDENTIALS, userId], [env.USER_STORAGE, userId], [env.FLEET_CATALOG, userId], [env.USER_SETTINGS, userId],
     [env.PROJECT_SECRETS, userId], [env.USER_SKILLS, userId], [env.USER_PROJECTS, userId], [env.USER_MCP_CONNECTIONS, userId], [env.GITHUB_APP, userId],
     [env.ACCOUNT_STATE, 'account'], [env.ACCOUNT_STATE, userId],
-    ...projects.flatMap((project): ReleaseObject[] => [[env.PROJECT_AUTHORITY, `${userId}:${project.id}`], [env.PROJECT_AUTOMATIONS, `${userId}:${project.id}`]]),
+    ...projects.flatMap((project): ReleaseObject[] => [
+      [env.PROJECT_AUTHORITY, `${userId}:${project.id}`], [env.PROJECT_AUTOMATIONS, `${userId}:${project.id}`], [env.PROJECT_CHATTER, `${userId}:${project.id}`],
+    ]),
     ...spaces.map((definition): ReleaseObject => [env.SPACE_AUTHORITY, `${userId}:${definition.spaceId}`]),
   ];
   const counts: Record<string, number> = {};

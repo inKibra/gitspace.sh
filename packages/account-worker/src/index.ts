@@ -77,6 +77,7 @@ export { BrowserSessionCdp, BrowserSessionDO, BrowserSessionFiles } from './brow
 export { ImageReader } from './image-reader.js';
 export { StorageMigrationDO } from './storage-migration.js';
 export { GhostDO } from './ghost.js';
+export { ProjectChatterDO } from './project-chatter.js';
 declare const GITSPACE_WORKER_SHA: string | undefined;
 const WORKER_VERSION = typeof GITSPACE_WORKER_SHA === 'string' ? GITSPACE_WORKER_SHA : 'channel';
 
