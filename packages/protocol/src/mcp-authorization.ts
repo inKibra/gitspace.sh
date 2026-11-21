@@ -14,8 +14,9 @@ export const MCP_OAUTH_CONSENT_API = '/v1/mcp-oauth/consent';
  * codes `gsoc_…`, dynamic client secrets `gscs_…`; GitSpace keeps only their SHA-256. */
 export const MCP_OAUTH_ACCESS_TOKEN = /^gsoa_[A-Za-z0-9_-]{43}$/u;
 
-/** Permissions a consent grants only after a passkey step-up (`mcp-oauth.grant`, target: the request id). */
-export const MCP_OAUTH_STEP_UP_CAPABILITIES: Readonly<Record<string, true>> = {
+/** Permissions an MCP client is granted only after a passkey step-up: `mcp-oauth.grant` on the consent page (target:
+ * the request id), `mcp-token.create` for a token connection made in Settings (target: its invitation id). */
+export const MCP_STEP_UP_CAPABILITIES: Readonly<Record<string, true>> = {
   'operator.decide': true, 'account.admin': true, 'lifecycle.control': true, 'devices.manage': true, 'deployment.control': true,
 };
 

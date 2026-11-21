@@ -71,8 +71,9 @@ The browser sends the action with header `x-gitspace-step-up` (`STEP_UP_HEADER`)
 | `secure-input.open` | the secure-input request id | `view` on `/api/secure-input` |
 | `secure-input.answer` | the secure-input request id | `submit` and `useSaved` (`decline` needs none) |
 | `mcp-oauth.grant` | the OAuth authorization request id | allowing an MCP client Decide as you, Account administration, Lifecycle control, Device management or Deployment on the OAuth consent page; spent in the same vault transaction that records the grant (docs/GITSPACE-MCP-CAPABILITY-MATRIX.md, "Connect with OAuth") |
+| `mcp-token.create` | the connection's client invitation id | adding a token MCP connection with Decide as you, Account administration, Lifecycle control, Device management or Deployment in Settings → Connections → MCP; spent in the same vault transaction that records the connection. Rotating its token keeps the same grant and needs none |
 
-`MCP_OAUTH_STEP_UP_CAPABILITIES` (`protocol/src/mcp-authorization.ts`) lists the permissions that need it; other permissions need only the signed-in browser.
+`MCP_STEP_UP_CAPABILITIES` (`protocol/src/mcp-authorization.ts`) lists the permissions that need either; other permissions need only the signed-in browser.
 
 ### Bootstrap
 

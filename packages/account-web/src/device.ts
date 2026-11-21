@@ -195,11 +195,11 @@ export interface ApiClientDraft {
   rpcUrl: string;
 }
 
-/** Prepare a delegated invite without creating or enrolling a client key. */
-export async function prepareApiClientInvite(device: BrowserDevice, draft: Pick<ApiClientDraft, 'label' | 'scope' | 'capabilities' | 'ttlMs'>): Promise<SignedDeviceInvite> {
+/** Prepare a delegated invite without creating or enrolling a client key; `inviteId` when a step-up already names it. */
+export async function prepareApiClientInvite(device: BrowserDevice, draft: Pick<ApiClientDraft, 'label' | 'scope' | 'capabilities' | 'ttlMs'>, inviteId: string = crypto.randomUUID()): Promise<SignedDeviceInvite> {
   if (!device.canDelegate || !device.userId) throw new DeviceEnrollmentError('CANNOT_DELEGATE', 'This browser cannot create API clients; re-enroll it with a delegating link');
   const invite: DeviceInvite = {
-    version: 1, userId: device.userId, inviteId: crypto.randomUUID(), kind: 'client', label: draft.label, scope: draft.scope, capabilities: draft.capabilities,
+    version: 1, userId: device.userId, inviteId, kind: 'client', label: draft.label, scope: draft.scope, capabilities: draft.capabilities,
     canDelegate: false, issuedAt: Date.now(), expiresAt: Date.now() + 5 * 60_000, grantTtlMs: draft.ttlMs, enrollUrl: device.enrollUrl,
   };
   const inviteSignature = deviceProtocolBase64.encode(new Uint8Array(await crypto.subtle.sign('Ed25519', device.keyPair.privateKey, owned(deviceInvitePayload(invite)))));

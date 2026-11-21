@@ -411,6 +411,8 @@ export const passkeyCeremonyPurposeSchema = z.enum([
   'secure-input.answer',
   /** Grant an MCP client powerful permissions on the OAuth consent page; target: the authorization request id. */
   'mcp-oauth.grant',
+  /** Create a token MCP connection with powerful permissions in Settings; target: its client invitation id. */
+  'mcp-token.create',
 ]);
 export type PasskeyCeremonyPurpose = z.infer<typeof passkeyCeremonyPurposeSchema>;
 export type StepUpPurpose = Exclude<PasskeyCeremonyPurpose, 'passkey.register'>;

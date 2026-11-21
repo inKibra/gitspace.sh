@@ -75,7 +75,7 @@ The endpoint uses the official TypeScript MCP SDK and Streamable HTTP. Clients d
 
 ### Add an MCP connection
 
-In **Settings > Connections**, choose **Add connection**, name it, and select its client's scope, permissions, and lifetime. An account-scoped browser with device-management and delegation authority must approve setup. An account has any number of connections, for example one per computer or tool; each has its own token, backing client, permissions, and revocation.
+In **Settings > Connections**, choose **Add connection**, name it, and select its client's scope, permissions, and lifetime. An account-scoped browser with device-management and delegation authority must approve setup. Decide as you, Account administration, Lifecycle control, Device management and Deployment also take a passkey step-up (`mcp-token.create`, docs/PASSKEYS-DESIGN.md), or the recovery key while no passkey is enrolled. An account has any number of connections, for example one per computer or tool; each has its own token, backing client, permissions, and revocation.
 
 The browser signs a dedicated API-client invitation. The account vault generates the signing key, enrolls the client under the connection's label, and stores the key encrypted. It also generates a random 32-byte bearer token and stores only its SHA-256 hash. Setup does not expose the signing key to the browser or MCP client.
 

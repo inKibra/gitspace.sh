@@ -30,7 +30,7 @@ import { createDeviceBinding, deviceGrantDependency, encodeApiKey, STEP_UP_HEADE
 import { passkeySignInOptionsRequestSchema, passkeySignInRequestSchema, type PasskeyOperation } from '@gitspace/protocol/passkey-access';
 import { PASSKEY_TABLES, PasskeyVault } from './passkeys.js';
 import { mcpAccessConnectionRequestSchema, mcpAccessCreateRequestSchema, mcpAccessStatusRequestSchema, mcpConnectionViewSchema, type McpAccessOperation, type McpAccessResult, type McpAccessView } from '@gitspace/protocol/mcp-access';
-import { MCP_OAUTH_ACCESS_TOKEN } from '@gitspace/protocol/mcp-authorization';
+import { MCP_OAUTH_ACCESS_TOKEN, MCP_STEP_UP_CAPABILITIES } from '@gitspace/protocol/mcp-authorization';
 import type { McpAuthorizationVault } from './mcp-authorization.js';
 import { GitLfsObjectSchema, GitLfsProtectionSchema, GitLfsSnapshotSchema, projectStorageRoot } from '@gitspace/protocol-workspace';
 import {
@@ -1199,8 +1199,9 @@ export class CredentialVaultDO extends BudgetedDurableObject {
   }
 
   /** Browser-only setup; no signing material is ever returned to the caller. Every change advances one revision, and is
-   * refused when the browser read an older one. */
-  async mcpAccessRequest(input: { operation: McpAccessOperation; header: string | null; target: string; body: Uint8Array }): Promise<McpAccessResult> {
+   * refused when the browser read an older one. Creating a connection with a powerful permission spends an
+   * `mcp-token.create` step-up naming its invitation; rotating keeps the connection's grant, so it needs none. */
+  async mcpAccessRequest(input: { operation: McpAccessOperation; header: string | null; stepUp: string | null; target: string; body: Uint8Array }): Promise<McpAccessResult> {
     const raw: unknown = JSON.parse(new TextDecoder().decode(input.body));
     const parsed = input.operation === 'create' ? mcpAccessCreateRequestSchema.safeParse(raw) : input.operation === 'status' ? mcpAccessStatusRequestSchema.safeParse(raw) : mcpAccessConnectionRequestSchema.safeParse(raw);
     const config = this.config();
@@ -1232,6 +1233,10 @@ export class CredentialVaultDO extends BudgetedDurableObject {
       if (revalidated.status === 'error') return revalidated;
       if (this.mcpAccessRevision() !== revision) return conflict;
       return this.ctx.storage.transactionSync((): McpAccessResult => {
+        if (invite.invite.capabilities.some(capability => MCP_STEP_UP_CAPABILITIES[capability])) {
+          const stepped = this.passkeys.consumeStepUp({ deviceId: authorized.value.deviceId, action: { purpose: 'mcp-token.create', targets: [invite.invite.inviteId] }, proof: input.stepUp });
+          if (stepped.status === 'error') return stepped;
+        }
         const recorded = this.recordMcpConnection({ invite, binding, sealedKey, label, tokenHash, oauth: null });
         if (recorded.status === 'error') return recorded;
         return { status: 'ok', value: { ...this.mcpAccessView(), token, connectionId: recorded.value.connectionId } };
@@ -3796,7 +3801,7 @@ const worker = {
       const headers = {
         'access-control-allow-origin': '*',
         'access-control-allow-methods': 'POST, OPTIONS',
-        'access-control-allow-headers': `content-type, ${RPC_DEVICE_HEADER}, x-gitspace-user`,
+        'access-control-allow-headers': `content-type, ${RPC_DEVICE_HEADER}, x-gitspace-user, ${STEP_UP_HEADER}`,
         'cache-control': 'private, no-store',
       };
       if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers });
@@ -3833,7 +3838,7 @@ const worker = {
           return Response.json(publicError('ACCOUNT_HOST_MISMATCH', 'MCP setup belongs to the current account hostname'), { status: 403, headers });
         }
         const result = await credentialVault(env, env.ACCOUNT_ID).mcpAccessRequest({
-          operation: mcpAccessRoute[1] as McpAccessOperation, header: request.headers.get(RPC_DEVICE_HEADER), target: `${url.pathname}${url.search}`, body,
+          operation: mcpAccessRoute[1] as McpAccessOperation, header: request.headers.get(RPC_DEVICE_HEADER), stepUp: request.headers.get(STEP_UP_HEADER), target: `${url.pathname}${url.search}`, body,
         });
         return Response.json(result, { status: result.status === 'ok' ? 200 : result.error.code === 'MCP_ACCESS_CONFLICT' ? 409 : result.error.code === 'MCP_NOT_FOUND' ? 404 : 403, headers });
       } catch {

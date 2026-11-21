@@ -2,14 +2,19 @@ import { env, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
-import { createDeviceBinding, deviceProtocolBase64, RPC_DEVICE_HEADER, signDeviceInvite, signRpcRequest, type DeviceCapability, type DeviceInvite } from '@gitspace/protocol';
+import {
+  createDeviceBinding, credentialProtocolBase64, deviceProtocolBase64, encodeStepUpProof, passkeyChallengePayload, RPC_DEVICE_HEADER, signDeviceInvite, signRpcRequest, STEP_UP_HEADER,
+  type DeviceCapability, type DeviceInvite,
+} from '@gitspace/protocol';
 import { mcpAccessResultSchema, type McpAccessOperation } from '@gitspace/protocol/mcp-access';
+import { MCP_STEP_UP_CAPABILITIES } from '@gitspace/protocol/mcp-authorization';
 import worker from '../src/index.js';
 import { CredentialVaultDO } from '../src/application.js';
 import { DEFAULT_SKILLS } from '@gitspace/protocol/default-skills';
 import { PHASE_RULE } from '@gitspace/protocol-workspace';
 import { scriptToolSources } from '@gitspace/runtime-core';
 import { tenantRootPrivateKey } from './setup.js';
+import { passkeyChallenge } from './fixtures/passkeys.js';
 
 async function fixture(capabilities: DeviceCapability[], rights: Partial<DeviceInvite> = {}, enable = true) {
   const privateKey = crypto.getRandomValues(new Uint8Array(32));
@@ -24,21 +29,30 @@ async function fixture(capabilities: DeviceCapability[], rights: Partial<DeviceI
   const binding = createDeviceBinding({ inviteId: invite.invite.inviteId, deviceId: crypto.randomUUID(), signingPublicKey: deviceProtocolBase64.encode(ed25519.getPublicKey(privateKey)), label: 'MCP', boundAt: Date.now(), signingPrivateKey: privateKey });
   const enrolled = await vault.enrollDevice({ invite, binding });
   if (enrolled.status !== 'ok') throw new Error(enrolled.error.message);
-  const management = (operation: McpAccessOperation, payload: Record<string, unknown> = {}, signed = true) => {
+  const management = (operation: McpAccessOperation, payload: Record<string, unknown> = {}, signed = true, stepUp: string | null = null) => {
     const path = `/v1/mcp-access/${operation}`;
     const body = new TextEncoder().encode(JSON.stringify({ userId: env.ACCOUNT_ID, ...payload }));
     return worker.fetch(new Request(`${env.ACCOUNT_URL}${path}`, {
       method: 'POST', body, headers: { 'content-type': 'application/json', 'x-gitspace-user': env.ACCOUNT_ID,
         ...(signed ? { [RPC_DEVICE_HEADER]: signRpcRequest({ deviceId: binding.deviceId, signingPrivateKey: privateKey, method: 'POST', path, body }) } : {}),
+        ...(stepUp ? { [STEP_UP_HEADER]: stepUp } : {}),
       },
     }), env);
+  };
+  /** A recovery-key step-up, issued to this browser, for creating the connection of `inviteId`. */
+  const recoveryStepUp = async (inviteId: string) => {
+    const view = await passkeyChallenge({ deviceId: binding.deviceId, key: privateKey }, 'mcp-token.create', [inviteId]);
+    if (!view.required) throw new Error('A step-up was due');
+    return encodeStepUpProof({ challengeId: view.challengeId, proof: { kind: 'root', signature: credentialProtocolBase64.encode(ed25519.sign(passkeyChallengePayload(view.payload), tenantRootPrivateKey)) } });
   };
   const clientInvite = (overrides: Partial<DeviceInvite> = {}) => signDeviceInvite({
     version: 1, userId: env.ACCOUNT_ID, inviteId: crypto.randomUUID(), kind: 'client', label: 'MCP', scope: { kind: 'user' },
     capabilities, canDelegate: false, issuedAt: Date.now(), expiresAt: Date.now() + 60_000, grantTtlMs: 3_600_000,
     enrollUrl: `${env.ACCOUNT_URL}/v1/devices/enroll`, ...overrides,
   }, privateKey, { kind: 'device', deviceId: binding.deviceId });
-  const enabled = enable ? mcpAccessResultSchema.parse(await (await management('create', { expectedRevision: 0, label: 'Desktop', invite: clientInvite() })).json()) : null;
+  const first = clientInvite();
+  const stepUp = enable && capabilities.some(capability => MCP_STEP_UP_CAPABILITIES[capability]) ? await recoveryStepUp(first.invite.inviteId) : null;
+  const enabled = enable ? mcpAccessResultSchema.parse(await (await management('create', { expectedRevision: 0, label: 'Desktop', invite: first }, true, stepUp)).json()) : null;
   if (enabled?.status === 'error') throw new Error(enabled.error.message);
   const accessKey = enabled?.value.token ?? '';
   const connectionId = enabled?.value.connectionId ?? '';
@@ -52,7 +66,7 @@ async function fixture(capabilities: DeviceCapability[], rights: Partial<DeviceI
     requestInit: { headers: { authorization: `Bearer ${accessKey}` } },
     fetch: (input, init) => worker.fetch(new Request(input, init), configured),
   });
-  return { client, transport, configured, request, vault, deviceId: enabled?.value.connections.find(connection => connection.connectionId === connectionId)?.deviceId ?? '', connectionId, browserId: binding.deviceId, accessKey, management, clientInvite };
+  return { client, transport, configured, request, vault, deviceId: enabled?.value.connections.find(connection => connection.connectionId === connectionId)?.deviceId ?? '', connectionId, browserId: binding.deviceId, accessKey, management, clientInvite, recoveryStepUp };
 }
 
 describe('tenant MCP authority boundary', () => {
@@ -175,6 +189,23 @@ describe('tenant MCP authority boundary', () => {
     expect(grants.find(record => record.binding.deviceId === second.value.connections[1]?.deviceId)?.revokedAt).toEqual(expect.any(Number));
     expect(grants.find(record => record.binding.deviceId === value.deviceId)?.revokedAt).toBeNull();
     expect(await (await value.management('status')).json()).toMatchObject({ value: { revision: 4, connections: [{ label: 'Desktop', active: true }] } });
+  });
+
+  it('creates a connection with a powerful permission only after an mcp-token.create step-up naming its invitation, and rotates it without one', async () => {
+    const value = await fixture(['rpc.read', 'account.admin'], {}, false);
+    const create = async (expectedRevision: number, capabilities: DeviceCapability[], stepUp: (inviteId: string) => Promise<string | null>) => {
+      const invite = value.clientInvite({ capabilities });
+      return mcpAccessResultSchema.parse(await (await value.management('create', { expectedRevision, label: 'Agent', invite }, true, await stepUp(invite.invite.inviteId))).json());
+    };
+    // Ordinary permissions take none.
+    expect(await create(0, ['rpc.read'], async () => null)).toMatchObject({ status: 'ok' });
+    expect(await create(1, ['rpc.read', 'account.admin'], async () => null)).toMatchObject({ status: 'error', error: { code: 'STEP_UP_ENROLL_REQUIRED' } });
+    expect(await create(1, ['rpc.read', 'account.admin'], async () => value.recoveryStepUp(crypto.randomUUID()))).toMatchObject({ status: 'error', error: { code: 'STEP_UP_INVALID' } });
+    const powerful = await create(1, ['rpc.read', 'account.admin'], value.recoveryStepUp);
+    if (powerful.status !== 'ok' || !powerful.value.connectionId) throw new Error('The stepped-up connection was refused');
+    expect(powerful.value.connections.find(connection => connection.connectionId === powerful.value.connectionId)?.capabilities).toEqual(['rpc.read', 'account.admin']);
+    const rotated = mcpAccessResultSchema.parse(await (await value.management('rotate', { expectedRevision: 2, connectionId: powerful.value.connectionId })).json());
+    expect(rotated).toMatchObject({ status: 'ok', value: { connectionId: powerful.value.connectionId, token: expect.any(String) } });
   });
 
   it('moves an existing single grant into the connection list with its token unchanged', async () => {

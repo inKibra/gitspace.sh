@@ -61,7 +61,8 @@ import { navigateProductUrl } from './routes.js';
 import { ConnectBrowserDialog, type BrowserConnectionActions } from './ConnectBrowserDialog.js';
 import { SpeechServicePicker, VoiceSetup } from './SpeechSettings.js';
 import type { PasskeyListView, PasskeyView } from '@gitspace/protocol/passkey-access';
-import { listPasskeys, PasskeyError, passkeysSupported, preparePasskeyEnrollment, revokePasskey, type PasskeyEnrollment } from './passkeys.js';
+import { listPasskeys, PasskeyError, passkeysSupported, preparePasskeyEnrollment, revokePasskey, type PasskeyEnrollment, type StepUp } from './passkeys.js';
+import { MCP_STEP_UP_CAPABILITIES } from '@gitspace/protocol/mcp-authorization';
 import { StepUpPrompt, stepUpErrorMessage, TAP, useRenewing, useStepUp } from './StepUpPrompt.js';
 
 // Onboarding embeds the same Default profile surface used by Inference.
@@ -574,7 +575,7 @@ function DeviceRows({ devices, kind, onRevokeDevice, onSignOut }: Pick<SettingsP
 /** One-time bearer values live only in this mounted Connections section. */
 export function McpAccessSettings({ projects, canManageMcp, canCreateMcp, onMcpStatus, onMcpCreate, onMcpRotate, onMcpDisable }: McpAccessActions & { projects: ReadonlyArray<{ id: string; name: string }> }) {
   const [view, setView] = useState<McpAccessView | null>(null);
-  const [action, setAction] = useState<{ kind: 'create' } | { kind: 'rotate' | 'disable'; connection: McpConnectionView } | null>(null);
+  const [action, setAction] = useState<{ kind: 'create'; inviteId: string } | { kind: 'rotate' | 'disable'; connection: McpConnectionView } | null>(null);
   const [secret, setSecret] = useState<{ token: string; endpoint: string; label: string } | null>(null);
   const [pending, setPending] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -583,6 +584,13 @@ export function McpAccessSettings({ projects, canManageMcp, canCreateMcp, onMcpS
   const [projectId, setProjectId] = useState('');
   const [capabilities, setCapabilities] = useState<DeviceCapability[]>(['rpc.read', 'session.prompt']);
   const [ttl, setTtl] = useState('never');
+  const [recovery, setRecovery] = useState<{ stepUp: StepUp; proof: string | null } | null>(null);
+  // Powerful permissions take an `mcp-token.create` step-up naming the new connection's invitation, prefetched while ticked.
+  const powerful = action?.kind === 'create' && capabilities.some(capability => MCP_STEP_UP_CAPABILITIES[capability]);
+  const confirming = useStepUp(action?.kind === 'create' && powerful ? { purpose: 'mcp-token.create', targets: [action.inviteId] } : null);
+  const challenge = confirming.value;
+  const recovered = recovery && recovery.stepUp === challenge ? recovery : null;
+  const confirmed = !powerful || (challenge !== null && (recovered !== null || challenge.passkeyAvailable));
   const alive = useRef(false);
   const status = useRef(onMcpStatus);
   status.current = onMcpStatus;
@@ -610,11 +618,13 @@ export function McpAccessSettings({ projects, canManageMcp, canCreateMcp, onMcpS
   const close = (): void => { if (!pending) { setAction(null); setSecret(null); } };
   const submit = async (): Promise<void> => {
     if (!view || !action || pending) return;
+    // The passkey runs first in the click: Safari runs WebAuthn only inside a gesture.
+    const proof = powerful && challenge ? (recovered ? Promise.resolve(recovered.proof) : challenge.withPasskey()) : Promise.resolve(null);
     setPending(true);
     setError(null);
     try {
       const result = action.kind === 'create'
-        ? await onMcpCreate(view.revision, { label: label.trim(), scope: projectId ? { kind: 'project', projectId } : { kind: 'user' }, capabilities, ttlMs: API_CLIENT_TTLS.find(option => option.value === ttl)?.ms ?? null })
+        ? await onMcpCreate(view.revision, { label: label.trim(), scope: projectId ? { kind: 'project', projectId } : { kind: 'user' }, capabilities, ttlMs: API_CLIENT_TTLS.find(option => option.value === ttl)?.ms ?? null, inviteId: action.inviteId, stepUp: await proof })
         : action.kind === 'rotate' ? await onMcpRotate(view.revision, action.connection.connectionId) : await onMcpDisable(view.revision, action.connection.connectionId);
       if (alive.current) {
         const { token, connectionId, ...next } = result;
@@ -624,7 +634,7 @@ export function McpAccessSettings({ projects, canManageMcp, canCreateMcp, onMcpS
         setAction(null);
       }
     } catch (failure) {
-      if (alive.current) { setError(rpcErrorMessage(failure, 'Change MCP access')); setAction(null); }
+      if (alive.current) { setError(powerful ? stepUpErrorMessage(failure, 'Could not add the MCP connection.') : rpcErrorMessage(failure, 'Change MCP access')); setAction(null); }
     } finally {
       // Reconcile once, including ambiguous failures; never retry a mutation.
       if (alive.current) { await refresh(); setPending(false); }
@@ -637,6 +647,7 @@ export function McpAccessSettings({ projects, canManageMcp, canCreateMcp, onMcpS
     setProjectId('');
     setCapabilities(['rpc.read', 'session.prompt']);
     setTtl('never');
+    setRecovery(null);
     setAction(next);
   };
   const target = action && action.kind !== 'create' ? action.connection.label : '';
@@ -664,7 +675,7 @@ export function McpAccessSettings({ projects, canManageMcp, canCreateMcp, onMcpS
     {!canManageMcp ? <p className="text-caption text-muted-foreground">Manage MCP from an active account-scoped browser with Device management permission.</p> : <>
       {!canCreateMcp ? <p className="text-caption text-muted-foreground">This browser cannot delegate access. Use a delegating account browser to add a connection.</p> : null}
       <div className="flex flex-wrap gap-2 pt-3">
-        <Button variant="primary" size="compact" disabled={!view || !canCreateMcp || loading || pending} onClick={() => open({ kind: 'create' })}>Add connection</Button>
+        <Button variant="primary" size="compact" disabled={!view || !canCreateMcp || loading || pending} onClick={() => open({ kind: 'create', inviteId: crypto.randomUUID() })}>Add connection</Button>
         <Button variant="ghost" size="compact" disabled={pending || loading} onClick={() => { setError(null); void refresh(); }}>Refresh status</Button>
       </div>
     </>}
@@ -683,10 +694,16 @@ export function McpAccessSettings({ projects, canManageMcp, canCreateMcp, onMcpS
         </div> : action?.kind === 'create' ? <fieldset disabled={pending} className="flex min-w-0 flex-col gap-4">
           <InputGroup className="w-full"><InputField index={0} label="Label" value={label} placeholder="Laptop, CI, Claude Desktop" onChange={setLabel} autoFocus required /></InputGroup>
           <ApiClientPermissions projects={projects} projectId={projectId} setProjectId={setProjectId} capabilities={capabilities} setCapabilities={setCapabilities} ttl={ttl} setTtl={setTtl} id="mcp-client" />
+          {powerful ? <section aria-label="Confirm" className="flex flex-col gap-3">
+            <p className="text-body text-foreground [text-wrap:pretty]">{challenge?.passkeyAvailable === false ? 'These permissions need a confirmation. This account has no passkey yet, so confirm with your recovery key.' : 'These permissions need your passkey: Add connection asks for it.'}</p>
+            {confirming.error ? <p role="alert" className="text-caption text-destructive [overflow-wrap:anywhere]">{confirming.error}</p> : null}
+            {recovered ? <p role="status" className="text-caption text-foreground">Recovery key accepted. Add the connection to finish.</p> : null}
+            {challenge && !recovered ? <StepUpPrompt stepUp={challenge} recoveryOnly onProof={proof => setRecovery({ stepUp: challenge, proof })} /> : null}
+          </section> : null}
         </fieldset> : null}
         <DialogFooter>
           <Button variant="secondary" disabled={pending} onClick={close}>{secret ? 'Done' : 'Cancel'}</Button>
-          {!secret ? <Button variant="primary" loading={pending} disabled={pending || !view || (action?.kind === 'create' && (!canCreateMcp || capabilities.length === 0 || !label.trim()))} onClick={() => void submit()}>{action?.kind === 'create' ? 'Add connection' : action?.kind === 'rotate' ? 'Rotate and invalidate old token' : revokesOAuth ? 'Revoke connection' : 'Disable connection'}</Button> : null}
+          {!secret ? <Button variant="primary" loading={pending} disabled={pending || !view || (action?.kind === 'create' && (!canCreateMcp || capabilities.length === 0 || !label.trim() || !confirmed))} onClick={() => void submit()}>{action?.kind === 'create' ? 'Add connection' : action?.kind === 'rotate' ? 'Rotate and invalidate old token' : revokesOAuth ? 'Revoke connection' : 'Disable connection'}</Button> : null}
         </DialogFooter>
       </DialogContent>
     </Dialog>

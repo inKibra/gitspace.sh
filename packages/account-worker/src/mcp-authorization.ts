@@ -1,7 +1,7 @@
 import { credentialProtocolBase64, deviceCapabilitySchema, encodeBase64Url, type DeviceBinding, type DeviceCapability, type SignedDeviceInvite, type StepUpAction, type VerifiedDevice } from '@gitspace/protocol';
 import { RPC_DEVICE_HEADER, STEP_UP_HEADER } from '@gitspace/protocol/device-grant';
 import {
-  MCP_OAUTH_CONSENT_API, MCP_OAUTH_CONSENT_PAGE, MCP_OAUTH_STEP_UP_CAPABILITIES, mcpOAuthClientViewSchema, mcpOAuthConsentDecisionSchema, mcpOAuthConsentViewRequestSchema,
+  MCP_OAUTH_CONSENT_API, MCP_OAUTH_CONSENT_PAGE, MCP_STEP_UP_CAPABILITIES, mcpOAuthClientViewSchema, mcpOAuthConsentDecisionSchema, mcpOAuthConsentViewRequestSchema,
   type McpOAuthConsentView,
 } from '@gitspace/protocol/mcp-authorization';
 import { z } from 'zod';
@@ -423,7 +423,7 @@ export class McpAuthorizationVault {
       if (again.status === 'error') return again;
       const still = this.pending(decision.requestId);
       if (still.status === 'error') return still;
-      if (invite.invite.capabilities.some(capability => MCP_OAUTH_STEP_UP_CAPABILITIES[capability])) {
+      if (invite.invite.capabilities.some(capability => MCP_STEP_UP_CAPABILITIES[capability])) {
         const stepped = this.host.consumeStepUp({ deviceId: browser.deviceId, action: { purpose: 'mcp-oauth.grant', targets: [decision.requestId] }, proof: input.stepUp });
         if (stepped.status === 'error') return stepped;
       }

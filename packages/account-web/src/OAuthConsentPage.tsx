@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Badge, Button, Card, CardContent, CardDescription, CardHeader, CardTitle, CheckboxGroup, CheckboxItem, InputField, InputGroup, RadioGroup, RadioItem } from '@gitspace/ui';
 import { STEP_UP_HEADER, type DeviceCapability, type DeviceScope } from '@gitspace/protocol/device-grant';
 import {
-  MCP_OAUTH_CONSENT_API, MCP_OAUTH_STEP_UP_CAPABILITIES, mcpOAuthConsentDecisionResultSchema, mcpOAuthConsentViewResultSchema,
+  MCP_OAUTH_CONSENT_API, MCP_STEP_UP_CAPABILITIES, mcpOAuthConsentDecisionResultSchema, mcpOAuthConsentViewResultSchema,
   type McpOAuthConsentDecision, type McpOAuthConsentView,
 } from '@gitspace/protocol/mcp-authorization';
 import type { z } from 'zod';
@@ -42,7 +42,7 @@ export interface OAuthConsentProjects {
  * and host from its metadata document, or marked unverified when it registered itself) and, prominently, the host its
  * answer goes to; the permissions as checkboxes, the app's requested ones ticked; the whole account, or one or more
  * projects, including a new one made here; the lifetime; Allow and Deny. Allow signs a client invitation with this
- * browser's key for exactly that choice. Powerful permissions (`MCP_OAUTH_STEP_UP_CAPABILITIES`) take an
+ * browser's key for exactly that choice. Powerful permissions (`MCP_STEP_UP_CAPABILITIES`) take an
  * `mcp-oauth.grant` step-up, prefetched while they are ticked so Allow runs the passkey straight away; with no passkey
  * enrolled, the recovery key answers it.
  */
@@ -77,7 +77,7 @@ export function OAuthConsentPage({ requestId, projects }: { requestId: string; p
     projects.list().then(listed => { if (live) setExisting(listed); }, () => { if (live) setExisting([]); });
     return () => { live = false; };
   }, [requestId]);
-  const powerful = capabilities.some(capability => MCP_OAUTH_STEP_UP_CAPABILITIES[capability]);
+  const powerful = capabilities.some(capability => MCP_STEP_UP_CAPABILITIES[capability]);
   const confirming = useStepUp(view && powerful ? { purpose: 'mcp-oauth.grant', targets: [requestId] } : null);
   const challenge = confirming.value;
   const recovered = recovery && recovery.stepUp === challenge ? recovery : null;
@@ -152,7 +152,7 @@ export function OAuthConsentPage({ requestId, projects }: { requestId: string; p
                       <CheckboxItem index={0} label={capability.label} checked={capabilities.includes(capability.id)} data-capability={capability.id}
                         onToggle={() => { if (!busy) setCapabilities(current => current.includes(capability.id) ? current.filter(value => value !== capability.id) : [...current, capability.id]); }} />
                     </CheckboxGroup>
-                    <p className="pl-7 text-caption text-muted-foreground [text-wrap:pretty]">{capability.description}{MCP_OAUTH_STEP_UP_CAPABILITIES[capability.id] ? '. Needs your passkey.' : ''}</p>
+                    <p className="pl-7 text-caption text-muted-foreground [text-wrap:pretty]">{capability.description}{MCP_STEP_UP_CAPABILITIES[capability.id] ? '. Needs your passkey.' : ''}</p>
                   </div>)}
                 </section>
                 <section aria-label="Projects" className="flex flex-col gap-3">
