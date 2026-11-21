@@ -135,6 +135,39 @@ describe('a ghost of one session', () => {
     expect(contexts[0]!.tools?.map(tool => tool.name)).toEqual(['history_search', 'history_read', 'read']);
   });
 
+  test('reads its transcript with the arguments models send: numbers or numeric strings, a page or one event', async () => {
+    const { identity } = await fixture();
+    transcripts();
+    const { model, contexts } = scripted([
+      () => reply([
+        call('page', 'history_read', { offset: 1024, limit: 1 }),
+        call('strings', 'history_read', { offset: '2048', limit: '5', textOnly: 'true' }),
+        call('event', 'history_read', { mode: 'content', ordinal: 0 }),
+        call('event-string', 'history_read', { mode: 'content', ordinal: '1024', contentLimit: '4000' }),
+      ], 'toolUse'),
+      () => reply([{ type: 'text', text: 'It moved exports to the archive bucket [#2].' }], 'stop'),
+    ]);
+    const { answer, sent } = await ghost(identity, model);
+
+    await answer('What did it decide?');
+    expect(sent.flatMap(message => message.type === 'read' && message.done ? [message] : []).sort((left, right) => left.index - right.index)).toEqual([
+      expect.objectContaining({ index: 0, read: { kind: 'read', from: 1, to: 1 } }),
+      expect.objectContaining({ index: 1, read: { kind: 'read', from: 2, to: 2 } }),
+      expect.objectContaining({ index: 2, read: { kind: 'read', from: 0, to: 0 } }),
+      expect.objectContaining({ index: 3, read: { kind: 'read', from: 1, to: 1 } }),
+    ]);
+    expect(sent.some(message => message.type === 'read' && message.failed !== undefined)).toBe(false);
+    const read = toolText(contexts[1]!);
+    for (const text of TRANSCRIPTS.main!) expect(read).toContain(text);
+    // What the provider is sent: one object per tool, its fields typed, never a bare union it would drop.
+    const Published = z.object({ type: z.literal('object'), properties: z.record(z.string(), z.unknown()), anyOf: z.never().optional(), oneOf: z.never().optional() });
+    expect(Object.fromEntries((contexts[0]!.tools ?? []).map(tool => [tool.name, Object.keys(Published.parse(tool.parameters).properties).sort()]))).toEqual({
+      history_search: ['cursor', 'query'],
+      history_read: ['before', 'contentLimit', 'contentOffset', 'fromEnd', 'limit', 'mode', 'offset', 'ordinal', 'role', 'textOnly'],
+      read: ['limit', 'offset', 'path'],
+    });
+  });
+
   test('reads the drive as it was when the ghost started: a later write is invisible', async () => {
     const { identity } = await fixture();
     transcripts();
