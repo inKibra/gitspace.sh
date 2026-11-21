@@ -148,7 +148,6 @@ describe('user artifact flows', () => {
     const request = { spaceId: workspaceId, expectedGeneration: 0, sessionId: null };
     const pageRequest = { ...request, cursor: null, limit: 16 };
     for (const url of [
-      `drive://workspaces/${siblingId}/private.txt`,
       'drive://workspace/%2e%2e/private.txt',
       'drive://missing.txt',
       'artifact://123',
@@ -163,6 +162,44 @@ describe('user artifact flows', () => {
     expect(await client.inspector.resources.readPage({ ...pageRequest, expectedGeneration: 1, url: 'drive://private.txt' })).toMatchObject({ status: 'error', error: { _tag: 'gitspace/space-generation-conflict' } });
     expect(await client.inspector.resources.readPage({ ...pageRequest, spaceId: crypto.randomUUID(), url: 'drive://private.txt' })).toMatchObject({ status: 'error', error: { _tag: 'gitspace/workspace-not-found' } });
     expect((await readBytes(client.inspector.resources.read({ ...request, spaceId: projectId, url: `drive://workspaces/${siblingId}/private.txt` }))).toString()).toBe('sibling workspace');
+    expect((await readBytes(client.inspector.resources.read({ ...request, url: `drive://workspaces/${siblingId}/private.txt` }))).toString()).toBe('sibling workspace');
+  });
+
+  it('reads and lists another workspace’s drive in the project, archived or as of a time, but never writes, shares or reaches another project’s', async () => {
+    const { authority, workspaceId, projectId, publish } = await fixture();
+    const siblingId = crypto.randomUUID();
+    await authority.putWorkspace({ id: siblingId, projectId, kind: 'worktree', name: 'Sibling', branch: 'main', phase: 'code', sourceKind: 'base', sourceRef: 'main', sourceCommit: null, lifecycle: 'archived', goalId: null, expectedRevision: 0 });
+    const sibling = new InspectorCloudArtifacts(env, env.ACCOUNT_ID, await readInspectorContext(env, env.ACCOUNT_ID, siblingId, projectId));
+    const first = await sibling.write('drive://workspace/notes/plan.md', { bytes: new TextEncoder().encode('first') });
+    await sibling.write('drive://workspace/notes/plan.md', { bytes: new TextEncoder().encode('second') });
+    const artifacts = new InspectorCloudArtifacts(env, env.ACCOUNT_ID, await readInspectorContext(env, env.ACCOUNT_ID, workspaceId, projectId));
+    const url = `drive://workspaces/${siblingId}/notes/plan.md`;
+    const text = async (asOf?: string) => new TextDecoder().decode((await artifacts.bytes(url, null, asOf)).bytes);
+
+    expect(await text()).toBe('second');
+    expect(await text(first.committedAt)).toBe('first');
+    expect(await artifacts.list(siblingId)).toEqual([expect.objectContaining({ url, path: 'notes/plan.md', scope: 'workspace', workspaceId: siblingId })]);
+    expect(await artifacts.list()).toEqual([]);
+    expect((await artifacts.grant(url)).scopeId).toBe(`space:${siblingId}`);
+    await expect(artifacts.write(url, { bytes: new TextEncoder().encode('mine') })).rejects.toThrow('drive://workspaces/<id>/ is read-only from this session; write drive://workspace/<path>');
+    await expect(artifacts.machineTarget(url)).rejects.toThrow('read-only');
+    await expect(artifacts.createShare(url, (await artifacts.grant(url)).hash, null)).rejects.toThrow('read-only here');
+    expect(await text()).toBe('second');
+
+    const otherProjectId = crypto.randomUUID();
+    const other = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${otherProjectId}`);
+    await other.bootstrap({ id: otherProjectId, name: 'Other', repositoryReference: null, baseBranch: 'main', createdBy: 'user' });
+    const strangerId = crypto.randomUUID();
+    await other.putWorkspace({ id: strangerId, projectId: otherProjectId, kind: 'worktree', name: 'Stranger', branch: 'main', phase: 'code', sourceKind: 'base', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
+    await expect(artifacts.bytes(`drive://workspaces/${strangerId}/notes/plan.md`)).rejects.toThrow(`Workspace ${strangerId} is not in this project`);
+    await expect(artifacts.list(strangerId)).rejects.toThrow('is not in this project');
+
+    // The project agent reads every workspace's drive as before, and still writes only drive://base/.
+    await publish(projectId, 1, [{ path: 'shared.md', content: 'project' }]);
+    const project = new InspectorCloudArtifacts(env, env.ACCOUNT_ID, await readInspectorContext(env, env.ACCOUNT_ID, projectId, projectId));
+    expect(new TextDecoder().decode((await project.bytes(url)).bytes)).toBe('second');
+    await expect(project.write(url, { bytes: new TextEncoder().encode('base') })).rejects.toThrow('write drive://base/<path>');
+    expect(new TextDecoder().decode((await artifacts.bytes('drive://base/shared.md')).bytes)).toBe('project');
   });
 
   it('applies the text preview limit before streaming and allows bounded resource selections', async () => {

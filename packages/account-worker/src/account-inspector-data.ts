@@ -134,7 +134,9 @@ export class InspectorCloudArtifacts {
     return read;
   }
 
-  /** Normalizes a drive:// URL to the workspace it addresses; that workspace's scope may not exist yet. */
+  /** Normalizes a drive:// URL to the workspace it addresses; that workspace's scope may not exist yet.
+   * drive://workspaces/<id>/… names any workspace of this project, archived ones included; a session only reads it:
+   * every write goes through `writablePath`, and `createShare` refuses it. */
   private target(url: string) {
     const parsed = new URL(url);
     if (parsed.protocol !== 'drive:') throw new Error('Artifact URL must use drive://');
@@ -147,10 +149,11 @@ export class InspectorCloudArtifacts {
     // The project session's own drive is drive://base/; drive://workspace/ there names it too, for reading: its browser
     // tools handed the project agent such addresses until 2026-11-02, and its conversations keep them.
     else if (parsed.hostname === 'workspace') spaceId = isBase ? this.source.project.id : this.source.workspace.id;
-    else if (parsed.hostname === 'workspaces' && isBase) {
+    else if (parsed.hostname === 'workspaces') {
       const [id, ...rest] = path.split('/');
       spaceId = id ?? '';
       path = rest.join('/');
+      if (!this.source.workspaces.some((candidate) => candidate.id === spaceId)) throw new Error(`Workspace ${spaceId} is not in this project; drive://workspaces/<id>/ reads only this project's workspaces`);
     } else throw new Error('Artifact scope is not accessible from this workspace');
     const workspace = this.source.workspaces.find((candidate) => candidate.id === spaceId);
     if (!workspace || (spaceId === this.source.project.id ? workspace.kind !== 'base' : workspace.kind !== 'worktree')) throw new Error('Artifact scope does not exist');
@@ -199,8 +202,19 @@ export class InspectorCloudArtifacts {
     return (await this.files.put(scope.id, new TextEncoder().encode(JSON.stringify(manifest)))).blobHash;
   }
 
-  async list(): Promise<InspectorView['artifacts']> {
+  /** This session's drives (its own and the project's), or with `workspaceId` that workspace's drive, named
+   * drive://workspaces/<id>/…: any workspace of this project, read-only unless it is this session's own. */
+  async list(workspaceId?: string): Promise<InspectorView['artifacts']> {
     const scopes = await this.source.authority.listArtifactScopes();
+    if (workspaceId !== undefined) {
+      const { spaceId } = this.target(`drive://workspaces/${encodeURIComponent(workspaceId)}/`);
+      const scope = scopes.find((candidate) => candidate.workspaceId === spaceId);
+      return scope ? (await this.entries(scope)).map((entry) => ({
+        url: driveUrl(`workspaces/${encodeURIComponent(spaceId)}`, entry.path), path: entry.path, hash: entry.blobHash,
+        size: entry.size, mediaType: entry.mediaType, scope: spaceId === this.source.project.id ? 'base' as const : 'workspace' as const,
+        workspaceId: spaceId === this.source.project.id ? null : spaceId, writtenAt: entry.writtenAt ?? null,
+      })) : [];
+    }
     const selected = scopes.filter((scope) => scope.workspaceId === this.source.workspace.id || scope.workspaceId === this.source.project.id);
     const groups = await Promise.all(selected.map(async (scope) => {
       const base = scope.workspaceId === this.source.project.id;
@@ -408,6 +422,9 @@ export class InspectorCloudArtifacts {
     const writable = this.writable();
     const resource = parseResourceUri(url);
     if (resource?.kind !== 'drive') throw new Error('Unsupported or unsafe resource URI');
+    if (resource.mount === 'workspaces') {
+      throw new Error(`drive://workspaces/<id>/ is read-only from this session; write drive://${writable.mount}/<path>`);
+    }
     if (resource.mount !== writable.mount) {
       throw new Error(writable.mount === 'workspace'
         ? 'This workspace can write drive://workspace/<path>; drive://base/ is written from the project session'
@@ -627,6 +644,10 @@ export class InspectorCloudArtifacts {
 
   async createShare(url: string, hash: string, expiresAt: string | null) {
     const { scope, path } = await this.resolve(url);
+    // A share publishes the file: a worktree session shares only its own drive and the project's.
+    if (this.source.workspace.kind !== 'base' && scope.workspaceId !== this.source.workspace.id && scope.workspaceId !== this.source.project.id) {
+      throw new Error('Files in another workspace’s drive are read-only here; share them from that workspace');
+    }
     const entry = (await this.entries(scope)).find((candidate) => candidate.path === path && candidate.blobHash === hash);
     if (!entry) throw new Error('Selected artifact version changed. Refresh and select it again.');
     if (expiresAt !== null && (!Number.isFinite(Date.parse(expiresAt)) || Date.parse(expiresAt) <= Date.now())) throw new Error('Choose an expiry in the future');

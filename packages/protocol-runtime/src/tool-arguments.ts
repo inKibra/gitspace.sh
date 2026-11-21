@@ -218,7 +218,8 @@ export const RuntimeGenerateImageArgumentsSchema = z.object({ prompt: path.descr
 export const RuntimeSpacePhaseArgumentsSchema = RuntimeDispatchSelectionSchema.extend({ phase: z.enum(['plan', 'code', 'review', 'ship']).describe('The workspace\'s new phase.') });
 const machinePath = path.describe('Path on the machine: relative to the checkout, or absolute under /tmp.');
 export const RuntimeSpaceArtifactsArgumentsSchema = z.discriminatedUnion('method', [
-  z.object({ method: z.enum(['list', 'listScopes', 'listPromotions']).describe('List the workspace\'s artifacts, drive scopes or promotions.') }),
+  z.object({ method: z.literal('list').describe('List the workspace\'s artifacts.'), workspaceId: path.optional().describe('List instead that workspace\'s drive in this project, read-only, as drive://workspaces/<workspaceId>/… URLs.') }),
+  z.object({ method: z.enum(['listScopes', 'listPromotions']).describe('List drive scopes or promotions.') }),
   z.object({ method: z.literal('read').describe('Read an artifact.'), url: path.describe('The artifact\'s drive:// URL.') }),
   z.object({ method: z.literal('readCode').describe('Read a repository file at a commit.'), path: path.describe('Repository path.'), commit: z.string().regex(/^[a-f0-9]{40,64}$/u).describe('Commit to read it at.') }),
   RuntimeDispatchSelectionSchema.extend({ method: z.literal('toMachine').describe('Copy a drive file to the machine.'), url: path.describe('The drive:// file to copy.'), path: machinePath }),

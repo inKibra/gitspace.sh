@@ -883,7 +883,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
         const args = RuntimeSpaceArtifactsArgumentsSchema.parse(input.args);
         const artifacts = new InspectorCloudArtifacts(env, env.ACCOUNT_ID, await source());
         switch (args.method) {
-          case 'list': return completed(input, await artifacts.list());
+          case 'list': return completed(input, await artifacts.list(args.workspaceId));
           case 'listScopes': return completed(input, await authority().listArtifactScopes());
           case 'listPromotions': return completed(input, await authority().listArtifactPromotions());
           case 'read': return artifactContent(input, args.url, artifacts, identity.workspaceId, options.documentMarkdown);
