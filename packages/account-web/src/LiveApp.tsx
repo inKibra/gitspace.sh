@@ -66,6 +66,8 @@ import { releaseWorkspaceCaches } from './workspace-cache-actions.js';
 import { useWorkspaceAutomations } from './goal/useWorkspaceAutomations.js';
 import { ACCOUNT_GROUP, openFirstPaintCache, workspaceGroup } from './first-paint-cache.js';
 import { Toasts, useToasts, type Toast } from './toasts.js';
+import { GhostLayer } from './ghost/GhostWindow.js';
+import { summonGhost } from './ghost/ghost-store.js';
 
 
 
@@ -552,6 +554,7 @@ function AccountFrame({ children }: { children: ReactNode }) {
         failedAutomationRuns={automationSummaries.reduce((sum, summary) => sum + summary.failedToday, 0)}
         onSetRelations={setRelations}
         onSetPhase={setPhase}
+        onAskGhost={(workspace) => summonGhost({ projectId: workspace.projectId, workspaceId: workspace.id, workspaceName: workspace.name, archived: workspace.closedAt !== null })}
       />
       <SidebarInset className="min-w-0 overflow-hidden">
         {!live ? <SidebarInsetTopbar><nav aria-label="Location" className="min-w-0"><span aria-current="page" className="truncate text-body font-medium">{frameView === 'agent' ? projectValues.find((project) => project.id === projectId)?.name ?? 'Your account' : PRODUCT_ROUTE_LABELS[frameView]}</span></nav></SidebarInsetTopbar> : null}
@@ -565,6 +568,7 @@ function AccountFrame({ children }: { children: ReactNode }) {
         catch (cause) { setCreateError(rpcErrorMessage(cause, 'Create workspace')); }
         finally { createPendingRef.current = false; setCreatePending(false); }
       }} />
+      <GhostLayer onOpenWorkspace={selectInspection} />
     </SidebarProvider>
   </StackToasts></ProjectGraphsContext.Provider></AccountDirectoryContext.Provider></AccountSidebarContext.Provider></ProjectSettingsContext.Provider></AccountWorkActionsContext.Provider>;
 }

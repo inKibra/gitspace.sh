@@ -99,3 +99,55 @@ body { overflow: hidden; }
 [data-comment-marked="staged"] { background-color: color-mix(in oklab, #f59e0b 10%, transparent); }
 [data-comment-marked="staged"]::before { background: #f59e0b; }
 [data-comment-marked][data-comment-active] { box-shadow: none; background-color: color-mix(in oklab, #f59e0b 22%, transparent); }
+
+/* ── Ghosts ── The ghost's window: frosted, lavender-edged, lit softly from above (ghost/GhostWindow.tsx). */
+.ghost-glass {
+  --ghost: #9a8cff;
+  background:
+    radial-gradient(120% 60% at 50% -10%, color-mix(in oklab, var(--ghost) 16%, transparent), transparent 70%),
+    color-mix(in oklab, var(--background) 74%, transparent);
+  backdrop-filter: blur(20px) saturate(1.25);
+  -webkit-backdrop-filter: blur(20px) saturate(1.25);
+  border: 1px solid color-mix(in oklab, var(--ghost) 32%, transparent);
+  box-shadow: 0 28px 64px -24px color-mix(in oklab, #6d5ce8 50%, transparent), 0 0 0 5px color-mix(in oklab, var(--ghost) 6%, transparent), inset 0 1px 0 color-mix(in oklab, white 35%, transparent);
+}
+.ghost-tombstone {
+  background: color-mix(in oklab, var(--background) 62%, transparent);
+  backdrop-filter: blur(14px) grayscale(0.3);
+  -webkit-backdrop-filter: blur(14px) grayscale(0.3);
+  border: 1px dashed color-mix(in oklab, #9a8cff 35%, var(--border));
+}
+.ghost-input { background: color-mix(in oklab, var(--background) 70%, transparent); box-shadow: inset 0 0 0 1px color-mix(in oklab, #9a8cff 26%, transparent); }
+.ghost-input:focus-within { box-shadow: inset 0 0 0 1px color-mix(in oklab, #9a8cff 60%, transparent), 0 0 0 3px color-mix(in oklab, #9a8cff 14%, transparent); }
+.ghost-scroll { scrollbar-width: thin; scrollbar-color: color-mix(in oklab, #9a8cff 30%, transparent) transparent; }
+.ghost-chip { color: color-mix(in oklab, #9a8cff 62%, var(--foreground)); background: color-mix(in oklab, #9a8cff 14%, transparent); box-shadow: inset 0 0 0 1px color-mix(in oklab, #9a8cff 24%, transparent); }
+.ghost-chip:hover { background: color-mix(in oklab, #9a8cff 26%, transparent); }
+.ghost-suggestion { color: color-mix(in oklab, #9a8cff 55%, var(--foreground)); background: color-mix(in oklab, #9a8cff 7%, transparent); box-shadow: inset 0 0 0 1px color-mix(in oklab, #9a8cff 24%, transparent); }
+.ghost-suggestion:hover { background: color-mix(in oklab, #9a8cff 16%, transparent); }
+.ghost-ask { color: color-mix(in oklab, #9a8cff 70%, var(--foreground)); background: color-mix(in oklab, #9a8cff 10%, var(--background)); box-shadow: inset 0 0 0 1px color-mix(in oklab, #9a8cff 28%, transparent); }
+.ghost-ask:hover { background: color-mix(in oklab, #9a8cff 20%, var(--background)); }
+/* A cited entry lights up, then settles to a faint wash; the composer glows when a draft lands in it. */
+.ghost-flash { animation: ghost-flash 2.6s ease-out forwards; border-radius: 10px; }
+@keyframes ghost-flash {
+  0% { background: color-mix(in oklab, #9a8cff 30%, transparent); box-shadow: 0 0 0 2px color-mix(in oklab, #9a8cff 65%, transparent); }
+  100% { background: color-mix(in oklab, #9a8cff 8%, transparent); box-shadow: 0 0 0 1px color-mix(in oklab, #9a8cff 25%, transparent); }
+}
+.ghost-composer-flash { animation: ghost-composer-flash 1.6s ease-out; }
+@keyframes ghost-composer-flash { 0% { box-shadow: 0 0 0 3px color-mix(in oklab, #9a8cff 55%, transparent); } 100% { box-shadow: 0 0 0 0 transparent; } }
+/* The glow when a ghost is summoned again. */
+.ghost-pulse { animation: ghost-pulse 1.3s ease-out forwards; }
+@keyframes ghost-pulse {
+  0% { box-shadow: inset 0 0 0 2px color-mix(in oklab, #9a8cff 70%, transparent), inset 0 0 40px color-mix(in oklab, #9a8cff 30%, transparent); }
+  100% { box-shadow: inset 0 0 0 0 transparent, inset 0 0 0 transparent; }
+}
+.ghost-bob { display: inline-flex; animation: ghost-bob 3.2s ease-in-out infinite; }
+@keyframes ghost-bob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-1.5px); } }
+.ghost-caret { display: inline-block; width: 7px; height: 14px; margin-left: 2px; vertical-align: -2px; border-radius: 2px; background: #9a8cff; animation: ghost-caret 1s steps(2) infinite; }
+@keyframes ghost-caret { 50% { opacity: 0; } }
+.ghost-shimmer {
+  background: linear-gradient(90deg, var(--muted-foreground) 30%, #9a8cff 50%, var(--muted-foreground) 70%) 0 0 / 220% 100%;
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+  animation: ghost-shimmer 1.4s linear infinite;
+}
+@keyframes ghost-shimmer { from { background-position: 110% 0; } to { background-position: -110% 0; } }
+@media (prefers-reduced-motion: reduce) { .ghost-bob, .ghost-caret, .ghost-shimmer { animation: none; } }

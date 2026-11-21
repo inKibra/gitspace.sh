@@ -24,7 +24,7 @@ function historyFor(items: TranscriptRow[], extra: Partial<TranscriptHistory> = 
     rows: items, generation: 'session-generation', loading: false, initialLoading: false, error: null, saved: false,
     navigation: null,
     hasBefore: false, hasAfter: false, total: items.length,
-    refresh: vi.fn(), loadOlder: vi.fn(), loadNewer: vi.fn(), jumpToLatest: vi.fn(), jumpToRow: vi.fn(), setViewport: vi.fn(),
+    refresh: vi.fn(), loadOlder: vi.fn(), loadNewer: vi.fn(), jumpToLatest: vi.fn(), jumpToRow: vi.fn(), jumpToOrdinal: vi.fn(), setViewport: vi.fn(),
     content: vi.fn(async () => ({ text: '{}', offset: 0, nextOffset: null, totalCharacters: 2 })),
     executionPage: vi.fn(async () => ({ generation: 'session-generation', revision: 0, rows: [], hasBefore: false, hasAfter: false, total: 0 })), ...extra,
   };

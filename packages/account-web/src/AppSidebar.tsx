@@ -35,6 +35,7 @@ import { Activity, Archive, ArrowDown, ArrowUp, BookOpen01, Check, ChevronRight,
 import { AnimatePresence, motion } from 'framer-motion';
 import { createContext, Fragment, useContext, useEffect, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from 'react';
 import { glyph } from './glyph.js';
+import { GHOST, GhostGlyph } from './ghost/ghost-parts.js';
 import { converging, latestLaunchProgress, launchPhaseLabel, machineConvergence, RELEASE_TARGETS, runningLabel, workspaceRelease, type LaunchTrack } from './release.js';
 import { PRODUCT_ROUTE_LABELS, type AppView, type ProductRoute } from './routes.js';
 import { operationActive } from './OperationProgress.js';
@@ -187,6 +188,8 @@ export interface AppSidebarProps {
   onOpenProjectSettings?(projectId: string): void;
   /** Opens Automations with this project chosen. */
   onOpenProjectAutomations?(projectId: string): void;
+  /** Opens a ghost of the workspace's main conversation: a read-only chat about it. Archived workspaces too. */
+  onAskGhost?(workspace: SidebarWorkspace): void;
   /** Automation runs that failed today across every project; the Automations item shows it. */
   failedAutomationRuns?: number;
   onNewProject?(): void;
@@ -557,7 +560,7 @@ function StateCounts({ items }: { items: readonly RowItem[] }) {
   </span>;
 }
 
-interface ProjectRowsProps extends Pick<AppSidebarProps, 'selected' | 'deployment' | 'onSelectProject' | 'onSelectWorkspace' | 'onReleaseMachines' | 'releasePendingSpaceId' | 'onArchive' | 'onRestore' | 'onDelete' | 'onRename' | 'onNewWorkspace' | 'onOpenProjectSettings' | 'onOpenProjectAutomations'> {
+interface ProjectRowsProps extends Pick<AppSidebarProps, 'selected' | 'deployment' | 'onSelectProject' | 'onSelectWorkspace' | 'onReleaseMachines' | 'releasePendingSpaceId' | 'onArchive' | 'onRestore' | 'onDelete' | 'onRename' | 'onNewWorkspace' | 'onOpenProjectSettings' | 'onOpenProjectAutomations' | 'onAskGhost'> {
   project: SidebarProject;
   /** Archived or being deleted: the row is dimmed and offers no new workspace. */
   archived: boolean;
@@ -572,7 +575,7 @@ interface ProjectRowsProps extends Pick<AppSidebarProps, 'selected' | 'deploymen
   move: MovePhase | null;
 }
 
-function ProjectRows({ project, archived: projectArchived, collapsed, onCollapse, selected, deployment, onSelectProject, onSelectWorkspace, onReleaseMachines, releasePendingSpaceId, onArchive, onRestore, onDelete, onRename, onNewWorkspace, onOpenProjectSettings, onOpenProjectAutomations, filter, groupBy, hovered, onHover, picker, edit, move }: ProjectRowsProps) {
+function ProjectRows({ project, archived: projectArchived, collapsed, onCollapse, selected, deployment, onSelectProject, onSelectWorkspace, onReleaseMachines, releasePendingSpaceId, onArchive, onRestore, onDelete, onRename, onNewWorkspace, onOpenProjectSettings, onOpenProjectAutomations, onAskGhost, filter, groupBy, hovered, onHover, picker, edit, move }: ProjectRowsProps) {
   const { base, workspaces, graph } = project;
   const [showArchived, setShowArchived] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
@@ -646,7 +649,12 @@ function ProjectRows({ project, archived: projectArchived, collapsed, onCollapse
       renaming={renamed} onStartRename={startRename}
       drag={edit && editable ? { draggable: !picker.mode && renaming !== item.id, start: () => { picker.setDragging(item.id); picker.start(item, 'stack'); }, drop: () => { if (picker.dragging) picker.pick(item.id); picker.setDragging(null); }, end: () => { picker.setDragging(null); if (picker.dragging) picker.leave(); } } : undefined}
       flags={<>{item.workspace.definition?.remote?.behind ? <BehindOriginGlyph branch={item.branch} /> : null}{launchedFrom(deployment, item.id) ? <LaunchedGlyph /> : null}{released ? <span className="ml-1 shrink-0 text-caption text-muted-foreground/70">· released</span> : null}</>}
-      actions={<SpaceMenu space={item.workspace} kind="workspace" summary={summary} deployment={deployment} onReleaseMachines={onReleaseMachines} releasePendingSpaceId={releasePendingSpaceId} onArchive={onArchive} onRestore={onRestore} onDelete={onDelete} onRename={startRename} phase={phase} stack={stack} />} />;
+      actions={<>
+        {onAskGhost ? <Tooltip content={archivedRow ? 'Ask a ghost · reads the archived session' : 'Ask a ghost · reads this conversation, changes nothing'} side="right">
+          <SidebarMenuAction aria-label={`Ask a ghost about ${item.name}`} onClick={() => onAskGhost(item.workspace)} style={{ color: `color-mix(in oklab, ${GHOST} 80%, var(--foreground))` }}><GhostGlyph size={15} /></SidebarMenuAction>
+        </Tooltip> : null}
+        <SpaceMenu space={item.workspace} kind="workspace" summary={summary} deployment={deployment} onReleaseMachines={onReleaseMachines} releasePendingSpaceId={releasePendingSpaceId} onArchive={onArchive} onRestore={onRestore} onDelete={onDelete} onRename={startRename} phase={phase} stack={stack} />
+      </>} />;
   };
   const entries = listEntries(items, filter, groupBy);
   const spot = stacking && source && picker.hover ? landing(items, source, picker.hover, filter, groupBy) : null;
@@ -748,7 +756,7 @@ export function AppSidebar(props: AppSidebarProps) {
   return <StackToasts><SidebarBody {...props} /></StackToasts>;
 }
 
-function SidebarBody({ view, onView, selected, selectedSummary, projects, onSelectProject, onSelectWorkspace, onReleaseMachines, releasePendingSpaceId = null, onArchive, onRestore, onDelete, onRename, onNewWorkspace, onNewProject, onOpenSettings, onOpenProjectSettings, onOpenProjectAutomations, failedAutomationRuns = 0, user, deployment, onSetRelations, onSetPhase }: AppSidebarProps) {
+function SidebarBody({ view, onView, selected, selectedSummary, projects, onSelectProject, onSelectWorkspace, onReleaseMachines, releasePendingSpaceId = null, onArchive, onRestore, onDelete, onRename, onNewWorkspace, onNewProject, onOpenSettings, onOpenProjectSettings, onOpenProjectAutomations, onAskGhost, failedAutomationRuns = 0, user, deployment, onSetRelations, onSetPhase }: AppSidebarProps) {
   const userName = user?.name || 'Your account';
   const [collapsedProjects, setCollapsedProjects] = useState(readCollapsedProjects);
   const [filter, setFilter] = useState<SidebarFilter>('all');
@@ -862,7 +870,7 @@ function SidebarBody({ view, onView, selected, selectedSummary, projects, onSele
     window.addEventListener('keydown', key);
     return () => window.removeEventListener('keydown', key);
   });
-  const rowProps = { selected, deployment, onSelectProject, onSelectWorkspace, onReleaseMachines, releasePendingSpaceId, onArchive: archive, onRestore, onDelete, onRename, onNewWorkspace, onOpenProjectSettings, onOpenProjectAutomations, filter, groupBy, hovered, onHover: setHovered, picker, edit, move };
+  const rowProps = { selected, deployment, onSelectProject, onSelectWorkspace, onReleaseMachines, releasePendingSpaceId, onArchive: archive, onRestore, onDelete, onRename, onNewWorkspace, onOpenProjectSettings, onOpenProjectAutomations, onAskGhost, filter, groupBy, hovered, onHover: setHovered, picker, edit, move };
   return <Sidebar ref={scroller} variant="inset">
     <SidebarHeader>
       <div className="relative">

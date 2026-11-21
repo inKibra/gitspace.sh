@@ -197,7 +197,7 @@ it('leaves virtual transcript scroll ownership with its native viewport renderer
       id: `row-${ordinal}`, ordinal, turnId: 'long-turn', turnStatus: 'running', truncated: false, contentBytes: 100,
       item: { id: `row-${ordinal}`, type: 'message', role: 'user', text: `Virtual block ${ordinal}` },
     })),
-    refresh: vi.fn(), loadOlder: vi.fn(), loadNewer: vi.fn(), jumpToLatest: vi.fn(), jumpToRow: vi.fn(), setViewport: vi.fn(),
+    refresh: vi.fn(), loadOlder: vi.fn(), loadNewer: vi.fn(), jumpToLatest: vi.fn(), jumpToRow: vi.fn(), jumpToOrdinal: vi.fn(), setViewport: vi.fn(),
     content: vi.fn(async () => ({ text: '{}', offset: 0, nextOffset: null, totalCharacters: 2 })),
     executionPage: vi.fn(async () => ({ generation: 'virtual-generation', revision: 0, rows: [], hasBefore: false, hasAfter: false, total: 0 })),
   };

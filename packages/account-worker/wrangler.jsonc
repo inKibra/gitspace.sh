@@ -93,6 +93,11 @@
       {
         "name": "STORAGE_MIGRATION",
         "class_name": "StorageMigrationDO"
+      },
+      {
+        // One memory-only object per ghost (src/ghost.ts); it never writes storage.
+        "name": "GHOSTS",
+        "class_name": "GhostDO"
       }
     ]
   },
@@ -152,6 +157,10 @@
       "tag": "account-v7-automations",
       "new_sqlite_classes": ["ProjectAutomationsDO"],
       "deleted_classes": ["ProjectCronsDO"]
+    },
+    {
+      "tag": "account-v8-ghosts",
+      "new_sqlite_classes": ["GhostDO"]
     }
   ],
   "vars": {

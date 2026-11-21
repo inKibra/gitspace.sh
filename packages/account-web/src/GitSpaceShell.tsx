@@ -64,6 +64,8 @@ import { anchorEntity } from './comments/CommentLayer.js';
 import { DocumentNavigation } from './comments/context.js';
 import { OutgoingMessages, useOutbox, type OutboxArrivals, type SentMessage } from './chat/outbox.js';
 import { Toasts, useToasts } from './toasts.js';
+import { GhostGlyph } from './ghost/ghost-parts.js';
+import { finishGhostRequest, summonGhost, useGhostRequest } from './ghost/ghost-store.js';
 
 /**
  * Where a space lives right now. A cloud runtime workspace lives in the cloud and reports its own status (machines are
@@ -796,6 +798,7 @@ function Shell({ project, projects, workspace, baseSpace, workspaces, mainAgent,
     onNewWorkspace: onCreateWorkspace ? (projectId) => setNewWorkspaceFor({ projectId, phase: 'plan' }) : undefined,
     onNewProject: onCreateProject ? () => setNewProject(true) : undefined,
     onOpenSettings,
+    onAskGhost: (target) => summonGhost({ projectId: target.projectId, workspaceId: target.id, workspaceName: target.name, archived: target.closedAt !== null }),
     user,
     deployment,
   };
@@ -822,6 +825,42 @@ function Shell({ project, projects, workspace, baseSpace, workspaces, mainAgent,
     setInspectorOpen(true);
     requestAnimationFrame(() => setInspectorSection('goal'));
   };
+  // A ghost's citation or draft for this workspace: the transcript at the entry (once its first page loaded), the
+  // Drive at the lines, or the draft in the composer.
+  const ghostRequest = useGhostRequest(workspace.id);
+  const transcriptReady = (transcript?.generation ?? null) !== null;
+  useEffect(() => {
+    if (!ghostRequest) return;
+    if (ghostRequest.kind === 'entry') {
+      if (!transcript || !transcriptReady) return;
+      transcript.jumpToOrdinal(ghostRequest.ordinal);
+    } else if (ghostRequest.kind === 'drive') {
+      if (!renderInspector) return;
+      setResourceRequest({ spaceId: workspace.id, request: { uri: ghostRequest.url } });
+      setInspectorSection(undefined);
+      setInspectorOpen(true);
+    } else {
+      if (!draft) return;
+      draft.onChange(draft.text.trim() ? `${draft.text.trimEnd()}\n\n${ghostRequest.text}` : ghostRequest.text);
+      const composer = document.querySelector<HTMLElement>('[data-slot="input-message"]');
+      composer?.querySelector('textarea')?.focus();
+      composer?.classList.add('ghost-composer-flash');
+      window.setTimeout(() => composer?.classList.remove('ghost-composer-flash'), 1600);
+    }
+    finishGhostRequest(ghostRequest.serial);
+  }, [ghostRequest, transcript, transcriptReady, draft, renderInspector, workspace.id]);
+  // The entry a ghost's citation jumped to lights up, then settles.
+  const flashRow = transcript?.navigation?.flash ? transcript.navigation.rowId : null;
+  useEffect(() => {
+    if (!flashRow) return;
+    let row: Element | null = null;
+    const frame = requestAnimationFrame(() => {
+      row = document.querySelector(`[data-transcript-row="${CSS.escape(flashRow)}"]`);
+      row?.classList.add('ghost-flash');
+    });
+    const timer = window.setTimeout(() => row?.classList.remove('ghost-flash'), 2600);
+    return () => { cancelAnimationFrame(frame); window.clearTimeout(timer); row?.classList.remove('ghost-flash'); };
+  }, [flashRow, transcript?.navigation]);
   const content = <BlockReferences.Provider value={referenceTargets}><ResourceFiles.Provider value={resolveResourceFile ?? null}><ResourceNavigation.Provider value={renderInspector ? (request) => { setResourceRequest({ spaceId: workspace.id, request }); setInspectorSection(undefined); setInspectorOpen(true); } : null}><GuideSectionNavigation.Provider value={renderInspector ? (id: string) => openGuideEntity(`section:${id}`) : null}><DocumentNavigation.Provider value={renderInspector ? openDocument : null}>
     <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
       <SidebarInsetTopbar className="pr-3">
@@ -839,6 +878,10 @@ function Shell({ project, projects, workspace, baseSpace, workspaces, mainAgent,
             {remote?.behind ? <BehindOrigin branch={workspace.branch} kind={workspace.kind} checkedAt={remote.checkedAt} onUpdate={workspace.kind === 'project' ? onUpdateBase : undefined} /> : null}
             {workspace.kind === 'workspace' && onSetWorkspacePhase ? <PhaseControl workspace={workspace} workspaces={workspaces} onSetPhase={onSetWorkspacePhase} /> : null}
             {sessionControls?.value.context ? <Tooltip content={`${Math.round(sessionControls.value.context.tokens).toLocaleString()} of ${Math.round(sessionControls.value.context.contextWindow).toLocaleString()} tokens`} side="bottom"><span className="tabular-nums px-2 text-caption text-muted-foreground">{Math.round(sessionControls.value.context.percent)}%</span></Tooltip> : null}
+            <Tooltip content={`Ask a ghost about ${workspace.kind === 'workspace' ? workspace.name : workspace.projectName} · reads, changes nothing`} side="bottom">
+              <button type="button" aria-label="Ask a ghost" onClick={() => summonGhost({ projectId: workspace.projectId, workspaceId: workspace.id, workspaceName: workspace.kind === 'workspace' ? workspace.name : workspace.projectName, archived: workspace.closedAt !== null })}
+                className="ghost-ask inline-flex h-7 shrink-0 items-center gap-1 rounded-full px-2.5 text-[11.5px] font-medium transition-colors"><GhostGlyph size={14} />Ask a ghost</button>
+            </Tooltip>
             {terminals ? <Tooltip content="Terminals" side="bottom"><Button variant="ghost" size="icon-compact" aria-label="Open terminals" aria-pressed={terminalOpen} onClick={() => setTerminalOpen((value) => !value)}><Terminal width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
             {renderInspector ? <Tooltip content="Inspector" side="bottom"><Button variant="ghost" size="icon-compact" aria-label="Open Inspector" aria-pressed={inspectorOpen} onClick={() => { if (inspectorOpen && inspectorFull) setInspectorFull(false); else setInspectorOpen((value) => !value); }}><LayoutRight width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
         </div>

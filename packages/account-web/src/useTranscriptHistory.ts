@@ -31,8 +31,9 @@ export interface TranscriptHistorySource {
 export interface TranscriptHistory {
   rows: readonly TranscriptRow[];
   generation: string | null;
-  /** A new object requests a scroll after an explicit jump has loaded. */
-  navigation: { rowId: string | null } | null;
+  /** A new object requests a scroll after an explicit jump has loaded; `flash` marks the row a jump to an ordinal landed
+   * on, for the reader to see. */
+  navigation: { rowId: string | null; flash?: true } | null;
   loading: boolean;
   initialLoading: boolean;
   error: string | null;
@@ -46,6 +47,8 @@ export interface TranscriptHistory {
   loadNewer(): void;
   jumpToLatest(): void;
   jumpToRow(id: string): void;
+  /** Scrolls to the first row at or after `ordinal` (`entry * 1024 + n`) and flashes it. */
+  jumpToOrdinal(ordinal: number): void;
   setViewport(firstId: string | null, lastId: string | null, following: boolean): void;
   content(rowId: string, offset: number, signal: AbortSignal): Promise<TranscriptContentPage>;
   executionPage(executionId: string, request: TranscriptPageRequest, signal: AbortSignal): Promise<TranscriptPage>;
@@ -55,7 +58,7 @@ export interface TranscriptHistory {
  * the transcript at most this often. What the reader asks for (older or newer rows, the latest, a retry) loads at once. */
 const ACTIVITY_RELOAD_MS = 1000;
 
-type Navigation = 'older' | 'newer' | 'latest' | { rowId: string };
+type Navigation = 'older' | 'newer' | 'latest' | { rowId: string } | { ordinal: number };
 interface HistorySession {
   identity: { key: string | null };
   refresh(): void;
@@ -109,6 +112,9 @@ export function useTranscriptHistory(source: TranscriptHistorySource | null, ini
   const jumpToRow = useCallback((id: string) => {
     if (session.current?.identity === identity) session.current.navigate({ rowId: id });
   }, [identity]);
+  const jumpToOrdinal = useCallback((ordinal: number) => {
+    if (session.current?.identity === identity) session.current.navigate({ ordinal });
+  }, [identity]);
   const setViewport = useCallback((firstId: string | null, lastId: string | null, following: boolean) => {
     if (session.current?.identity === identity) session.current.setViewport(firstId, lastId, following);
   }, [identity]);
@@ -140,7 +146,7 @@ export function useTranscriptHistory(source: TranscriptHistorySource | null, ini
     let activityPending = false;
     let lastActivityLoad = Number.NEGATIVE_INFINITY;
 
-    const load = async (request: TranscriptPageRequest, replace: boolean): Promise<void> => {
+    const load = async (request: TranscriptPageRequest, replace: boolean, landing?: number): Promise<void> => {
       const currentSource = sourceRef.current;
       if (!active || currentSource?.key !== identity.key) return;
       const current = new AbortController();
@@ -162,7 +168,12 @@ export function useTranscriptHistory(source: TranscriptHistorySource | null, ini
           && !page.rows.some((row) => cache.rows.some((previous) => previous.id === row.id));
         if (movedAnchor) requested = true;
         else cache = mergeTranscriptPage(cache, page, request, viewport, replace || generationChanged);
-        if (replace || generationChanged) navigation = { rowId: generationChanged ? null : request.around };
+        if (replace || generationChanged) {
+          // A jump to an ordinal lands on the first row at or after it, whatever its ID.
+          const landed = landing === undefined || generationChanged ? null : page.rows.find((row) => row.ordinal >= landing)?.id ?? null;
+          if (landed !== null) viewport = { firstId: landed, lastId: landed, following: false };
+          navigation = landed !== null ? { rowId: landed, flash: true } : { rowId: generationChanged ? null : request.around };
+        }
         hasSnapshot = true;
         saved = false;
         error = null;
@@ -249,13 +260,18 @@ export function useTranscriptHistory(source: TranscriptHistorySource | null, ini
         request.after = last!.ordinal;
       } else if (destination === 'latest') {
         viewport = { firstId: null, lastId: null, following: true };
-      } else {
+      } else if ('rowId' in destination) {
         request.around = destination.rowId;
         const target = cache.rows.find((row) => row.id === destination.rowId);
         if (target) request.aroundOrdinal = target.ordinal;
         viewport = { firstId: destination.rowId, lastId: destination.rowId, following: false };
+      } else {
+        // No row has this ID: the server reads from `aroundOrdinal` when `around` names no row.
+        request.around = `ordinal:${destination.ordinal}`;
+        request.aroundOrdinal = destination.ordinal;
+        viewport = { firstId: null, lastId: null, following: false };
       }
-      void load(request, destination === 'latest' || typeof destination === 'object');
+      void load(request, destination === 'latest' || typeof destination === 'object', typeof destination === 'object' && 'ordinal' in destination ? destination.ordinal : undefined);
     };
     const currentSession: HistorySession = {
       identity,
@@ -354,6 +370,6 @@ export function useTranscriptHistory(source: TranscriptHistorySource | null, ini
     hasBefore: current.cache.hasBefore,
     hasAfter: current.cache.hasAfter,
     total: current.cache.total,
-    refresh, loadOlder, loadNewer, jumpToLatest, jumpToRow, setViewport, content, executionPage,
+    refresh, loadOlder, loadNewer, jumpToLatest, jumpToRow, jumpToOrdinal, setViewport, content, executionPage,
   };
 }

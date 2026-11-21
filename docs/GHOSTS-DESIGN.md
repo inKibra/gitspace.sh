@@ -103,6 +103,37 @@ summarized entries are those before it, back to the previous compaction's `head`
 compaction as "Compacted here · N earlier turns summarized" with the summary fetched on demand, its root marked
 `data-compaction="<entryId>"` for milestone 8; drive reads take `asOf` over `artifact_scope_history` (§4.1).
 
+Milestone 4 is built (2026-11-20, not deployed): a person's ghost of a workspace's main conversation.
+- **Where it runs.** `GhostDO` (`account-worker/src/ghost.ts`, binding `GHOSTS`, migration `account-v8-ghosts`), one
+  object per ghost named `${ACCOUNT_ID}:ghost:<uuid>`. Its model loop and tools (`ghost-session.ts`, `ghost-tools.ts`)
+  load on the first socket, not at worker startup. It never writes storage; its one alarm is the deadline.
+- **The calls are one socket, not RPC procedures** (§6 planned `ghost.open/ask/keep/close` beside
+  `runtimeWatchContract`). `GET /api/ghost?projectId&workspaceId[&conversationId]` (`GHOST_PATH`,
+  `protocol-runtime/src/ghost.ts`), upgraded and signed in `Sec-WebSocket-Protocol` as the dictation socket is, by a
+  browser device with `rpc.read` and `session.prompt` that reaches the workspace (archived ones pass). The browser
+  sends `ask`, `keep`, `close`; the ghost sends `ready`, `read`, `text`, `answer` (parts with citations, `draft`,
+  `rounds`, `truncated`), `failed`, `expires`, `ended`. One socket is the ghost's whole life, so closing the window, a
+  reload or a lost connection ends it with no registry of ghosts.
+- **Admitted and billed.** The model is the account's default inference profile (`DEFAULT_INFERENCE_PROFILE_ID`),
+  role `fast` with `default` as fallback (`resolveModelSelection`), on a catalog built in the ghost's object with
+  credential pins in memory; requests run in that object's isolate. Each answer's token counts go to the vault's
+  `ghost_usage` (day, profile, model; `CredentialVaultDO.recordGhostUsage`, through `acrossRelease`, logged when it
+  fails). The usage view does not show them yet, and `history_search`'s judge calls are not counted.
+- **Bound tools.** `history_search`, `history_read` and `read`, closed over the target workspace, conversation and
+  `driveAsOf` (the ghost's start); their schemas take no workspace or conversation, and arguments naming another are
+  refused. `read` takes the target workspace's drive (`drive://workspace/…`, the project drive only for the project
+  agent's ghost) at `driveAsOf`, and the conversation's `result://` outputs; images are named, not shown. Reads carry
+  entry numbers, which answers cite.
+- **Lifetime.** 10 minutes after the last answer, held while one runs; Keep 10 min; the window fades and warns in the
+  last minute; a tombstone says "Ghost ended. Nothing was kept." Six tool rounds per answer, one question at a time.
+- **Web.** A ghost button on sidebar rows (archived too), Ask a ghost in the topbar, one floating window bottom right
+  (`account-web/src/ghost/`). A citation opens the ghost's workspace and jumps the transcript to the entry
+  (`jumpToOrdinal`, which flashes the row) or opens the Drive at the lines; the Drive shows the current file, not the
+  generation the ghost read. The draft card has Put in composer (live workspaces) and Copy.
+- **Not yet.** Several ghosts, pills and the dock (milestone 7); a ghost of an earlier conversation or subagent from
+  the web (the socket takes `conversationId`; no entry point sends one yet); "New workspace with it" (milestone 6). A
+  live ghost keeps the code it started on until it ends: it is not in the release restart list, having no registry.
+
 What is missing:
 
 - **Inference is admitted per workspace conversation.** `runtime-inference.ts` `active(conversationId)` reads the

@@ -58,8 +58,9 @@ import { BROWSER_WATCH_INTERNAL_PATH, browserWatchDeviceActive, serveBrowserWatc
 import { serveBrowserCaptureShare } from './browser-capture-share.js';
 import { serveSecureInput } from './secure-input.js';
 import { BROWSER_CAPTURE_SHARE_PATH, type RuntimeBrowserCaptureShareComment } from '@gitspace/protocol-runtime';
-import { BROWSER_WATCH_PATH, DICTATION_PATH, SECURE_INPUT_API_PATH } from '@gitspace/protocol-runtime';
+import { BROWSER_WATCH_PATH, DICTATION_PATH, GHOST_PATH, SECURE_INPUT_API_PATH } from '@gitspace/protocol-runtime';
 import { serveDictation, workersAiDictation } from './dictation.js';
+import { serveGhost } from './ghost.js';
 import { mintUploadLink, serveUploadLink } from './upload-link.js';
 import { UPLOAD_LINK_PATH } from '@gitspace/protocol/rpc-contract';
 import { workspaceDrive } from './workspace-drive.js';
@@ -75,6 +76,7 @@ export {
 export { BrowserSessionCdp, BrowserSessionDO, BrowserSessionFiles } from './browser-session.js';
 export { ImageReader } from './image-reader.js';
 export { StorageMigrationDO } from './storage-migration.js';
+export { GhostDO } from './ghost.js';
 declare const GITSPACE_WORKER_SHA: string | undefined;
 const WORKER_VERSION = typeof GITSPACE_WORKER_SHA === 'string' ? GITSPACE_WORKER_SHA : 'channel';
 
@@ -1266,6 +1268,8 @@ export default {
     if (url.pathname === SECURE_INPUT_API_PATH) return serveSecureInput(request, env);
     // The composer's dictation socket: a recording in, its text from the profile's dictation provider out.
     if (url.pathname === DICTATION_PATH) return serveDictation(request, env, workersAiDictation(env.AI));
+    // A ghost's socket: a read-only, memory-only chat about one session (`ghost.ts`).
+    if (url.pathname === GHOST_PATH) return serveGhost(request, env);
     if (url.pathname === '/api/services/approve' || /^\/api\/browser-relay\/(pair|status|unpair|confirm|chrome|project-status|project-update|extension\.zip)$/u.test(url.pathname)) {
       if (request.method !== 'POST' || request.headers.get('origin') !== new URL(env.ACCOUNT_URL).origin) return jsonError(403, 'ORIGIN_REJECTED', 'Account origin required');
       const declared = request.headers.get('content-length');

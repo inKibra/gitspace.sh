@@ -43,7 +43,7 @@ const relationView = (relations: SpaceView['workspaces'][number]['relations'], w
   workspaces: [{ id: workspace.id, projectId: project.id, projectName: project.name, name: workspace.name, branch: 'work', rootPath: '/work', phase: 'code', closedAt: null, status: emptyWorkspaceStatus, relations, stack: { waitsOn, blocks: [], findings: [], position: null } }],
   statusError: null, operations: [],
 });
-const transcript: TranscriptHistory = { rows: [], generation: null, navigation: null, loading: false, initialLoading: false, error: null, saved: false, hasBefore: false, hasAfter: false, total: 0, refresh: vi.fn(), loadOlder: vi.fn(), loadNewer: vi.fn(), jumpToLatest: vi.fn(), jumpToRow: vi.fn(), setViewport: vi.fn(), content: vi.fn(), executionPage: vi.fn() };
+const transcript: TranscriptHistory = { rows: [], generation: null, navigation: null, loading: false, initialLoading: false, error: null, saved: false, hasBefore: false, hasAfter: false, total: 0, refresh: vi.fn(), loadOlder: vi.fn(), loadNewer: vi.fn(), jumpToLatest: vi.fn(), jumpToRow: vi.fn(), jumpToOrdinal: vi.fn(), setViewport: vi.fn(), content: vi.fn(), executionPage: vi.fn() };
 /** What RuntimeWorkspace hands the shell: the retained relation graph, whether its read is current, and its failure. */
 const reads = (): WorkspaceReads => ({
   transcript,
