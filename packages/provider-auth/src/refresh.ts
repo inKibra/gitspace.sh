@@ -69,7 +69,7 @@ export async function refreshCredential(credential: StoredOAuthCredential, fetch
   const provider = credential.provider;
   const anthropic = provider === 'anthropic';
   const fields = { grant_type: 'refresh_token', refresh_token: credential.refresh, ...oauthClient(provider) };
-  const url = anthropic ? 'https://api.anthropic.com/v1/oauth/token' : provider === 'openai-codex' ? 'https://auth.openai.com/oauth/token' : 'https://oauth2.googleapis.com/token';
+  const url = anthropic ? 'https://api.anthropic.com/v1/oauth/token' : 'https://auth.openai.com/oauth/token';
   const data = parseProvider(provider, tokenSchema, await request(provider, url, { method: 'POST', headers: anthropic ? { 'content-type': 'application/json', 'anthropic-beta': 'oauth-2025-04-20', 'user-agent': 'anthropic-sdk-typescript/0.94.0 userOAuthProvider' } : { 'content-type': 'application/x-www-form-urlencoded' }, body: anthropic ? JSON.stringify(fields) : new URLSearchParams(fields) }, fetcher));
   if (provider === 'openai-codex' && !data.refresh_token) throw new ProviderRefreshError(provider, 'invalid-response', 'Provider omitted rotated refresh token', 200);
   return { ...credential, access: data.access_token, refresh: data.refresh_token || credential.refresh, expires: Date.now() + data.expires_in * 1000 - (provider === 'openai-codex' ? 0 : 300_000) };

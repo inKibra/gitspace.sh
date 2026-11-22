@@ -128,8 +128,6 @@ describe('portable refresh adapters', () => {
   it.each([
     ['anthropic', 'https://api.anthropic.com/v1/oauth/token'],
     ['openai-codex', 'https://auth.openai.com/oauth/token'],
-    ['google-gemini-cli', 'https://oauth2.googleapis.com/token'],
-    ['google-antigravity', 'https://oauth2.googleapis.com/token'],
   ] as const)('refreshes %s using Worker-compatible fetch', async (provider, expectedUrl) => {
     let requestedUrl = '';
     const refreshed = await refreshCredential({
@@ -137,7 +135,6 @@ describe('portable refresh adapters', () => {
       refresh: 'refresh-old',
       access: 'access-old',
       expires: 0,
-      ...(provider.startsWith('google-') ? { projectId: 'project-a' } : {}),
     }, async (input) => {
       requestedUrl = String(input);
       const body = { access_token: 'access-new', refresh_token: 'refresh-new', expires_in: 3600 };

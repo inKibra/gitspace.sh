@@ -22,7 +22,7 @@ const key = account({ id: 'cred-3', type: 'api_key', label: 'API key ····41a
 const anthropic = provider({ id: 'anthropic', name: 'Anthropic', authKind: 'oauth', supportsApiKey: true, hasAuth: true, hasUsage: true, accounts: [max, ops, key] });
 const openai = provider({ id: 'openai', name: 'OpenAI', supportsOAuth: false, supportsApiKey: true, loginable: false });
 const codex = provider({ id: 'openai-codex', name: 'OpenAI Codex' });
-const gemini = provider({ id: 'google-gemini-cli', name: 'Google Gemini CLI', supportsApiKey: true });
+const copilot = provider({ id: 'github-copilot', name: 'GitHub Copilot', supportsApiKey: true });
 const hidden = provider({ id: 'ollama', name: 'Ollama', available: false, loginable: false, supportsOAuth: false });
 const report = (credentialId: string, fetchedAt = '2026-09-01T10:00:00.000Z'): ProviderUsage['reports'][number] => ({
   credentialId, provider: 'anthropic', account: 'dev@example.com', fetchedAt, notes: ['Limits reset on a rolling window.'],
@@ -37,7 +37,7 @@ const usage: ProviderUsage = { generatedAt: '2026-09-01T10:05:00.000Z', reports:
 
 function props(overrides: Partial<ProvidersSectionProps> = {}): ProvidersSectionProps {
   return {
-    providers: [anthropic, openai, codex, gemini, hidden],
+    providers: [anthropic, openai, codex, copilot, hidden],
     usage: null,
     usageStatus: 'idle',
     onShow: noop,
@@ -86,11 +86,11 @@ describe('ProvidersSection', () => {
     expect(card('anthropic').textContent).toContain('Add account');
     expect(card('openai').textContent).toContain('Add API key');
     expect(card('openai-codex').textContent).toContain('Sign in');
-    expect(card('google-gemini-cli').textContent).toContain('Connect');
+    expect(card('github-copilot').textContent).toContain('Connect');
     expect(container.textContent).not.toContain('Ollama');
     // Sign-in providers before key-only ones.
     const order = [...container.querySelectorAll('[data-provider]')].map((element) => element.getAttribute('data-provider'));
-    expect(order).toEqual(['anthropic', 'openai-codex', 'google-gemini-cli', 'openai']);
+    expect(order).toEqual(['anthropic', 'openai-codex', 'github-copilot', 'openai']);
   });
 
   it("shows each account's own usage, and a failed read only on the account it failed for", async () => {

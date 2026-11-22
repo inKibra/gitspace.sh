@@ -4,6 +4,7 @@ import { http, HttpResponse } from 'msw';
 import { credentialProtocolBase64 } from '@gitspace/protocol';
 import { orderedAccounts, type VaultAccess } from '@gitspace/runtime-core/inference';
 import { network } from './network.js';
+import { CredentialVaultDO } from '../src/application.js';
 import { parse as parseYaml } from 'yaml';
 
 async function seedVault(credentials: Array<{ id: string; provider: 'anthropic' | 'openai-codex'; access: string; accountId?: string; email?: string; expires?: number }>): Promise<string> {
@@ -136,6 +137,30 @@ describe('Cloud inference credential authority', () => {
     // The removed account held the highest id; a later upload must not inherit it.
     await vault.putBrowserApiKey('default', 'openai', 'later-key');
     expect((await vault.cloudCredentialAccounts('default', 'openai')).map(account => account.id)).not.toContain(removed!.id);
+  });
+
+  it('deletes stored Google Antigravity and Gemini CLI accounts on start and keeps every other provider\'s', async () => {
+    const vault = env.CREDENTIALS.getByName(await seedVault([
+      { id: 'anthropic-kept', provider: 'anthropic', access: 'access-anthropic', accountId: 'account-anthropic' },
+      { id: 'codex-kept', provider: 'openai-codex', access: 'access-codex', accountId: 'account-codex' },
+    ]));
+    const removed = await runInDurableObject(vault, (_instance, state) => {
+      for (const [id, provider] of [['antigravity', 'google-antigravity'], ['gemini-cli', 'google-gemini-cli']]) {
+        state.storage.sql.exec("INSERT INTO inference_credentials(id, provider, sealed_json, revision, expires_at, state, updated_at, profile_id) SELECT ?, ?, sealed_json, revision, expires_at, state, updated_at, profile_id FROM inference_credentials WHERE id = 'anthropic-kept'", id, provider);
+      }
+      return state.storage.sql.exec<{ row_id: number }>("SELECT rowid AS row_id FROM inference_credentials WHERE provider LIKE 'google-%'").toArray().map(row => String(row.row_id));
+    });
+    await vault.cloudCredentialFailure({ profileId: 'default', credentialId: removed[0]!, kind: 'rotate', reason: 'Quota' });
+    await runInDurableObject(vault, async (_instance, state) => {
+      new CredentialVaultDO(state, env);
+      await state.blockConcurrencyWhile(async () => {});
+      expect(state.storage.sql.exec('SELECT id, provider FROM inference_credentials ORDER BY rowid').toArray()).toEqual([
+        { id: 'anthropic-kept', provider: 'anthropic' }, { id: 'codex-kept', provider: 'openai-codex' },
+      ]);
+      expect(state.storage.sql.exec('SELECT credential_id FROM cloud_account_health WHERE credential_id IN (?, ?)', ...removed).toArray()).toEqual([]);
+    });
+    expect((await vault.cloudCredentialAccounts('default')).map(account => account.provider)).toEqual(['anthropic', 'openai-codex']);
+    expect((await vault.cloudProviders('default')).map(provider => provider.id)).not.toContain('google-antigravity');
   });
 
   it('enables a disabled account under its id, ends its cooldown, and selects it again', async () => {

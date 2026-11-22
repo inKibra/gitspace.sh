@@ -27,7 +27,7 @@ describe('portable refresh rotation safety', () => {
 
 describe('durable cloud login secret and state boundaries', () => {
   it('round-trips private state while publishing neither verifier nor CSRF secret as fields', async () => {
-    const transition = await beginLogin({ provider: 'google-gemini-cli' });
+    const transition = await beginLogin({ provider: 'anthropic' });
     const state = loginStateSchema.parse(JSON.parse(JSON.stringify(transition.state)));
     expect(state.kind).toBe('code');
     if (state.kind !== 'code') throw new Error('Expected code state');
@@ -37,7 +37,7 @@ describe('durable cloud login secret and state boundaries', () => {
     expect(new URL(state.authorizationUrl).searchParams.get('code_challenge')).not.toBe(state.verifier);
   });
   it('rejects mismatched callback state before making any token request', async () => {
-    const transition = await beginLogin({ provider: 'google-antigravity' });
+    const transition = await beginLogin({ provider: 'anthropic' });
     if (transition.state.kind !== 'code') throw new Error('Expected code state');
     const fetcher = vi.fn<typeof fetch>();
     await expect(respondLogin(transition.state, { code: `${transition.state.redirectUri}?code=stolen&state=wrong` }, fetcher)).rejects.toMatchObject({ kind: 'invalid-response' });

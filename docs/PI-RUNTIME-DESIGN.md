@@ -77,7 +77,7 @@ pi-durable makes the durable record the state: runs, queued messages, aborts, su
 
 | Package | Role here | Notes |
 |---|---|---|
-| `pi-ai` 1.0 | Providers, `Models` collection we construct, classifier and image models | `Provider` interface: `auth`, `getModels`, `stream`, `streamSimple`, `classify`, `generateImages`. Providers include `openai-codex`, `amazon-bedrock`, `anthropic`, `openai`, `google`, `openrouter`, and ~40 more. Missing vs OMP: Cursor, Antigravity, Gemini CLI. |
+| `pi-ai` 1.0 | Providers, `Models` collection we construct, classifier and image models | `Provider` interface: `auth`, `getModels`, `stream`, `streamSimple`, `classify`, `generateImages`. Providers include `openai-codex`, `amazon-bedrock`, `anthropic`, `openai`, `google`, `openrouter`, and ~40 more. Missing vs OMP: Cursor and two Google product sign-ins (§12.1). |
 | `pi-durable` 1.0 | Harness: Sessions, conversations, entries, tasks, documents, watch | README marks it **experimental**. Built-in tools: `read`, `write`, `edit`, `bash` only; `read` has no image support yet. Storage: memory, SQLite, JSONL; the portable cores run "on Bun or in Cloudflare Durable Objects". |
 | `chord` 1.0 | Replicated state, services, Context, delta tracking | Runtime-neutral except the plugin bundler/loader (`chord/bundler`, `chord/node`, esbuild). |
 | `pi-mcp` 1.0 | MCP client | Standalone. |
@@ -533,7 +533,7 @@ Replaces OMP's launch broker, which GitSpace uses today for every terminal, serv
 ### 12.1 Models and providers
 
 - `pi-ai` `Models` constructed with only our providers; each provider is a GitSpace wrapper that resolves credentials from the vault.
-- Missing providers (Antigravity, Gemini CLI): ported as our own `Provider` objects. Cursor was ported, then removed (2026-10-29).
+- Providers missing from `pi-ai`: none are ported. Cursor was ported, then removed (2026-10-29). Google Antigravity and Gemini CLI were ported, then removed (2026-11-22): Google suspends accounts that use those product sign-ins from third-party tools, so Google is reached only through `google` (AI Studio API key) and `google-vertex`; the vault deletes their stored credentials on start.
 - Model roles stored in `pi.agent` per conversation; profile revisions apply on the next request (no worker restarts exist).
 
 ### 12.2 Credential vault
@@ -542,11 +542,11 @@ Replaces OMP's launch broker, which GitSpace uses today for every terminal, serv
 |---|---|
 | Vault DO, leases, profiles, assignments | Unchanged |
 | OMP broker wire types (`SnapshotResponse` etc.) | Our own schemas in `@gitspace/protocol` |
-| Token refreshers (Anthropic, Codex, Antigravity, Gemini CLI) | Our own package, lifted from the `pi-ai` patch; use `pi-ai` 1.0's own OAuth where it runs on Workers |
+| Token refreshers (Anthropic, Codex) | Our own package, lifted from the `pi-ai` patch; use `pi-ai` 1.0's own OAuth where it runs on Workers |
 | Broker client and managed-inference guard | Removed under option B: the provider wrapper gets tokens over DO RPC; credentials never leave Cloudflare |
-| Login flows | Run in the vault DO: GitSpace's own flows (Anthropic, Codex device code, Gemini CLI, Antigravity) and `pi-ai`'s provider flows (OpenAI Sign in with ChatGPT, Copilot, OpenRouter, xAI, Kimi, Meta). Loopback-redirect flows (Sign in with ChatGPT: `http://127.0.0.1:1455/auth/callback`) finish by pasting the callback URL; Anthropic shows a code to copy. |
+| Login flows | Run in the vault DO: GitSpace's own flows (Anthropic, Codex device code) and `pi-ai`'s provider flows (OpenAI Sign in with ChatGPT, Copilot, OpenRouter, xAI, Kimi, Meta). Loopback-redirect flows (Sign in with ChatGPT: `http://127.0.0.1:1455/auth/callback`) finish by pasting the callback URL; Anthropic shows a code to copy. |
 
-The GitSpace-owned flows use client-registration metadata vendored in `packages/provider-auth/src/catalog.ts` from OMP's `pi-catalog` 18.2.11, with its MIT attribution preserved in the package license. There is no runtime catalog-package dependency; only the four required client registrations are retained, and Cursor's custom flow needs no client-registration metadata. Further adoption of Pi OAuth must preserve cloud login state, refresh safety, and provider coverage. In particular, legacy Codex device-code credentials and Pi's working OpenAI Sign in with ChatGPT route are not interchangeable (§12.3); vendoring does not change or remove either route.
+The GitSpace-owned flows use client-registration metadata vendored in `packages/provider-auth/src/catalog.ts` from OMP's `pi-catalog` 18.2.11, with its MIT attribution preserved in the package license. There is no runtime catalog-package dependency; only the two required client registrations (Anthropic, Codex) are retained. Further adoption of Pi OAuth must preserve cloud login state, refresh safety, and provider coverage. In particular, legacy Codex device-code credentials and Pi's working OpenAI Sign in with ChatGPT route are not interchangeable (§12.3); vendoring does not change or remove either route.
 
 Legacy `openai-codex` is disabled in provider/model admission and for new cloud sign-ins; profile overrides cannot re-enable it. The device-code polling implementation, pending-flow completion, and existing credentials remain intact for the later one-time migration or a future deliberate re-enable. Stored accounts can still be inspected and managed, but are not offered as an available inference provider. The separate `openai` provider keeps both Sign in with ChatGPT and API-key support.
 

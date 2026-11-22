@@ -226,7 +226,6 @@ const credentialUploadSchema = z.strictObject({
       email: z.string().optional(),
       orgId: z.string().optional(),
       orgName: z.string().optional(),
-      projectId: z.string().optional(),
       authorizedAt: z.number().optional(),
     }).passthrough(),
   ]),
@@ -267,13 +266,12 @@ function credentialIdentity(credential: StoredVaultCredential): string | null {
   if (credential.type === 'api_key') return null;
   const account = credential.accountId?.trim();
   const email = credential.email?.trim().toLowerCase();
-  const project = credential.projectId?.trim();
   if (credential.provider === 'anthropic' || credential.provider === 'openai-codex' || credential.provider === 'openai') {
-    const base = email ? `email:${email}` : account ? `account:${account}` : project ? `project:${project}` : null;
+    const base = email ? `email:${email}` : account ? `account:${account}` : null;
     const org = credential.orgId?.trim();
     return org ? (base ? `${base}|org:${org}` : `org:${org}`) : base;
   }
-  return account ? `account:${account}` : email ? `email:${email}` : project ? `project:${project}` : null;
+  return account ? `account:${account}` : email ? `email:${email}` : null;
 }
 
 type SignedInAccount = z.infer<typeof SignedInAccountSchema>;
@@ -703,6 +701,24 @@ export class CredentialVaultDO extends BudgetedDurableObject {
           this.ctx.storage.sql.exec('DROP TABLE mcp_access');
         });
       }
+      // Google Antigravity and Gemini CLI sign-ins were removed (Google suspends accounts using them from other tools):
+      // their stored credentials, sign-ins in progress and account records are deleted.
+      const removedProviders = JSON.stringify(['google-antigravity', 'google-gemini-cli']);
+      const tables = new Set(this.ctx.storage.sql.exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table'").toArray().map(row => row.name));
+      this.ctx.storage.transactionSync(() => {
+        if (tables.has('inference_credentials')) {
+          const removed = this.ctx.storage.sql.exec<{ row_id: number; profile_id: string }>('DELETE FROM inference_credentials WHERE provider IN (SELECT value FROM json_each(?)) RETURNING rowid AS row_id, profile_id', removedProviders).toArray();
+          for (const { row_id: rowId, profile_id: profileId } of removed) {
+            if (tables.has('cloud_account_health')) this.ctx.storage.sql.exec('DELETE FROM cloud_account_health WHERE profile_id = ? AND credential_id = ?', profileId, String(rowId));
+            if (tables.has('credential_models')) this.ctx.storage.sql.exec('DELETE FROM credential_models WHERE profile_id = ? AND credential_id = ?', profileId, String(rowId));
+            this.ctx.storage.sql.exec('INSERT INTO retired_credential_rowid(id, row_id) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET row_id = MAX(row_id, excluded.row_id)', rowId);
+          }
+          for (const profileId of new Set(removed.map(row => row.profile_id))) this.credentialsChanged(profileId);
+        }
+        this.ctx.storage.sql.exec('DELETE FROM oauth_credentials WHERE provider IN (SELECT value FROM json_each(?))', removedProviders);
+        this.ctx.storage.sql.exec('DELETE FROM provider_secrets WHERE provider IN (SELECT value FROM json_each(?))', removedProviders);
+        if (tables.has('cloud_provider_logins')) this.ctx.storage.sql.exec('DELETE FROM cloud_provider_logins WHERE provider IN (SELECT value FROM json_each(?))', removedProviders);
+      });
     });
   }
 
@@ -1988,7 +2004,7 @@ export class CredentialVaultDO extends BudgetedDurableObject {
     const headers = auth?.headers ? Object.fromEntries(Object.entries(auth.headers).filter((entry): entry is [string, string] => typeof entry[1] === 'string')) : null;
     return { id: input.credentialId, provider: credential.provider, revision: row.revision, credential: credential.type === 'api_key'
       ? { type: 'api_key', key: credential.key }
-      : { type: 'oauth', access: auth?.apiKey ?? credential.access, expires: credential.expires, ...(credential.accountId ? { accountId: credential.accountId } : {}), ...(credential.projectId ? { projectId: credential.projectId } : {}), ...(credential.email ? { email: credential.email } : {}), ...(credential.orgId ? { orgId: credential.orgId } : {}), ...(auth?.baseUrl ? { baseUrl: auth.baseUrl } : {}), ...(headers ? { headers } : {}) } };
+      : { type: 'oauth', access: auth?.apiKey ?? credential.access, expires: credential.expires, ...(credential.accountId ? { accountId: credential.accountId } : {}), ...(credential.email ? { email: credential.email } : {}), ...(credential.orgId ? { orgId: credential.orgId } : {}), ...(auth?.baseUrl ? { baseUrl: auth.baseUrl } : {}), ...(headers ? { headers } : {}) } };
   }
 
   async cloudProviders(profileId: string): Promise<ProviderView[]> {
@@ -2020,7 +2036,7 @@ export class CredentialVaultDO extends BudgetedDurableObject {
       return { id: provider, credentialProvider: descriptor?.credentialProvider ?? provider, name: descriptor?.name ?? provider, available: descriptor !== undefined, loginable: oauth || descriptor?.supportsApiKey === true,
         supportsOAuth: oauth, supportsApiKey: descriptor?.supportsApiKey ?? false,
         authKind: active.some(account => account.type === 'oauth') ? 'oauth' : active.length ? 'api_key' : 'none',
-        hasAuth: active.length > 0, source: active.length ? 'Inference profile' : null, hasUsage: ['anthropic', 'openai-codex', 'google-antigravity'].includes(provider),
+        hasAuth: active.length > 0, source: active.length ? 'Inference profile' : null, hasUsage: provider === 'anthropic' || provider === 'openai-codex',
         accounts: owned.map(account => {
           const { out, signIn } = accountHealth(health.get(account.id), now);
           // A refused sign-in has no end time: the account is out until it is signed in again.
@@ -2307,9 +2323,7 @@ export class CredentialVaultDO extends BudgetedDurableObject {
     const view = publicLogin(state);
     switch (view.kind) {
       case 'code': return [{ type: 'auth', url: view.authorizationUrl, launchUrl: view.authorizationUrl, instructions: view.prompt }, { type: 'prompt', promptId: `${flowId}:${revision}`, message: view.prompt, placeholder: 'Paste the full authorization response' }];
-      case 'project-input': return [{ type: 'prompt', promptId: `${flowId}:${revision}`, message: view.prompt, placeholder: 'Google Cloud project ID' }];
       case 'device': return [{ type: 'auth', url: view.authorizationUrl, launchUrl: view.authorizationUrl, instructions: `Enter code ${view.userCode}` }];
-      case 'poll': return view.authorizationUrl ? [{ type: 'auth', url: view.authorizationUrl, launchUrl: view.authorizationUrl, instructions: 'Complete authorization in your browser' }] : [{ type: 'progress', message: 'Waiting for provider authorization' }];
       case 'cancelled': return [{ type: 'done', ok: false, error: 'Login cancelled' }];
       case 'complete': {
         const provider = (await this.cloudProviders(profileId)).find(provider => provider.id === view.provider);
@@ -2447,7 +2461,7 @@ export class CredentialVaultDO extends BudgetedDurableObject {
     if (!config) throw new Error('Vault is not configured');
     const state = loginStateSchema.parse(JSON.parse(await openVaultText(row.sealed_state, credentialProtocolBase64.decode(config.vault_key), JSON.stringify(['provider-login/v1', row.profile_id, row.flow_id, row.revision]))));
     if (response && response.promptId !== `${row.flow_id}:${row.revision}`) throw new Error('Login prompt is no longer current');
-    if (!response && (state.kind === 'code' || state.kind === 'project-input' || state.kind === 'complete' || state.kind === 'cancelled')) return;
+    if (!response && (state.kind === 'code' || state.kind === 'complete' || state.kind === 'cancelled')) return;
     if (!response && 'nextPollAt' in state && Date.parse(state.nextPollAt) > Date.now()) return;
     const claimed = this.ctx.storage.sql.exec("UPDATE cloud_provider_logins SET status = 'busy', events_json = CASE WHEN ? THEN json_insert(events_json, '$[#]', json(?)) ELSE events_json END WHERE flow_id = ? AND revision = ? AND status = 'pending'", response ? 1 : 0, JSON.stringify({ type: 'progress', message: 'Authorization response received' }), row.flow_id, row.revision).rowsWritten;
     if (!claimed) return;

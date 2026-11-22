@@ -14,7 +14,6 @@ import { claudeCode, type ClaudeCodeTransport } from './claude-code-request.js';
 import { fastServingProvider } from './fast.js';
 import { parseImageReference } from '@gitspace/protocol-runtime/image-reference';
 import { expandedLength, requestImages, type ImageRequestTransport } from './image-requests.js';
-import { createLegacyCloudProviders } from './providers/index.js';
 import { withPublishedCatalog } from './published-catalog.js';
 import type { ResolvedCredential } from './selection.js';
 import { searchWithModel, type WebSearchEvent, type WebSearchRequest } from './web-search.js';
@@ -59,14 +58,14 @@ export function attemptOptions(options: object | undefined): Record<string, unkn
   return Object.fromEntries(Object.entries(options ?? {}).filter(([key, value]) => key !== 'telemetry' && value !== undefined && typeof value !== 'function' && !(value instanceof AbortSignal)));
 }
 
-/** pi-ai's providers and GitSpace's own, before a profile admits them. Their models are pi-ai's pinned rows; a
- * workspace's catalog replaces them with the vault's (`withCatalogRows`). */
+/** pi-ai's providers, before a profile admits them. Their models are pi-ai's pinned rows; a workspace's catalog
+ * replaces them with the vault's (`withCatalogRows`). */
 export function inferenceProviderSource(): readonly Provider[] {
-  return [...builtinProviders(), ...createLegacyCloudProviders()];
+  return builtinProviders();
 }
 /** The source the vault builds profile catalogs from: pi-ai's providers with pi.dev's published rows over their own. */
 export function publishedProviderSource(): readonly Provider[] {
-  return [...builtinProviders().map(provider => withPublishedCatalog(provider)), ...createLegacyCloudProviders()];
+  return builtinProviders().map(provider => withPublishedCatalog(provider));
 }
 /** The providers a profile admits, with GitSpace's catalog patches. */
 export function profileProviders(settings: InferenceProfile['settings'], source: readonly Provider[] = inferenceProviderSource()): readonly Provider[] {
@@ -86,9 +85,6 @@ export function requestAuth(resolved: ResolvedCredential): AuthResult {
     return { auth: { apiKey: key.token }, env: { CLOUDFLARE_ACCOUNT_ID: key.accountId } };
   }
   switch (resolved.provider) {
-    case 'google-gemini-cli': case 'google-antigravity':
-      if (!credential.projectId) throw new Error('Google OAuth account has no authorized project');
-      return { auth: { apiKey: JSON.stringify({ access: credential.access, projectId: credential.projectId }) } };
     case 'openai-codex':
       if (!credential.accountId) throw new Error('Codex OAuth account has no account identity');
       return { auth: { apiKey: credential.access, headers: { 'ChatGPT-Account-ID': credential.accountId } } };

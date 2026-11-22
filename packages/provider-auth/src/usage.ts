@@ -57,19 +57,6 @@ export async function collectUsage(credential: StoredOAuthCredential, fetcher: t
         report.limits.push(limit);
       }
     }
-  } else if (credential.provider === 'google-antigravity') {
-    if (!credential.projectId) throw new ProviderUsageError(credential.provider, 'invalid-response');
-    const quota = z.object({ remainingFraction: numeric.optional(), resetTime: z.string().optional(), windowId: z.string().optional(), windowLabel: z.string().optional() });
-    const quotas = z.union([quota, z.array(quota)]);
-    const data = await payload(credential, 'https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels', z.object({ models: z.record(z.string(), z.object({ displayName: z.string().optional(), quotaInfo: quotas.optional(), quotaInfos: z.array(quota).optional(), dailyQuotaInfo: quotas.optional(), dailyQuotaInfos: z.array(quota).optional(), weeklyQuotaInfo: quotas.optional(), weeklyQuotaInfos: z.array(quota).optional() })) }), fetcher, { method: 'POST', headers: { Authorization: `Bearer ${credential.access}`, 'Content-Type': 'application/json', 'User-Agent': 'antigravity/hub/2.8.0 (aidev_client; os_type=darwin; arch=arm64; cl=963137146)' }, body: JSON.stringify({ project: credential.projectId }) });
-    for (const [model, value] of Object.entries(data.models)) {
-      for (const [kind, raw] of [['quota', value.quotaInfo], ['quota', value.quotaInfos], ['daily', value.dailyQuotaInfo], ['daily', value.dailyQuotaInfos], ['weekly', value.weeklyQuotaInfo], ['weekly', value.weeklyQuotaInfos]] as const) {
-        for (const [index, info] of (raw === undefined ? [] : Array.isArray(raw) ? raw : [raw]).entries()) {
-          if (info.remainingFraction === undefined) continue;
-          report.limits.push(percent(`${model}:${kind}:${index}:${report.limits.length}`, value.displayName ?? model, model, 100 * (1 - Math.max(0, Math.min(1, info.remainingFraction))), timestamp(info.resetTime), info.windowLabel ?? info.windowId ?? kind));
-        }
-      }
-    }
   } else {
     throw new ProviderUsageError(credential.provider, 'unsupported');
   }

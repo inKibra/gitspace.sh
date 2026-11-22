@@ -38,7 +38,6 @@ const PROVIDERS: readonly ProviderView[] = [
     account('c1', 'oauth', 'brad@inkibra.com', { outUntil: at(134), outReason: 'Weekly usage limit reached' }),
   ] }),
   provider('openrouter', 'OpenRouter', { supportsOAuth: false, supportsApiKey: true, loginable: false, authKind: 'api_key', hasAuth: true, accounts: [account('o1', 'api_key', 'API key ····8f2c')] }),
-  provider('google-gemini-cli', 'Google Gemini CLI', {}),
   provider('github-copilot', 'GitHub Copilot', {}),
   provider('xai', 'xAI', { supportsOAuth: false, supportsApiKey: true, loginable: false }),
   provider('groq', 'Groq', { supportsOAuth: false, supportsApiKey: true, loginable: false }),

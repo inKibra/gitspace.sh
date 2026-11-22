@@ -20,7 +20,7 @@ export const credentialAccountSchema = z.object({
 export type CredentialAccount = z.infer<typeof credentialAccountSchema>;
 export type ResolvedCredential = {
   id: string; provider: string; revision: number;
-  credential: { type: 'api_key'; key: string } | { type: 'oauth'; access: string; expires: number; accountId?: string; projectId?: string; email?: string; orgId?: string; baseUrl?: string; headers?: Record<string, string> };
+  credential: { type: 'api_key'; key: string } | { type: 'oauth'; access: string; expires: number; accountId?: string; email?: string; orgId?: string; baseUrl?: string; headers?: Record<string, string> };
 };
 /** A request the account could not serve: `until` is the provider's reset when its answer named one. `signIn`: the
  * provider refused the account's sign-in, `reason` says how; it stays out until it is signed in again. */

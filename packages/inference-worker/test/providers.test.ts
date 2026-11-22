@@ -101,14 +101,12 @@ it('streams a Claude subscription request with the images written in and the att
   expect(events).toContainEqual(expect.objectContaining({ type: 'response', status: 400 }));
 });
 
-it('streams OpenAI, Google and Gemini CLI requests with the images written into their own encodings', async () => {
+it('streams OpenAI and Google requests with the images written into their own encodings', async () => {
   const openai = text((await run(model('openai', 'gpt-4.1'), key('sk-test'))).request);
   for (const image of images) expect(openai).toContain(`data:image/png;base64,${base64(image.size)}"`);
   const google = text((await run(model('google', 'gemini-2.5-flash'), key('google-test'))).request);
   for (const image of images) expect(google).toContain(`"data":"${base64(image.size)}"`);
-  const cli = text((await run(model('google-gemini-cli', 'gemini-2.5-flash'), { type: 'oauth', access: 'ya29.test', expires: 4_102_444_800_000, projectId: 'project' })).request);
-  for (const image of images) expect(cli).toContain(`"data":"${base64(image.size)}"`);
-  for (const body of [openai, google, cli]) expect(body).not.toContain('gs-image:');
+  for (const body of [openai, google]) expect(body).not.toContain('gs-image:');
 });
 
 it('sends a Bedrock request through the AWS SDK with the images written in and bearer auth', async () => {

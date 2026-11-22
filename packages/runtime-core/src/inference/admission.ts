@@ -3,7 +3,6 @@ import { builtinProviders } from '@earendil-works/pi-ai/providers/all';
 import { BUILT_IN_MODEL_ROLES, applyInferenceSettings, contextLimitsSchema, inferenceSettingsSchema, parseModelRoleSelector, type ModelRoleSelector, type InferenceProfile } from '@gitspace/protocol/inference';
 import { z } from 'zod';
 import { applyProviderCatalog } from './catalog.js';
-import { createLegacyCloudProviders } from './providers/index.js';
 import type { ModelSelectionIntent } from '@gitspace/protocol-runtime/session-controls';
 
 const credentialHeaders = /^(?:authorization|proxy-authorization|x-api-key|api-key|x-goog-api-key|x-amz-security-token|cookie|host|chatgpt-account-id)$/iu;
@@ -143,15 +142,15 @@ export function admitProfileProviders(settings: InferenceProfile['settings'], pr
 
 /** Providers the account Worker can sign in to: GitSpace's own flows plus Pi's subscription flows. */
 const signInProviders: Readonly<Record<string, true>> = {
-  anthropic: true, 'openai-codex': true, cursor: true, 'google-antigravity': true, 'google-gemini-cli': true,
+  anthropic: true, 'openai-codex': true, cursor: true,
   openai: true, 'github-copilot': true, openrouter: true, xai: true, 'kimi-coding': true, meta: true,
 };
 /** Subscription-only providers whose API-key path would bypass the sign-in they require. */
-const signInOnlyProviders: Readonly<Record<string, true>> = { 'openai-codex': true, cursor: true, 'google-antigravity': true, 'google-gemini-cli': true };
+const signInOnlyProviders: Readonly<Record<string, true>> = { 'openai-codex': true, cursor: true };
 /** Pi labels Codex "(legacy)"; here it is the ChatGPT subscription's device-code sign-in. */
 const displayNames: Readonly<Record<string, string>> = { 'openai-codex': 'OpenAI Codex (ChatGPT)' };
 export function describeCloudProviders(settings: InferenceProfile['settings'] = {}) {
-  return admitProfileProviders(settings, [...builtinProviders(), ...createLegacyCloudProviders()].map(applyProviderCatalog)).map(provider => ({
+  return admitProfileProviders(settings, builtinProviders().map(applyProviderCatalog)).map(provider => ({
     id: provider.id, name: displayNames[provider.id] ?? provider.name, credentialProvider: provider.id,
     supportsApiKey: provider.auth.apiKey !== undefined && signInOnlyProviders[provider.id] !== true, supportsOAuth: signInProviders[provider.id] === true,
   }));

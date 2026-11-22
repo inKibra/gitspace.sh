@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 /** Sign-in flows GitSpace implements itself (cloud state machines in login.ts). */
-export const gitspaceOAuthProviderSchema = z.enum(['anthropic', 'openai-codex', 'google-gemini-cli', 'google-antigravity']);
+export const gitspaceOAuthProviderSchema = z.enum(['anthropic', 'openai-codex']);
 /** Sign-in flows run from Pi's own provider registry (@earendil-works/pi-ai). */
 export const upstreamOAuthProviderSchema = z.enum(['openai', 'github-copilot', 'openrouter', 'xai', 'kimi-coding', 'meta']);
 export type UpstreamOAuthProvider = z.infer<typeof upstreamOAuthProviderSchema>;
@@ -10,17 +10,15 @@ export type WorkerOAuthProvider = z.infer<typeof workerOAuthProviderSchema>;
 // Pi's flows keep provider-specific fields (e.g. ChatGPT's issued clientId) that refresh and request auth need.
 export const storedOAuthCredentialSchema = z.object({
   provider: workerOAuthProviderSchema, refresh: z.string().min(1), access: z.string().min(1), expires: z.number().finite(),
-  accountId: z.string().optional(), email: z.string().optional(), orgId: z.string().optional(), projectId: z.string().optional(),
+  accountId: z.string().optional(), email: z.string().optional(), orgId: z.string().optional(),
 }).loose();
 export type StoredOAuthCredential = z.infer<typeof storedOAuthCredentialSchema>;
 const base = { provider: gitspaceOAuthProviderSchema, expiresAt: z.iso.datetime() };
 const pending = { ...base, authorizationUrl: z.url(), nextPollAt: z.iso.datetime() };
 /** Secret server-side state. Encrypt at rest; never return this through management RPC. */
 export const loginStateSchema = z.discriminatedUnion('kind', [
-  z.object({ ...base, kind: z.literal('code'), provider: z.enum(['anthropic', 'google-gemini-cli', 'google-antigravity']), authorizationUrl: z.url(), verifier: z.string().min(43), csrf: z.string().min(32), redirectUri: z.url(), projectId: z.string().optional() }),
+  z.object({ ...base, kind: z.literal('code'), provider: z.literal('anthropic'), authorizationUrl: z.url(), verifier: z.string().min(43), csrf: z.string().min(32), redirectUri: z.url() }),
   z.object({ ...pending, kind: z.literal('device'), provider: z.literal('openai-codex'), deviceAuthId: z.string().min(1), userCode: z.string().min(1), intervalMs: z.number().positive() }),
-  z.object({ ...base, kind: z.literal('project'), credential: storedOAuthCredentialSchema, operation: z.string().min(1), nextPollAt: z.iso.datetime() }),
-  z.object({ ...base, kind: z.literal('project-input'), credential: storedOAuthCredentialSchema }),
   z.object({ ...base, kind: z.literal('complete') }),
   z.object({ ...base, kind: z.literal('cancelled') }),
 ]);
@@ -28,13 +26,11 @@ export type LoginState = z.infer<typeof loginStateSchema>;
 export const loginViewSchema = z.discriminatedUnion('kind', [
   z.object({ ...base, kind: z.literal('code'), authorizationUrl: z.url(), prompt: z.string() }),
   z.object({ ...base, kind: z.literal('device'), authorizationUrl: z.url(), userCode: z.string(), nextPollAt: z.iso.datetime() }),
-  z.object({ ...base, kind: z.literal('poll'), authorizationUrl: z.url().optional(), nextPollAt: z.iso.datetime() }),
-  z.object({ ...base, kind: z.literal('project-input'), prompt: z.string() }),
   z.object({ ...base, kind: z.literal('complete') }),
   z.object({ ...base, kind: z.literal('cancelled') }),
 ]);
 export type LoginView = z.infer<typeof loginViewSchema>;
-export const beginLoginInputSchema = z.object({ provider: gitspaceOAuthProviderSchema, projectId: z.string().min(1).optional() });
+export const beginLoginInputSchema = z.object({ provider: gitspaceOAuthProviderSchema });
 export const loginResponseSchema = z.object({ code: z.string().min(1).max(16_384) });
 export const loginTransitionSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('pending'), state: loginStateSchema, view: loginViewSchema }),

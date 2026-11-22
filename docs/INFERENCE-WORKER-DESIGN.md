@@ -82,7 +82,7 @@ One model request attempt is one RPC call, `run(attempt)`, on the loaded worker'
   few chunks whatever the images add up to.
 - **Every provider streams**, each through the path its pi-ai adapter allows (pi-ai 1.3.0):
   - Adapters that take our `fetch` and leave the base64 text alone (`anthropic-messages`, `openai-completions`,
-    `openai-responses`, `azure-openai-responses`, `google-gemini-cli`, `mistral-conversations`, `openrouter-images`,
+    `openai-responses`, `azure-openai-responses`, `mistral-conversations`, `openrouter-images`,
     `pi-messages`) send through it.
   - **Google** (`google-generative-ai`, and `google-vertex`, which GitSpace does not admit) refuses a custom `fetch` and
     sends through Google's SDK with the global one, the image data passed through as text. The worker wraps the global
@@ -134,7 +134,7 @@ From a Durable Object in a throwaway dispatch namespace, as the workspace object
 
 `packages/inference-worker/test/providers.test.ts` runs the built module in workerd with a fake reader and fake
 upstreams, and checks the exact bytes each provider sends: Claude subscription (images written in, attestation over
-the expanded body), OpenAI, Google, Gemini CLI, Bedrock through the AWS SDK; another workspace's
+the expanded body), OpenAI, Google, Bedrock through the AWS SDK; another workspace's
 reference is refused before anything is sent. `runtime-core` tests the attempt codec, cancel and the stand-ins;
 `account-worker` tests the real `ImageReader`.
 
