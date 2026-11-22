@@ -15,8 +15,8 @@ const answer = (session: Partial<GhostAskResult['session']>): GhostAskResult => 
   ghostId: '0b7f3c1e-8a52-4d7a-9a3c-2f1e5d6c7b8a', expiresAt: new Date(Date.now() + 600_000).toISOString(),
   session: { workspaceId: 'billing-1a2b', workspace: 'Billing', conversationId: 'main', title: 'Invoices', main: true, archived: false, ...session },
   answer: 'It moved exports to the archive bucket [#12], as the plan says [drive://workspace/plan.md:3-4].',
-  cites: [{ kind: 'entry', from: 12, ref: 'history://billing-1a2b/main#12' }, { kind: 'drive', url: 'drive://workspace/plan.md', lines: [3, 4], generation: 7, ref: 'drive://workspaces/billing-1a2b/plan.md:3-4' }],
-  reads: [{ kind: 'search', query: 'bucket', hits: 2 }, { kind: 'read', from: 10, to: 14 }], driveAsOf: new Date().toISOString(),
+  cites: [{ kind: 'entry', from: 12, ref: 'history://billing-1a2b/main#12' }, { kind: 'drive', url: 'drive://workspace/plan.md', lines: [3, 4], generation: 7, hash: 'sha256:abc', ref: 'drive://workspaces/billing-1a2b/plan.md:3-4' }],
+  until: null, reads: [{ kind: 'search', query: 'bucket', hits: 2 }, { kind: 'read', from: 10, to: 14 }], driveAsOf: new Date().toISOString(),
   draft: 'Please move the remaining exports too.', rounds: 2, truncated: false, usage: { model: 'openai/gpt-fast', requests: 3, input: 30_000, output: 900, costUsd: 0.0123 },
 });
 const call = (result: GhostAskResult | null, status: ToolCallBlock['status'] = 'done', text = JSON.stringify(result)): ToolCallBlock => ({

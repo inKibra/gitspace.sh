@@ -9,6 +9,7 @@ import { QuestionCardsContext } from './QuestionCards.js';
 import { useTranscriptHistory, type TranscriptHistory } from './useTranscriptHistory.js';
 import { TranscriptContentCache } from './transcriptContentCache.js';
 import { CommentMarginLayout } from './comments/CommentMargin.js';
+import { GhostEntry } from './ghost/GhostEntry.js';
 
 export interface VirtualTranscriptProps {
   history: TranscriptHistory;
@@ -447,7 +448,10 @@ function TranscriptWindow({ history, transport, onAnswer, inline = false, viewKe
         {complete.error ? <div role="alert" className="mt-2 text-body text-destructive">{complete.error}<Button variant="ghost" onClick={() => contentCache.retry(member)}>Retry content</Button></div> : null}
       </>;
     }
-    return <MeasuredRow key={row.id} row={row} top={rowTop} gap={gap} onMeasure={onMeasure} onNode={onNode}>{body}</MeasuredRow>;
+    // An entry of the main transcript offers "Ask a ghost about this"; a compaction row, a ghost from that point.
+    const first = row.rows[0]?.item;
+    const compaction = !row.tools && first?.type === 'interruption' && first.reason === 'compacted';
+    return <MeasuredRow key={row.id} row={row} top={rowTop} gap={gap} onMeasure={onMeasure} onNode={onNode}>{inline ? body : <GhostEntry ordinal={row.ordinal} compaction={compaction}>{body}</GhostEntry>}</MeasuredRow>;
   });
   const column = <div ref={root} data-virtual-transcript className={`${inline ? 'min-w-0 w-full px-3 py-2' : 'mx-auto min-w-0 w-full max-w-3xl px-6 pb-[calc(var(--composer-overlay-height,0px)+1.5rem)] pt-6'} [overflow-anchor:none]`}>
     {transport.length ? <div className="mb-6 flex min-w-0 flex-col gap-1">{transport.map((block) => <TransportNotice block={block} key={block.id} />)}</div> : null}

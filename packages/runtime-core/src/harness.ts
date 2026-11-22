@@ -237,8 +237,9 @@ export async function createRuntimeHarness(options: RuntimeHarnessOptions) {
     }
     // The project agent's turn starts with its workspace board; a workspace agent's with its stack board while it heads
     // a stack, then a Base line when its base changed; then the Chatter digest; appended after everything earlier
-    // requests sent. Subagents get none of them.
-    const turn = !child && live?.run ? String(live.run.taskId) : null;
+    // requests sent. Subagents get none of them. A run's generation changes at every tool round, so the run is named by
+    // its first entry (its first input or generation before that is recorded).
+    const turn = !child && live?.run ? String(live.run.first ?? live.run.inputs[0] ?? live.run.taskId) : null;
     const chatter = options.tools.chatterDigest;
     const lines = turn === null ? [] : [
       board ? await boardForTurn(harness, runtime.conversationId, turn, input.messages, board, context) : null,

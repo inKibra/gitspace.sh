@@ -8,11 +8,11 @@ import { IssuesView, openIssueCount, type IssuesViewProps } from './IssuesView.j
 const at = new Date('2026-11-21T10:00:00.000Z');
 const topic = (key: string, extra: Partial<ChatterTopic> = {}): ChatterTopic => ({
   key, display: key, firstAt: at, lastAt: at, posts: 2, participants: [{ kind: 'workspace', id: 'workspace-a', name: 'Parser' }, { kind: 'workspace', id: 'workspace-b', name: 'Billing' }],
-  state: 'open', stateBy: 'Parser', stateAt: at, fixedIn: null, repeats: 0, filed: null, ...extra,
+  state: 'open', stateBy: 'Parser', stateAt: at, fixedIn: null, repeats: 0, filed: null, marked: null, sameAs: null, ...extra,
 });
 const post = (topicKey: string, text: string): ChatterPost => ({
   type: 'post', offset: 1, id: `post-${topicKey}`, at, topicKey, topic: topicKey, author: { kind: 'workspace', id: 'workspace-a', name: 'Parser' }, phase: 'code', kind: 'tooling', text,
-  spot: { tool: 'proc', reference: 'history://workspace-a/main#12', machine: 'm-1' },
+  spot: { tool: 'proc', reference: 'history://workspace-a/main#12', machine: 'm-1' }, link: null,
 });
 
 // happy-dom has no Web Animations; the scroll area's viewport asks for them on a timer.

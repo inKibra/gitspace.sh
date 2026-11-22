@@ -6,7 +6,8 @@ import { Harness, MemoryStorage, createRegistry, defineExtension, defineTool, ty
 import { Type } from 'typebox';
 import { createModels, createAssistantMessageEventStream, getCurrentTools, type AssistantMessage, type Message, type Models, type Model, type Api, type ToolCall, type ToolResultMessage } from '@earendil-works/pi-ai';
 import { RuntimeBrowserApprovalCardSchema, RuntimeFullOutputDetailsSchema, RuntimeJobAcceptanceSchema, RuntimeJobObservationSchema, TOOL_RESULT_MAX_BYTES, toolResultReference } from '@gitspace/protocol-runtime';
-import { QuestionsDoc, TodosDoc, WorkspaceDoc, PlanDoc } from './documents.js';
+import { AutomationRequestsDoc, QuestionsDoc, TodosDoc, WorkspaceDoc, PlanDoc } from './documents.js';
+import { formatConversationEvents } from '@gitspace/blocks';
 import { SessionControlsDoc } from './session-controls.js';
 import { createRuntimeTools, parseToolArguments, runtimeToolParameters, scriptToolSources, type ToolServices } from './tools.js';
 import { declareTool, declareTools } from './tool-declarations.js';
@@ -47,7 +48,7 @@ const samples: Record<string, ToolCall['arguments']> = {
   space_workflow: { method: 'get' }, space_rubric: { method: 'get' }, space_journal: { method: 'list' }, space_guide: { method: 'get' }, space_review: { method: 'list' },
   web_search: { query: 'TypeScript documentation' }, web_fetch: { url: 'https://www.typescriptlang.org/docs/' }, generate_image: { prompt: 'A blue square' }, decide: { state: 'A one-line fix', questions: { risky: { type: 'bool', instructions: 'Is it risky?' } } }, ast_grep: { pattern: 'foo($A)', path: 'src', language: 'typescript' },
   ast_edit: { ops: [{ pat: 'foo($A)', out: 'bar($A)' }], paths: ['src/main.ts'], language: 'typescript' }, ast_resolve: { proposalId: 'proposal', action: 'reject' },
-  history_search: { query: 'decision' }, history_read: { conversationId: 'conversation' }, chatter_post: { topic: 'bun test hang', kind: 'workaround', text: 'A longer timeout gets past it.' }, chatter_read: { topic: 'bun test hang' }, blocks: { op: 'changeSet' },
+  history_search: { query: 'decision' }, history_read: { conversationId: 'conversation' }, chatter_post: { topic: 'bun test hang', kind: 'workaround', text: 'A longer timeout gets past it.' }, chatter_read: { topic: 'bun test hang' }, chatter_topic: { topic: 'bun test hang', action: 'resolve', fixedIn: '4f2a9c1' }, blocks: { op: 'changeSet' },
   ghost_ask: { question: 'Why did it choose the archive bucket?', workspaceId: 'billing' },
   checkpoint: { goal: 'Inspect implementation' }, rewind: { checkpoint: 'checkpoint', report: 'Findings' }, wait: { timeoutMs: 1000 },
   mcp_discover: {}, mcp_invoke: { connectionId: 'connection', name: 'lookup', arguments: { query: 'hello' } }, web_browser: { action: 'tabs' },
@@ -110,6 +111,29 @@ test('every registered tool advertises its real object contract and executes thr
     expect((await harness.snapshot(TodosDoc, root.id, BACKGROUND_CONTEXT))?.items).toEqual(samples.todo?.items);
     expect((await harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items.map(question => question.kind).sort()).toEqual(['approval', 'secure-input', 'takeover']);
     expect((await harness.snapshot(PlanDoc, root.id, BACKGROUND_CONTEXT))?.status).toBe('proposed');
+  } finally { await harness.close(BACKGROUND_CONTEXT); }
+});
+test('chatter_topic acts in a turn a person started, and is refused in one an automation run or a delivered event started', async () => {
+  const resolve = { topic: 'bun test hang', action: 'resolve' };
+  const dispatched: string[] = [];
+  // One call per turn: each turn's second request answers.
+  const rounds: ToolCall[][] = [];
+  rounds[0] = [call('chatter_topic', resolve, 'person')];
+  rounds[2] = [call('chatter_topic', resolve, 'automation')];
+  rounds[4] = [call('chatter_topic', resolve, 'event')];
+  const { harness, root } = await registered(rounds, async input => { dispatched.push(input.requestId); return completed(input); });
+  try {
+    await root.submit({ type: 'input', content: 'Resolve the bun test hang issue.' }, BACKGROUND_CONTEXT);
+    await root.waitForIdle(BACKGROUND_CONTEXT);
+    await harness.commit(async tx => { (await tx.doc(AutomationRequestsDoc)).requests['automation-1'] = { conversationId: String(root.id), text: 'Triage Chatter.' }; }, BACKGROUND_CONTEXT);
+    await root.submit({ type: 'input', content: 'Triage Chatter.', requestId: 'automation-1' }, BACKGROUND_CONTEXT);
+    await root.waitForIdle(BACKGROUND_CONTEXT);
+    await root.submit({ type: 'input', content: formatConversationEvents([{ kind: 'workspace', source: 'Parser', text: 'Parser finished its turn.' }]) }, BACKGROUND_CONTEXT);
+    await root.waitForIdle(BACKGROUND_CONTEXT);
+    const results = (await root.context(BACKGROUND_CONTEXT)).messages.filter(message => message.role === 'toolResult');
+    expect(results.map(result => [result.toolCallId, result.isError])).toEqual([['person', false], ['automation', true], ['event', true]]);
+    expect(JSON.stringify(results[1]?.content)).toContain('chatter_topic acts only in a turn a person started');
+    expect(dispatched).toEqual(['person']);
   } finally { await harness.close(BACKGROUND_CONTEXT); }
 });
 test('space_review only lists: opening, replying to or resolving a thread is refused without dispatching', async () => {

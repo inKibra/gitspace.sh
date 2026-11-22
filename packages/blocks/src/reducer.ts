@@ -512,7 +512,7 @@ export class TranscriptProjector {
           counts.others ? `${counts.others} other ${counts.others === 1 ? 'post' : 'posts'} — chatter_read` : null,
           counts.fullTokens > counts.tokens ? `~${counts.tokens} tokens instead of ~${counts.fullTokens}` : null,
         ].filter(Boolean).join(' · ') : '';
-        this.#write({ id: `${turn.id}:chatter:${event.ordinal}`, type: 'interruption', reason: 'machine', title: 'Chatter since its last turn', detail, body: contentText(message.content), ...createdAt(event) });
+        this.#write({ id: `${turn.id}:chatter:${event.ordinal}`, type: 'interruption', reason: 'machine', title: counts?.during ? 'Chatter during this run' : 'Chatter since its last turn', detail, body: contentText(message.content), ...createdAt(event) });
         return;
       }
       if (message.role === 'custom' && message.customType === WORKSPACE_REPORT_ENTRY && message.display === true) {

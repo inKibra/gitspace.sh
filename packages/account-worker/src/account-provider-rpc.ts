@@ -3,8 +3,9 @@ import {
   listProvidersContract, setProviderApiKeyContract, logoutProviderContract,
   disableProviderAccountContract, enableProviderAccountContract, removeProviderAccountContract,
   startProviderLoginContract, providerLoginEventsContract, respondProviderLoginContract,
-  cancelProviderLoginContract, providerUsageContract, listAvailableModelsContract,
+  cancelProviderLoginContract, providerUsageContract, serviceUsageContract, listAvailableModelsContract,
 } from '@gitspace/protocol/rpc-contract';
+import { acrossRelease } from './release-worker.js';
 import { err, ok } from 'result-rpc';
 import { serverRpc } from 'result-rpc/server';
 
@@ -73,9 +74,14 @@ export function providerCloudProcedures(env: Env, userId: string, requireAdminis
     try { return ok(await vault.cloudUsage(input.profileId, input.providerId, input.refresh)); }
     catch (error) { return err(errors.OperationFailed({ operation: 'read provider usage', message: message(error) })); }
   });
+  // The vault method is new in this release.
+  const serviceUsage = server.implement(serviceUsageContract).handler(async ({ input, errors }) => {
+    try { return ok({ rows: await acrossRelease(() => vault.serviceUsage(input.profileId, input.days)) }); }
+    catch (error) { return err(errors.OperationFailed({ operation: 'read service usage', message: message(error) })); }
+  });
   const models = server.implement(listAvailableModelsContract).handler(async ({ input, errors }) => {
     try { return ok(await vault.cloudModels(input.profileId)); }
     catch (error) { return err(errors.OperationFailed({ operation: 'list available models', message: message(error) })); }
   });
-  return { list, apiKey: { set }, logout, account: { disable, enable, remove }, login: { start, events, respond, cancel }, usage, models };
+  return { list, apiKey: { set }, logout, account: { disable, enable, remove }, login: { start, events, respond, cancel }, usage, serviceUsage, models };
 }

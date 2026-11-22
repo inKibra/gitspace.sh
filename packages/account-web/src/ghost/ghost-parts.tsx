@@ -1,8 +1,8 @@
-// Small pieces a ghost draws in several places: its glyph, a citation chip, a read's label, and inline text with `code`
-// and **bold**.
+// Small pieces a ghost draws in several places: its glyph, a citation chip, a read's label, the ring of its time left,
+// and inline text with `code` and **bold**.
 import { Tooltip } from '@gitspace/ui';
-import type { GhostCite, GhostRead } from '@gitspace/protocol-runtime';
-import { File02, MessageTextSquare01 } from '@untitledui/icons';
+import { GHOST_LIFETIME_MS, GHOST_WARN_MS, type GhostCite, type GhostRead } from '@gitspace/protocol-runtime';
+import { File02, MessageChatCircle, MessageTextSquare01 } from '@untitledui/icons';
 
 /** The ghost's tint: a soft lavender, kept off the product's blue (selection) and violet (upstream). */
 export const GHOST = '#9a8cff';
@@ -17,29 +17,45 @@ export function GhostGlyph({ size = 16, className }: { size?: number; className?
   </svg>;
 }
 
-/** `#118`, `#93–117`, `plan.md:19–20`. */
+/** How much of a ghost's life is left, as a ring that empties; amber in its last minute. */
+export function IdleRing({ remaining, size = 16 }: { remaining: number; size?: number }) {
+  const radius = size / 2 - 2;
+  const length = 2 * Math.PI * radius;
+  const left = Math.max(0, Math.min(1, remaining / GHOST_LIFETIME_MS));
+  return <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="shrink-0 -rotate-90" aria-hidden data-idle-ring={Math.round(left * 100)}>
+    <circle cx={size / 2} cy={size / 2} r={radius} fill="none" stroke="currentColor" strokeOpacity={0.15} strokeWidth={2} />
+    <circle cx={size / 2} cy={size / 2} r={radius} fill="none" stroke={remaining <= GHOST_WARN_MS ? AMBER : GHOST} strokeWidth={2} strokeLinecap="round" strokeDasharray={length} strokeDashoffset={length * (1 - left)} style={{ transition: 'stroke-dashoffset 1s linear' }} />
+  </svg>;
+}
+
+/** `#118`, `#93–117`, `plan.md:19–20`, `post 412`. */
 export function citeLabel(cite: GhostCite): string {
   if (cite.kind === 'entry') return cite.to === undefined ? `#${cite.from}` : `#${cite.from}–${cite.to}`;
+  if (cite.kind === 'chatter') return `post ${cite.offset}`;
   const name = decodeURIComponent(cite.url.split('/').at(-1) ?? cite.url);
   return cite.lines ? `${name}:${cite.lines[0] === cite.lines[1] ? cite.lines[0] : `${cite.lines[0]}–${cite.lines[1]}`}` : name;
 }
 
-/** One read of a ghost: `searched “polling” · 9 hits`, `read transcript 93–117`, `read drive://…/plan.md`. */
+/** One read of a ghost: `searched “polling” · 9 hits`, `read transcript 93–117`, `read drive://…/plan.md`,
+ * `read Chatter “bun test hang” · 4 posts`. */
 export function readLabel(read: GhostRead): string {
   if (read.kind === 'search') return `searched “${read.query}”${read.hits === null ? '' : ` · ${read.hits} ${read.hits === 1 ? 'hit' : 'hits'}`}`;
   if (read.kind === 'read') return read.from === null ? 'reading the transcript' : read.from === read.to ? `read entry ${read.from}` : `read transcript ${read.from}–${read.to}`;
+  if (read.kind === 'chatter') return `read Chatter${read.topic === null ? '' : ` “${read.topic}”`}${read.posts === null ? '' : ` · ${read.posts} ${read.posts === 1 ? 'post' : 'posts'}`}`;
   return `read ${read.url}`;
 }
 
-/** A citation: an entry (#118, #93–117) or a drive file's lines. Clicking shows it in the workspace; without `onCite`
- * (an entry of a conversation the workspace view doesn't show) it only names it. */
+/** A citation: an entry (#118, #93–117), a drive file's lines or a Chatter post. Clicking shows it (the workspace at the
+ * entry, the Drive at the lines in the version the ghost read, the post in the Chatter pane); without `onCite` (an
+ * entry of a conversation the workspace view doesn't show) it only names it. */
 export function CiteChip({ cite, onCite }: { cite: GhostCite; onCite?(cite: GhostCite): void }) {
-  const Icon = cite.kind === 'entry' ? MessageTextSquare01 : File02;
+  const Icon = cite.kind === 'entry' ? MessageTextSquare01 : cite.kind === 'chatter' ? MessageChatCircle : File02;
   const label = citeLabel(cite);
   const entries = cite.kind === 'entry' ? cite.to === undefined ? `entry ${cite.from}` : `entries ${cite.from}–${cite.to}` : null;
   const preview = !onCite ? `${entries ?? label} of the session the ghost read`
     : entries ? `Show ${entries} in the transcript`
-    : `Open ${label} in the Drive${cite.kind === 'drive' && cite.generation !== null ? ` · the ghost read generation ${cite.generation}` : ''}`;
+    : cite.kind === 'chatter' ? `Open ${label} in Chatter`
+    : `Open ${label} in the Drive${cite.kind === 'drive' && cite.generation !== null ? ` as the ghost read it · generation ${cite.generation}` : ''}`;
   const className = 'ghost-chip mx-0.5 inline-flex h-[19px] translate-y-[-1px] items-center gap-1 rounded-full px-1.5 align-middle font-mono text-[10.5px] font-medium leading-none transition-colors';
   const content = <><Icon width={11} height={11} strokeWidth={1.75} className="shrink-0 opacity-80" />{label}</>;
   return <Tooltip content={<span className="block max-w-[280px] whitespace-normal">{preview}</span>} side="top">

@@ -208,11 +208,14 @@ export const RuntimeChatterPostArgumentsSchema = z.object({
   reference: z.string().max(2_048).regex(CHATTER_REFERENCE, 'A history:// reference or a result:// path').optional().describe('Tooling: where it failed, a history:// reference or a result:// path.'),
   machine: z.string().max(160).optional().describe('Tooling: the machine it failed on; this workspace\'s default machine when omitted.'),
   title: z.string().max(160).optional().describe('Tooling: a short title; the text\'s first line when omitted.'),
+  workspace: z.string().min(1).max(160).optional().describe('Project agent only: the workspace (id or name) you started for this, linked on the post; it must be a workspace of this project.'),
+  issue: z.string().min(1).max(160).optional().describe('Project agent only: the issue topic you marked for filing or resolved, linked on the post.'),
 }).strict().superRefine((value, context) => {
   if (value.kind === 'tooling') {
     if (value.tool === undefined) context.addIssue({ code: 'custom', path: ['tool'], message: 'A tooling post names the tool that failed' });
     if (value.reference === undefined) context.addIssue({ code: 'custom', path: ['reference'], message: 'A tooling post names where it failed: a history:// reference or a result:// path' });
   } else if (value.topic === undefined || value.topic.trim() === '') context.addIssue({ code: 'custom', path: ['topic'], message: 'A post names its topic' });
+  if (value.workspace !== undefined && value.issue !== undefined) context.addIssue({ code: 'custom', path: ['issue'], message: 'A post links one thing: a workspace or an issue topic' });
 });
 export type RuntimeChatterPostArguments = z.infer<typeof RuntimeChatterPostArgumentsSchema>;
 /** `chatter_read`: one topic's posts, or the project's posts and its active topics (issue topics with `issue` or
@@ -226,15 +229,27 @@ export const RuntimeChatterReadArgumentsSchema = z.object({
   limit: z.number().int().min(1).max(100).optional().describe('Posts to return, newest first; 30 by default, at most 100.'),
 }).strict();
 export type RuntimeChatterReadArguments = z.infer<typeof RuntimeChatterReadArgumentsSchema>;
+/** `chatter_topic` (the project agent only): act on a topic as the project agent. */
+export const RuntimeChatterTopicArgumentsSchema = z.object({
+  topic: z.string().min(1).max(160).describe('The topic to act on, as listed by chatter_read.'),
+  action: z.enum(['resolve', 'dismiss', 'file', 'merge', 'not_same']).describe('resolve an issue topic after its fix landed (with fixedIn), dismiss it, file: mark it for filing with GitSpace (a person decides), merge it into the topic named by into when they are one thing, or not_same: it is not the same as into, so the suggestion to merge them goes.'),
+  into: z.string().min(1).max(160).optional().describe('merge and not_same: the other topic.'),
+  fixedIn: z.string().trim().min(1).max(200).optional().describe('resolve: the commit that fixed it.'),
+}).strict().superRefine((value, context) => {
+  if ((value.action === 'merge' || value.action === 'not_same') && value.into === undefined) context.addIssue({ code: 'custom', path: ['into'], message: `${value.action} names the other topic as into` });
+  if (value.fixedIn !== undefined && value.action !== 'resolve') context.addIssue({ code: 'custom', path: ['fixedIn'], message: 'fixedIn goes with resolve' });
+});
+export type RuntimeChatterTopicArguments = z.infer<typeof RuntimeChatterTopicArgumentsSchema>;
 /** `ghost_ask` (docs/GHOSTS-DESIGN.md §5.1): a new ghost of one session of the project (this conversation when both ids
- * are left out; a workspace's main conversation when only `conversationId` is), or with `ghostId` alone a follow-up to a
- * live ghost this conversation started. */
+ * are left out; a workspace's main conversation when only `conversationId` is), reading up to entry `until` when given,
+ * or with `ghostId` alone a follow-up to a live ghost this conversation started. */
 export const RuntimeGhostAskArgumentsSchema = z.object({
   question: z.string().trim().min(1).max(GHOST_QUESTION_MAX).describe('What to ask the ghost about the session, up to 4,000 characters.'),
   workspaceId: path.optional().describe('A workspace of this project whose conversation the ghost reads; this workspace when omitted.'),
   conversationId: path.optional().describe('One conversation of that workspace (an earlier one, a subagent\'s); its main conversation when omitted, and this conversation when workspaceId is omitted too.'),
-  ghostId: z.uuid().optional().describe('Ask a live ghost this conversation started again, by the ghostId its last answer returned; leave workspaceId and conversationId out.'),
-}).strict().refine(args => args.ghostId === undefined || (args.workspaceId === undefined && args.conversationId === undefined), { message: 'A follow-up names only ghostId: the ghost already reads its session', path: ['ghostId'] });
+  until: z.number().int().nonnegative().optional().describe('An entry number: the ghost reads the session only up to this entry, and the drive and Chatter as they were at its time, so it answers as the agent could have known then.'),
+  ghostId: z.uuid().optional().describe('Ask a live ghost this conversation started again, by the ghostId its last answer returned; leave workspaceId, conversationId and until out.'),
+}).strict().refine(args => args.ghostId === undefined || (args.workspaceId === undefined && args.conversationId === undefined && args.until === undefined), { message: 'A follow-up names only ghostId: the ghost already reads its session', path: ['ghostId'] });
 export type RuntimeGhostAskArguments = z.infer<typeof RuntimeGhostAskArgumentsSchema>;
 export const RuntimeCheckpointArgumentsSchema = z.object({ goal: z.string().describe('What the exploration is for.') });
 export const RuntimeRewindArgumentsSchema = z.object({ checkpoint: z.string().describe('The checkpoint id checkpoint returned.'), report: z.string().describe('What the exploration found; it replaces the exploration in context.') });

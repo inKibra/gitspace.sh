@@ -1,10 +1,12 @@
 // An agent's question to a ghost (`ghost_ask`) as its conversation shows it: the session asked about, the question and
-// the ghost's cited answer. A citation opens that workspace at the entry or the drive lines, as a person's ghost's do.
+// the ghost's cited answer. A citation opens that workspace at the entry or the drive lines (in the version the ghost
+// read), as a person's ghost's do; a Chatter post opens in the Chatter pane.
 import type { ToolCallBlock } from '@gitspace/blocks';
-import { GhostAskResultSchema, RuntimeGhostAskArgumentsSchema, ghostParts, type GhostAskResult, type GhostCite } from '@gitspace/protocol-runtime';
+import { GhostAskResultSchema, RuntimeGhostAskArgumentsSchema, ghostParts, type GhostAskResult, type GhostCite, type GhostDriveVersion } from '@gitspace/protocol-runtime';
 import { Tooltip, useShape } from '@gitspace/ui';
 import { Check, Copy01, Lock01 } from '@untitledui/icons';
 import { useMemo, useState } from 'react';
+import { openChatter } from '../chatter/chatter-open.js';
 import type { ItemInteractionProps } from '../chat/TranscriptItemView.js';
 import { selectInspection } from '../routes.js';
 import { AMBER, CiteChip, GHOST, GhostGlyph, Inline, readLabel } from './ghost-parts.js';
@@ -41,19 +43,23 @@ export function GhostAskCall({ block, state, onStateChange }: { block: ToolCallB
   const args = RuntimeGhostAskArgumentsSchema.safeParse(block.args);
   const output = (block.result ?? []).flatMap(content => content.type === 'code' || content.type === 'markdown' ? [content.text] : []).join('\n');
   const result = useMemo(() => block.status === 'done' ? askResult(output) : null, [block.status, output]);
-  const parts = useMemo(() => result && ghostParts(result.answer, new Map(result.cites.flatMap(cite => cite.kind === 'drive' ? [[cite.url, cite.generation]] : []))), [result]);
+  const parts = useMemo(() => result && ghostParts(result.answer, new Map(result.cites.flatMap((cite): [string, GhostDriveVersion][] => cite.kind === 'drive' ? [[cite.url, { generation: cite.generation, hash: cite.hash }]] : []))), [result]);
   const question = args.success ? args.data.question : null;
   const followUp = args.success && args.data.ghostId !== undefined;
   const session = result?.session;
   const subject = session ? session.workspace : followUp ? 'its ghost' : args.success && args.data.workspaceId !== undefined ? args.data.workspaceId : 'this conversation';
   const running = block.status === 'running' || block.status === 'pending';
   const failure = !running && !result ? output || 'The ghost did not answer.' : null;
-  // Entries open in the workspace's transcript, which shows its main conversation; drive lines open in its Drive.
+  // Entries open in the workspace's transcript, which shows its main conversation; drive lines open in its Drive; posts
+  // in the project's Chatter.
   const onCite = (cite: GhostCite): void => {
     const projectId = new URL(window.location.href).searchParams.get('project');
     if (!session || !projectId) return;
-    showGhostCite(session.workspaceId, cite);
-    selectInspection(projectId, session.workspaceId === projectId ? null : session.workspaceId);
+    if (cite.kind === 'chatter') openChatter({ projectId, offset: cite.offset });
+    else {
+      showGhostCite(session.workspaceId, cite);
+      selectInspection(projectId, session.workspaceId === projectId ? null : session.workspaceId);
+    }
   };
   const folded = (result?.answer.length ?? 0) > FOLDED && !state?.open;
   return <div role="group" aria-label={`Asked a ghost of ${subject}`} data-ghost-ask={block.toolCallId} className={`flex min-w-0 flex-col gap-1.5 border border-border bg-surface-2 px-3 py-2 ${shape.container}`}>
@@ -76,7 +82,7 @@ export function GhostAskCall({ block, state, onStateChange }: { block: ToolCallB
     {result && parts ? <div className="flex min-w-0 flex-col gap-1.5 pl-8">
       <div data-ghost-answer className={`whitespace-pre-wrap text-[13px] leading-[1.6] text-foreground/90 [overflow-wrap:anywhere] ${folded ? 'line-clamp-6' : ''}`}>
         {parts.map((part, index) => typeof part === 'string' ? <Inline key={index} text={part} />
-          : <CiteChip key={index} cite={part} {...part.kind === 'drive' || result.session.main ? { onCite } : {}} />)}
+          : <CiteChip key={index} cite={part} {...part.kind !== 'entry' || result.session.main ? { onCite } : {}} />)}
       </div>
       {(result.answer.length > FOLDED) ? <button type="button" className="self-start text-[11.5px] text-muted-foreground hover:text-foreground" onClick={() => onStateChange?.({ open: !state?.open })}>{folded ? 'Show the whole answer' : 'Show less'}</button> : null}
       {result.truncated ? <span className="text-[11px] text-muted-foreground">It stopped at its limit and answered from what it read.</span> : null}

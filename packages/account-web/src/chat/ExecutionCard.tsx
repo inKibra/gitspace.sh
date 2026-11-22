@@ -1,8 +1,9 @@
-import type { ExecutionBlock, SideAgentBlock } from '@gitspace/blocks';
+import { executionAgentId, type ExecutionBlock, type SideAgentBlock } from '@gitspace/blocks';
 import { Badge, ThinkingStep, ThinkingSteps, ThinkingStepsContent, ThinkingStepsHeader, useShape } from '@gitspace/ui';
 import { ChevronDown, ChevronRight, Terminal, Users01 } from '@untitledui/icons';
 import { useState } from 'react';
 import { GitSpaceMarkdown } from '../GitSpaceMarkdown.js';
+import { GhostSessionButton } from '../ghost/GhostEntry.js';
 import type { ExecutionHistoryRenderer, ItemInteractionProps } from './TranscriptItemView.js';
 
 export function SideAgents({ agents, state, onStateChange }: { agents: SideAgentBlock[] } & ItemInteractionProps) {
@@ -17,7 +18,7 @@ export function SideAgents({ agents, state, onStateChange }: { agents: SideAgent
         description={[agent.agent, agent.status].filter(Boolean).join(' · ')}
         status={agent.status === 'running' ? 'active' : 'complete'}
         isLast={index === agents.length - 1}
-      >{agent.summary ? <p className="text-body text-muted-foreground">{agent.summary}</p> : null}</ThinkingStep>)}
+      ><div className="flex flex-col items-start gap-1">{agent.summary ? <p className="text-body text-muted-foreground">{agent.summary}</p> : null}<GhostSessionButton conversationId={agent.agentId} title={agent.label} /></div></ThinkingStep>)}
     </ThinkingStepsContent>
   </ThinkingSteps>;
 }
@@ -30,6 +31,8 @@ export function Execution({ block, state, onStateChange, renderHistory }: { bloc
   const color = block.status === 'failed' ? 'red' : block.status === 'blocked' || block.status === 'queued' ? 'amber' : block.status === 'cancelled' ? 'gray' : 'green';
   const Icon = block.kind === 'agent' ? Users01 : Terminal;
   const Chevron = open ? ChevronDown : ChevronRight;
+  // A subagent's run names its session, which a ghost can read.
+  const agentId = executionAgentId(block);
   return <section className={`${shape.container} min-w-0 bg-surface-2 shadow-surface-1`} data-execution-id={block.executionId} data-execution-kind={block.kind}>
     <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2">
       {renderHistory ? <button
@@ -41,6 +44,7 @@ export function Execution({ block, state, onStateChange, renderHistory }: { bloc
       ><Chevron width={16} height={16} strokeWidth={1.5} className="shrink-0 text-muted-foreground" /><Icon width={16} height={16} strokeWidth={1.5} className="shrink-0 text-muted-foreground" /><span className="min-w-0 text-body [overflow-wrap:anywhere]"><span className="mr-2 text-muted-foreground">{kind}</span>{block.label}</span></button>
         : <div className="flex min-h-10 min-w-0 flex-1 items-center gap-2"><Icon width={16} height={16} strokeWidth={1.5} className="shrink-0 text-muted-foreground" /><span className="min-w-0 text-body [overflow-wrap:anywhere]"><span className="mr-2 text-muted-foreground">{kind}</span>{block.label}</span></div>}
       <Badge variant="dot" color={color}>{block.status}</Badge>
+      {agentId ? <GhostSessionButton conversationId={agentId} title={block.label} /> : null}
       {block.hasFailures && block.status !== 'failed' ? <Badge variant="dot" color="red">Failure in history</Badge> : null}
     </div>
     <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 px-3 pb-3 text-caption text-muted-foreground">

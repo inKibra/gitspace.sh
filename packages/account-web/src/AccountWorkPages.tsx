@@ -232,7 +232,7 @@ function ProjectsView({ projects, workspaces, directory, operations, onOpen, onO
   const pendingRef = useRef(false);
   useToasts([error && !projectDialog && workspaceDialog === null ? { key: `project-operation:${error}`, tone: 'error', message: error, onDismiss: () => setError(null) } : null]);
   const visible = projects.filter((project) => filter === 'all' || (filter === 'archived' ? project.lifecycle === 'archived' : project.lifecycle !== 'archived' && project.lifecycle !== 'deleting'));
-  const run = async (action: () => void | Promise<void>, close?: () => void): Promise<void> => {
+  const run = async (action: () => unknown, close?: () => void): Promise<void> => {
     if (pendingRef.current) return;
     pendingRef.current = true;
     setPending(true);

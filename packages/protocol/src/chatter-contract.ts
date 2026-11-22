@@ -148,6 +148,7 @@ export const ChatterAuthorCodec = wire.serializable((value): value is ChatterAut
 export const ChatterChangeSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('state'), state: z.enum(CHATTER_ISSUE_STATES), from: z.enum(CHATTER_ISSUE_STATES).nullable(), fixedIn: z.string().nullable() }).strict(),
   z.object({ kind: z.literal('merge'), from: z.string().min(1), fromDisplay: z.string() }).strict(),
+  z.object({ kind: z.literal('marked') }).strict(),
 ]);
 export type ChatterChange = z.infer<typeof ChatterChangeSchema>;
 export const ChatterChangeCodec = wire.serializable((value): value is ChatterChange => ChatterChangeSchema.safeParse(value).success, { id: 'gitspace/chatter-change/v1', jsonSchema: ChatterChangeSchema });
@@ -157,6 +158,15 @@ export const ChatterChangeCodec = wire.serializable((value): value is ChatterCha
 export const ChatterSpotSchema = z.object({ tool: z.string().min(1), reference: z.string().min(1), machine: z.string().nullable() }).strict();
 export type ChatterSpot = z.infer<typeof ChatterSpotSchema>;
 export const ChatterSpotCodec = wire.serializable((value): value is ChatterSpot => ChatterSpotSchema.safeParse(value).success, { id: 'gitspace/chatter-spot/v1', jsonSchema: ChatterSpotSchema });
+
+/** What the project agent's post links (docs/CHATTER-DESIGN.md §6): a workspace of the project it started (GitSpace
+ * checked it exists in the project), or an issue topic it marked for filing or resolved. */
+export const ChatterLinkSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('workspace'), id: z.string().min(1), name: z.string() }).strict(),
+  z.object({ kind: z.literal('issue'), key: z.string().min(1), display: z.string() }).strict(),
+]);
+export type ChatterLink = z.infer<typeof ChatterLinkSchema>;
+export const ChatterLinkCodec = wire.serializable((value): value is ChatterLink => ChatterLinkSchema.safeParse(value).success, { id: 'gitspace/chatter-link/v1', jsonSchema: ChatterLinkSchema });
 
 export const ChatterPostCodec = wire.object({
   type: wire.literal('post'),
@@ -174,6 +184,8 @@ export const ChatterPostCodec = wire.object({
   text: wire.string,
   /** A tooling post's tool, reference and machine; null for other posts and for a person's. */
   spot: wire.nullable(ChatterSpotCodec),
+  /** What the project agent's post links: a workspace it started or an issue topic it acted on; null otherwise. */
+  link: wire.nullable(ChatterLinkCodec),
 });
 export type ChatterPost = InputOf<typeof ChatterPostCodec>;
 
@@ -312,9 +324,10 @@ function digestAuthor(post: ChatterPost): string {
  * The digest a turn carries (docs/CHATTER-DESIGN.md §3): the posts always heard, then the picked topics (or, with no
  * model answer, the newest topics), each under its topic in stream order and quoted as written (`<topic>:` then `<time>
  * <author> (<phase or person or project agent>, <kind>): <text>`), a floor post with its reason and a picked topic with
- * the model's; then the rest as one count. Null when there is nothing to say.
+ * the model's; then the rest as one count. `during` is a long run's digest at a tool boundary, headed as such. Null
+ * when there is nothing to say.
  */
-export function chatterDigestText(input: { entries: readonly { post: ChatterPost; heard: ChatterHeard }[]; others: number; otherTopics: number }): string | null {
+export function chatterDigestText(input: { entries: readonly { post: ChatterPost; heard: ChatterHeard }[]; others: number; otherTopics: number; during: boolean }): string | null {
   if (input.entries.length === 0 && input.others === 0) return null;
   const section = (title: string, entries: readonly { post: ChatterPost; heard: ChatterHeard }[]): string[] => {
     if (entries.length === 0) return [];
@@ -331,7 +344,7 @@ export function chatterDigestText(input: { entries: readonly { post: ChatterPost
   };
   const rest = input.others === 0 ? [] : [`${input.others} other ${input.others === 1 ? 'post' : 'posts'} in ${input.otherTopics} ${input.otherTopics === 1 ? 'topic' : 'topics'} — chatter_read`];
   return [
-    'Chatter since your last turn (times UTC):',
+    input.during ? 'Chatter during this run, since your last digest (times UTC):' : 'Chatter since your last turn (times UTC):',
     ...section('Always heard', input.entries.filter(entry => entry.heard.via === 'floor')),
     ...section('Picked for you', input.entries.filter(entry => entry.heard.via === 'pick')),
     ...section('Newest topics (no model picked)', input.entries.filter(entry => entry.heard.via === 'newest')),
@@ -343,6 +356,11 @@ export function chatterDigestText(input: { entries: readonly { post: ChatterPost
 export const ChatterFiledSchema = z.object({ at: z.iso.datetime(), by: z.string(), target: z.enum(['gitspace', 'repository']) }).strict();
 export type ChatterFiled = z.infer<typeof ChatterFiledSchema>;
 export const ChatterFiledCodec = wire.serializable((value): value is ChatterFiled => ChatterFiledSchema.safeParse(value).success, { id: 'gitspace/chatter-filed/v1', jsonSchema: ChatterFiledSchema });
+
+/** The project agent marked an issue topic for filing: when, and by whom. Filing stays a person's decision. */
+export const ChatterMarkedSchema = z.object({ at: z.iso.datetime(), by: z.string() }).strict();
+export type ChatterMarked = z.infer<typeof ChatterMarkedSchema>;
+export const ChatterMarkedCodec = wire.serializable((value): value is ChatterMarked => ChatterMarkedSchema.safeParse(value).success, { id: 'gitspace/chatter-marked/v1', jsonSchema: ChatterMarkedSchema });
 
 export const ChatterTopicCodec = wire.object({
   key: wire.string,
@@ -363,6 +381,11 @@ export const ChatterTopicCodec = wire.object({
   repeats: wire.integer({ min: 0 }),
   /** The last filing with GitSpace or GitHub draft shared; null when never. */
   filed: wire.nullable(ChatterFiledCodec),
+  /** The project agent marked it for filing since it was last filed; null when not. */
+  marked: wire.nullable(ChatterMarkedCodec),
+  /** The sameness check's suggestion that this topic is the same thing as another live topic (merge it there), unless
+   * someone said they are not the same; null when none. */
+  sameAs: wire.nullable(wire.object({ key: wire.string, display: wire.string, posts: wire.integer({ min: 0 }) })),
 });
 export type ChatterTopic = InputOf<typeof ChatterTopicCodec>;
 
@@ -377,11 +400,14 @@ export const ChatterPageCodec = wire.object({
 });
 export type ChatterPage = InputOf<typeof ChatterPageCodec>;
 
-/** What a person does to a topic: set its issue state (with the fixing commit when resolving), or merge it into
- * another topic. */
+/** What a person or the project agent does to a topic: set its issue state (with the fixing commit when resolving),
+ * merge it into another topic, mark an issue topic for filing (a person still decides), or say it is not the same as
+ * `other`, so the sameness check's suggestion goes and is not made again. */
 export const ChatterTopicActionSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('state'), state: z.enum(CHATTER_ISSUE_STATES), fixedIn: z.string().trim().min(1).max(CHATTER_FIXED_IN_CHARACTERS).nullable().default(null) }).strict(),
   z.object({ kind: z.literal('merge'), into: z.string().min(1).max(CHATTER_TOPIC_CHARACTERS * 2) }).strict(),
+  z.object({ kind: z.literal('mark') }).strict(),
+  z.object({ kind: z.literal('distinct'), other: z.string().min(1).max(CHATTER_TOPIC_CHARACTERS * 2) }).strict(),
 ]);
 export type ChatterTopicAction = z.input<typeof ChatterTopicActionSchema>;
 export const ChatterTopicActionCodec = wire.serializable((value): value is ChatterTopicAction => ChatterTopicActionSchema.safeParse(value).success, { id: 'gitspace/chatter-topic-action/v1', jsonSchema: ChatterTopicActionSchema });

@@ -171,8 +171,52 @@ Milestone 5 is built (2026-11-21, not deployed): agents ask ghosts with `ghost_a
   and when it fades. A chip opens the asked workspace and jumps to the entry, as a person's ghost's do; entries of a
   conversation the workspace view doesn't show (an earlier one, a subagent's) are named, not linked. Drive chips open
   the Drive at the lines.
-- **Not yet.** `until` (milestone 8) and `driveNote` (the drive-history note reaches the ghost in its read, not the
-  result).
+- **Not yet** (as built in milestone 5). `driveNote` (the drive-history note reaches the ghost in its read, not the
+  result). `until` came with milestone 8.
+
+Milestones 6–9 and the milestone-4 follow-ups are built (2026-11-21, not deployed).
+- **Entry points (6).** "Ask a ghost about this" on every entry of the workspace's main transcript (hover; the ghost
+  icon beside the row, `ghost/GhostEntry.tsx` `GhostEntry` in `VirtualTranscript`), which opens the conversation's ghost
+  with the entry as `about` and "Why did the agent do this?" in its composer; the question goes as `ask { text, about }`
+  and the model hears "About entry #N: …" with the `aboutEntry` rule in its instructions. A ghost button on each
+  subagent: its transcript entry (the Execution card and the Subagents list in the transcript) and its card in the
+  Inspector's Subagents tab (`GhostSessionButton`, the socket's `conversationId`). The Inspector has no list of earlier
+  conversations, so those are reached by `ghost_ask` and the socket only. The archived banner says "Its agent is gone;
+  the sessions and drive stay readable" with Ask a ghost. New workspace with it: an archived workspace's draft opens
+  the project's create dialog with a note, and the created workspace's composer gets the draft
+  (`onCreateWorkspace` resolves to the new id).
+- **Several ghosts and the dock (7).** The browser keeps up to 6 live ghosts (`GHOST_PERSON_MAX`; past it the one
+  opened longest ago ends, ended ones are dropped first). Summoning a session already read (same workspace,
+  conversation and `until`) focuses that ghost and it glows. Floating: the open ghost's window at the bottom right,
+  the others as pills with a ring that empties over the 10 minutes (amber in the last one), ended ones struck through;
+  Minimize shows only pills. Docked: a 384 px column right of the workspace (the Inspector folds away when docking and
+  can be opened beside it), a tab per ghost with its ring, and a `+` tab whose start page offers the workspace on
+  screen with three suggested questions (asked as soon as the ghost is ready) or an empty ghost. The choice is kept in
+  this browser (`localStorage` `gitspace.ghosts.placement`).
+- **From a point in time (8).** The socket and `ghost_ask` take `until` (an entry number). The ghost's reads are capped
+  at its ordinal (`before` = (until+1)·1024 on every transcript range; a content read past it is refused), its size is
+  counted up to it, and its `asOf` (drive and Chatter) is the newest event's time at or before it. A compaction row
+  in the transcript carries "Ghost from here" (`until` = the row's entry), whose suggestions start with "What did
+  this summary leave out?"; the header shows "up to #N". `GhostAskResult.until` says what it read up to.
+- **Chatter (9, CHATTER-DESIGN.md §11).** A fourth read tool `chatter_read { topic?, kind?, everywhere?, limit? }`,
+  offered only when the asker may read the project's Chatter (a person's device scope reaches the project; an agent's
+  ghost always, its project being the asker's). It calls `ProjectChatterDO.read` with `before: asOf` and, unless a
+  topic or `everywhere` is named, `workspaceId` (the topics the ghost's workspace posted in), and drops anything not
+  before `asOf` again. Posts are cited `[chatter:412]`, a chip that opens the post in the Chatter pane
+  (`openChatter({ projectId, offset })`); `ghost_ask` cites them as `chatter:<offset>` with their topic. A draft for
+  everyone is written `<draft for="everyone" kind="…">` and arrives as `answer.everyone` (a kind); only such a draft
+  gets **Post to Chatter** (the Chatter composer opens with it and the kind), and never Put in composer; a draft that
+  asks a workspace to act gets only the composer (or New workspace with it). A tooling post whose reference names a
+  session offers "Ask a ghost about this" (`askGhostAboutReference`, `ghostReference` in `protocol-runtime/src/ghost.ts`).
+  Ghosts never post, get no digest and are no listener.
+- **Usage view (4 follow-up).** `providers.serviceUsage { profileId, days }` reads the vault's `service_usage` for one
+  profile (`CredentialVaultDO.serviceUsage`, newest day first); Inference → Providers shows "Ghosts and decisions"
+  under the providers: totals per service and a row per day, service, model and workspace (workspace names from the
+  account directory; '' is "You" for ghosts and "No workspace" for decisions), last 30 days.
+- **The version a ghost read (4 follow-up).** A drive read records the file's hash at `asOf`
+  (`InspectorCloudArtifacts.versionAt`); drive cites carry `hash`, and their chip opens that version in the Inspector
+  (`ResourceRequest.hash` → `inspector.artifacts.read` with the hash), labelled "· as read" with a note that it is the
+  version the ghost read.
 
 ## 4. Data model and storage
 
@@ -394,11 +438,12 @@ Each step ships alone.
 5. **Agents ask ghosts.** `ghost_ask` with follow-ups by `ghostId`, the caps, and usage counted to the asker (§5.1).
    Built (§3).
 6. **Entry points everywhere.** Per-entry "Ask a ghost about this", Inspector Sessions list, subagent entries, the
-   archived banner, New workspace with it.
-7. **Several ghosts and the dock.** Pills, idle rings, the docked column with tabs and its start page.
+   archived banner, New workspace with it. Built (§3).
+7. **Several ghosts and the dock.** Pills, idle rings, the docked column with tabs and its start page. Built (§3).
 8. **From a point in time.** Start from a compaction row or any entry with `until`, the drive read as of that entry
-   (decision 3).
-9. **Chatter.** A ghost reads Chatter, and its draft can be posted there by the person (CHATTER-DESIGN.md §11).
+   (decision 3). Built (§3).
+9. **Chatter.** A ghost reads Chatter, and its draft can be posted there by the person (CHATTER-DESIGN.md §11). Built
+   (§3).
 
 ## 10. Open decisions
 

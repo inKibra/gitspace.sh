@@ -1,4 +1,6 @@
+import { executionAgentId } from '@gitspace/blocks';
 import { TranscriptItemView } from '../chat/TranscriptItemView.js';
+import { GhostSessionButton } from '../ghost/GhostEntry.js';
 import { Badge, Button, Card, CardAction, CardContent, CardDescription, CardGroup, CardHeader, CardMedia, CardTitle, InputCopy, ScrollArea } from '@gitspace/ui';
 import { Users01 } from '@untitledui/icons';
 import { useState } from 'react';
@@ -24,8 +26,10 @@ export function SubagentsSurface({ subagents, onStop, renderTranscript }: { suba
   if (!subagents.length) return <Padded><EmptyState icon={ic(Users01, 22)} title="No delegated work" description="Subagents from the canonical agent transcript appear here while they run and after they yield." /></Padded>;
   return <ScrollArea className="min-h-0 flex-1" viewportClassName="h-full"><div className="p-4">{error ? <p role="alert" className="mb-3 text-destructive">{error}</p> : null}<CardGroup border="outlined">{subagents.map((agent) => {
     const model = agent.type === 'side-agent' && agent.runtime?.model ? `${agent.runtime.model.modelId} (${agent.runtime.model.provider})` : agent.model;
+    // Each subagent is a session of its own, which a ghost can read.
+    const session = agent.type === 'side-agent' ? agent.agentId : executionAgentId(agent);
     return <Card key={agent.id}>
-    <CardHeader><CardMedia icon={UsersGlyph} /><CardTitle>{agent.label}</CardTitle><CardDescription>{agent.type === 'side-agent' && agent.runtime ? <><span aria-label="Role">Role: {agent.runtime.role ?? 'Not selected'}</span> · <span aria-label="Model">Model: {model ?? 'Not admitted'}</span></> : [agent.agent ?? 'subagent', model, agent.status].filter(Boolean).join(' · ')}</CardDescription><CardAction className="flex flex-wrap gap-1"><Tone value={agent.status} />{agent.type === 'side-agent' && onStop && (agent.status === 'running' || agent.status === 'blocked') ? <Button variant="secondary" size="compact" aria-label={`Stop ${agent.label}`} disabled={stopping.includes(agent.agentId)} onClick={() => void stop(agent.agentId)}>{stopping.includes(agent.agentId) ? 'Stopping…' : 'Stop'}</Button> : null}{agent.type === 'execution' && agent.hasFailures && agent.status !== 'failed' ? <Badge variant="dot" color="red">Failure in history</Badge> : null}</CardAction></CardHeader>
+    <CardHeader><CardMedia icon={UsersGlyph} /><CardTitle>{agent.label}</CardTitle><CardDescription>{agent.type === 'side-agent' && agent.runtime ? <><span aria-label="Role">Role: {agent.runtime.role ?? 'Not selected'}</span> · <span aria-label="Model">Model: {model ?? 'Not admitted'}</span></> : [agent.agent ?? 'subagent', model, agent.status].filter(Boolean).join(' · ')}</CardDescription><CardAction className="flex flex-wrap gap-1"><Tone value={agent.status} />{session ? <GhostSessionButton conversationId={session} title={agent.label} /> : null}{agent.type === 'side-agent' && onStop && (agent.status === 'running' || agent.status === 'blocked') ? <Button variant="secondary" size="compact" aria-label={`Stop ${agent.label}`} disabled={stopping.includes(agent.agentId)} onClick={() => void stop(agent.agentId)}>{stopping.includes(agent.agentId) ? 'Stopping…' : 'Stop'}</Button> : null}{agent.type === 'execution' && agent.hasFailures && agent.status !== 'failed' ? <Badge variant="dot" color="red">Failure in history</Badge> : null}</CardAction></CardHeader>
     {agent.summary ? <CardContent><GitSpaceMarkdown>{agent.summary}</GitSpaceMarkdown></CardContent> : null}
     {agent.type === 'side-agent' && agent.runtime ? <CardContent>
       <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-2 text-caption">

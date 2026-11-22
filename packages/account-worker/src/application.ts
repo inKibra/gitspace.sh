@@ -16,7 +16,7 @@ import { describeCloudProviders, listCloudModels, listCloudModelsOfType, publish
 import type { AccountFailure, CredentialAccount, ProfileCatalog, ResolvedCredential } from '@gitspace/runtime-core/inference';
 import { createModels, type AnyModel } from '@earendil-works/pi-ai';
 import { listAccountModels, accountModelSchema, ACCOUNT_MODEL_PROVIDERS, type AccountModel } from '@gitspace/provider-auth';
-import type { McpConnectionStatus, ProviderView, ProviderLoginEvent, ProviderUsage } from '@gitspace/protocol';
+import type { McpConnectionStatus, ProviderView, ProviderLoginEvent, ProviderUsage, ServiceUsageRow } from '@gitspace/protocol';
 import { ProviderLoginEventCodec } from '@gitspace/protocol';
 import { cloudImageProviderCall, resolveCloudImage } from './sandbox-rollout.js';
 import { cloudImageOperationActive, cloudImageProviderStatusSchema, cloudImageSelectionSchema, type CloudImageSelection } from '@gitspace/protocol/cloud-image';
@@ -2030,12 +2030,10 @@ export class CredentialVaultDO extends BudgetedDurableObject {
     });
   }
 
-  /** A Service's spending joins the account's usage by UTC day, profile, service (`ghost`, `decision`), model and the
-   * workspace whose agent spent it ('' for the account's own): tokens and cost, no text. The rows of the `ghost_usage`
-   * table it replaces move in once, as `ghost`, their cached prompt tokens counted as input; rows recorded before
-   * usage named workspaces move in once as the account's own. */
-  recordServiceUsage(raw: unknown): void {
-    const usage = ServiceUsageSchema.parse(raw);
+  /** The `service_usage` table, after the moves older layouts need: the rows of the `ghost_usage` table it replaces
+   * move in once, as `ghost`, their cached prompt tokens counted as input; rows recorded before usage named workspaces
+   * move in once as the account's own. */
+  #serviceUsageTable(): void {
     const sql = this.ctx.storage.sql;
     const create = 'CREATE TABLE IF NOT EXISTS service_usage(day TEXT NOT NULL, profile_id TEXT NOT NULL, service TEXT NOT NULL, model TEXT NOT NULL, workspace_id TEXT NOT NULL DEFAULT \'\', requests INTEGER NOT NULL, input INTEGER NOT NULL, output INTEGER NOT NULL, cost_usd REAL NOT NULL, PRIMARY KEY(day, profile_id, service, model, workspace_id))';
     const existing = sql.exec<{ sql: string }>("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'service_usage'").toArray()[0];
@@ -2051,9 +2049,26 @@ export class CredentialVaultDO extends BudgetedDurableObject {
         SELECT day, profile_id, 'ghost', model, requests, input + cache_read + cache_write, output, cost_usd FROM ghost_usage`);
       sql.exec('DROP TABLE ghost_usage');
     });
-    sql.exec(`INSERT INTO service_usage(day, profile_id, service, model, workspace_id, requests, input, output, cost_usd) VALUES(?,?,?,?,?,?,?,?,?)
+  }
+
+  /** A Service's spending joins the account's usage by UTC day, profile, service (`ghost`, `decision`), model and the
+   * workspace whose agent spent it ('' for the account's own): tokens and cost, no text. */
+  recordServiceUsage(raw: unknown): void {
+    const usage = ServiceUsageSchema.parse(raw);
+    this.#serviceUsageTable();
+    this.ctx.storage.sql.exec(`INSERT INTO service_usage(day, profile_id, service, model, workspace_id, requests, input, output, cost_usd) VALUES(?,?,?,?,?,?,?,?,?)
       ON CONFLICT(day, profile_id, service, model, workspace_id) DO UPDATE SET requests=requests+excluded.requests, input=input+excluded.input, output=output+excluded.output, cost_usd=cost_usd+excluded.cost_usd`,
     new Date().toISOString().slice(0, 10), usage.profileId, usage.service, usage.model, usage.workspaceId ?? '', usage.requests, usage.input, usage.output, usage.costUsd);
+  }
+
+  /** One profile's Service usage over the last `days` UTC days (today included), newest day first: one row per day,
+   * service, model and workspace ('' for the account's own). */
+  serviceUsage(profileId: string, days: number): ServiceUsageRow[] {
+    this.#serviceUsageTable();
+    const since = new Date(Date.now() - (days - 1) * 86_400_000).toISOString().slice(0, 10);
+    return this.ctx.storage.sql.exec<{ day: string; service: string; model: string; workspace_id: string; requests: number; input: number; output: number; cost_usd: number }>(
+      'SELECT day, service, model, workspace_id, requests, input, output, cost_usd FROM service_usage WHERE profile_id = ? AND day >= ? ORDER BY day DESC, service, cost_usd DESC, model, workspace_id', profileId, since,
+    ).toArray().map(row => ({ day: row.day, service: ServiceUsageSchema.shape.service.parse(row.service), model: row.model, workspaceId: row.workspace_id, requests: row.requests, input: row.input, output: row.output, costUsd: row.cost_usd }));
   }
 
   /** Each account's usage: a report or why its read failed. API keys report none, so they are not read. */

@@ -244,9 +244,11 @@ describe('Chatter digests', () => {
       if (posted.status !== 'ok') throw new Error('post refused');
       return posted.value.post.offset;
     };
-    /** Runs the digest build once its posts have settled, with `decide` as the Decisions model. */
-    const build = async (decide: DigestDecide) => {
-      await runInDurableObject(object, instance => { instance.decider = async () => decide; });
+    /** Runs the digest build once its posts have settled, with `decide` as the Decisions model for digests and `same`
+     * for the sameness check (by default it finds nothing the same). */
+    const build = async (decide: DigestDecide, same: DigestDecide = async () => ({ model: 'test/same', answers: {} })) => {
+      const route: DigestDecide = async args => z.object({ listener: z.unknown() }).safeParse(args.state).success ? await decide(args) : await same(args);
+      await runInDurableObject(object, instance => { instance.decider = async () => route; });
       vi.setSystemTime(Date.now() + 3 * 60_000);
       expect(await runDurableObjectAlarm(object)).toBe(true);
     };
@@ -274,11 +276,14 @@ describe('Chatter digests', () => {
     expect(posts.map(post => post.offset)).toEqual([head, blocker, mention, agent, ...others.slice(1)]);
     expect(rest).toBe(1);
 
+    // The project agent is an ordinary listener: tooling and resource posts are not in its floor, a mention of it is,
+    // and its own posts are left out.
     const tooling = await say(workspace('ws-ui'), 'vite crash · bash', 'vite build crashed.', 'tooling');
     const resource = await say(workspace('ws-ui'), 'bigger machine', 'Need 32 GB for the e2e run.', 'resource');
+    const mentioned = await say(workspace('ws-api'), 'release notes', 'Heads up @demo: release notes are drafted.');
     await say({ kind: 'project', id: projectId, name: 'demo' }, 'bigger machine', 'Moved ws-ui to a 32 GB machine until 18:00.', 'resource', null);
     const project = (await object.hear({ listener: listener('project', { name: 'demo', phase: null }), after: digest.through })).digest;
-    expect(why(project)).toEqual({ [tooling]: 'a tooling post: it acts on these', [resource]: 'a resource ask: it acts on these' });
+    expect(why(project)).toEqual({ [tooling]: 'among the newest topics', [resource]: 'among the newest topics', [mentioned]: 'mentions it' });
   });
 
   it('builds each active listener\'s digest after posts settle, one decision per listener, and a turn start reads that row without a model call', async () => {
@@ -308,6 +313,69 @@ describe('Chatter digests', () => {
     const late = await say(workspace('ws-ui'), 'lint config', 'And on commit.');
     await build(async () => { throw new Error('Decisions is unavailable'); });
     expect(await object.digestPreview({ listener: 'ws-billing', name: 'ws-billing' })).toMatchObject({ model: null, heard: [{ offset: late, via: 'newest', reason: 'among the newest topics' }] });
+  });
+
+  it('suggests merging a new topic the Decisions model finds the same as an active one, never merges it, and Not the same removes the suggestion for good', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const { projectId, object, say, build } = digests();
+    const nothing = vi.fn<DigestDecide>(async () => ({ model: 'test/picker', answers: {} }));
+    await say(workspace('ws-db'), 'SQLite 2 MB cap', 'Writes over 2 MB fail with SQLITE_TOOBIG.');
+    const alone = vi.fn<DigestDecide>(async () => ({ model: 'test/same', answers: {} }));
+    await build(nothing, alone);
+    // A lone topic has nothing to be the same as: no call.
+    expect(alone).not.toHaveBeenCalled();
+
+    await say(workspace('ws-api'), 'blob too big for storage', 'Storing the 3 MB export blob fails: it is too big.');
+    await say(workspace('ws-ui'), 'lint config', 'Prettier now runs on save.');
+    const same = vi.fn<DigestDecide>(async args => {
+      const state = z.object({ existing: z.array(z.object({ id: z.string(), topic: z.string() })), new: z.array(z.object({ id: z.string(), topic: z.string() })) }).parse(args.state);
+      const sqlite = state.existing.find(entry => entry.topic === 'SQLite 2 MB cap')?.id ?? 'missing';
+      return { model: 'test/same', answers: Object.fromEntries(state.new.map(entry => [entry.id, entry.topic === 'blob too big for storage'
+        ? { choice: sqlite, probabilities: { [sqlite]: 0.85 }, confidence: 0.85 }
+        : { choice: 'none', probabilities: { none: 0.9 }, confidence: 0.9 }])) };
+    });
+    await build(nothing, same);
+    // One decision over both new topics; the topic compared before is not asked about again.
+    expect(same).toHaveBeenCalledTimes(1);
+    expect(Object.keys(same.mock.calls[0]![0].questions)).toEqual(['n0', 'n1']);
+    const rows = async () => Object.fromEntries((await object.topics({})).map(topic => [topic.key, topic]));
+    expect((await rows())['blob too big for storage']?.sameAs).toEqual({ key: 'sqlite 2 mb cap', display: 'SQLite 2 MB cap', posts: 1 });
+    expect((await rows())['lint config']?.sameAs).toBeNull();
+    // It never merges by itself.
+    expect((await rows())['sqlite 2 mb cap']?.posts).toBe(1);
+    expect((await object.watch({ topic: 'blob too big for storage' })).events.map(event => event.topicKey)).toEqual(['blob too big for storage']);
+
+    const refused = await object.act({ projectId, key: 'blob too big for storage', action: { kind: 'distinct', other: 'SQLite 2 MB cap' }, author: person });
+    expect(refused).toMatchObject({ status: 'ok', value: { line: null } });
+    expect((await rows())['blob too big for storage']?.sameAs).toBeNull();
+    // A later post and build bring it back neither as a suggestion nor as a question.
+    await say(workspace('ws-api'), 'blob too big for storage', 'Still failing after a retry.');
+    await build(nothing, same);
+    expect(same).toHaveBeenCalledTimes(1);
+    expect((await rows())['blob too big for storage']?.sameAs).toBeNull();
+  });
+
+  it('the sameness check does not offer a pair someone said is not the same, and merging along a suggestion clears it', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const { projectId, object, say, build } = digests();
+    const nothing = async () => ({ model: 'test/picker', answers: {} });
+    await say(workspace('ws-db'), 'SQLite 2 MB cap', 'Writes over 2 MB fail with SQLITE_TOOBIG.');
+    await say(workspace('ws-ui'), 'storage limits', 'Durable Object storage limits per value.');
+    await build(nothing);
+    await say(workspace('ws-api'), 'durable object value too large', 'A 3 MB value is refused.');
+    await object.act({ projectId, key: 'durable object value too large', action: { kind: 'distinct', other: 'SQLite 2 MB cap' }, author: person });
+    const offered: string[][] = [];
+    await build(nothing, async args => {
+      const state = z.object({ existing: z.array(z.object({ id: z.string(), topic: z.string() })) }).parse(args.state);
+      const questions = z.record(z.string(), z.object({ criteria: z.record(z.string(), z.string()) })).parse(args.questions);
+      offered.push(...Object.values(questions).map(question => Object.keys(question.criteria).map(label => state.existing.find(entry => entry.id === label)?.topic ?? label)));
+      const limits = state.existing.find(entry => entry.topic === 'storage limits')?.id ?? 'missing';
+      return { model: 'test/same', answers: { n0: { choice: limits, probabilities: { [limits]: 0.9 }, confidence: 0.9 } } };
+    });
+    expect(offered).toEqual([['storage limits', 'none']]);
+    expect((await object.topics({})).find(topic => topic.key === 'durable object value too large')?.sameAs?.display).toBe('storage limits');
+    const merged = await object.act({ projectId, key: 'durable object value too large', action: { kind: 'merge', into: 'storage limits' }, author: person });
+    expect(merged).toMatchObject({ status: 'ok', value: { topic: { key: 'storage limits', posts: 2, sameAs: null } } });
   });
 
   it('rebuilds a listener in a long run at most every 10 minutes, and builds nothing for one idle past 2 hours', async () => {

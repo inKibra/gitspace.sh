@@ -65,7 +65,9 @@ import { DocumentNavigation } from './comments/context.js';
 import { OutgoingMessages, useOutbox, type OutboxArrivals, type SentMessage } from './chat/outbox.js';
 import { Toasts, useToasts } from './toasts.js';
 import { GhostGlyph } from './ghost/ghost-parts.js';
-import { finishGhostRequest, summonGhost, useGhostRequest } from './ghost/ghost-store.js';
+import { GhostMainTranscript, GhostWorkspace } from './ghost/GhostEntry.js';
+import { GhostDock } from './ghost/GhostWindow.js';
+import { composeInWorkspace, finishGhostRequest, summonGhost, useGhostRequest, useGhosts, type GhostSubject } from './ghost/ghost-store.js';
 
 /**
  * Where a space lives right now. A cloud runtime workspace lives in the cloud and reports its own status (machines are
@@ -209,7 +211,8 @@ export interface GitSpaceShellProps {
   onArchiveWorkspace?: (workspaceId: string) => void | Promise<void>;
   onRenameWorkspace?: (workspaceId: string, name: string) => void | Promise<void>;
   onCreateProject?: (input: CreateProjectInput) => void | Promise<void>;
-  onCreateWorkspace?: (input: CreateWorkspaceInput) => void | Promise<void>;
+  /** Creates a workspace; resolves to its id when the host knows it (a ghost's draft then goes into its composer). */
+  onCreateWorkspace?: (input: CreateWorkspaceInput) => void | Promise<void> | Promise<string>;
   onArchiveProject?: (projectId: string, expectedRevision: number) => void | Promise<void>;
   onRestoreProject?: (projectId: string, expectedRevision: number) => void | Promise<void>;
   onDeleteProject?: (projectId: string, expectedRevision: number) => void | Promise<void>;
@@ -399,6 +402,8 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onR
   access?: { card: ReactNode; notice: string };
 }) {
   const shape = useShape();
+  // An archived workspace's agent is gone; its banner offers a ghost of it instead.
+  const ghostWorkspace = useContext(GhostWorkspace);
   const running = mainAgent ? mainAgent.state === 'running' || mainAgent.state === 'permission-needed' || mainAgent.state === 'retrying' : false;
   // Where a message the person sent lands: the transcript's messages of the person, or the session's queue.
   const outboxArrivals = useMemo((): OutboxArrivals => ({
@@ -465,7 +470,7 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onR
       : mainAgent?.failed ? 'Agent failed' : inactive ? 'Agent is inactive'
         : 'Agent unavailable';
   const idleDetail = workspace.closedAt
-    ? 'Files, history, artifacts, and review state are preserved. Restore this workspace from Projects to continue.'
+    ? 'Its agent is gone; the sessions and drive stay readable, and a ghost can answer from them. Restore this workspace from Projects to continue.'
     : mainAgent?.recovering ? 'Restoring the saved session. Prompts become available when recovery finishes.'
       : inactive ? 'Files and transcript are preserved. Retry when you are ready.' : 'This workspace has no available agent. Retry to continue.';
   const virtualTranscript = transcript !== undefined;
@@ -546,7 +551,8 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onR
                   <span className="block text-body text-foreground">{idleTitle}</span>
                   <span className="block text-caption text-muted-foreground">{idleDetail}</span>
                 </span>
-                {!workspace.closedAt ? <Button variant="secondary" size="compact" className="min-h-10" loading={opening || mainAgent?.recovering === true} disabled={opening || mainAgent?.recovering === true || !onRetryAgent} onClick={() => void open()} leadingIcon={glyph(RefreshCcw01)}>{mainAgent?.recovering ? 'Recovering…' : opening ? 'Retrying agent…' : 'Retry agent'}</Button> : null}
+                {!workspace.closedAt ? <Button variant="secondary" size="compact" className="min-h-10" loading={opening || mainAgent?.recovering === true} disabled={opening || mainAgent?.recovering === true || !onRetryAgent} onClick={() => void open()} leadingIcon={glyph(RefreshCcw01)}>{mainAgent?.recovering ? 'Recovering…' : opening ? 'Retrying agent…' : 'Retry agent'}</Button>
+                  : ghostWorkspace ? <button type="button" onClick={() => summonGhost(ghostWorkspace)} className="ghost-ask inline-flex h-8 shrink-0 items-center gap-1 rounded-full px-3 text-[12px] font-medium"><GhostGlyph size={14} />Ask a ghost</button> : null}
                 {openError ? <p role="alert" className="text-caption text-destructive">{openError}</p> : null}
               </div>
             : <Composer workspace={workspace} draft={draft} artifactUpload={artifactUpload} sessionCommand={sessionCommand} controls={sessionControls} providers={providers} skills={skills} running={running} onSend={onSend} pending={pending} recovering={mainAgent?.recovering} error={error} outbox={outbox} />}
@@ -579,7 +585,7 @@ export function CreateProjectDialog({ open, onOpenChange, onSubmit, pending, err
   </Dialog>;
 }
 
-export function CreateWorkspaceDialog({ projectId, workspaces, initialPhase = 'plan', onOpenChange, onSubmit, pending, error }: { projectId: string | null; workspaces: readonly WorkspacePickerItem[]; initialPhase?: WorkspaceView['phase']; onOpenChange(open: boolean): void; onSubmit(input: CreateWorkspaceInput): Promise<void>; pending: boolean; error: string | null }) {
+export function CreateWorkspaceDialog({ projectId, workspaces, initialPhase = 'plan', note, onOpenChange, onSubmit, pending, error }: { projectId: string | null; workspaces: readonly WorkspacePickerItem[]; initialPhase?: WorkspaceView['phase']; /** A line under the title, such as where a ghost's draft goes. */ note?: string; onOpenChange(open: boolean): void; onSubmit(input: CreateWorkspaceInput): Promise<void>; pending: boolean; error: string | null }) {
   const [form, setForm] = useState<Record<'name' | 'branch' | 'sourceRef', string>>({ name: '', branch: '', sourceRef: '' });
   const [sourceKind, setSourceKind] = useState<CreateWorkspaceInput['sourceKind']>('base');
   const [phase, setPhase] = useState<WorkspaceView['phase']>(initialPhase);
@@ -594,6 +600,7 @@ export function CreateWorkspaceDialog({ projectId, workspaces, initialPhase = 'p
   return <Dialog open={projectId !== null} onOpenChange={(next) => { if (!pending) onOpenChange(next); }}>
     <DialogContent>
       <DialogHeader><DialogTitle>Create from source</DialogTitle><DialogDescription>Start a workspace from a branch, pull request, tag, commit, or another workspace.</DialogDescription></DialogHeader>
+      {note ? <p role="note" className="text-caption text-muted-foreground">{note}</p> : null}
       <form id="create-workspace-form" className="flex flex-col gap-4" onSubmit={(event) => { event.preventDefault(); if (projectId && !pending) void onSubmit({ projectId, name: form.name, branch: form.branch, phase, sourceKind, sourceRef: sourceKind === 'base' ? '' : form.sourceRef, dependsOn: dependsOn.filter((id) => id !== source?.id) }); }}>
         <InputGroup>
           <InputField index={0} label="Name" value={form.name} onChange={set('name')} required autoFocus />
@@ -725,7 +732,8 @@ function Shell({ project, projects, workspace, baseSpace, workspaces, mainAgent,
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [requestedTerminal, setRequestedTerminal] = useState<{ spaceId: string; name: string } | null>(null);
   const [terminalHeight, setTerminalHeight] = useState(300);
-  const [newWorkspaceFor, setNewWorkspaceFor] = useState<{ projectId: string; phase: WorkspaceView['phase'] } | null>(null);
+  /** The new-workspace dialog's project and phase, and the ghost's draft its composer gets once it exists. */
+  const [newWorkspaceFor, setNewWorkspaceFor] = useState<{ projectId: string; phase: WorkspaceView['phase']; draft?: string } | null>(null);
   const [newProject, setNewProject] = useState(false);
   const [createPending, setCreatePending] = useState(false);
   const createPendingRef = useRef(false);
@@ -800,7 +808,7 @@ function Shell({ project, projects, workspace, baseSpace, workspaces, mainAgent,
     onNewWorkspace: onCreateWorkspace ? (projectId) => setNewWorkspaceFor({ projectId, phase: 'plan' }) : undefined,
     onNewProject: onCreateProject ? () => setNewProject(true) : undefined,
     onOpenSettings,
-    onAskGhost: (target) => summonGhost({ projectId: target.projectId, workspaceId: target.id, workspaceName: target.name, archived: target.closedAt !== null }),
+    onAskGhost: (target) => summonGhost({ projectId: target.projectId, workspaceId: target.id, workspaceName: target.name, archived: target.closedAt !== null, conversationId: null, title: null, until: null }),
     user,
     deployment,
   };
@@ -828,8 +836,9 @@ function Shell({ project, projects, workspace, baseSpace, workspaces, mainAgent,
     requestAnimationFrame(() => setInspectorSection('goal'));
   };
   // A ghost's citation or draft for this workspace: the transcript at the entry (once its first page loaded), the
-  // Drive at the lines, or the draft in the composer.
-  const ghostRequest = useGhostRequest(workspace.id);
+  // Drive at the lines (in the version the ghost read), or the draft in the composer; an archived workspace's draft
+  // opens a new workspace of the project, whose composer gets it.
+  const ghostRequest = useGhostRequest(workspace.id, workspace.projectId);
   const transcriptReady = (transcript?.generation ?? null) !== null;
   useEffect(() => {
     if (!ghostRequest) return;
@@ -838,9 +847,12 @@ function Shell({ project, projects, workspace, baseSpace, workspaces, mainAgent,
       transcript.jumpToOrdinal(ghostRequest.ordinal);
     } else if (ghostRequest.kind === 'drive') {
       if (!renderInspector) return;
-      setResourceRequest({ spaceId: workspace.id, request: { uri: ghostRequest.url } });
+      setResourceRequest({ spaceId: workspace.id, request: { uri: ghostRequest.url, ...(ghostRequest.hash === null ? {} : { hash: ghostRequest.hash }) } });
       setInspectorSection(undefined);
       setInspectorOpen(true);
+    } else if (ghostRequest.kind === 'create') {
+      if (!onCreateWorkspace) return;
+      setNewWorkspaceFor({ projectId: ghostRequest.projectId, phase: 'plan', draft: ghostRequest.text });
     } else {
       if (!draft) return;
       draft.onChange(draft.text.trim() ? `${draft.text.trimEnd()}\n\n${ghostRequest.text}` : ghostRequest.text);
@@ -850,7 +862,13 @@ function Shell({ project, projects, workspace, baseSpace, workspaces, mainAgent,
       window.setTimeout(() => composer?.classList.remove('ghost-composer-flash'), 1600);
     }
     finishGhostRequest(ghostRequest.serial);
-  }, [ghostRequest, transcript, transcriptReady, draft, renderInspector, workspace.id]);
+  }, [ghostRequest, transcript, transcriptReady, draft, renderInspector, workspace.id, onCreateWorkspace]);
+  // The workspace on screen as a ghost's session: its main conversation. Docking the ghosts folds the Inspector away;
+  // it can be opened again beside them.
+  const workspaceName = workspace.kind === 'workspace' ? workspace.name : workspace.projectName;
+  const ghostHere = useMemo((): GhostSubject => ({ projectId: workspace.projectId, workspaceId: workspace.id, workspaceName, archived: workspace.closedAt !== null, conversationId: null, title: null, until: null }), [workspace.projectId, workspace.id, workspaceName, workspace.closedAt]);
+  const ghostPlacement = useGhosts().placement;
+  useEffect(() => { if (ghostPlacement === 'dock') { setInspectorOpen(false); setInspectorFull(false); } }, [ghostPlacement]);
   // The entry a ghost's citation jumped to lights up, then settles.
   const flashRow = transcript?.navigation?.flash ? transcript.navigation.rowId : null;
   useEffect(() => {
@@ -863,7 +881,7 @@ function Shell({ project, projects, workspace, baseSpace, workspaces, mainAgent,
     const timer = window.setTimeout(() => row?.classList.remove('ghost-flash'), 2600);
     return () => { cancelAnimationFrame(frame); window.clearTimeout(timer); row?.classList.remove('ghost-flash'); };
   }, [flashRow, transcript?.navigation]);
-  const content = <BlockReferences.Provider value={referenceTargets}><ResourceFiles.Provider value={resolveResourceFile ?? null}><ResourceNavigation.Provider value={renderInspector ? (request) => { setResourceRequest({ spaceId: workspace.id, request }); setInspectorSection(undefined); setInspectorOpen(true); } : null}><GuideSectionNavigation.Provider value={renderInspector ? (id: string) => openGuideEntity(`section:${id}`) : null}><DocumentNavigation.Provider value={renderInspector ? openDocument : null}>
+  const content = <GhostWorkspace.Provider value={ghostHere}><BlockReferences.Provider value={referenceTargets}><ResourceFiles.Provider value={resolveResourceFile ?? null}><ResourceNavigation.Provider value={renderInspector ? (request) => { setResourceRequest({ spaceId: workspace.id, request }); setInspectorSection(undefined); setInspectorOpen(true); } : null}><GuideSectionNavigation.Provider value={renderInspector ? (id: string) => openGuideEntity(`section:${id}`) : null}><DocumentNavigation.Provider value={renderInspector ? openDocument : null}>
     <div data-workspace-panel className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
       <SidebarInsetTopbar className="pr-3">
         <nav aria-label="Location" className="flex flex-[1_0_auto] items-center gap-2 text-body">
@@ -883,8 +901,8 @@ function Shell({ project, projects, workspace, baseSpace, workspaces, mainAgent,
         </div>
         {/* Pinned to the bar's end: when the bar scrolls sideways on a narrow screen these stay in view, labels hidden. */}
         <div className="sticky right-0 z-10 flex shrink-0 items-center gap-1 bg-background max-sm:pl-1">
-            <Tooltip content={`Ask a ghost about ${workspace.kind === 'workspace' ? workspace.name : workspace.projectName} · reads, changes nothing`} side="bottom">
-              <button type="button" aria-label="Ask a ghost" onClick={() => summonGhost({ projectId: workspace.projectId, workspaceId: workspace.id, workspaceName: workspace.kind === 'workspace' ? workspace.name : workspace.projectName, archived: workspace.closedAt !== null })}
+            <Tooltip content={`Ask a ghost about ${workspaceName} · reads, changes nothing`} side="bottom">
+              <button type="button" aria-label="Ask a ghost" onClick={() => summonGhost(ghostHere)}
                 className="ghost-ask inline-flex h-7 shrink-0 items-center gap-1 rounded-full px-2.5 text-[11.5px] font-medium transition-colors max-sm:px-2"><GhostGlyph size={14} /><span className="max-sm:sr-only">Ask a ghost</span></button>
             </Tooltip>
             {chatter}
@@ -896,11 +914,12 @@ function Shell({ project, projects, workspace, baseSpace, workspaces, mainAgent,
       <div className="workspace-workbench" data-terminal-open={terminalOpen && !!terminals || undefined} style={{ '--inspector-width': `${inspectorWidth}px`, '--terminal-height': `${terminalHeight}px` } as CSSProperties}>
             <div className="workspace-content" data-inspector-full={inspectorOpen && inspectorFull && !!renderInspector || undefined}>
               <div className="conversation-stage">
-                <AgentCanvas key={workspace.id} workspace={workspace} mainAgent={mainAgent} sessionControls={sessionControls} controlsError={controlsError} onRetryControls={onRetryControls} onRetryAgent={onRetryAgent} onContinueAgent={onContinueAgent} turns={turns} transcript={transcript} history={history} transport={transport} onSend={onSend} draft={draft} artifactUpload={artifactUpload} sessionCommand={sessionCommand} pending={sendPending} error={sendError} providers={providers} skills={skills} access={access ? { card: access.card(openEnvironment), notice: access.notice } : undefined} />
+                <GhostMainTranscript.Provider value={true}><AgentCanvas key={workspace.id} workspace={workspace} mainAgent={mainAgent} sessionControls={sessionControls} controlsError={controlsError} onRetryControls={onRetryControls} onRetryAgent={onRetryAgent} onContinueAgent={onContinueAgent} turns={turns} transcript={transcript} history={history} transport={transport} onSend={onSend} draft={draft} artifactUpload={artifactUpload} sessionCommand={sessionCommand} pending={sendPending} error={sendError} providers={providers} skills={skills} access={access ? { card: access.card(openEnvironment), notice: access.notice } : undefined} /></GhostMainTranscript.Provider>
               </div>
               {inspectorOpen && renderInspector ? <InspectorResizeHandle width={inspectorWidth} onWidth={updateInspectorWidth} /> : null}
               {/* Opaque in every state: on narrow viewports the pane overlays the conversation, so a transparent loading or error state would still swallow its clicks. */}
               {inspectorOpen && renderInspector ? <aside className="inspector-pane flex min-w-0 flex-col bg-surface-2" aria-label="Inspector"><InspectorLayout.Provider value={{ full: inspectorFull, onFull: setInspectorFull }}>{renderInspector(() => { setInspectorOpen(false); setInspectorFull(false); setInspectorSection(undefined); setResourceRequest(null); setGuideSection(null); setDriveFocus(null); }, inspectorSection, resourceRequest?.spaceId === workspace.id ? resourceRequest.request : undefined, (name) => { setRequestedTerminal({ spaceId: workspace.id, name }); setTerminalOpen(true); }, guideSection?.spaceId === workspace.id ? { entity: guideSection.entity, serial: guideSection.serial } : undefined, driveFocus?.spaceId === workspace.id ? { anchor: driveFocus.anchor, serial: driveFocus.serial } : undefined)}</InspectorLayout.Provider></aside> : null}
+              {ghostPlacement === 'dock' ? <GhostDock here={ghostHere} /> : null}
             </div>
             {terminalOpen && terminals ? <><TerminalResizeHandle height={terminalHeight} onHeight={setTerminalHeight} /><section className="min-h-0 min-w-0 overflow-hidden"><WorkspaceTerminals key={terminals.spaceId} {...terminals} requestedName={requestedTerminal?.spaceId === workspace.id ? requestedTerminal.name : terminals.requestedName} onAttachMachine={renderInspector ? openEnvironment : undefined} onClose={() => setTerminalOpen(false)} /></section></> : null}
           </div>
@@ -912,13 +931,17 @@ function Shell({ project, projects, workspace, baseSpace, workspaces, mainAgent,
       setCreateError(null);
       try { await onCreateProject(input); setNewProject(false); } catch (failure) { setCreateError(rpcErrorMessage(failure, 'Create project')); } finally { createPendingRef.current = false; setCreatePending(false); }
     }} /> : null}
-    {onCreateWorkspace ? <CreateWorkspaceDialog key={newWorkspaceFor ? `${newWorkspaceFor.projectId}:${newWorkspaceFor.phase}` : 'closed'} projectId={newWorkspaceFor?.projectId ?? null} initialPhase={newWorkspaceFor?.phase} workspaces={workspaces.map((item) => item.id === workspace.id ? { ...item, ...selectedSummary } : item)} onOpenChange={(open) => { if (!open) { setNewWorkspaceFor(null); setCreateError(null); } }} pending={createPending} error={createError} onSubmit={async (input) => {
+    {onCreateWorkspace ? <CreateWorkspaceDialog key={newWorkspaceFor ? `${newWorkspaceFor.projectId}:${newWorkspaceFor.phase}` : 'closed'} projectId={newWorkspaceFor?.projectId ?? null} initialPhase={newWorkspaceFor?.phase} {...newWorkspaceFor?.draft ? { note: 'The ghost’s draft goes into the new workspace’s composer; nothing is sent until you send it.' } : {}} workspaces={workspaces.map((item) => item.id === workspace.id ? { ...item, ...selectedSummary } : item)} onOpenChange={(open) => { if (!open) { setNewWorkspaceFor(null); setCreateError(null); } }} pending={createPending} error={createError} onSubmit={async (input) => {
       if (createPendingRef.current) return;
       createPendingRef.current = true;
       setCreatePending(true);
       setCreateError(null);
-      try { await onCreateWorkspace(input); setNewWorkspaceFor(null); } catch (failure) { setCreateError(rpcErrorMessage(failure, 'Create workspace')); } finally { createPendingRef.current = false; setCreatePending(false); }
+      try {
+        const created = await onCreateWorkspace(input);
+        if (newWorkspaceFor?.draft && typeof created === 'string') composeInWorkspace(created, newWorkspaceFor.draft);
+        setNewWorkspaceFor(null);
+      } catch (failure) { setCreateError(rpcErrorMessage(failure, 'Create workspace')); } finally { createPendingRef.current = false; setCreatePending(false); }
     }} /> : null}
-  </DocumentNavigation.Provider></GuideSectionNavigation.Provider></ResourceNavigation.Provider></ResourceFiles.Provider></BlockReferences.Provider>;
+  </DocumentNavigation.Provider></GuideSectionNavigation.Provider></ResourceNavigation.Provider></ResourceFiles.Provider></BlockReferences.Provider></GhostWorkspace.Provider>;
   return accountSidebar ? content : <SidebarProvider className="gitspace-shell" persist={false} width="19rem"><AppSidebar {...sidebar} /><SidebarInset className="overflow-hidden">{content}</SidebarInset></SidebarProvider>;
 }

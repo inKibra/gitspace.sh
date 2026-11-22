@@ -1,15 +1,15 @@
 import {
   CHATTER_ACTIVE_MS, CHATTER_ACTIVE_TOPICS, CHATTER_ISSUE_STATES, CHATTER_KINDS, CHATTER_LEVELS, CHATTER_MAX_PICKS, CHATTER_PAGE_EVENTS, CHATTER_PROJECT_STRIP, CHATTER_RETENTION_MS,
-  CHATTER_TEXT_CHARACTERS, CHATTER_TOPIC_CHARACTERS, ChatterAuthorSchema, ChatterChangeSchema, ChatterFiledSchema, ChatterSpotSchema, ChatterTopicActionSchema,
+  CHATTER_TEXT_CHARACTERS, CHATTER_TOPIC_CHARACTERS, ChatterAuthorSchema, ChatterChangeSchema, ChatterFiledSchema, ChatterLinkSchema, ChatterMarkedSchema, ChatterSpotSchema, ChatterTopicActionSchema,
   defaultChatterLevel, displayChatterTopic, normalizeChatterTopic, runtimeFailureChatterTopic, similarChatterTopic,
   type ChatterAuthor, type ChatterChange, type ChatterDigest, type ChatterEvent, type ChatterFiled, type ChatterHeard, type ChatterHearings, type ChatterIssueState, type ChatterKind,
-  type ChatterLeft, type ChatterLevel, type ChatterPage, type ChatterPost, type ChatterProjectMuteLine, type ChatterReturnedLine, type ChatterSpot, type ChatterTopic, type ChatterTopicAction,
+  type ChatterLeft, type ChatterLevel, type ChatterLink, type ChatterPage, type ChatterPost, type ChatterProjectMuteLine, type ChatterReturnedLine, type ChatterSpot, type ChatterTopic, type ChatterTopicAction,
   type ChatterTopicLine, type ChatterVolumeLine, type ChatterVolumes,
 } from '@gitspace/protocol/chatter-contract';
 import { projectLiveKey } from '@gitspace/protocol/live-notice';
 import { z } from 'zod';
 import {
-  ChatterListenerSchema, chatterStrip, digestPicks, digestQuestion, pickDigest, projectDecider, stripLevel, weighDigest,
+  ChatterListenerSchema, SAMENESS_CANDIDATES, SAMENESS_TOPICS, chatterStrip, digestPicks, digestQuestion, pickDigest, projectDecider, samenessQuestion, samenessSuggestions, stripLevel, weighDigest,
   type ChatterListener, type ChatterMix, type DigestDecide, type TopicPick,
 } from './chatter-digest.js';
 import { notifyBrowsers } from './live-notices.js';
@@ -30,6 +30,7 @@ interface EventRow extends Record<string, SqlStorageValue> {
   change_json: string | null;
   author_phase: string | null;
   spot_json: string | null;
+  link_json: string | null;
 }
 
 interface TopicRow extends Record<string, SqlStorageValue> {
@@ -46,6 +47,8 @@ interface TopicRow extends Record<string, SqlStorageValue> {
   filed_json: string | null;
   alias_of: string | null;
   repeats: number;
+  marked_json: string | null;
+  same_checked: number;
 }
 
 interface Participant extends ChatterAuthor { posts: number; lastAt: string }
@@ -127,6 +130,7 @@ export class ProjectChatterDO extends BudgetedDurableObject {
     author: ChatterAuthorSchema,
     phase: z.string().nullable().default(null),
     spot: ChatterSpotSchema.nullable().default(null),
+    link: ChatterLinkSchema.nullable().default(null),
   });
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -154,7 +158,8 @@ export class ProjectChatterDO extends BudgetedDurableObject {
             text TEXT,
             change_json TEXT,
             author_phase TEXT,
-            spot_json TEXT
+            spot_json TEXT,
+            link_json TEXT
           );
           CREATE INDEX IF NOT EXISTS chatter_events_topic ON chatter_events(topic_key, seq);
           CREATE INDEX IF NOT EXISTS chatter_events_at ON chatter_events(at);
@@ -171,7 +176,9 @@ export class ProjectChatterDO extends BudgetedDurableObject {
             fixed_in TEXT,
             filed_json TEXT,
             alias_of TEXT,
-            repeats INTEGER NOT NULL DEFAULT 0
+            repeats INTEGER NOT NULL DEFAULT 0,
+            marked_json TEXT,
+            same_checked INTEGER NOT NULL DEFAULT 0
           );
           CREATE INDEX IF NOT EXISTS chatter_topics_last ON chatter_topics(last_at);
           CREATE INDEX IF NOT EXISTS chatter_topics_state ON chatter_topics(state, last_at);
@@ -188,6 +195,7 @@ export class ProjectChatterDO extends BudgetedDurableObject {
             digest_json TEXT,
             built_at TEXT
           );
+          CREATE TABLE IF NOT EXISTS chatter_same(key TEXT NOT NULL, other TEXT NOT NULL, state TEXT NOT NULL CHECK (state IN ('suggested', 'distinct')), by TEXT NOT NULL, at TEXT NOT NULL, PRIMARY KEY (key, other));
         `);
         if (legacy) {
           const kept = this.rows<{ name: string }>('PRAGMA table_info(chatter_events_old)').map(column => column.name).join(', ');
@@ -195,6 +203,10 @@ export class ProjectChatterDO extends BudgetedDurableObject {
           sql.exec('DROP TABLE chatter_events_old');
         }
         if (!this.rows<{ name: string }>('PRAGMA table_info(chatter_topics)').some(column => column.name === 'repeats')) sql.exec('ALTER TABLE chatter_topics ADD COLUMN repeats INTEGER NOT NULL DEFAULT 0');
+        if (!this.rows<{ name: string }>('PRAGMA table_info(chatter_events)').some(column => column.name === 'link_json')) sql.exec('ALTER TABLE chatter_events ADD COLUMN link_json TEXT');
+        if (!this.rows<{ name: string }>('PRAGMA table_info(chatter_topics)').some(column => column.name === 'marked_json')) sql.exec('ALTER TABLE chatter_topics ADD COLUMN marked_json TEXT');
+        // Topics from before the sameness check count as compared, so its first build asks only about new ones.
+        if (!this.rows<{ name: string }>('PRAGMA table_info(chatter_topics)').some(column => column.name === 'same_checked')) sql.exec('ALTER TABLE chatter_topics ADD COLUMN same_checked INTEGER NOT NULL DEFAULT 0; UPDATE chatter_topics SET same_checked = 1');
       });
     });
   }
@@ -230,9 +242,10 @@ export class ProjectChatterDO extends BudgetedDurableObject {
    * A post under its topic. A retry with the same `id` returns the first post. A new topic gets the closest active
    * topic as `similar`. A tooling post opens its topic as an issue, or reopens it when resolved or dismissed (a fresh
    * report means the failure came back); any other post leaves the state alone. `phase` is a workspace author's phase,
-   * `spot` a tooling post's tool, reference and machine.
+   * `spot` a tooling post's tool, reference and machine. `link` is what the project agent's post links: a workspace (its
+   * caller checked it is the project's) or an issue topic, which must be one here and is linked by its key after a merge.
    */
-  async post(raw: { projectId: string; id: string; topic: string; kind: ChatterKind; text: string; author: ChatterAuthor; phase?: string | null; spot?: ChatterSpot | null }): Promise<ChatterOutcome<ChatterPostResult, ChatterInvalid>> {
+  async post(raw: { projectId: string; id: string; topic: string; kind: ChatterKind; text: string; author: ChatterAuthor; phase?: string | null; spot?: ChatterSpot | null; link?: ChatterLink | null }): Promise<ChatterOutcome<ChatterPostResult, ChatterInvalid>> {
     const input = this.postSchema.parse(raw);
     const written = this.rows<EventRow>("SELECT * FROM chatter_events WHERE id = ? AND type = 'post'", input.id)[0];
     if (written) {
@@ -247,6 +260,13 @@ export class ProjectChatterDO extends BudgetedDurableObject {
     const text = input.text.trim();
     if (text === '') return invalid('text', 'A post needs text');
     if (text.length > CHATTER_TEXT_CHARACTERS) return invalid('text', `A post is at most ${CHATTER_TEXT_CHARACTERS} characters`);
+    let link = input.link;
+    if (link !== null && input.author.kind !== 'project') return invalid('link', 'Only the project agent\'s posts link what it did');
+    if (link?.kind === 'issue') {
+      const linked = this.topicRow(this.resolve(normalizeChatterTopic(link.key)));
+      if (!linked || linked.state === null) return invalid('issue', `There is no issue topic ${link.key} in this project's Chatter`);
+      link = { kind: 'issue', key: linked.key, display: linked.display };
+    }
     const now = Date.now();
     const at = new Date(now).toISOString();
     const key = this.resolve(normalized);
@@ -254,7 +274,7 @@ export class ProjectChatterDO extends BudgetedDurableObject {
     const similar = existing ? null : similarChatterTopic(key, this.active(now, CHATTER_ACTIVE_TOPICS));
     const opens = input.kind === 'tooling' && existing?.state !== 'open';
     const seq = this.ctx.storage.transactionSync(() => {
-      const posted = this.insert({ id: input.id, at, type: 'post', topicKey: key, topic: display, author: input.author, kind: input.kind, text, change: null, phase: input.phase, spot: input.spot });
+      const posted = this.insert({ id: input.id, at, type: 'post', topicKey: key, topic: display, author: input.author, kind: input.kind, text, change: null, phase: input.phase, spot: input.spot, link });
       if (existing) {
         this.ctx.storage.sql.exec('UPDATE chatter_topics SET last_at = ?, posts = posts + 1, participants_json = ? WHERE key = ?',
           at, JSON.stringify(this.joined(this.participants(existing), input.author, 1, at)), key);
@@ -320,22 +340,49 @@ export class ProjectChatterDO extends BudgetedDurableObject {
     return { kind: 'posted', post: posted.value.post, topic: posted.value.topic };
   }
 
-  /** `chatter_read`: one topic's row and posts (`topic`), or the issue topics (`issue`, `state`) or active topics with
-   * the project's posts; posts newest first, of one `kind` and after an offset when given. */
-  read(input: { topic?: string; kind?: ChatterKind; issue?: boolean; state?: ChatterIssueState; after?: number; limit?: number }): ChatterRead {
+  /**
+   * `chatter_read`: one topic's row and posts (`topic`), or the issue topics (`issue`, `state`) or active topics with
+   * the project's posts; posts newest first, of one `kind` and after an offset when given. `before` (an ISO time: a
+   * ghost's as-of) keeps only the posts before it and the topics with a post before it, their counts and last post as
+   * they stood then; `workspaceId` keeps only the topics that workspace posted in (as its agent, as the project agent,
+   * or GitSpace for its runtime), before `before` when given.
+   */
+  read(input: { topic?: string; kind?: ChatterKind; issue?: boolean; state?: ChatterIssueState; after?: number; limit?: number; before?: string; workspaceId?: string }): ChatterRead {
     const limit = Math.min(input.limit ?? READ_POSTS, CHATTER_PAGE_EVENTS);
     const key = input.topic === undefined ? null : this.resolve(normalizeChatterTopic(input.topic));
-    const filters = ["type = 'post'", 'seq > ?'];
-    const bindings: SqlStorageValue[] = [input.after ?? 0];
+    const scope: string[] = [];
+    const scoped: SqlStorageValue[] = [];
+    if (input.before !== undefined) { scope.push('at < ?'); scoped.push(input.before); }
+    if (input.workspaceId !== undefined) {
+      scope.push(`topic_key IN (SELECT topic_key FROM chatter_events WHERE type = 'post' AND author_id = ? AND author_kind IN ${WORKSPACE_AUTHOR_KINDS}${input.before === undefined ? '' : ' AND at < ?'})`);
+      scoped.push(input.workspaceId, ...input.before === undefined ? [] : [input.before]);
+    }
+    const filters = ["type = 'post'", 'seq > ?', ...scope];
+    const bindings: SqlStorageValue[] = [input.after ?? 0, ...scoped];
     if (key !== null) { filters.push('topic_key = ?'); bindings.push(key); }
     if (input.kind !== undefined) { filters.push('kind = ?'); bindings.push(input.kind); }
     const rows = this.rows<EventRow>(`SELECT * FROM chatter_events WHERE ${filters.join(' AND ')} ORDER BY seq DESC LIMIT ?`, ...bindings, limit + 1);
-    const topics = key !== null ? this.topicRows([key])
-      : input.state !== undefined ? this.rows<TopicRow>('SELECT * FROM chatter_topics WHERE alias_of IS NULL AND state = ? ORDER BY last_at DESC LIMIT 100', input.state)
-      : input.issue === true ? this.rows<TopicRow>("SELECT * FROM chatter_topics WHERE alias_of IS NULL AND state IS NOT NULL ORDER BY state = 'open' DESC, last_at DESC LIMIT 100")
-      : this.active(Date.now(), CHATTER_ACTIVE_TOPICS);
+    let topics: ChatterTopic[];
+    if (scope.length === 0) {
+      topics = (key !== null ? this.topicRows([key])
+        : input.state !== undefined ? this.rows<TopicRow>('SELECT * FROM chatter_topics WHERE alias_of IS NULL AND state = ? ORDER BY last_at DESC LIMIT 100', input.state)
+        : input.issue === true ? this.rows<TopicRow>("SELECT * FROM chatter_topics WHERE alias_of IS NULL AND state IS NOT NULL ORDER BY state = 'open' DESC, last_at DESC LIMIT 100")
+        : this.active(Date.now(), CHATTER_ACTIVE_TOPICS)).map(row => this.topicView(row));
+    } else {
+      const counted = this.rows<{ topic_key: string; posts: number; last_at: string }>(
+        `SELECT topic_key, COUNT(*) AS posts, MAX(at) AS last_at FROM chatter_events WHERE ${["type = 'post'", ...scope, ...key === null ? [] : ['topic_key = ?']].join(' AND ')} GROUP BY topic_key ORDER BY last_at DESC LIMIT 100`,
+        ...scoped, ...key === null ? [] : [key],
+      );
+      const byKey = new Map(this.topicRows(counted.map(entry => entry.topic_key)).map(row => [row.key, row]));
+      topics = counted.flatMap(entry => {
+        const row = byKey.get(entry.topic_key);
+        if (!row || (input.state !== undefined && row.state !== input.state) || (input.issue === true && row.state === null)) return [];
+        const view = this.topicView(row);
+        return [input.before === undefined ? view : { ...view, posts: entry.posts, lastAt: new Date(entry.last_at) }];
+      }).slice(0, key !== null || input.state !== undefined || input.issue === true ? 100 : CHATTER_ACTIVE_TOPICS);
+    }
     return {
-      topics: topics.map(row => this.topicView(row)),
+      topics,
       posts: rows.slice(0, limit).flatMap(row => { const view = this.eventView(row); return view.type === 'post' ? [view] : []; }),
       cursor: this.cursor(),
       more: rows.length > limit,
@@ -376,7 +423,7 @@ export class ProjectChatterDO extends BudgetedDurableObject {
   async filed(input: { projectId: string; key: string; filed: ChatterFiled }): Promise<ChatterTopic> {
     const filed = ChatterFiledSchema.parse(input.filed);
     const key = this.resolve(normalizeChatterTopic(input.key));
-    this.ctx.storage.sql.exec('UPDATE chatter_topics SET filed_json = ? WHERE key = ?', JSON.stringify(filed), key);
+    this.ctx.storage.sql.exec('UPDATE chatter_topics SET filed_json = ?, marked_json = NULL WHERE key = ?', JSON.stringify(filed), key);
     const row = this.topicRow(key);
     if (!row) throw new Error('Chatter topic vanished');
     await this.changed(input.projectId, this.cursor());
@@ -384,9 +431,11 @@ export class ProjectChatterDO extends BudgetedDurableObject {
   }
 
   /**
-   * A person's action on a topic. State: a topic that is not an issue can only be opened; `fixedIn` goes with
-   * resolved. Merge: the topic's events move to `into` (after following its alias), its aliases follow, `into` keeps
-   * its state unless it has none, and the merged topic stays as an alias so a later post under it lands in `into`.
+   * A person's or the project agent's action on a topic. State: a topic that is not an issue can only be opened;
+   * `fixedIn` goes with resolved. Merge: the topic's events move to `into` (after following its alias), its aliases
+   * follow, `into` keeps its state unless it has none, and the merged topic stays as an alias so a later post under it
+   * lands in `into`. Mark: an issue topic is marked for filing, which a person then decides. Distinct: the two topics
+   * are not the same, so the sameness check's suggestion for the pair goes and is never made again.
    */
   async act(input: { projectId: string; key: string; action: ChatterTopicAction; author: ChatterAuthor }): Promise<ChatterOutcome<ChatterActResult>> {
     const action = ChatterTopicActionSchema.safeParse(input.action);
@@ -411,6 +460,31 @@ export class ProjectChatterDO extends BudgetedDurableObject {
       await this.changed(input.projectId, seq);
       return this.acted(row.key, id);
     }
+    if (action.data.kind === 'mark') {
+      const row = this.topicRow(this.resolve(named));
+      if (!row) return { status: 'error', failure: { kind: 'notFound', key: named } };
+      if (row.state === null) return invalid('action', 'Only an issue topic can be marked for filing');
+      const seq = this.ctx.storage.transactionSync(() => {
+        this.ctx.storage.sql.exec('UPDATE chatter_topics SET marked_json = ? WHERE key = ?', JSON.stringify({ at, by: author.name }), row.key);
+        return this.insert({ id, at, type: 'topic', topicKey: row.key, topic: row.display, author, kind: null, text: null, change: { kind: 'marked' }, phase: null, spot: null });
+      });
+      await this.changed(input.projectId, seq);
+      return this.acted(row.key, id);
+    }
+    if (action.data.kind === 'distinct') {
+      const row = this.topicRow(this.resolve(named));
+      if (!row) return { status: 'error', failure: { kind: 'notFound', key: named } };
+      const otherKey = this.resolve(normalizeChatterTopic(action.data.other));
+      if (!this.topicRow(otherKey)) return { status: 'error', failure: { kind: 'notFound', key: otherKey } };
+      if (otherKey === row.key) return invalid('other', 'A topic is the same as itself');
+      this.ctx.storage.transactionSync(() => {
+        for (const [one, two] of [[row.key, otherKey], [otherKey, row.key]]) {
+          this.ctx.storage.sql.exec("INSERT INTO chatter_same(key, other, state, by, at) VALUES (?, ?, 'distinct', ?, ?) ON CONFLICT(key, other) DO UPDATE SET state = 'distinct', by = excluded.by, at = excluded.at", one, two, author.name, at);
+        }
+      });
+      await this.changed(input.projectId, this.cursor());
+      return { status: 'ok', value: { topic: this.topicView(row), line: null } };
+    }
     const source = this.topicRow(named);
     if (!source) return { status: 'error', failure: { kind: 'notFound', key: named } };
     if (source.alias_of !== null) return invalid('key', `This topic was already merged into ${source.alias_of}`);
@@ -432,6 +506,7 @@ export class ProjectChatterDO extends BudgetedDurableObject {
         into.key,
       );
       this.ctx.storage.sql.exec("UPDATE chatter_topics SET alias_of = ?, posts = 0, repeats = 0, participants_json = '[]', state = NULL, state_by = NULL, state_at = NULL, fixed_in = NULL WHERE key = ?", into.key, source.key);
+      this.ctx.storage.sql.exec("DELETE FROM chatter_same WHERE key = ? AND state = 'suggested'", source.key);
       return this.insert({ id, at, type: 'topic', topicKey: into.key, topic: into.display, author, kind: null, text: null, change: { kind: 'merge', from: source.key, fromDisplay: source.display }, phase: null, spot: null });
     });
     await this.changed(input.projectId, seq);
@@ -600,6 +675,7 @@ export class ProjectChatterDO extends BudgetedDurableObject {
       for (const { key } of expired) {
         this.ctx.storage.sql.exec('DELETE FROM chatter_events WHERE topic_key = ?', key);
         this.ctx.storage.sql.exec('DELETE FROM chatter_topics WHERE key = ? OR alias_of = ?', key, key);
+        this.ctx.storage.sql.exec('DELETE FROM chatter_same WHERE key = ? OR other = ?', key, key);
       }
       this.ctx.storage.sql.exec("DELETE FROM chatter_events WHERE topic_key = '' AND at <= ?", cutoff);
     });
@@ -612,12 +688,15 @@ export class ProjectChatterDO extends BudgetedDurableObject {
    * the rest (one call per listener, every offered topic a question of it); a failed call leaves the floor plus the
    * newest topics. An idle listener is built for when it next runs. A listener that has not started a turn since its
    * last build (a long run) is rebuilt at most once per REBUILD_MS, the skipped build scheduled for then. While Chatter
-   * is muted for the project, nothing is.
+   * is muted for the project, nothing is. The sameness check runs first, muted or not.
    */
   private async build(): Promise<void> {
     const settings = this.settings();
     const projectId = settings.projectId;
-    if (settings.muted || projectId === null) return;
+    if (projectId === null) return;
+    let decide: Promise<DigestDecide> | null = null;
+    await this.sameness(projectId, () => decide ??= this.decider(projectId));
+    if (settings.muted) return;
     const now = Date.now();
     const cursor = this.cursor();
     const mix = this.mix();
@@ -630,7 +709,6 @@ export class ProjectChatterDO extends BudgetedDurableObject {
       else later = Math.min(later ?? rebuild, rebuild);
     }
     if (later !== null) this.ctx.storage.sql.exec('UPDATE chatter_settings SET build_at = COALESCE(MIN(build_at, ?), ?) WHERE id = 1', later, later);
-    let decide: Promise<DigestDecide> | null = null;
     await Promise.all(listeners.map(async row => {
       const listener = ChatterListenerSchema.parse(JSON.parse(row.profile_json));
       const weighed = weighDigest(listener, this.digestPosts(row.heard, cursor), mix);
@@ -652,6 +730,54 @@ export class ProjectChatterDO extends BudgetedDurableObject {
       this.ctx.storage.sql.exec('UPDATE digests SET after_offset = ?, through = ?, digest_json = ?, built_at = ? WHERE listener = ?',
         row.heard, cursor, JSON.stringify({ heard, left, model }), new Date().toISOString(), row.listener);
     }));
+  }
+
+  /**
+   * The sameness check (docs/CHATTER-DESIGN.md §5.1): the topics no build has compared yet, the oldest first and at
+   * most SAMENESS_TOPICS, against the active topics in one decision. Each suggestion waits on the new topic's row for
+   * people (its header) and the project agent (`chatter_read`) to merge or say they are not the same; it never merges.
+   * A pair someone said is not the same is not offered again. A failed call suggests nothing for those topics.
+   */
+  private async sameness(projectId: string, decide: () => Promise<DigestDecide>): Promise<void> {
+    const fresh = this.rows<TopicRow>('SELECT * FROM chatter_topics WHERE alias_of IS NULL AND same_checked = 0 ORDER BY first_at LIMIT ?', SAMENESS_TOPICS);
+    if (fresh.length === 0) return;
+    this.ctx.storage.sql.exec(`UPDATE chatter_topics SET same_checked = 1 WHERE key IN (${fresh.map(() => '?').join(',')})`, ...fresh.map(row => row.key));
+    const active = this.active(Date.now(), SAMENESS_CANDIDATES + fresh.length);
+    const keys = [...new Set([...fresh, ...active].map(row => row.key))];
+    const latest = new Map(this.rows<{ topic_key: string; text: string | null }>(
+      `SELECT topic_key, text FROM chatter_events WHERE seq IN (SELECT MAX(seq) FROM chatter_events WHERE type = 'post' AND topic_key IN (${keys.map(() => '?').join(',')}) GROUP BY topic_key)`, ...keys,
+    ).map(row => [row.topic_key, row.text ?? '']));
+    const distinct = new Set(this.rows<{ key: string; other: string }>("SELECT key, other FROM chatter_same WHERE state = 'distinct'").map(pair => `${pair.key}\n${pair.other}`));
+    const existing = active.map(row => ({ key: row.key, display: row.display, text: latest.get(row.key) ?? '' }));
+    const question = samenessQuestion(fresh.map(row => ({
+      topic: { key: row.key, display: row.display, text: latest.get(row.key) ?? '' },
+      candidates: active.filter(other => other.key !== row.key && !distinct.has(`${row.key}\n${other.key}`)).slice(0, SAMENESS_CANDIDATES).map(other => other.key),
+    })), existing);
+    if (question === null) return;
+    let suggestions: { key: string; other: string }[] = [];
+    let model = '';
+    try {
+      const answer = await (await decide())(question.args);
+      suggestions = samenessSuggestions(question.asked, existing, answer.answers);
+      model = answer.model;
+    } catch (error) {
+      console.warn(JSON.stringify({ event: 'chatter_sameness_unchecked', topics: fresh.length, message: error instanceof Error ? error.message : String(error) }));
+    }
+    if (suggestions.length === 0) return;
+    const at = new Date().toISOString();
+    for (const { key, other } of suggestions) this.ctx.storage.sql.exec("INSERT INTO chatter_same(key, other, state, by, at) VALUES (?, ?, 'suggested', ?, ?) ON CONFLICT(key, other) DO NOTHING", key, other, model, at);
+    await notifyBrowsers(this.env, [{ ...projectLiveKey(projectId, 'chatter'), version: this.cursor() }]);
+  }
+
+  /** The live topic the sameness check suggested `key` is the same as, unless someone said the two are not the same. */
+  private sameAs(key: string): ChatterTopic['sameAs'] {
+    for (const { other } of this.rows<{ other: string }>("SELECT other FROM chatter_same WHERE key = ? AND state = 'suggested' ORDER BY at DESC", key)) {
+      const into = this.topicRow(this.resolve(other));
+      if (!into || into.key === key) continue;
+      if (this.rows<{ one: number }>("SELECT 1 AS one FROM chatter_same WHERE key = ? AND other = ? AND state = 'distinct'", key, into.key).length) continue;
+      return { key: into.key, display: into.display, posts: into.posts };
+    }
+    return null;
   }
 
   private async changed(projectId: string, seq: number): Promise<void> {
@@ -719,12 +845,12 @@ export class ProjectChatterDO extends BudgetedDurableObject {
     return { status: 'ok', value: { topic: this.topicView(topic), line: view.type === 'topic' ? view : null } };
   }
 
-  private insert(event: { id: string; at: string; type: ChatterEvent['type']; topicKey: string; topic: string; author: ChatterAuthor; kind: ChatterKind | null; text: string | null; change: ChatterChange | VolumeChange | { on: boolean } | null; phase: string | null; spot: ChatterSpot | null; to?: string }): number {
+  private insert(event: { id: string; at: string; type: ChatterEvent['type']; topicKey: string; topic: string; author: ChatterAuthor; kind: ChatterKind | null; text: string | null; change: ChatterChange | VolumeChange | { on: boolean } | null; phase: string | null; spot: ChatterSpot | null; to?: string; link?: ChatterLink | null }): number {
     const change = event.to !== undefined ? { to: event.to } : event.change;
     return this.ctx.storage.sql.exec<{ seq: number }>(
-      'INSERT INTO chatter_events(id, at, type, topic_key, topic, author_kind, author_id, author_name, kind, text, change_json, author_phase, spot_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING seq',
+      'INSERT INTO chatter_events(id, at, type, topic_key, topic, author_kind, author_id, author_name, kind, text, change_json, author_phase, spot_json, link_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING seq',
       event.id, event.at, event.type, event.topicKey, event.topic, event.author.kind, event.author.id, event.author.name, event.kind, event.text,
-      change === null ? null : JSON.stringify(change), event.phase, event.spot === null ? null : JSON.stringify(event.spot),
+      change === null ? null : JSON.stringify(change), event.phase, event.spot === null ? null : JSON.stringify(event.spot), event.link ? JSON.stringify(event.link) : null,
     ).one().seq;
   }
 
@@ -776,6 +902,8 @@ export class ProjectChatterDO extends BudgetedDurableObject {
       fixedIn: row.fixed_in,
       repeats: row.repeats,
       filed: row.filed_json === null ? null : ChatterFiledSchema.parse(JSON.parse(row.filed_json)),
+      marked: row.marked_json === null ? null : ChatterMarkedSchema.parse(JSON.parse(row.marked_json)),
+      sameAs: this.sameAs(row.key),
     };
   }
 
@@ -783,7 +911,10 @@ export class ProjectChatterDO extends BudgetedDurableObject {
     const author = ChatterAuthorSchema.parse({ kind: row.author_kind, id: row.author_id, name: row.author_name });
     const at = new Date(row.at);
     if (row.type === 'post') {
-      return { type: 'post', offset: row.seq, id: row.id, at, topicKey: row.topic_key, topic: row.topic, author, phase: row.author_phase, kind: z.enum(CHATTER_KINDS).parse(row.kind), text: row.text ?? '', spot: row.spot_json === null ? null : ChatterSpotSchema.parse(JSON.parse(row.spot_json)) };
+      return {
+        type: 'post', offset: row.seq, id: row.id, at, topicKey: row.topic_key, topic: row.topic, author, phase: row.author_phase, kind: z.enum(CHATTER_KINDS).parse(row.kind), text: row.text ?? '',
+        spot: row.spot_json === null ? null : ChatterSpotSchema.parse(JSON.parse(row.spot_json)), link: row.link_json === null ? null : ChatterLinkSchema.parse(JSON.parse(row.link_json)),
+      };
     }
     if (row.type === 'volume') {
       const { strip, name, level, muted, from, wasMuted } = this.volumeChangeSchema.parse(JSON.parse(row.change_json ?? 'null'));

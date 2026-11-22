@@ -1,4 +1,4 @@
-import { env, runInDurableObject } from 'cloudflare:test';
+import { env, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { expect, test, vi } from 'vitest';
 import { createModels, createAssistantMessageEventStream, type ToolCall, type AssistantMessage } from '@earendil-works/pi-ai';
 import { BACKGROUND_CONTEXT, withAbortSignal } from '@earendil-works/chord/context';
@@ -21,6 +21,7 @@ import { ServiceTokenGrantSchema } from '@gitspace/protocol-environment';
 import { decodeJwt } from 'jose';
 import type { ProfileDecision } from '@gitspace/runtime-core/inference';
 import { GhostDO, type GhostAgentReply, type GhostAgentRequest } from '../src/ghost.js';
+import type { ChatterAuthor, ChatterPost } from '@gitspace/protocol/chatter-contract';
 
 const unsupported = async (): Promise<never> => { throw new Error('Unexpected external operation'); };
 
@@ -885,7 +886,7 @@ test('an agent\'s chatter_post lands under its workspace; a hand-off is returned
     expect(text(await invoke('chatter_post', { kind: 'tooling', tool: 'shell', reference: `history://${identity.workspaceId}/main#9`, text: 'bun test hangs on the watcher' }))).toContain('joined issue bun test hangs on the watcher · bash (2 posts, 1 workspace)');
     answer = 0.9;
     expect(text(await invoke('chatter_post', { topic: 'invoice column', kind: 'coordination', text: '@billing please add an invoice column for me, I will wait.' })))
-      .toBe('Not posted: this asks Billing to do work. Chatter is ambient and can\'t assign or hand off work. Post what you found or what you need; the project agent reads Chatter and decides what gets done.');
+      .toBe('Not posted: this asks Billing to do work. Chatter is ambient and can\'t assign or hand off work; post what you found or what you need.');
     answer = new Error('Decisions model unavailable');
     expect(text(await invoke('chatter_post', { topic: 'invoice column', kind: 'discovery', text: 'The schema has no invoice column yet.' }))).toContain('posted under invoice column (1 post)');
     expect(asked).toHaveLength(5);
@@ -903,6 +904,73 @@ test('an agent\'s chatter_post lands under its workspace; a hand-off is returned
   });
 });
 
+test('the project agent\'s reply links a workspace it started (one outside the project is refused) and an issue it acted on; it resolves, marks and merges topics as the project agent and sees sameness suggestions; a workspace agent can do neither', async () => {
+  const projectId = `chatter-agent-${crypto.randomUUID()}`;
+  const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`);
+  await authority.bootstrap({ id: projectId, name: 'Chatter project', repositoryReference: null, baseBranch: 'main', createdBy: 'user' });
+  const parserId = `${projectId}-parser`;
+  await authority.putWorkspace({ id: parserId, projectId, kind: 'worktree', name: 'Parser', branch: parserId, phase: null, sourceKind: 'branch', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
+  const object = env.PROJECT_CHATTER.getByName(`${env.ACCOUNT_ID}:${projectId}`);
+  const parser: ChatterAuthor = { kind: 'workspace', id: parserId, name: 'Parser' };
+  await object.post({ projectId, id: 'hang-1', topic: 'bun test hangs · bash', kind: 'tooling', text: 'bun test hangs on the watcher.', author: parser, spot: { tool: 'bash', reference: `history://${parserId}/main#3`, machine: null } });
+  await object.post({ projectId, id: 'hang-2', topic: 'bun test watcher hang', kind: 'status', text: 'The watcher never exits.', author: parser });
+  // The build's sameness check finds the watcher topic the same as the tooling one.
+  await runInDurableObject(object, instance => {
+    instance.decider = async () => async args => {
+      const state = z.object({ existing: z.array(z.object({ id: z.string(), topic: z.string() })), new: z.array(z.object({ id: z.string(), topic: z.string() })) }).parse(args.state);
+      const into = state.existing.find(entry => entry.topic === 'bun test hangs · bash')?.id ?? 'missing';
+      const asked = state.new.find(entry => entry.topic === 'bun test watcher hang')?.id ?? 'missing';
+      return { model: 'test/same', answers: { [asked]: { choice: into, probabilities: { [into]: 0.9 }, confidence: 0.9 } } };
+    };
+  });
+  vi.useFakeTimers({ toFake: ['Date'] });
+  try {
+    vi.setSystemTime(Date.now() + 3 * 60_000);
+    expect(await runDurableObjectAlarm(object)).toBe(true);
+  } finally { vi.useRealTimers(); }
+  const decide = async (): Promise<ProfileDecision> => ({ answers: { handoff: { bool: 0.1 } }, model: 'fixture', usage: null, fallback: null });
+  await runInDurableObject(env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`), async (_instance, ctx) => {
+    const { runtime, invoke, text } = await ownerFixture(ctx, RuntimeIdentitySchema.parse({ projectId, workspaceId: projectId }), decide);
+    try {
+      const read = z.object({ topics: z.array(z.object({ topic: z.string(), sameAs: z.string().nullable() })), note: z.string() }).parse(JSON.parse(text(await invoke('chatter_read', {}))));
+      expect(read.topics).toEqual(expect.arrayContaining([{ topic: 'bun test watcher hang', sameAs: 'bun test hangs · bash' }, { topic: 'bun test hangs · bash', sameAs: null }]));
+      expect(read.topics).toHaveLength(2);
+      expect(read.note).toContain('sameAs is the sameness check\'s suggestion');
+
+      expect(text(await invoke('chatter_topic', { topic: 'bun test watcher hang', action: 'merge', into: 'bun test hangs · bash' }))).toBe('merged bun test watcher hang into bun test hangs · bash (2 posts)');
+      expect(text(await invoke('chatter_topic', { topic: 'bun test hangs · bash', action: 'resolve', fixedIn: '4f2a9c1' }))).toContain('resolved issue bun test hangs · bash (fixed in 4f2a9c1)');
+      expect(text(await invoke('chatter_topic', { topic: 'bun test hangs · bash', action: 'file' }))).toContain('marked issue bun test hangs · bash for filing with GitSpace; filing it is a person\'s action');
+
+      expect(text(await invoke('chatter_post', { topic: 'bun test hangs · bash', kind: 'status', text: 'Started Parser on a fix for the watcher.', workspace: 'parser' }))).toContain('linked workspace Parser');
+      const nowhere = await invoke('chatter_post', { topic: 'bun test hangs · bash', kind: 'status', text: 'Started a fix.', workspace: 'nowhere' });
+      expect(nowhere.status).toBe('failed');
+      expect(text(nowhere)).toBe('Not posted: there is no workspace nowhere in this project to link. Link a workspace you started, by its id or name.');
+      // An issue named by its merged topic links the topic it went into.
+      expect(text(await invoke('chatter_post', { topic: 'bun test hangs · bash', kind: 'status', text: 'Fixed in 4f2a9c1; marked for filing.', issue: 'bun test watcher hang' }))).toContain('linked issue bun test hangs · bash');
+    } finally { await runtime.harness.close(BACKGROUND_CONTEXT); }
+  });
+  const { events, topics } = await object.watch({});
+  expect(events.flatMap(event => event.type === 'post' && event.author.kind === 'project' ? [[event.text, event.link]] : [])).toEqual([
+    ['Started Parser on a fix for the watcher.', { kind: 'workspace', id: parserId, name: 'Parser' }],
+    ['Fixed in 4f2a9c1; marked for filing.', { kind: 'issue', key: 'bun test hangs bash', display: 'bun test hangs · bash' }],
+  ]);
+  expect(events.some(event => event.type === 'post' && event.text === 'Started a fix.')).toBe(false);
+  expect(events.flatMap(event => event.type === 'topic' ? [[event.author.kind, event.change.kind]] : [])).toEqual([['workspace', 'state'], ['project', 'merge'], ['project', 'state'], ['project', 'marked']]);
+  expect(topics.find(topic => topic.key === 'bun test hangs bash')).toMatchObject({ state: 'resolved', fixedIn: '4f2a9c1', marked: { by: 'Chatter project' }, posts: 4 });
+
+  await runInDurableObject(env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${parserId}`), async (_instance, ctx) => {
+    const { runtime, invoke, text } = await ownerFixture(ctx, RuntimeIdentitySchema.parse({ projectId, workspaceId: parserId }), decide);
+    try {
+      const acted = await invoke('chatter_topic', { topic: 'bun test hangs · bash', action: 'dismiss' });
+      expect(acted.status).toBe('failed');
+      expect(text(acted)).toContain('Only the project agent has chatter_topic');
+      expect((await invoke('chatter_post', { topic: 'bun test hangs · bash', kind: 'status', text: 'I started it.', workspace: parserId })).status).toBe('failed');
+    } finally { await runtime.harness.close(BACKGROUND_CONTEXT); }
+  });
+  const posts: ChatterPost[] = (await object.watch({})).events.flatMap(event => event.type === 'post' ? [event] : []);
+  expect(posts.some(post => post.text === 'I started it.')).toBe(false);
+});
+
 test('ghost_ask reaches a ghost of a session in its project, on the conversation\'s inference profile; another project\'s workspace is refused, live ghosts are capped, a faded one says so', async () => {
   const projectId = `ghosts-${crypto.randomUUID()}`;
   const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`);
@@ -915,7 +983,7 @@ test('ghost_ask reaches a ghost of a session in its project, on the conversation
   let fades = true;
   const answer = (request: GhostAgentRequest): GhostAgentReply => ({ status: 'answered', result: {
     ghostId: request.ghostId, expiresAt: new Date(Date.now() + 600_000).toISOString(),
-    session: { workspaceId: request.open?.workspaceId ?? 'followed', workspace: request.open?.workspace ?? 'followed', conversationId: 'main', title: 'Main', main: true, archived: false },
+    session: { workspaceId: request.open?.workspaceId ?? 'followed', workspace: request.open?.workspace ?? 'followed', conversationId: 'main', title: 'Main', main: true, archived: false }, until: null,
     answer: 'It chose the archive bucket [#2].', cites: [{ kind: 'entry', from: 2, ref: 'history://w/main#2' }], reads: [{ kind: 'read', from: 0, to: 2 }], driveAsOf: new Date().toISOString(),
     draft: null, rounds: 1, truncated: false, usage: { model: 'openai/fake', requests: 2, input: 200, output: 40, costUsd: 0.01 },
   } });
@@ -938,9 +1006,9 @@ test('ghost_ask reaches a ghost of a session in its project, on the conversation
       const own = await invoke('ghost_ask', { question: 'What did my compaction leave out?' });
       await invoke('ghost_ask', { workspaceId: projectId, question: 'What does the project agent plan?' });
       expect(asked).toEqual([
-        { ghostId: ghostId(billing), asker, question: 'Why the archive bucket?', open: { workspaceId: `${projectId}-billing`, workspace: 'Billing', conversationId: null, archived: true, profileId: 'conversation-profile' } },
-        { ghostId: ghostId(own), asker, question: 'What did my compaction leave out?', open: { workspaceId: identity.workspaceId, workspace: 'Parser', conversationId: String(root.id), archived: false, profileId: 'conversation-profile' } },
-        { ghostId: expect.any(String), asker, question: 'What does the project agent plan?', open: { workspaceId: projectId, workspace: 'Ghost project', conversationId: null, archived: false, profileId: 'conversation-profile' } },
+        { ghostId: ghostId(billing), asker, question: 'Why the archive bucket?', open: { workspaceId: `${projectId}-billing`, workspace: 'Billing', conversationId: null, until: null, archived: true, profileId: 'conversation-profile' } },
+        { ghostId: ghostId(own), asker, question: 'What did my compaction leave out?', open: { workspaceId: identity.workspaceId, workspace: 'Parser', conversationId: String(root.id), until: null, archived: false, profileId: 'conversation-profile' } },
+        { ghostId: expect.any(String), asker, question: 'What does the project agent plan?', open: { workspaceId: projectId, workspace: 'Ghost project', conversationId: null, until: null, archived: false, profileId: 'conversation-profile' } },
       ]);
 
       const capped = await invoke('ghost_ask', { workspaceId: `${projectId}-billing`, question: 'One more?' });

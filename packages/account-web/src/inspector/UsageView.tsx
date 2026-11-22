@@ -41,8 +41,8 @@ const compactNumber = new Intl.NumberFormat(undefined, { notation: 'compact', ma
 const dayFormat = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' });
 const selectionColor: Record<Selection, NonNullable<BadgeProps['color']>> = { role: 'green', pinned: 'amber', inherited: 'gray', unknown: 'gray' };
 
-function tokens(value: number): string { return compactNumber.format(value); }
-function usd(value: number): string { return value === 0 || value >= 0.01 ? `$${value.toFixed(2)}` : `$${value.toFixed(4)}`; }
+export function tokens(value: number): string { return compactNumber.format(value); }
+export function usd(value: number): string { return value === 0 || value >= 0.01 ? `$${value.toFixed(2)}` : `$${value.toFixed(4)}`; }
 function requests(value: number): string { return `${value}×`; }
 function dateRange(first: string | null, last: string | null): string {
   if (!first) return '—';

@@ -126,6 +126,16 @@ body { overflow: hidden; }
 .ghost-suggestion:hover { background: color-mix(in oklab, #9a8cff 16%, transparent); }
 .ghost-ask { color: color-mix(in oklab, #9a8cff 70%, var(--foreground)); background: color-mix(in oklab, #9a8cff 10%, var(--background)); box-shadow: inset 0 0 0 1px color-mix(in oklab, #9a8cff 28%, transparent); }
 .ghost-ask:hover { background: color-mix(in oklab, #9a8cff 20%, var(--background)); }
+/* The docked ghosts: a column on the workspace's right, washed faintly lavender from the top. */
+.ghost-dock {
+  background:
+    radial-gradient(90% 40% at 50% 0%, color-mix(in oklab, #9a8cff 11%, transparent), transparent 75%),
+    color-mix(in oklab, #9a8cff 4%, var(--background));
+}
+/* "Ask a ghost about this" on a transcript entry: shown while the entry is hovered or the button has focus. */
+.ghost-entry-ask { opacity: 0; transition: opacity 120ms ease-out; }
+.ghost-entry:hover .ghost-entry-ask, .ghost-entry-ask:focus-visible { opacity: 1; }
+@media (hover: none) { .ghost-entry-ask { opacity: 0.7; } }
 /* A cited entry lights up, then settles to a faint wash; the composer glows when a draft lands in it. */
 .ghost-flash { animation: ghost-flash 2.6s ease-out forwards; border-radius: 10px; }
 @keyframes ghost-flash {

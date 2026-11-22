@@ -343,6 +343,7 @@ describe('messages delivered on others\' behalf', () => {
       { sessionId: 's1', ordinal: 1, kind: 'message_end', payload: { message: { role: 'user', content: [{ type: 'text', text: 'Carry on.' }] } } },
       { sessionId: 's1', ordinal: 2, kind: 'message_end', payload: { message: { role: 'custom', customType: 'gitspace.chatter-digest', display: true, content: digest, details: { floor: 1, picked: 2, others: 2, tokens: 60, fullTokens: 180 } } } },
       { sessionId: 's1', ordinal: 3, kind: 'message_end', payload: { message: { role: 'custom', customType: 'gitspace.chatter-digest', display: true, content: digest, details: { floor: 1, picked: 0, newest: 3, others: 0, tokens: 60, fullTokens: 60 } } } },
+      { sessionId: 's1', ordinal: 4, kind: 'message_end', payload: { message: { role: 'custom', customType: 'gitspace.chatter-digest', display: true, content: digest, details: { floor: 1, picked: 0, newest: 0, others: 0, tokens: 30, fullTokens: 30, during: true } } } },
     ]);
     expect(turns).toHaveLength(1);
     expect(turns[0]?.user).toMatchObject({ text: 'Carry on.' });
@@ -350,6 +351,8 @@ describe('messages delivered on others\' behalf', () => {
       expect.objectContaining({ type: 'interruption', reason: 'machine', title: 'Chatter since its last turn', detail: '1 always heard · 2 picked by the model · 2 other posts — chatter_read · ~60 tokens instead of ~180', body: digest }),
       // With no model answer, the newest topics are not called model picks.
       expect.objectContaining({ type: 'interruption', title: 'Chatter since its last turn', detail: '1 always heard · 3 from the newest topics' }),
+      // A long run's digest at a tool boundary says so.
+      expect.objectContaining({ type: 'interruption', title: 'Chatter during this run', detail: '1 always heard' }),
     ]);
   });
 });

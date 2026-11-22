@@ -371,7 +371,7 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, reads, 
         stop: async (machineId, name) => { const result = await rpcClient.terminals.stop({ spaceId, machineId, name }); if (result.status === 'error') throw result.error; },
       }}
       renderInspector={(onClose, initialView, resourceRequest, openTerminal, guideSection, driveFocus) => props.renderInspector({ snapshot, conversationId, sessionId: value?.sessionId ?? conversationId ?? null, controls: value, turns, scope: scope.workspace, workspaces: scope.workspaces, onClose, onAskAgent: ask, onCompose: draft ? text => draft.onChange(/\S$/u.test(draft.text) ? `${draft.text} ${text}` : `${draft.text}${text}`) : undefined, onSetRelations: relationsEditable ? setRelations : undefined, initialView, resourceRequest, guideSection, driveFocus, onOpenTerminal: (machineId, name) => { selectTerminalMachine(machineId); openTerminal(name); } })}
-      chatter={<LiveChatter projectId={inspection.project.id} projectName={inspection.project.name} workspaceId={identity.workspaceId} workspaces={scope.workspaces.filter(workspace => workspace.closedAt === null).map(({ id, name }) => ({ id, name }))} />}
+      chatter={<LiveChatter projectId={inspection.project.id} projectName={inspection.project.name} workspaceId={identity.workspaceId} workspaces={scope.workspaces.filter(workspace => workspace.closedAt === null).map(({ id, name }) => ({ id, name }))} onOpenWorkspace={props.onSelectWorkspace} />}
     />
     </SpeechProvider>
     </RequirementAcceptance.Provider>

@@ -4,7 +4,7 @@ import { BACKGROUND_CONTEXT as context } from '@earendil-works/chord/context';
 import { createAssistantMessageEventStream, createModels, type Api, type AssistantMessage, type Context, type Message, type Model } from '@earendil-works/pi-ai';
 import { RuntimeIdentitySchema } from '@gitspace/protocol-runtime';
 import { createRuntimeHarness } from './harness.js';
-import { CHATTER_DIGEST_INSTRUCTION, type ChatterTurnDigest } from './chatter-digest.js';
+import { CHATTER_DIGEST_INSTRUCTION, CHATTER_RUN_DIGEST_MS, type ChatterTurnDigest } from './chatter-digest.js';
 import { AgentDefinitionContextDoc } from './subagent-state.js';
 
 const model: Model<Api> = { id: 'listener', name: 'Listener', provider: 'test', api: 'test', baseUrl: 'https://invalid.test', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1_000_000, maxTokens: 4096 };
@@ -12,34 +12,40 @@ const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0
 const unused = async (): Promise<never> => { throw new Error('Unexpected service'); };
 const done: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: 'Done.' }], api: model.api, provider: model.provider, model: model.id, stopReason: 'stop', timestamp: Date.now(), usage };
 const text = (message: Message | undefined) => typeof message?.content === 'string' ? message.content : JSON.stringify(message?.content);
-const digests = (request: Context | undefined) => request?.messages.map(text).filter(line => line.startsWith('Chatter since your last turn')) ?? [];
+const digests = (request: Context | undefined) => request?.messages.map(text).filter(line => /^Chatter (since your last turn|during this run)/u.test(line)) ?? [];
 
 /**
  * A main agent whose Chatter is a list of posts by offset: a read after `after` hears every later post once, as the
- * Chatter object does, and records each position it was asked from.
+ * Chatter object does, and records each position it was asked from and whether it was a long run's read. `script`
+ * holds the model's replies in order, then it answers "Done."; `answered` runs after each model request with how many
+ * there have been.
  */
-async function fixture() {
+async function fixture(options: { script?: AssistantMessage[]; answered?(requests: number, chatter: { posts: string[] }): void } = {}) {
   const requests: Context[] = [];
-  const chatter: { posts: string[]; asked: (number | null)[]; fail: boolean } = { posts: [], asked: [], fail: false };
+  const script = [...options.script ?? []];
+  const chatter: { posts: string[]; asked: (number | null)[]; during: boolean[]; fail: boolean } = { posts: [], asked: [], during: [], fail: false };
   const models = Object.assign(createModels(), { getModel: () => model, completeSimple: unused,
     streamSimple(_model: Model<Api>, request: Context) {
       requests.push(request);
+      options.answered?.(requests.length, chatter);
+      const answer = script.shift() ?? done;
       const stream = createAssistantMessageEventStream();
-      stream.push({ type: 'done', reason: 'stop', message: done });
-      stream.end(done);
+      stream.push({ type: 'done', reason: answer.stopReason === 'toolUse' ? 'toolUse' : 'stop', message: answer });
+      stream.end(answer);
       return stream;
     } });
-  const read = async (input: { after: number | null }): Promise<ChatterTurnDigest> => {
+  const read = async (input: { after: number | null; during: boolean }): Promise<ChatterTurnDigest> => {
     chatter.asked.push(input.after);
+    chatter.during.push(input.during);
     if (chatter.fail) throw new Error('Chatter is restarting');
     const fresh = chatter.posts.slice(input.after ?? 0);
     const body = fresh.map(post => `  10:00 Parser (code, discovery): ${post} [its stack's head]`);
-    return { text: fresh.length ? ['Chatter since your last turn (times UTC):', 'Always heard', 'parser:', ...body].join('\n') : null, through: chatter.posts.length, floor: fresh.length, picked: 0, newest: 0, others: 0, tokens: 10, fullTokens: 10 };
+    return { text: fresh.length ? [input.during ? 'Chatter during this run, since your last digest (times UTC):' : 'Chatter since your last turn (times UTC):', 'Always heard', 'parser:', ...body].join('\n') : null, through: chatter.posts.length, floor: fresh.length, picked: 0, newest: 0, others: 0, tokens: 10, fullTokens: 10 };
   };
   const { harness, root } = await createRuntimeHarness({
     identity: RuntimeIdentitySchema.parse({ projectId: 'project', workspaceId: 'billing' }), storage: new MemoryStorage(), models, model: { provider: 'test', modelId: model.id },
     tools: { images: { store: async image => image, load: async image => image }, prepareBrowser: unused, takeoverTab: unused, lifecycleApproval: async () => null, instructions: async () => '', preflight: async () => {}, results: { put: unused, text: unused },
-      invoke: unused, chatterDigest: read },
+      async invoke(input) { return { requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: '{}' }] }; }, chatterDigest: read },
     operations: { execute: unused, reconcile: async () => null, cancel: unused, jobScope: () => ({ projectId: 'project', workspaceId: 'billing' }), controlJob: unused, observeProcess: unused, stopProcess: unused, wakeAt: async () => {} },
     retainedRules: { loadRules: async () => [] }, editTool: () => 'edit',
     onReport: error => { throw error; }, admitInference: unused, bindInferenceConversation: async () => {}, refuseRequest: unused,
@@ -52,8 +58,45 @@ async function fixture() {
     await conversation.waitForIdle(context);
     return requests.slice(before)[0];
   }
-  return { harness, root, chatter, turn };
+  return { harness, root, chatter, requests, turn };
 }
+
+/** Date.now as the fixture's clock reads it: real time moved on by `shift` milliseconds. */
+const clock = { shift: 0 };
+const realNow = Date.now;
+Date.now = () => realNow() + clock.shift;
+
+test('a long run hears Chatter again at the first tool boundary 20 minutes after its last read, and not before', async () => {
+  const call = (id: string): AssistantMessage => ({ ...done, content: [{ type: 'toolCall', id, name: 'chatter_read', arguments: {} }], stopReason: 'toolUse' });
+  // The turn starts at 0; its tool boundaries come at 12, 20 and 22 minutes, and a post arrives after the first request.
+  const minutes = [12, CHATTER_RUN_DIGEST_MS / 60_000 - 12, 2];
+  const f = await fixture({ script: [call('one'), call('two'), call('three')], answered(count, chatter) {
+    clock.shift += (minutes[count - 1] ?? 0) * 60_000;
+    if (count === 1) chatter.posts.push('The staging database is writable again.');
+  } });
+  try {
+    f.chatter.posts.push('The staging database is read-only.');
+    await f.turn('Run the migration.');
+    const [start, twelve, twenty, after] = f.requests;
+    expect(digests(start)).toEqual([expect.stringContaining('read-only')]);
+    // 12 minutes in: no read, though a post is waiting.
+    expect(digests(twelve)).toHaveLength(1);
+    // 20 minutes after the turn start's read, the request after the tool results carries the run's digest, after
+    // everything earlier requests sent, with only the post not heard yet.
+    expect(twenty!.messages.slice(0, twelve!.messages.length)).toEqual(twelve!.messages);
+    expect(digests(twenty)).toHaveLength(2);
+    expect(digests(twenty).at(-1)).toMatch(/^Chatter during this run/u);
+    expect(digests(twenty).at(-1)).toContain('The staging database is writable again.');
+    expect(digests(twenty).at(-1)).not.toContain('read-only');
+    // Two minutes later nothing is read; the run's digest stays where it was put.
+    expect(digests(after)).toEqual(digests(twenty));
+    expect(f.chatter.asked).toEqual([null, 1]);
+    expect(f.chatter.during).toEqual([false, true]);
+  } finally {
+    await f.harness.close(context);
+    clock.shift = 0;
+  }
+}, 20_000);
 
 test('a main turn starts with the posts since its last digest, each heard once; a turn with no news gets nothing', async () => {
   const f = await fixture();

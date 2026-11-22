@@ -1,17 +1,19 @@
 import { DurableObject } from 'cloudflare:workers';
 import { z } from 'zod';
-import { DEVICE_SOCKET_PROTOCOL, scopeAllowsWorkspace, socketProtocolProof } from '@gitspace/protocol';
+import { DEVICE_SOCKET_PROTOCOL, scopeAllowsProject, scopeAllowsWorkspace, socketProtocolProof } from '@gitspace/protocol';
 import { GHOST_QUESTION_MAX, GhostQuerySchema, RuntimeIdentitySchema, type GhostAskResult } from '@gitspace/protocol-runtime';
 import { accountAccessResponse, activeAccount } from './account-access.js';
 import { DEVICE_AUTHORITY_UNAVAILABLE, withDeviceAuthority } from './device-authority.js';
 import { requireWorkspaceAccess } from './runtime-access.js';
 import type { AgentGhost, GhostSession } from './ghost-session.js';
 
-/** The request the account worker forwards to a new ghost's object: who opened it and what it reads, already authorized. */
+/** The request the account worker forwards to a new ghost's object: who opened it and what it reads (the session, up to
+ * entry `until`, and Chatter when the device may read the project's), already authorized. */
 const GHOST_SPEC_HEADER = 'x-gitspace-ghost';
+const entry = z.number().int().nonnegative();
 export const GhostSpecSchema = z.strictObject({
   ghostId: z.uuid(), projectId: z.string().min(1), workspaceId: z.string().min(1), conversationId: z.string().min(1).nullable(),
-  deviceId: z.string().min(1), archived: z.boolean(),
+  until: entry.nullable(), deviceId: z.string().min(1), archived: z.boolean(), chatter: z.boolean(),
 });
 export type GhostSpec = z.infer<typeof GhostSpecSchema>;
 
@@ -21,12 +23,13 @@ export const GhostAskerSchema = z.strictObject({ projectId: id, workspaceId: id,
 export type GhostAsker = z.infer<typeof GhostAskerSchema>;
 /**
  * One `ghost_ask` question, as the asking workspace's object sends it to the ghost's, already authorized: the session is
- * a workspace of the asker's project. `open` starts the ghost (the session it reads, that workspace's name, whether it
- * is archived, and the asking conversation's inference profile); without it the question is a follow-up.
+ * a workspace of the asker's project. `open` starts the ghost (the session it reads, up to entry `until`, that
+ * workspace's name, whether it is archived, and the asking conversation's inference profile); without it the question
+ * is a follow-up. An agent's ghost reads its project's Chatter: the asker's own project.
  */
 export const GhostAgentRequestSchema = z.strictObject({
   ghostId: z.uuid(), asker: GhostAskerSchema, question: z.string().trim().min(1).max(GHOST_QUESTION_MAX),
-  open: z.strictObject({ workspaceId: id, workspace: z.string(), conversationId: id.nullable(), archived: z.boolean(), profileId: id }).nullable(),
+  open: z.strictObject({ workspaceId: id, workspace: z.string(), conversationId: id.nullable(), until: entry.nullable(), archived: z.boolean(), profileId: id }).nullable(),
 });
 export type GhostAgentRequest = z.infer<typeof GhostAgentRequestSchema>;
 /** How a `ghost_ask` question ended: answered, refused because no ghost of this asker lives here, or failed (with when
@@ -39,10 +42,11 @@ export type GhostAgentReply =
 function fail(status: number, code: string, message: string) { return Response.json({ status: 'error', error: { code, message } }, { status, headers: { 'cache-control': 'private, no-store' } }); }
 
 /**
- * `GET GHOST_PATH?projectId&workspaceId[&conversationId]`, upgraded, from the account's own origin, signed in
+ * `GET GHOST_PATH?projectId&workspaceId[&conversationId][&until]`, upgraded, from the account's own origin, signed in
  * `Sec-WebSocket-Protocol` as the dictation socket is. A ghost reads what its asker could open and spends inference, so
  * the device must be a browser with `rpc.read` and `session.prompt` that reaches the workspace; archived workspaces
- * pass (reads only). Each socket is a new ghost in its own object.
+ * pass (reads only). It reads the project's Chatter only when the device may (a workspace-scoped device may not). Each
+ * socket is a new ghost in its own object.
  */
 export async function serveGhost(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
@@ -55,7 +59,7 @@ export async function serveGhost(request: Request, env: Env): Promise<Response> 
   if (!offered) return fail(400, 'GHOST_INVALID', 'Ghost authorization is missing');
   const auth = await withDeviceAuthority(env, (view, now) => view.authorizeRequest({ header: offered.proof, method: 'GET', target: `${url.pathname}${url.search}`, body: new Uint8Array(), capabilities: ['rpc.read', 'session.prompt'], browserOnly: true, accountScope: false }, now));
   if (auth.status === 'error') return fail(auth.error.code === DEVICE_AUTHORITY_UNAVAILABLE ? 503 : auth.error.code === 'RPC_FORBIDDEN' ? 403 : 401, auth.error.code, auth.error.message);
-  const { device } = auth.value, { projectId, workspaceId, conversationId } = query.data;
+  const { device } = auth.value, { projectId, workspaceId, conversationId, until } = query.data;
   if (!scopeAllowsWorkspace(device.scope, projectId, workspaceId)) return fail(403, 'RPC_FORBIDDEN', 'Workspace is outside the device scope');
   const denied = accountAccessResponse(await activeAccount(env, env.ACCOUNT_ID));
   if (denied) return denied;
@@ -63,7 +67,7 @@ export async function serveGhost(request: Request, env: Env): Promise<Response> 
   try {
     archived = (await requireWorkspaceAccess(env, env.ACCOUNT_ID, RuntimeIdentitySchema.parse({ projectId, workspaceId }), false)).workspace.lifecycle !== 'active';
   } catch (error) { return fail(404, 'WORKSPACE_UNAVAILABLE', error instanceof Error ? error.message : String(error)); }
-  const spec: GhostSpec = { ghostId: crypto.randomUUID(), projectId, workspaceId, conversationId: conversationId ?? null, deviceId: device.deviceId, archived };
+  const spec: GhostSpec = { ghostId: crypto.randomUUID(), projectId, workspaceId, conversationId: conversationId ?? null, until: until ?? null, deviceId: device.deviceId, archived, chatter: scopeAllowsProject(device.scope, projectId) };
   const opened = await env.GHOSTS.getByName(`${env.ACCOUNT_ID}:ghost:${spec.ghostId}`).fetch('https://ghost.internal/open', { headers: { upgrade: 'websocket', [GHOST_SPEC_HEADER]: JSON.stringify(spec) } });
   if (!opened.webSocket) return opened;
   return new Response(null, { status: 101, webSocket: opened.webSocket, headers: { 'sec-websocket-protocol': offered.protocol } });

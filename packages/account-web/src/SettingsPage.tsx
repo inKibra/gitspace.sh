@@ -54,6 +54,7 @@ import { ArrowLeft, Check, CpuChip01, GitBranch01, GitPullRequest, Globe02, Key0
 import { glyph } from './glyph.js';
 import { EmptyState, PageCanvas, PageHeader } from './GitSpaceShell.js';
 import { ProvidersSection, type ProvidersSectionProps } from './ProvidersSection.js';
+import { ServiceUsageSection } from './ServiceUsage.js';
 import { ModelCombobox, modelOptions, type ModelOption } from './ModelCombobox.js';
 import { desiredLabel, machineRollup, ompRollup, RELEASE_STATUS_COLOR, RELEASE_TARGET_LABEL, RELEASE_TARGETS, releaseSourceText, shortSha, type ReleaseRecordView } from './release.js';
 import { AddMachinePanel } from './AddMachinePanel.js';
@@ -391,6 +392,7 @@ export function RuntimeSettingsEditor({ runtimeSettings, runtimeGeneration, onSe
   } else if (tab === 'Providers') {
     content = <>
       {providers ? <ProvidersSection {...providers} /> : null}
+      {providers?.serviceUsage ? <ServiceUsageSection {...providers.serviceUsage} /> : null}
       <Accordion type="single" collapsible>
         <AccordionItem value="advanced" index={0}>
           <AccordionTrigger>Advanced provider settings</AccordionTrigger>

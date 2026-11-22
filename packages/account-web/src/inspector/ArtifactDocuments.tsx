@@ -97,10 +97,12 @@ function ArtifactPreview({ reference, content, mode, artifactReferences, artifac
 }
 
 /** A resource opened from a link; `version` is the drive's current hash for it, when the drive lists it, so the
- * document reads the file again once its path gets new bytes. */
-export function ResourceDocument({ uri, version, mode, onRequest, artifactReferences, artifactContent, onRequestArtifact }: {
+ * document reads the file again once its path gets new bytes. With `hash` it shows that earlier version of a drive file
+ * (the one a ghost read) and says so. */
+export function ResourceDocument({ uri, version, hash, mode, onRequest, artifactReferences, artifactContent, onRequestArtifact }: {
   uri: string;
   version: string | null;
+  hash?: string;
   mode: 'preview' | 'source';
   onRequest: InspectorProps['onRequestResource'];
   artifactReferences: readonly ArtifactReference[];
@@ -117,7 +119,7 @@ export function ResourceDocument({ uri, version, mode, onRequest, artifactRefere
     void (async () => {
       try {
         if (!onRequest) throw new Error('Resource reads are unavailable for this workspace.');
-        const content = await onRequest(uri, controller.signal);
+        const content = await onRequest(uri, controller.signal, hash);
         if (cancelled) content.dispose?.();
         else { loaded = content; setResult({ content }); }
       } catch (error) {
@@ -128,5 +130,9 @@ export function ResourceDocument({ uri, version, mode, onRequest, artifactRefere
   }, [uri, version, attempt]);
   if (!result) return <div className="flex flex-1 items-center justify-center p-6"><ThinkingIndicator aria-label={`Loading ${uri}…`} /></div>;
   if ('error' in result) return <Padded><EmptyState icon={ic(AlertCircle, 22)} title="Resource could not load" description={`${uri}: ${result.error}`} action={<Button variant="secondary" size="compact" type="button" onClick={() => setAttempt((value) => value + 1)}>Retry</Button>} /></Padded>;
-  return <ArtifactPreview reference={{ url: uri, label: uri, mediaType: result.content.mediaType }} content={result.content} mode={mode} artifactReferences={artifactReferences} artifactContent={artifactContent} onRequest={onRequestArtifact} drive={null} />;
+  const preview = <ArtifactPreview reference={{ url: uri, label: uri, mediaType: result.content.mediaType }} content={result.content} mode={mode} artifactReferences={artifactReferences} artifactContent={artifactContent} onRequest={onRequestArtifact} drive={null} />;
+  return hash === undefined ? preview : <div className="flex min-h-0 flex-1 flex-col">
+    <p role="note" data-drive-version={hash} className="shrink-0 border-b border-border px-4 py-1.5 text-caption text-muted-foreground">The version the ghost read ({hash.slice(0, 15)}…), not necessarily the drive’s current one.</p>
+    {preview}
+  </div>;
 }

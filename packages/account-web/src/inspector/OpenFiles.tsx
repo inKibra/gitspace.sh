@@ -8,6 +8,8 @@ export interface InspectorOpenDocument {
   kind: 'file' | 'artifact' | 'resource';
   label: string;
   target: string;
+  /** A drive file's earlier version (`sha256:…`) to show instead of its current one: the version a ghost read. */
+  hash?: string;
 }
 /** The open strip: its documents, the one shown, and whether the side Inspector shows it (true) or the tab's browser. */
 export interface OpenFiles {

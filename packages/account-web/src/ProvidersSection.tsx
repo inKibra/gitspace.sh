@@ -29,6 +29,7 @@ import {
 import { AlertCircle, ChevronDown, CpuChip01, DotsHorizontal, RefreshCcw01 } from '@untitledui/icons';
 import { useEffect, useState, type ReactNode } from 'react';
 import { EmptyState } from './GitSpaceShell.js';
+import type { ServiceUsageProps } from './ServiceUsage.js';
 import { glyph } from './glyph.js';
 import { formatRelativeTime } from './relative-time.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
@@ -58,6 +59,8 @@ export interface ProvidersSectionProps {
   onEnableAccount(providerId: string, credentialId: string): Promise<void>;
   onRemoveAccount(providerId: string, credentialId: string): Promise<void>;
   onSetApiKey(providerId: string, key: string): Promise<void>;
+  /** What the profile's Services (ghosts, decisions) spent, shown under the providers. */
+  serviceUsage?: ServiceUsageProps;
   login: ProviderLoginProps;
 }
 type UsageFailure = ProviderUsage['errors'][number];

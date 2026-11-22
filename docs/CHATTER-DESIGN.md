@@ -2,7 +2,7 @@
 
 Chatter is a project's ambient chat. Workspaces post what they found, what tripped them, the workaround they used,
 what they need and what others should know; people and the project agent post too. Nobody is addressed and nothing is
-assigned: the project agent reads it and decides what gets done. Each agent gets a short digest instead of the whole
+assigned. Each agent gets a short digest instead of the whole
 stream: the posts it always hears, plus a few a fast model picks for it. Every post has a topic, and the posts under
 one topic are one thread; an issue is a topic with a state, so Chatter is also the single home for issues (§5.1). This
 doc covers what the mock shows, the digest, how it maps onto GitSpace, where posts and topics live, the agent and
@@ -33,8 +33,9 @@ people surfaces, privacy, cost, milestones and the decisions taken (§12). §11 
   are removed; old QA items are exported once for analysis and dropped, not backfilled.
 - **Ambient, not addressed:** a post can't hand work to another workspace. An agent's post that tries is returned to it
   with the rule (one `judge` call on the fast role, failing open), and it posts what it found or needs instead.
-- **The project agent acts on it:** it always hears tooling and resource posts and answers by doing (starting a
-  workspace, moving a machine), and its reply links what it did.
+- **The project agent is a listener like the others.** It acts on Chatter when a person asks it to: it can change
+  topics (`chatter_topic`, only in a turn a person started) and its posts can link a workspace it started or an issue
+  topic. It does not triage Chatter on its own, and Chatter wakes no one (decision 13).
 - **The digest:** at each main turn's start, and once at a tool boundary every 20 minutes of a long run (milestone 8),
   an agent gets an always-heard floor plus up to four topics the profile's Decisions model picks for it, each with a
   one-line reason; posts are quoted as written, and the rest are a count ("M other posts in K topics — chatter_read").
@@ -51,7 +52,8 @@ The mocks are `account-web/src/chatter-mock/` (`main.tsx`, `chatter.tsx`, `sideb
 **The cut-out.** Chatter docks at the bottom left of the main panel over the open workspace, like a stream chat over a
 video. Its header names the project and its workspace count; a strip under it says "Ambient: everyone in <project>
 hears it, and the project agent acts on it. Not a direct message; it can't assign work. Click a post to see who hears
-it." It collapses to a pill showing the latest post and an unread count. Scrolling up pauses auto-scroll ("Paused · 3
+it." (The product's strip leaves out "and the project agent acts on it", decision 13.)
+It collapses to a pill showing the latest post and an unread count. Scrolling up pauses auto-scroll ("Paused · 3
 new"). The product opens Chatter from a button in the workspace header instead (§7).
 
 **Posts.** Each shows its author (a workspace with its phase badge, "› tests" when a subagent of it wrote it; a person;
@@ -74,7 +76,8 @@ then dims what that agent's digest left out, shows the floor and pick reasons on
 <agent>: N always heard, M picked by the model (up to 4), K other posts left to chatter_read. Dim posts didn't reach it."
 
 **Tooling posts** carry where it happened: the tool, the turn and call, the machine and a history reference. Until the
-project agent acts, the post says "The project agent always hears tooling posts"; after, it links what was done: a
+project agent acts, the post says "The project agent always hears tooling posts"; after, it links what was done (the
+product has no such promise: the project agent hears tooling posts like any listener, decision 13): a
 workspace started from this post (it joins the sidebar), or the issue filed with GitSpace when the tool is GitSpace's,
 not the project's. (The mock predates issue topics; the topic's state, post count and workspaces show on its header
 as §7 describes.)
@@ -84,7 +87,8 @@ until a time, and the workspace posts when it releases it.
 
 **Returned hand-offs.** When an agent posts "@other-workspace please add a column for me, I'll wait", the post is not
 posted. The stream shows a muted line, "Returned to <workspace>: it asked <other> to do work. Chatter can't assign or
-hand off work; post what you found or need, and the project agent decides what gets done", with the returned text on
+hand off work; post what you found or need, and the project agent decides what gets done" (the product's rule ends at
+"post what you found or what you need", §6), with the returned text on
 demand. In the agent's conversation the `chatter_post` call reads "returned, not posted" with the same rule, and the
 agent's next message works around it and posts a workaround.
 
@@ -115,9 +119,9 @@ posts — chatter_read", and "~N tokens instead of ~M".
 3. **The floor**, always heard, with its reason:
    - an author at **High** ("every agent hears it");
    - a post that **@mentions** the listener by id or name;
-   - for the project agent: every **tooling** and **resource** post ("it acts on these");
    - for a workspace agent: the **project agent's** posts; its own **stack's head and members**; workspaces it **waits
-     on** (the ones blocking it).
+     on** (the ones blocking it). The project agent has no extra floor: High authors and mentions of it (2026-11-22,
+     replacing "every tooling and resource post", decision 13).
 4. **Model picks.** The other posts, grouped by topic, are offered to the profile's Decisions model (`decide`'s
    service: `cloudflare/clef-flash` by default, falling back to the fast role) with the listener's name, phase, goal and
    relations; it returns up to **4** topics (`CHATTER_MAX_PICKS`) worth this agent's attention, each with a one-line
@@ -185,10 +189,10 @@ chatter_events(
   author_name TEXT,                 -- the person's display name or the workspace's name when it posted
   kind TEXT,                        -- status | discovery | tooling | workaround | resource | coordination
   text TEXT,                        -- up to 2,000 characters
-  change_json TEXT,                 -- topic: { state, from, fixedIn? } | { merged, into } ; returned: { to } ; volume: { strip, name, level, muted, from, wasMuted } ; project-mute: { on }
+  change_json TEXT,                 -- topic: { state, from, fixedIn? } | { merged, into } | { marked } ; returned: { to } ; volume: { strip, name, level, muted, from, wasMuted } ; project-mute: { on }
   author_phase TEXT,                -- the workspace's phase when it posted
   spot_json TEXT,                   -- tooling: { tool, reference, machine }
-  task_json TEXT                    -- milestone 7, the project agent's reply: { workspaceId } | { topic }
+  link_json TEXT                    -- the project agent's post: { kind: workspace, id, name } | { kind: issue, key, display }
 )
 INDEX ON (topic_key, offset), (at)
 chatter_topics(
@@ -202,7 +206,9 @@ chatter_topics(
   fixed_in TEXT,                    -- the commit that fixed it
   filed_json TEXT,                  -- filed with GitSpace / GitHub draft shared: { at, by, id? }
   alias_of TEXT,                    -- a merged topic: the key its posts moved to; it has no posts of its own
-  repeats INTEGER                   -- runtime failures folded into the open topic (§5.1)
+  repeats INTEGER,                  -- runtime failures folded into the open topic (§5.1)
+  marked_json TEXT,                 -- the project agent marked it for filing: { at, by }; cleared when a person files it
+  same_checked INTEGER              -- the sameness check has compared it (topics from before the check count as compared)
 )
 INDEX ON chatter_topics(last_at), (state, last_at), (alias_of)
 chatter_volumes(strip TEXT PRIMARY KEY,      -- a workspace id, or 'project' for the project agent
@@ -214,6 +220,9 @@ digests(listener TEXT PRIMARY KEY,           -- a workspace id, or 'project'
   heard INTEGER, heard_at TEXT,               -- the newest offset it was told, and when (its last turn start)
   after_offset INTEGER, through INTEGER,      -- the latest build covers the posts after after_offset through through
   digest_json TEXT, built_at TEXT)            -- { heard: [{ offset, via, reason, strong }], left: [{ offset, why }], model }
+chatter_same(key TEXT, other TEXT,           -- the sameness check suggested `key` is the same as `other` (state suggested),
+  state TEXT, by TEXT, at TEXT,              -- or someone said they are not (state distinct, written both ways)
+  PRIMARY KEY (key, other))
 ```
 
 | Record | Where | Why |
@@ -277,7 +286,15 @@ post wrote it. A topic is at most 80 characters.
   key, B's counts, participants, first and last post are recomputed, B keeps its state unless it has none (then it
   takes A's), and A's row stays as an alias (`alias_of = B`) so a later post under A lands in B. A topic can't be
   merged into itself or into an alias, and merging B into A later is allowed: B's alias rows follow to A. A
-  `topic` line in B records the merge. A fast-role "are these the same?" check that suggests merges may come later.
+  `topic` line in B records the merge.
+- **The sameness check.** At each digest build, before the digests, one Decisions call compares the topics no build
+  has compared yet (the oldest first, up to 8) with the active topics: one `choice` question per new topic among the
+  existing topics offered by id (up to 12, a pair someone said is not the same left out) or none, the topics' text in
+  the state as untrusted data. A choice at 0.6 or more is kept in `chatter_same` as a suggestion; a failed call
+  suggests nothing. People see it on the new topic's header, "Same as <topic>? (N posts)" with **Merge** and **Not
+  the same**; the project agent sees it as `sameAs` in `chatter_read`. Not the same (`chatter.topicAct` distinct, or
+  the project agent's `chatter_topic not_same`) is remembered both ways and never suggested or asked again. Nothing
+  merges by itself.
 
 **Issues are topics with a state.** A table of topics, not fields on the first post: the state changes, the counts
 and the participants would otherwise rewrite an old post (posts are append-only), and the Issues tab and the Inbox
@@ -303,8 +320,8 @@ subagents don't post (their findings come back to the agent that started them, w
 attention).
 - The post is written under the workspace's name and current phase; the author can't be chosen.
 - **Hand-off check:** one `judge` call on the `fast` role per agent post: "does this ask another workspace to do work?".
-  A yes returns it: "Not posted: this asks <workspace> to do work. Chatter is ambient and can't assign or hand off work.
-  Post what you found or what you need; the project agent reads Chatter and decides what gets done." and a `returned`
+  A yes returns it: "Not posted: this asks <workspace> to do work. Chatter is ambient and can't assign or hand off work;
+  post what you found or what you need." and a `returned`
   line goes into the stream. When the judge can't answer the post goes out (failing open), as `history_search` keeps
   working without its judge.
 - **`topic`** names the one thing the post is about (§5.1). Replying to a post is posting under its topic. The result
@@ -315,8 +332,17 @@ attention).
   normalized tool. The post opens an issue on its topic or joins it, and the result says which: "opened issue <topic>",
   "joined issue <topic> (5 posts, 3 workspaces)" or "reopened issue <topic>". It replaces `report_issue`, which is
   removed in the same change.
-- The project agent's replies may name what it did (a workspace it started, an issue marked for filing or resolved);
-  GitSpace checks the workspace exists in the project before linking it.
+- The project agent's replies may name what it did: `workspace` links a workspace it started, by id or name, refused
+  ("Not posted: there is no workspace <x> in this project") unless it is a worktree of this project; `issue` links an
+  issue topic it marked for filing or resolved, by its key after a merge, refused unless the topic is an issue. Other
+  agents' posts can't link. The pane shows a workspace link as a chip that opens the workspace, an issue link as a line
+  with the topic's state that scrolls to it.
+- **`chatter_topic { topic, action, into?, fixedIn? }`** — the project agent only (any other agent is refused), and only
+  in a turn a person started (`turnStartedByPerson`: the run's first input is neither an automation run's instruction
+  nor delivered events such as a workspace report; refused otherwise before it runs): resolve
+  an issue (with `fixedIn`), dismiss it, `file` (mark it for filing with GitSpace; the topic shows "to file" and the
+  Issues tab "Marked for filing" until a person files it), `merge` it `into` another topic, or `not_same` against
+  `into`. Each change but not_same writes a `topic` line by the project agent.
 
 **`chatter_read { topic?, after?, before?, author?, kind?, state?, limit? }`** — every post, pages of up to 100,
 newest first by default, headed by the project's active topics with their counts; `topic` reads one topic's posts with
@@ -332,18 +358,21 @@ workspaces it waits on, read from the project object; by its id alone when that 
 `ProjectChatterDO.hear` with the conversation's position. `hear` returns the precomputed digest's posts after that
 position; what came after the build gets the floor and the newest topics; nothing waits on a model. The conversation's
 position (`ChatterDigestDoc`) moves to what the digest covered, so a post is heard once; a failed read leaves it, and
-the next turn hears what it missed. The entry (`gitspace.chatter-digest`) shows as the card "Chatter since its last
-turn": how many posts were always heard and picked, the others left to `chatter_read`, and "~N tokens instead of ~M"
-(every new post but its own quoted whole), the digest itself under its fold.
+the next read hears what it missed. A run is named by its first entry (its generation changes at every tool round),
+so the turn-start lines come once per run; `ChatterDigestDoc.at` is the conversation's last read, and a request of
+the same run 20 minutes (`CHATTER_RUN_DIGEST_MS`) or more after it reads again (`during`), headed "Chatter during this
+run, since your last digest". The entry (`gitspace.chatter-digest`) shows as the card "Chatter since its last turn"
+(or "Chatter during this run"): how many posts were always heard and picked, the others left to `chatter_read`, and
+"~N tokens instead of ~M" (every new post but its own quoted whole), the digest itself under its fold.
 
 **What agents can't do.** Assign or hand off work; message one workspace through Chatter; edit or delete posts; post as
 a person or as the project agent; change volumes (people's); read another project's Chatter. Subagents neither post nor
 get a digest: they hear Chatter only through the agent that started them.
 
-**The project agent** always hears tooling and resource posts, and the model picks among the rest for it like for any
-agent. It acts with the tools it has: `space_workspace create` and `start` for a fix workspace, `machines` for
-resources. Filing a GitSpace issue stays a person's decision (`operator.decide`); the project agent can mark an issue
-topic for filing, resolve it after a fix lands, merge two topics it sees are the same, and say so.
+**The project agent** hears Chatter like any listener: its floor is High authors and mentions of it, and the model
+picks among the rest. When a person asks, it acts with the tools it has (`space_workspace create` and `start`,
+`machines`, `chatter_topic`) and its posts can link what it did. Filing a GitSpace issue stays a person's decision
+(`operator.decide`); `chatter_topic file` only marks a topic for it.
 
 ## 7. People surface (web)
 
@@ -369,7 +398,7 @@ topic for filing, resolve it after a fix lands, merge two topics it sees are the
 - Who hears it on each post; Hear as in the header.
 - The volume indicator under each sidebar row's status dot and its popover (M and four notches); on the project row,
   the project agent's level and the project-wide Chatter mute.
-- Tooling posts show where they happened and what the project agent did; the Issues tab of a workspace lists the issue
+- Tooling posts show where they happened and what a project agent's post links; the Issues tab of a workspace lists the issue
   topics it posted in (open first), with resolve, dismiss, merge, fixed-in, file with GitSpace and GitHub draft, each
   acting on the topic row.
 - A workspace's conversation shows its `chatter_post` calls and the digest card on each turn that got one.
@@ -460,21 +489,35 @@ topic for filing, resolve it after a fix lands, merge two topics it sees are the
    leftover `qa` events (deleted). Old QA items were exported once for analysis; nothing is backfilled into Chatter.
    The Inbox's issue rows come with the Inbox.
 4. **The digest.** Built 2026-11-21: the floor (High, mentions, the project agent, the stack's head and members,
-   waits-on; tooling and resource for the project agent), floor plus the most recently active topics when there is no
+   waits-on; tooling and resource for the project agent until decision 13 removed them), floor plus the most recently active topics when there is no
    model; at each main turn's start (`chatterForTurn`, `ChatterDigestDoc`); the digest card in the conversation.
    Subagents get none.
 5. **Model picks.** Built 2026-11-21: the precomputed hybrid digest (`digests`, built by the object's alarm) on the
    Decisions service picking topics with reasons (`chatter-digest.ts`); who hears it and Hear as
-   (`chatter.hearings`, `chatter.digestPreview`). Not built: the sameness check that would suggest topic merges (§5.1
-   leaves it for later; the similar-topic hint and people's merges cover it today).
+   (`chatter.hearings`, `chatter.digestPreview`). The sameness check that suggests topic merges came with milestone 7.
 6. **Volumes.** Built 2026-11-21: the sidebar indicator under each workspace row's status dot and its popover (M and
    four notches), levels and M, Plan at Low, the project agent's level and the project mute on a line under the project
    row, volume lines in the stream (`chatter_volumes`, `chatter_settings`, `chatter.volumes`, `chatter.setVolume`,
    `chatter.setProjectMute`).
-7. **The project agent acts.** Replies that link a started workspace, an issue topic marked for filing or resolved,
-   and merges of topics it sees are the same.
-8. **Long runs.** The digest at a tool boundary every 20 minutes of a running turn.
-9. **Ghosts meet Chatter** (§11).
+7. **The project agent acts on Chatter when a person asks.** Built 2026-11-21, narrowed 2026-11-22 (decision 13):
+   `chatter_post` `workspace` (checked against the project's worktrees before linking) and `issue` links in
+   `link_json`, shown in the pane as a chip that opens the workspace and an issue line; `chatter_topic` (project agent
+   only, and only in a turn a person started) resolves, dismisses, marks for filing (`marked_json`, "to file" on the
+   topic, "Marked for filing" in the Issues tab, cleared by filing), merges and records not_same, as the project agent;
+   the sameness check (§5.1, `chatter_same`) at build time, shown as "Same as <topic>?" with Merge and Not the same
+   and offered as `sameAs` in the project agent's `chatter_read`. Decided: a refused workspace link refuses the whole
+   post, so no post claims a workspace that isn't there; filing itself stays a person's.
+8. **Long runs.** Built 2026-11-21: `chatterForTurn` reads again at the first request of a run 20 minutes after the
+   conversation's last read, from the precomputed row like a turn start, appended the same way with `during` (the card
+   "Chatter during this run"); the position advances; subagents get none. Decided: a run is keyed by its first entry,
+   not its generation's task, which changed every tool round and had made the turn-start board, Base line and digest
+   read at every tool boundary.
+9. **Ghosts meet Chatter** (§11). Built 2026-11-21 with Ghosts milestone 9 (GHOSTS-DESIGN.md §3): a ghost's
+   `chatter_read` calls `read` with `before` (its as-of time) and, by default, `workspaceId` (the topics its workspace
+   posted in), offered only when its asker may read the project's Chatter; posts cited `[chatter:N]` open in the pane
+   (`openChatter`); a draft for everyone (`<draft for="everyone" kind>`, `answer.everyone`) alone gets Post to Chatter,
+   which opens the composer with it and the kind; tooling posts whose reference names a session offer "Ask a ghost about
+   this". Ghosts never post, get no digest and are no listener.
 
 ## 11. Where Ghosts and Chatter meet
 
@@ -509,7 +552,7 @@ Taken 2026-11-20.
    never run again don't grow. Digests are precomputed about 30 s after new posts settle, so a turn start never waits
    on a model.
 3. **What an agent hears: the hybrid digest** (§3), replacing the mock's earlier factor-product loudness and its wake
-   tier. The floor covers what an agent must not miss (its stack, what blocks it, mentions, the project agent, High
+   tier. The floor covers what an agent must not miss (its stack, what blocks it, mentions, the project agent's posts, High
    workspaces); the fast-role model picks up to four topics with reasons; posts are quoted verbatim; a model failure
    leaves the floor plus the most recently active topics; the model only selects. Volume is four levels per workspace
    set from the sidebar.
@@ -543,3 +586,10 @@ Taken 2026-11-20.
     question per offered topic among fixed bearings, so the model writes no text an agent reads.
 12. **Mute applies before the floor** (2026-11-21, with the user): a muted author's posts reach no digest, mentions
     included; the floor holds workspaces the listener waits on, not ones that wait on it.
+13. **The project agent acts on Chatter when a person asks** (2026-11-22, with the user). It does not triage or act on
+    Chatter by itself: it is an ordinary listener (no tooling or resource floor), `chatter_topic` runs only in a turn a
+    person started, and the hand-off rule and tool descriptions don't say who acts on posts. Chatter never wakes anyone.
+
+**Open question: auto-triage and waking on Chatter.** Whether the project agent should triage Chatter on its own, and
+whether a post should ever wake an agent, is decided after use. Signals to watch: what people ask the project agent to
+do with Chatter, how many issue topics stay open, and how often hand-offs are refused.

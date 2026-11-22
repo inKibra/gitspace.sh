@@ -62,6 +62,7 @@ export const ACCOUNT_RPC_AUTHORITY = {
   'providers.account.remove': 'cloud',
   'providers.apiKey.set': 'cloud',
   'providers.usage': 'cloud',
+  'providers.serviceUsage': 'cloud',
   'providers.models': 'cloud',
   'devices.list': 'cloud',
   'devices.revoke': 'cloud',

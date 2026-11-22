@@ -2,8 +2,8 @@
 // message, and the lookup derived from the transcript. A sent comment lives in the person's message only (its line and
 // data, `commentsMessage`), and a reply in the agent's message (a Reply block); the lookup holds pointers to them, is
 // updated after each commit that stores either, and can be rebuilt from the transcript at any time.
-import { AssistantEntry, UserEntry, type Conversation, type ConversationId, type ConversationRecord, type Cursor, type EntryRecord, type Harness, type Storage } from '@earendil-works/pi-durable';
-import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
+import { AssistantEntry, LiveDoc, UserEntry, type Conversation, type ConversationId, type ConversationRecord, type Cursor, type EntryRecord, type Harness, type Storage, type ToolExecutionApi } from '@earendil-works/pi-durable';
+import { BACKGROUND_CONTEXT, type Context } from '@earendil-works/chord/context';
 import { PI_ENTRY_ORDINALS, openerAt, parseConversationEvents, piMessageRowId, piSessionId, turnRowId, userRowId } from '@gitspace/blocks';
 import { blockReplies } from '@gitspace/protocol/gitspace-ui';
 import { STAGED_ANSWERS_MAX, STAGED_COMMENTS_MAX, messageComments, type CommentAnchor, type CommentLookup, type OpenDocumentKind, type StagedComment } from '@gitspace/protocol-runtime/comments';
@@ -20,6 +20,26 @@ function inputText(entry: EntryRecord): string {
   const message = entry.model?.[0];
   if (message?.role !== 'user') return '';
   return typeof message.content === 'string' ? message.content : message.content.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n');
+}
+
+/**
+ * Whether a person started the conversation's running turn: its first input is neither an automation run's instruction
+ * (its request id in `AutomationRequestsDoc`) nor delivered events (`<gitspace-event>` envelopes: workspace reports,
+ * jobs, subagents and the rest), as `commentWindow` tells them apart. A continue counts as its run's first entry. False
+ * with no running turn.
+ */
+export async function turnStartedByPerson(api: Pick<ToolExecutionApi, 'snapshot' | 'commit' | 'conversationId'>, context: Context): Promise<boolean> {
+  const run = (await api.snapshot(LiveDoc, api.conversationId, context))?.run;
+  if (!run) return false;
+  const automations = (await api.snapshot(AutomationRequestsDoc, context))?.requests ?? {};
+  const first = run.inputs[0];
+  return api.commit(async tx => {
+    const submission = first === undefined ? undefined : await tx.submission(first);
+    if (submission?.requestId !== undefined && automations[submission.requestId]) return false;
+    const entryId = submission?.type === 'input' && submission.entry !== undefined ? submission.entry : run.first;
+    const entry = entryId === undefined ? undefined : await tx.entry(entryId);
+    return entry !== undefined && UserEntry.is(entry) && parseConversationEvents(inputText(entry)) === null;
+  }, context);
 }
 
 /** Whether a stored entry adds to the lookup: a person's message with comments, or an agent's message with Replies. */

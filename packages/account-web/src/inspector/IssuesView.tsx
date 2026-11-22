@@ -130,6 +130,7 @@ export function IssuesView({ issues, error: readError, onAct, onFile }: IssuesVi
           <CardAction className="flex flex-wrap gap-1">
             <Badge variant="dot" color={stateColor[state]}>{state === 'resolved' && topic.fixedIn ? `Resolved in ${topic.fixedIn.slice(0, 12)}` : state}</Badge>
             {topic.filed ? <Badge color="blue">{topic.filed.target === 'gitspace' ? 'Filed' : 'Draft shared'}</Badge> : null}
+            {topic.marked ? <Badge color="violet" title={`Marked by ${topic.marked.by}; filing is your decision`}>Marked for filing</Badge> : null}
           </CardAction>
         </CardHeader>
         {latest ? <CardContent className="flex flex-col gap-2">

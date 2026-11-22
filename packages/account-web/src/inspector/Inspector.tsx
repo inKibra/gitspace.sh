@@ -89,7 +89,8 @@ export interface InspectorProps {
   /** Opens the drive file a drive doc comment is on, scrolled to its anchor, asked from outside the Inspector (a comment
    * linked from the chat); a new serial opens it again. */
   driveFocus?: { anchor: CommentAnchor; serial: number };
-  onRequestResource?(uri: string, signal?: AbortSignal): Promise<InspectorArtifactContent>;
+  /** Reads a resource a link named; `hash` asks for a drive file's earlier version (the one a ghost read). */
+  onRequestResource?(uri: string, signal?: AbortSignal, hash?: string): Promise<InspectorArtifactContent>;
   artifactActions?: ArtifactActionsHandlers;
   /** Present when the viewer may upload files into the drive this space writes. */
   artifactUpload?: ArtifactUploadClient;
@@ -290,10 +291,11 @@ export function Inspector(props: InspectorProps) {
   const showDocument = (id: string): void => { setOpenFiles((current) => ({ ...current, active: id, viewing: true })); closeThread(); };
   const closeDocument = (id: string): void => { setOpenFiles((current) => closeInStrip(current, id)); closeThread(); };
   const openProduct = (kind: ProductKind): void => { if (kind === 'workflow' ? props.overview.workflow : props.overview.rubric) setProduct(kind); };
-  const openResource = ({ uri, diff }: ResourceRequest): void => {
+  const openResource = ({ uri, diff, hash }: ResourceRequest): void => {
     const resource = diff ? parseResourceUri(uri) : null;
     // A ChangeSet file opens its diff against the base in Files, where the workspace's runtime serves it.
     if (resource?.kind === 'repo' && runtimeAvailable) openFile(resource.path, 'base');
+    else if (hash !== undefined) openDocument({ id: `resource:${uri}@${hash}`, kind: 'resource', label: `${fileName(uri)} · as read`, target: uri, hash });
     else openDocument({ id: `resource:${uri}`, kind: 'resource', label: fileName(uri), target: uri });
   };
   useEffect(() => { if (props.resourceRequest) openResource(props.resourceRequest); }, [props.resourceRequest]);
@@ -346,9 +348,10 @@ export function Inspector(props: InspectorProps) {
   let documentBody: ReactNode = null;
   if (activeDocument?.kind === 'resource') {
     const resource = parseResourceUri(activeDocument.target);
-    // The drive's current version of the file, so the document reads it again once the path gets new bytes.
-    const version = resource?.kind === 'drive' ? driveFiles.find((file) => file.scope === (resource.mount ?? props.drive?.own) && file.path === resource.path)?.hash ?? null : null;
-    documentBody = <ResourceDocument key={`${props.overview.spaceId}:${activeDocument.target}`} uri={activeDocument.target} version={version} mode={artifactModeById[activeDocument.id] ?? 'preview'} onRequest={props.onRequestResource} artifactReferences={artifacts} artifactContent={artifactContent} onRequestArtifact={loadArtifact} />;
+    // The drive's current version of the file, so the document reads it again once the path gets new bytes; or the
+    // earlier version asked for, which never changes.
+    const version = activeDocument.hash ?? (resource?.kind === 'drive' ? driveFiles.find((file) => file.scope === (resource.mount ?? props.drive?.own) && file.path === resource.path)?.hash ?? null : null);
+    documentBody = <ResourceDocument key={`${props.overview.spaceId}:${activeDocument.id}`} uri={activeDocument.target} version={version} {...activeDocument.hash === undefined ? {} : { hash: activeDocument.hash }} mode={artifactModeById[activeDocument.id] ?? 'preview'} onRequest={props.onRequestResource} artifactReferences={artifacts} artifactContent={artifactContent} onRequestArtifact={loadArtifact} />;
   } else if (activeDocument?.kind === 'artifact') {
     const focus = props.driveFocus?.anchor.document.kind === 'drive' && props.driveFocus.anchor.document.path === activeArtifact?.url ? props.driveFocus : null;
     documentBody = activeArtifact ? <ArtifactDocument

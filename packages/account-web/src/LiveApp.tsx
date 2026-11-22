@@ -70,6 +70,7 @@ import { ACCOUNT_GROUP, openFirstPaintCache, workspaceGroup } from './first-pain
 import { Toasts, useToasts, type Toast } from './toasts.js';
 import { GhostLayer } from './ghost/GhostWindow.js';
 import { summonGhost } from './ghost/ghost-store.js';
+import { SERVICE_USAGE_DAYS } from './ServiceUsage.js';
 
 
 
@@ -241,7 +242,7 @@ export function LiveInspector({
     resourceRequest={resourceRequest}
     guideSection={runtimeContext.guideSection}
     driveFocus={runtimeContext.driveFocus}
-    onRequestResource={(uri, signal) => loadInspectorResource({
+    onRequestResource={(uri, signal, hash) => loadInspectorResource({
       readArtifact: (input, options) => rpcClient.inspector.artifacts.read(input, options),
       artifactFile: async (input, options) => {
         const result = await rpcClient.inspector.artifacts.file(input, options);
@@ -255,7 +256,7 @@ export function LiveInspector({
         if (!response.value.browserArtifact) throw new Error('The machine did not return browser artifact content.');
         return response.value.browserArtifact;
       },
-    }, { spaceId, projectId, generation, sessionId, runtimeAvailable }, uri, signal)}
+    }, { spaceId, projectId, generation, sessionId, runtimeAvailable }, uri, signal, hash)}
     scope={scope}
     workspaces={workspaces}
     environment={(openAgentSetup, openBrowser) => <LiveEnvironment projectId={projectId} projectName={scope?.projectName ?? projectId} workspaceName={scope?.name ?? spaceId} spaceId={spaceId} workspace={spaceId !== projectId} onAskAgent={onAskAgent} onOpenAgent={() => selectInspection(projectId, spaceId !== projectId ? spaceId : null)} onOpenAgentSetup={openAgentSetup} browser={browsersActive} onOpenBrowser={openBrowser} runtimeContext={runtimeContext} />}
@@ -551,7 +552,7 @@ function AccountFrame({ children }: { children: ReactNode }) {
         failedAutomationRuns={automationSummaries.reduce((sum, summary) => sum + summary.failedToday, 0)}
         onSetRelations={setRelations}
         onSetPhase={setPhase}
-        onAskGhost={(workspace) => summonGhost({ projectId: workspace.projectId, workspaceId: workspace.id, workspaceName: workspace.name, archived: workspace.closedAt !== null })}
+        onAskGhost={(workspace) => summonGhost({ projectId: workspace.projectId, workspaceId: workspace.id, workspaceName: workspace.name, archived: workspace.closedAt !== null, conversationId: null, title: null, until: null })}
       />
       </ChatterVolumesProvider>
       <SidebarInset className="min-w-0 overflow-hidden">
@@ -746,6 +747,8 @@ function GitSpaceProduct() {
   const usageQuery = useResultQuery(rpcClient.providers.usage, { profileId, providerId: null, refresh: usageRefresh }, { enabled: providersEnabled && usageVisible });
   const usageKey = JSON.stringify(queryRuntime.cache.key(rpcClient.providers.usage, { profileId, providerId: null, refresh: usageRefresh }));
   const usageValue = useRetainedQueryValue(usageQuery, providersEnabled ? usageKey : null, { key: usageKey, updatedAt: usageQuery.updatedAt });
+  // What the profile's Services spent (ghosts' and decisions' answers), read with the providers' usage.
+  const serviceUsageQuery = useResultQuery(rpcClient.providers.serviceUsage, { profileId, days: SERVICE_USAGE_DAYS }, { enabled: providersEnabled && usageVisible });
   useEffect(() => { setUsageRefresh(false); }, [profileId]);
   useEffect(() => {
     if (!providersEnabled) return;
@@ -1035,6 +1038,7 @@ function GitSpaceProduct() {
   };
   const refreshUsage = async (): Promise<void> => {
     await providersQuery.refetch();
+    if (usageVisible) void serviceUsageQuery.refetch();
     if (usageRefresh) await usageQuery.refetch();
     else setUsageRefresh(true);
   };
@@ -1049,6 +1053,11 @@ function GitSpaceProduct() {
     onShow: () => setUsageProfile(profileId),
     onRefreshUsage: refreshUsage,
     onSignIn: signInProvider,
+    serviceUsage: {
+      rows: serviceUsageQuery.state === 'success' ? serviceUsageQuery.value.rows : null,
+      status: !usageVisible ? 'idle' : serviceUsageQuery.state === 'failure' ? 'error' : serviceUsageQuery.state === 'success' ? 'ready' : 'loading',
+      ...(serviceUsageQuery.state === 'failure' ? { error: rpcErrorMessage(serviceUsageQuery.error, 'providers.serviceUsage') } : {}),
+    },
     onDisableAccount: disableAccount,
     onEnableAccount: enableAccount,
     onRemoveAccount: removeAccount,
@@ -1363,6 +1372,7 @@ function useAccountWorkActions(account: NonNullable<ContextType<typeof AccountDi
     onCreateWorkspace: async (input) => {
       const result = await mutate(rpcClient.workspace.create({ ...input, dependsOn: [...input.dependsOn] }));
       selectInspection(input.projectId, result.workspace.id);
+      return result.workspace.id;
     },
     onReleaseMachines: async (spaceId) => {
       try {

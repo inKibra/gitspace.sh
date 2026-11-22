@@ -190,6 +190,13 @@ export class InspectorCloudArtifacts {
     return this.scopeAtTime(this.target(resource.url).spaceId, asOf);
   }
 
+  /** The version of a drive file current at `asOf`: its drive's generation then and the file's `sha256:` hash in it,
+   * which `read` takes to show that version again. */
+  async versionAt(url: string, asOf: string): Promise<{ generation: number; hash: string }> {
+    const { scope, entry } = await this.version(url, null, asOf);
+    return { generation: scope.generation, hash: entry.blobHash };
+  }
+
   /** The workspace's committed scope, or the empty generation-0 scope its first commit creates. */
   private scopeOf(scopes: readonly CanonicalArtifactScope[], workspaceId: string): CanonicalArtifactScope {
     return scopes.find((scope) => scope.workspaceId === workspaceId) ?? {

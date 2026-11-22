@@ -1544,6 +1544,21 @@ export const providerUsageContract = gitspaceRpc
   .output(ProviderUsageCodec)
   .errors({ OperationFailed: rpcErrors.operationFailed })
   .query();
+/** One row of what the account's Services spent (`service_usage`, docs/GHOSTS-DESIGN.md §8): a UTC day, the service
+ * (`ghost` a ghost's answers, `decision` the Decisions service's), the model, the workspace whose agent spent it ('' for
+ * the account's own: a person's ghost, a decision outside a workspace) and what it spent. Counts only, never text. */
+export const ServiceUsageRowCodec = wire.object({
+  day: wire.string, service: wire.enum(['ghost', 'decision']), model: wire.string, workspaceId: wire.string,
+  requests: wire.integer({ min: 0 }), input: wire.integer({ min: 0 }), output: wire.integer({ min: 0 }), costUsd: wire.number,
+});
+export type ServiceUsageRow = InputOf<typeof ServiceUsageRowCodec>;
+/** One profile's Service usage over the last `days` UTC days, newest day first. */
+export const serviceUsageContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ profileId: wire.string, days: wire.integer({ min: 1, max: 90 }) }))
+  .output(wire.object({ rows: wire.array(ServiceUsageRowCodec) }))
+  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .query();
 /** `unavailable`: no account of the profile can serve the model now: when the soonest can again (ISO), and why. It may
  * be absent: a credential vault still on the release before it (while a release rolls out) does not send it. */
 export const AvailableModelCodec = wire.object({ provider: wire.string, id: wire.string, name: wire.string, contextWindow: wire.nullable(wire.number), images: wire.boolean, unavailable: wire.optional(wire.nullable(wire.object({ until: wire.string, reason: wire.string }))) });
@@ -2686,6 +2701,7 @@ export const gitspaceContract = gitspaceRpc.contract({
     account: { disable: disableProviderAccountContract, enable: enableProviderAccountContract, remove: removeProviderAccountContract },
     apiKey: { set: setProviderApiKeyContract },
     usage: providerUsageContract,
+    serviceUsage: serviceUsageContract,
     models: listAvailableModelsContract,
   },
   devices: { list: listDevicesContract, revoke: revokeDeviceContract },

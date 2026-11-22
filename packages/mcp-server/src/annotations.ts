@@ -259,6 +259,10 @@ export const reviewedAnnotations: Record<string, ToolAnnotation> = {
     "readOnlyHint": true,
     "openWorldHint": true
   },
+  "providers.serviceUsage": {
+    "readOnlyHint": true,
+    "openWorldHint": false
+  },
   "providers.models": {
     "readOnlyHint": true,
     "openWorldHint": false

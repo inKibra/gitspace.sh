@@ -9,6 +9,7 @@ import { GHOST_LIFETIME_MS, GHOST_MAX_ROUNDS, GHOST_PATH, GhostAskResultSchema, 
 import { InspectorCloudArtifacts, readInspectorContext } from '../src/account-inspector-data.js';
 import { createDocumentMarkdown } from '../src/document-markdown.js';
 import { GhostSession, type GhostModel } from '../src/ghost-session.js';
+import type { ChatterAuthor } from '@gitspace/protocol/chatter-contract';
 import { createGhostTools } from '../src/ghost-tools.js';
 import { serveGhost } from '../src/ghost.js';
 import { SpaceAuthorityDO } from '../src/space-authority.js';
@@ -52,7 +53,8 @@ function transcripts() {
   return vi.spyOn(SpaceAuthorityDO.prototype, 'runtimeTranscript').mockImplementation(async (raw, _format, range) => {
     const conversationId = z.object({ conversationId: z.string() }).parse(raw).conversationId;
     const { from, before, newestFirst } = RangeSchema.parse(range);
-    const events = (TRANSCRIPTS[conversationId] ?? []).map((text, entry) => ({ ordinal: entry * 1024, kind: 'message', createdAt: '2026-11-20T09:00:00.000Z', sessionId: conversationId, payload: { message: { role: entry % 2 === 0 ? 'user' : 'assistant', content: text } } }))
+    // Entry n was written at 09:0n.
+    const events = (TRANSCRIPTS[conversationId] ?? []).map((text, entry) => ({ ordinal: entry * 1024, kind: 'message', createdAt: `2026-11-20T09:0${entry}:00.000Z`, sessionId: conversationId, payload: { message: { role: entry % 2 === 0 ? 'user' : 'assistant', content: text } } }))
       .filter(event => (from === undefined || event.ordinal >= from) && (before === undefined || event.ordinal < before));
     return new Response((newestFirst ? events.reverse() : events).map(event => `${JSON.stringify(event)}\n`).join(''));
   });
@@ -81,8 +83,9 @@ function scripted(replies: Array<(context: Context) => AssistantMessage>) {
   return { model, contexts };
 }
 
-/** A ghost of `identity`'s main conversation with `model`, its drive read as of `driveAsOf`; what it sends, collected. */
-async function ghost(identity: z.infer<typeof RuntimeIdentitySchema>, model: GhostModel, driveAsOf = new Date().toISOString()) {
+/** A ghost of `identity`'s main conversation with `model`, its drive (and Chatter, when it reads it) read as of
+ * `driveAsOf`, up to entry `until`; what it sends, collected. */
+async function ghost(identity: z.infer<typeof RuntimeIdentitySchema>, model: GhostModel, driveAsOf = new Date().toISOString(), options: { until?: number; chatter?: boolean } = {}) {
   const sent: GhostServerMessage[] = [];
   const recorded: unknown[] = [];
   const session = new GhostSession({
@@ -93,13 +96,14 @@ async function ghost(identity: z.infer<typeof RuntimeIdentitySchema>, model: Gho
     recordUsage: async spent => { recorded.push(spent); await env.CREDENTIALS.getByName(env.ACCOUNT_ID).recordServiceUsage(spent); },
     ended() {},
   });
-  const target = { ...identity, conversationId: 'main' };
+  const target = { ...identity, conversationId: 'main', until: options.until ?? null };
+  const chatter = options.chatter ?? false;
   await session.start({
-    asker: 'person', target, title: 'Main', main: true, entries: 3, archived: false, driveAsOf, profileId: 'default', model,
-    tools: createGhostTools({ env, target, driveAsOf, judge: async (_state, questions) => Object.fromEntries(Object.keys(questions).map(id => [id, 1])), documentMarkdown: createDocumentMarkdown(null, env.AI) }),
+    asker: 'person', target, title: 'Main', main: true, entries: 3, archived: false, driveAsOf, chatter, profileId: 'default', model,
+    tools: createGhostTools({ env, target, driveAsOf, chatter, judge: async (_state, questions) => Object.fromEntries(Object.keys(questions).map(id => [id, 1])), documentMarkdown: createDocumentMarkdown(null, env.AI) }),
   });
-  const answer = async (text: string) => {
-    await session.ask(text);
+  const answer = async (text: string, about: number | null = null) => {
+    await session.ask(text, about);
     const last = sent.at(-1);
     if (last?.type !== 'answer') throw new Error(`Expected an answer, got ${JSON.stringify(last)}`);
     return last;
@@ -189,7 +193,12 @@ describe('a ghost of one session', () => {
     const { answer, sent } = await ghost(identity, model, startedAt);
 
     const answered = await answer('When does it ship?');
-    expect(answered.parts).toEqual(['The plan ships on Monday ', { kind: 'drive', url: 'drive://workspace/plan.md', lines: [2, 2], generation: 1 }, '.']);
+    // The citation names the version read, not the drive's current one: the Drive opens that version.
+    const current = (await artifacts.list()).find(file => file.path === 'plan.md')?.hash;
+    expect(current).toMatch(/^sha256:/u);
+    expect(answered.parts).toEqual(['The plan ships on Monday ', { kind: 'drive', url: 'drive://workspace/plan.md', lines: [2, 2], generation: 1, hash: expect.stringMatching(/^sha256:/u) }, '.']);
+    const cited = answered.parts[1];
+    expect(typeof cited === 'object' && cited.kind === 'drive' ? cited.hash : null).not.toBe(current);
     expect(sent).toContainEqual(expect.objectContaining({ type: 'read', done: true, read: { kind: 'drive', url: 'drive://workspace/plan.md', generation: 1 } }));
     const read = toolText(contexts[1]!);
     expect(read).toContain('ship on Monday');
@@ -211,6 +220,112 @@ describe('a ghost of one session', () => {
     // The draft never streams as text, and the call to act found no tool.
     expect(sent.filter(message => message.type === 'text').map(message => message.delta).join('')).not.toContain('<dr');
     expect(toolText(contexts[1]!)).toContain('This ghost has no bash tool');
+  });
+
+  test('from a point in time it reads nothing after its until entry, in pages, searches or one event', async () => {
+    const { identity } = await fixture();
+    transcripts();
+    const { model, contexts } = scripted([
+      () => reply([call('page', 'history_read', { fromEnd: true }), call('forward', 'history_read', { offset: 0 }), call('search', 'history_search', { query: 'archive bucket exports' }), call('later', 'history_read', { mode: 'content', ordinal: 2048 })], 'toolUse'),
+      () => reply([{ type: 'text', text: 'Uploads is public [#1].' }], 'stop'),
+    ]);
+    const { answer, sent } = await ghost(identity, model, '2026-11-20T09:01:00.000Z', { until: 1 });
+
+    await answer('What did it know then?');
+    const read = toolText(contexts[1]!);
+    expect(read).toContain('The archive bucket: uploads is public.');
+    expect(read).not.toContain('Exports now go to the archive bucket.');
+    expect(sent).toContainEqual(expect.objectContaining({ type: 'read', index: 3, failed: expect.stringContaining('only up to entry 1') }));
+    expect(contexts[0]!.systemPrompt).toContain('only up to entry 1');
+  });
+
+  test('a question about one entry names the entry to the model', async () => {
+    const { identity } = await fixture();
+    transcripts();
+    const { model, contexts } = scripted([() => reply([{ type: 'text', text: 'The transcript does not explain it [#2].' }], 'stop')]);
+    const { answer } = await ghost(identity, model);
+
+    await answer('Why did the agent do this?', 2);
+    expect(contexts[0]!.messages[0]).toMatchObject({ role: 'user', content: 'About entry #2: Why did the agent do this?' });
+  });
+
+  test('a draft for everyone says so with its kind; a draft asking a workspace to act does not', async () => {
+    const { identity } = await fixture();
+    transcripts();
+    const { model } = scripted([
+      () => reply([{ type: 'text', text: 'I can\'t post.\n<draft for="everyone" kind="workaround">Exports go to the archive bucket: uploads is public.</draft>' }], 'stop'),
+      () => reply([{ type: 'text', text: 'I can\'t merge.\n<draft>Please merge the export change.</draft>' }], 'stop'),
+    ]);
+    const { answer } = await ghost(identity, model);
+
+    expect(await answer('Tell everyone where exports go.')).toMatchObject({ draft: 'Exports go to the archive bucket: uploads is public.', everyone: 'workaround', parts: ['I can\'t post.'] });
+    expect(await answer('Merge it.')).toMatchObject({ draft: 'Please merge the export change.', everyone: null });
+  });
+
+  test('reads Chatter held to its project and to posts before its time, by default the topics its workspace posted in', async () => {
+    const { identity } = await fixture();
+    transcripts();
+    const chatter = env.PROJECT_CHATTER.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`);
+    const otherProject = crypto.randomUUID();
+    const elsewhere = env.PROJECT_CHATTER.getByName(`${env.ACCOUNT_ID}:${otherProject}`);
+    const own: ChatterAuthor = { kind: 'workspace', id: identity.workspaceId, name: 'exports' };
+    const neighbour: ChatterAuthor = { kind: 'workspace', id: 'neighbour', name: 'billing' };
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-11-20T09:00:00.000Z'));
+    await chatter.post({ projectId: identity.projectId, id: 'p1', topic: 'archive bucket', kind: 'discovery', text: 'Uploads is public; exports go to the archive bucket.', author: own });
+    vi.setSystemTime(new Date('2026-11-20T09:01:00.000Z'));
+    await chatter.post({ projectId: identity.projectId, id: 'p2', topic: 'archive bucket', kind: 'workaround', text: 'Billing reads the archive bucket too.', author: neighbour });
+    await chatter.post({ projectId: identity.projectId, id: 'p3', topic: 'invoice rounding', kind: 'discovery', text: 'Invoices round half up.', author: neighbour });
+    vi.setSystemTime(new Date('2026-11-20T09:05:00.000Z'));
+    await chatter.post({ projectId: identity.projectId, id: 'p4', topic: 'archive bucket', kind: 'status', text: 'The archive bucket moved to cold storage.', author: own });
+    await elsewhere.post({ projectId: otherProject, id: 'x1', topic: 'archive bucket', kind: 'discovery', text: 'Another project keeps its own notes.', author: own });
+    vi.useRealTimers();
+    const { model, contexts } = scripted([
+      () => reply([call('mine', 'chatter_read', {}), call('all', 'chatter_read', { everywhere: 'true' })], 'toolUse'),
+      () => reply([{ type: 'text', text: 'Billing answered that it reads the bucket too [chatter:2].' }], 'stop'),
+    ]);
+    const { answer } = await ghost(identity, model, '2026-11-20T09:03:00.000Z', { chatter: true });
+
+    const answered = await answer('What did it tell the others?');
+    expect(answered.parts).toContainEqual({ kind: 'chatter', offset: 2 });
+    expect(contexts[0]!.tools?.map(tool => tool.name)).toContain('chatter_read');
+    const result = (id: string) => contexts[1]!.messages.flatMap(message => message.role === 'toolResult' && message.toolCallId === id ? message.content.flatMap(part => part.type === 'text' ? [part.text] : []) : []).join('');
+    const posts = (id: string) => z.object({ posts: z.array(z.object({ text: z.string() })) }).parse(JSON.parse(result(id))).posts.map(post => post.text);
+    expect(posts('mine')).toEqual(['Billing reads the archive bucket too.', 'Uploads is public; exports go to the archive bucket.']);
+    expect(posts('all')).toEqual(expect.arrayContaining(['Invoices round half up.', 'Billing reads the archive bucket too.']));
+    expect(posts('all').join('\n')).not.toMatch(/cold storage|Another project/u);
+  });
+
+  test('without Chatter (a device that may not read the project\'s) it has no chatter_read', async () => {
+    const { identity } = await fixture();
+    transcripts();
+    const { model, contexts } = scripted([() => reply([call('chatter', 'chatter_read', {})], 'toolUse'), () => reply([{ type: 'text', text: 'I can only read the transcript.' }], 'stop')]);
+    const { answer } = await ghost(identity, model);
+
+    await answer('What did it post?');
+    expect(contexts[0]!.tools?.map(tool => tool.name)).not.toContain('chatter_read');
+    expect(toolText(contexts[1]!)).toContain('This ghost has no chatter_read tool');
+  });
+
+  test('the usage view reads one profile\'s rows by day, service, model and workspace, newest day first, within its days', async () => {
+    const vault = env.CREDENTIALS.getByName(env.ACCOUNT_ID);
+    const spent: ServiceUsage = { service: 'ghost', profileId: 'default', model: 'openai/fake', requests: 1, input: 100, output: 20, costUsd: 0.25 };
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-11-01T10:00:00.000Z'));
+    await vault.recordServiceUsage(spent);
+    vi.setSystemTime(new Date('2026-11-20T10:00:00.000Z'));
+    await vault.recordServiceUsage({ ...spent, workspaceId: 'parser' });
+    await vault.recordServiceUsage({ service: 'decision', profileId: 'default', model: 'cloudflare/clef-flash', requests: 1, input: 80, output: 0, costUsd: 0.0001 });
+    await vault.recordServiceUsage({ ...spent, profileId: 'other' });
+    const month = await vault.serviceUsage('default', 30);
+    const week = await vault.serviceUsage('default', 7);
+    vi.useRealTimers();
+    expect(month).toEqual([
+      { day: '2026-11-20', service: 'decision', model: 'cloudflare/clef-flash', workspaceId: '', requests: 1, input: 80, output: 0, costUsd: 0.0001 },
+      { day: '2026-11-20', service: 'ghost', model: 'openai/fake', workspaceId: 'parser', requests: 1, input: 100, output: 20, costUsd: 0.25 },
+      { day: '2026-11-01', service: 'ghost', model: 'openai/fake', workspaceId: '', requests: 1, input: 100, output: 20, costUsd: 0.25 },
+    ]);
+    expect(week.map(row => row.day)).toEqual(['2026-11-20', '2026-11-20']);
   });
 
   test('stops reading at the round cap and answers from what it has', async () => {
@@ -424,7 +539,7 @@ describe('an agent\'s ghost (ghost_ask)', () => {
     ]);
     const ghostId = crypto.randomUUID();
 
-    const result = answered(await ghost(ghostId).ask({ ghostId, asker, question: 'Where do exports go?', open: { workspaceId: identity.workspaceId, workspace: 'Exports work', conversationId: null, archived: false, profileId: 'default' } }));
+    const result = answered(await ghost(ghostId).ask({ ghostId, asker, question: 'Where do exports go?', open: { workspaceId: identity.workspaceId, workspace: 'Exports work', conversationId: null, until: null, archived: false, profileId: 'default' } }));
     expect(result).toMatchObject({
       ghostId, session: { workspaceId: identity.workspaceId, workspace: 'Exports work', conversationId: 'main', title: 'Exports', main: true, archived: false },
       answer: 'Exports go to the archive bucket [#1-2], as the plan says [drive://workspace/plan.md:2-2].',
@@ -449,7 +564,7 @@ describe('an agent\'s ghost (ghost_ask)', () => {
     const { askerId, asker, reads, bodies, ghost } = await asking([calls(['history_read', { fromEnd: true }]), says('The proxy uses port 8443, since the gateway holds 443 [#1].')]);
     const ghostId = crypto.randomUUID();
 
-    const result = answered(await ghost(ghostId).ask({ ghostId, asker, question: 'Which port did we pick, and why?', open: { workspaceId: askerId, workspace: 'Proxy work', conversationId: 'asking', archived: false, profileId: 'default' } }));
+    const result = answered(await ghost(ghostId).ask({ ghostId, asker, question: 'Which port did we pick, and why?', open: { workspaceId: askerId, workspace: 'Proxy work', conversationId: 'asking', until: null, archived: false, profileId: 'default' } }));
     expect(result).toMatchObject({ session: { workspaceId: askerId, conversationId: 'asking', title: 'Proxy', main: true }, cites: [{ kind: 'entry', from: 1, ref: `history://${askerId}/asking#1` }] });
     expect(bodies[1]).toContain('Port 8443: 443 is taken by the gateway.');
     expect(reads.mock.calls.every(([raw]) => z.object({ workspaceId: z.literal(askerId), conversationId: z.literal('asking') }).safeParse(raw).success)).toBe(true);
@@ -462,7 +577,7 @@ describe('an agent\'s ghost (ghost_ask)', () => {
       says('The archive bucket [#2].'),
     ]);
     const ghostId = crypto.randomUUID();
-    const open = { workspaceId: identity.workspaceId, workspace: 'Exports work', conversationId: null, archived: false, profileId: 'default' };
+    const open = { workspaceId: identity.workspaceId, workspace: 'Exports work', conversationId: null, until: null, archived: false, profileId: 'default' };
     const object = ghost(ghostId);
     const alarm = async () => runInDurableObject(object, async (_instance, state) => ({ keys: (await state.storage.list()).size, alarm: await state.storage.getAlarm() }));
 
@@ -485,5 +600,15 @@ describe('an agent\'s ghost (ghost_ask)', () => {
     expect(await alarm()).toEqual({ keys: 0, alarm: null });
     const fresh = crypto.randomUUID();
     expect(answered(await ghost(fresh).ask({ ghostId: fresh, asker, question: 'Where do exports go?', open }))).toMatchObject({ ghostId: fresh, answer: 'The archive bucket [#2].' });
+  });
+
+  test('with until it reads the session up to that entry and the drive as of that entry\'s time', async () => {
+    const { identity, asker, bodies, ghost } = await asking([calls(['history_read', { fromEnd: true }]), says('Uploads is public [#1].')]);
+    const ghostId = crypto.randomUUID();
+
+    const result = answered(await ghost(ghostId).ask({ ghostId, asker, question: 'What did it know then?', open: { workspaceId: identity.workspaceId, workspace: 'Exports work', conversationId: null, until: 1, archived: false, profileId: 'default' } }));
+    expect(result).toMatchObject({ until: 1, driveAsOf: '2026-11-20T09:01:00.000Z', reads: [{ kind: 'read', from: 0, to: 1 }] });
+    expect(bodies[1]).toContain('The archive bucket: uploads is public.');
+    expect(bodies[1]).not.toContain('Exports now go to the archive bucket.');
   });
 });

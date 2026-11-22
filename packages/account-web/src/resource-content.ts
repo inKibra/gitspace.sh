@@ -64,7 +64,7 @@ export async function loadInspectorResource(transport: ResourceTransport, contex
   generation: number;
   sessionId: string | null;
   runtimeAvailable: boolean;
-}, uri: string, signal?: AbortSignal): Promise<InspectorArtifactContent> {
+}, uri: string, signal?: AbortSignal, hash?: string): Promise<InspectorArtifactContent> {
   const resource = parseResourceUri(uri);
   if (!resource) throw new Error('Unsupported or unsafe resource URI');
   if (resource.kind === 'browser-artifact') {
@@ -96,8 +96,9 @@ export async function loadInspectorResource(transport: ResourceTransport, contex
   const request = { spaceId: context.spaceId, expectedGeneration: context.generation };
   if (resource.kind === 'repo') return loadInspectorContent(transport.readResource({ ...request, sessionId: context.sessionId, url: uri }, { signal }), uri, signal);
   if (resource.kind !== 'drive') throw new Error('Machine-session output spills are not retained cloud artifacts. Use a published drive:// evidence link.');
-  if (resource.mount === null && context.runtimeAvailable) return loadInspectorContent(transport.readResource({ ...request, sessionId: context.sessionId, url: uri }, { signal }), uri, signal);
-  const input = { ...request, url: `${canonicalDriveResourceUrl(resource, context.spaceId === context.projectId ? 'base' : 'workspace')}${resource.suffix}`, hash: null };
+  // An earlier version (`hash`, the one a ghost read) is read from the drive store, which keeps every version.
+  if (resource.mount === null && context.runtimeAvailable && hash === undefined) return loadInspectorContent(transport.readResource({ ...request, sessionId: context.sessionId, url: uri }, { signal }), uri, signal);
+  const input = { ...request, url: `${canonicalDriveResourceUrl(resource, context.spaceId === context.projectId ? 'base' : 'workspace')}${resource.suffix}`, hash: hash ?? null };
   // A line selection reads just those lines, however large the file.
   return resource.suffix ? loadInspectorContent(transport.readArtifact(input, { signal }), uri, signal) : loadDriveArtifact(transport, input, uri, signal);
 }

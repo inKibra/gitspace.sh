@@ -210,9 +210,10 @@ export const workspaceReportBlockSchema = base.extend({ type: z.literal('workspa
 export const WORKSPACE_REPORT_ENTRY = 'gitspace.workspace';
 /** The entry kind, and custom transcript message type, of a turn's Chatter digest; its data counts what it holds: posts
  * always heard, posts the model picked, posts of the newest topics when no model picked (absent on entries written
- * before that count existed), other posts, and its tokens against the tokens of every new post quoted whole. */
+ * before that count existed), other posts, and its tokens against the tokens of every new post quoted whole; `during`
+ * marks a long run's digest at a tool boundary rather than a turn start's. */
 export const CHATTER_DIGEST_ENTRY = 'gitspace.chatter-digest';
-export const chatterDigestDetailsSchema = z.object({ floor: z.number().int().nonnegative(), picked: z.number().int().nonnegative(), newest: z.number().int().nonnegative().default(0), others: z.number().int().nonnegative(), tokens: z.number().int().nonnegative(), fullTokens: z.number().int().nonnegative() });
+export const chatterDigestDetailsSchema = z.object({ floor: z.number().int().nonnegative(), picked: z.number().int().nonnegative(), newest: z.number().int().nonnegative().default(0), others: z.number().int().nonnegative(), tokens: z.number().int().nonnegative(), fullTokens: z.number().int().nonnegative(), during: z.boolean().default(false) });
 
 export const turnItemSchema = z.discriminatedUnion('type', [
   messageBlockSchema,
