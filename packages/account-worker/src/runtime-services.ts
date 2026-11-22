@@ -600,7 +600,7 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
     if (args.workspace !== undefined) {
       const wanted = args.workspace.trim().toLowerCase();
       const started = (await acrossRelease(() => authority().listWorkspaces())).find(workspace => workspace.kind === 'worktree' && workspace.lifecycle !== 'deleting' && (workspace.id.toLowerCase() === wanted || workspace.name.toLowerCase() === wanted));
-      if (!started) throw new Error(`Not posted: there is no workspace ${args.workspace} in this project to link. Link a workspace you started, by its id or name.`);
+      if (!started) throw new Error(`Not posted: there is no workspace ${args.workspace} in this project to link. Name one of this project's workspaces by its id or name.`);
       link = { kind: 'workspace', id: started.id, name: started.name };
     }
     const name = base ? (await acrossRelease(() => authority().getProject()))?.name : (await acrossRelease(() => authority().getWorkspace(identity.workspaceId)))?.name;

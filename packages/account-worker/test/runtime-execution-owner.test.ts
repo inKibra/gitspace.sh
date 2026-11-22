@@ -944,7 +944,7 @@ test('the project agent\'s reply links a workspace it started (one outside the p
       expect(text(await invoke('chatter_post', { topic: 'bun test hangs · bash', kind: 'status', text: 'Started Parser on a fix for the watcher.', workspace: 'parser' }))).toContain('linked workspace Parser');
       const nowhere = await invoke('chatter_post', { topic: 'bun test hangs · bash', kind: 'status', text: 'Started a fix.', workspace: 'nowhere' });
       expect(nowhere.status).toBe('failed');
-      expect(text(nowhere)).toBe('Not posted: there is no workspace nowhere in this project to link. Link a workspace you started, by its id or name.');
+      expect(text(nowhere)).toBe('Not posted: there is no workspace nowhere in this project to link. Name one of this project\'s workspaces by its id or name.');
       // An issue named by its merged topic links the topic it went into.
       expect(text(await invoke('chatter_post', { topic: 'bun test hangs · bash', kind: 'status', text: 'Fixed in 4f2a9c1; marked for filing.', issue: 'bun test watcher hang' }))).toContain('linked issue bun test hangs · bash');
     } finally { await runtime.harness.close(BACKGROUND_CONTEXT); }
