@@ -342,45 +342,20 @@ export class ProjectChatterDO extends BudgetedDurableObject {
 
   /**
    * `chatter_read`: one topic's row and posts (`topic`), or the issue topics (`issue`, `state`) or active topics with
-   * the project's posts; posts newest first, of one `kind` and after an offset when given. `before` (an ISO time: a
-   * ghost's as-of) keeps only the posts before it and the topics with a post before it, their counts and last post as
-   * they stood then; `workspaceId` keeps only the topics that workspace posted in (as its agent, as the project agent,
-   * or GitSpace for its runtime), before `before` when given.
+   * the project's posts; posts newest first, of one `kind` and after an offset when given.
    */
-  read(input: { topic?: string; kind?: ChatterKind; issue?: boolean; state?: ChatterIssueState; after?: number; limit?: number; before?: string; workspaceId?: string }): ChatterRead {
+  read(input: { topic?: string; kind?: ChatterKind; issue?: boolean; state?: ChatterIssueState; after?: number; limit?: number }): ChatterRead {
     const limit = Math.min(input.limit ?? READ_POSTS, CHATTER_PAGE_EVENTS);
     const key = input.topic === undefined ? null : this.resolve(normalizeChatterTopic(input.topic));
-    const scope: string[] = [];
-    const scoped: SqlStorageValue[] = [];
-    if (input.before !== undefined) { scope.push('at < ?'); scoped.push(input.before); }
-    if (input.workspaceId !== undefined) {
-      scope.push(`topic_key IN (SELECT topic_key FROM chatter_events WHERE type = 'post' AND author_id = ? AND author_kind IN ${WORKSPACE_AUTHOR_KINDS}${input.before === undefined ? '' : ' AND at < ?'})`);
-      scoped.push(input.workspaceId, ...input.before === undefined ? [] : [input.before]);
-    }
-    const filters = ["type = 'post'", 'seq > ?', ...scope];
-    const bindings: SqlStorageValue[] = [input.after ?? 0, ...scoped];
+    const filters = ["type = 'post'", 'seq > ?'];
+    const bindings: SqlStorageValue[] = [input.after ?? 0];
     if (key !== null) { filters.push('topic_key = ?'); bindings.push(key); }
     if (input.kind !== undefined) { filters.push('kind = ?'); bindings.push(input.kind); }
     const rows = this.rows<EventRow>(`SELECT * FROM chatter_events WHERE ${filters.join(' AND ')} ORDER BY seq DESC LIMIT ?`, ...bindings, limit + 1);
-    let topics: ChatterTopic[];
-    if (scope.length === 0) {
-      topics = (key !== null ? this.topicRows([key])
-        : input.state !== undefined ? this.rows<TopicRow>('SELECT * FROM chatter_topics WHERE alias_of IS NULL AND state = ? ORDER BY last_at DESC LIMIT 100', input.state)
-        : input.issue === true ? this.rows<TopicRow>("SELECT * FROM chatter_topics WHERE alias_of IS NULL AND state IS NOT NULL ORDER BY state = 'open' DESC, last_at DESC LIMIT 100")
-        : this.active(Date.now(), CHATTER_ACTIVE_TOPICS)).map(row => this.topicView(row));
-    } else {
-      const counted = this.rows<{ topic_key: string; posts: number; last_at: string }>(
-        `SELECT topic_key, COUNT(*) AS posts, MAX(at) AS last_at FROM chatter_events WHERE ${["type = 'post'", ...scope, ...key === null ? [] : ['topic_key = ?']].join(' AND ')} GROUP BY topic_key ORDER BY last_at DESC LIMIT 100`,
-        ...scoped, ...key === null ? [] : [key],
-      );
-      const byKey = new Map(this.topicRows(counted.map(entry => entry.topic_key)).map(row => [row.key, row]));
-      topics = counted.flatMap(entry => {
-        const row = byKey.get(entry.topic_key);
-        if (!row || (input.state !== undefined && row.state !== input.state) || (input.issue === true && row.state === null)) return [];
-        const view = this.topicView(row);
-        return [input.before === undefined ? view : { ...view, posts: entry.posts, lastAt: new Date(entry.last_at) }];
-      }).slice(0, key !== null || input.state !== undefined || input.issue === true ? 100 : CHATTER_ACTIVE_TOPICS);
-    }
+    const topics = (key !== null ? this.topicRows([key])
+      : input.state !== undefined ? this.rows<TopicRow>('SELECT * FROM chatter_topics WHERE alias_of IS NULL AND state = ? ORDER BY last_at DESC LIMIT 100', input.state)
+      : input.issue === true ? this.rows<TopicRow>("SELECT * FROM chatter_topics WHERE alias_of IS NULL AND state IS NOT NULL ORDER BY state = 'open' DESC, last_at DESC LIMIT 100")
+      : this.active(Date.now(), CHATTER_ACTIVE_TOPICS)).map(row => this.topicView(row));
     return {
       topics,
       posts: rows.slice(0, limit).flatMap(row => { const view = this.eventView(row); return view.type === 'post' ? [view] : []; }),

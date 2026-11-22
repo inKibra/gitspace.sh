@@ -15,7 +15,7 @@ export const GhostMainTranscript = createContext(false);
 /**
  * A transcript entry of the workspace's main conversation (at `ordinal`): while hovered it offers "Ask a ghost about
  * this", a ghost of the conversation about that entry. A compaction row also offers a ghost from that point: it reads
- * nothing after the row, and the drive and Chatter as they were then.
+ * nothing after the row, and the drive as it was then.
  */
 export function GhostEntry({ ordinal, compaction, children }: { ordinal: number; compaction: boolean; children: ReactNode }) {
   const workspace = useContext(GhostWorkspace);

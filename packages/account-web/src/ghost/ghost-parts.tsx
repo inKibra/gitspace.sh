@@ -2,7 +2,7 @@
 // and inline text with `code` and **bold**.
 import { Tooltip } from '@gitspace/ui';
 import { GHOST_LIFETIME_MS, GHOST_WARN_MS, type GhostCite, type GhostRead } from '@gitspace/protocol-runtime';
-import { File02, MessageChatCircle, MessageTextSquare01 } from '@untitledui/icons';
+import { File02, MessageTextSquare01 } from '@untitledui/icons';
 
 /** The ghost's tint: a soft lavender, kept off the product's blue (selection) and violet (upstream). */
 export const GHOST = '#9a8cff';
@@ -28,33 +28,29 @@ export function IdleRing({ remaining, size = 16 }: { remaining: number; size?: n
   </svg>;
 }
 
-/** `#118`, `#93–117`, `plan.md:19–20`, `post 412`. */
+/** `#118`, `#93–117`, `plan.md:19–20`. */
 export function citeLabel(cite: GhostCite): string {
   if (cite.kind === 'entry') return cite.to === undefined ? `#${cite.from}` : `#${cite.from}–${cite.to}`;
-  if (cite.kind === 'chatter') return `post ${cite.offset}`;
   const name = decodeURIComponent(cite.url.split('/').at(-1) ?? cite.url);
   return cite.lines ? `${name}:${cite.lines[0] === cite.lines[1] ? cite.lines[0] : `${cite.lines[0]}–${cite.lines[1]}`}` : name;
 }
 
-/** One read of a ghost: `searched “polling” · 9 hits`, `read transcript 93–117`, `read drive://…/plan.md`,
- * `read Chatter “bun test hang” · 4 posts`. */
+/** One read of a ghost: `searched “polling” · 9 hits`, `read transcript 93–117`, `read drive://…/plan.md`. */
 export function readLabel(read: GhostRead): string {
   if (read.kind === 'search') return `searched “${read.query}”${read.hits === null ? '' : ` · ${read.hits} ${read.hits === 1 ? 'hit' : 'hits'}`}`;
   if (read.kind === 'read') return read.from === null ? 'reading the transcript' : read.from === read.to ? `read entry ${read.from}` : `read transcript ${read.from}–${read.to}`;
-  if (read.kind === 'chatter') return `read Chatter${read.topic === null ? '' : ` “${read.topic}”`}${read.posts === null ? '' : ` · ${read.posts} ${read.posts === 1 ? 'post' : 'posts'}`}`;
   return `read ${read.url}`;
 }
 
-/** A citation: an entry (#118, #93–117), a drive file's lines or a Chatter post. Clicking shows it (the workspace at the
- * entry, the Drive at the lines in the version the ghost read, the post in the Chatter pane); without `onCite` (an
- * entry of a conversation the workspace view doesn't show) it only names it. */
+/** A citation: an entry (#118, #93–117) or a drive file's lines. Clicking shows it (the workspace at the entry, the Drive
+ * at the lines in the version the ghost read); without `onCite` (an entry of a conversation the workspace view doesn't
+ * show) it only names it. */
 export function CiteChip({ cite, onCite }: { cite: GhostCite; onCite?(cite: GhostCite): void }) {
-  const Icon = cite.kind === 'entry' ? MessageTextSquare01 : cite.kind === 'chatter' ? MessageChatCircle : File02;
+  const Icon = cite.kind === 'entry' ? MessageTextSquare01 : File02;
   const label = citeLabel(cite);
   const entries = cite.kind === 'entry' ? cite.to === undefined ? `entry ${cite.from}` : `entries ${cite.from}–${cite.to}` : null;
   const preview = !onCite ? `${entries ?? label} of the session the ghost read`
     : entries ? `Show ${entries} in the transcript`
-    : cite.kind === 'chatter' ? `Open ${label} in Chatter`
     : `Open ${label} in the Drive${cite.kind === 'drive' && cite.generation !== null ? ` as the ghost read it · generation ${cite.generation}` : ''}`;
   const className = 'ghost-chip mx-0.5 inline-flex h-[19px] translate-y-[-1px] items-center gap-1 rounded-full px-1.5 align-middle font-mono text-[10.5px] font-medium leading-none transition-colors';
   const content = <><Icon width={11} height={11} strokeWidth={1.75} className="shrink-0 opacity-80" />{label}</>;

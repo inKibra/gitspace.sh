@@ -5,9 +5,9 @@ import { z } from 'zod';
  * per ghost (`GHOST_PATH?projectId&workspaceId[&conversationId][&until]`, upgraded, signed by one of the account's
  * browser devices in `Sec-WebSocket-Protocol`); no conversation id means the workspace's main conversation. An agent
  * asks one with `ghost_ask` and gets one answer back (`GhostAskResult`), asking the same ghost again by its id while it
- * lives. The ghost lives in memory only, in its own object, and reads that one conversation's transcript, the
- * workspace's drive and the project's Chatter as they were at its `asOf`: when it started, or with `until` (an entry it
- * reads nothing after) that entry's time. It fades `GHOST_LIFETIME_MS` after its last answer (`keep` moves that on),
+ * lives. The ghost lives in memory only, in its own object, and reads that one conversation's transcript and the
+ * workspace's drive as they were at its `asOf`: when it started, or with `until` (an entry it reads nothing after) that
+ * entry's time. It fades `GHOST_LIFETIME_MS` after its last answer (`keep` moves that on),
  * and closing a person's socket ends it at once. Nothing it read or said is kept; only token counts are, in the
  * account's usage.
  */
@@ -35,27 +35,23 @@ export const GhostQuerySchema = z.strictObject({ projectId: id, workspaceId: id,
 /** The query as the browser writes it: every value a string. */
 export type GhostQuery = z.input<typeof GhostQuerySchema>;
 
-/** What an answer points at: a transcript entry or run of entries, lines of a drive file in the version read (its
- * generation and the file's `sha256:` hash there; results recorded before the hash existed have none), or a Chatter post
- * by its offset. */
+/** What an answer points at: a transcript entry or run of entries, or lines of a drive file in the version read (its
+ * generation and the file's `sha256:` hash there; results recorded before the hash existed have none). */
 const entryCite = z.strictObject({ kind: z.literal('entry'), from: entry, to: entry.optional() });
 const driveCite = z.strictObject({
   kind: z.literal('drive'), url: z.string().min(1), lines: z.tuple([z.number().int().positive(), z.number().int().positive()]).optional(),
   generation: z.number().int().nonnegative().nullable(), hash: z.string().min(1).nullable().default(null),
 });
-const chatterCite = z.strictObject({ kind: z.literal('chatter'), offset: z.number().int().positive() });
-export const GhostCiteSchema = z.discriminatedUnion('kind', [entryCite, driveCite, chatterCite]);
+export const GhostCiteSchema = z.discriminatedUnion('kind', [entryCite, driveCite]);
 export type GhostCite = z.infer<typeof GhostCiteSchema>;
 /** The version of a drive file a ghost read: the drive's generation and the file's hash in it (null when unknown). */
 export type GhostDriveVersion = { generation: number | null; hash: string | null };
 
-/** One read the ghost made while answering: a search with its hit count, a run of transcript entries, a drive file,
- * Chatter (one topic, or the topics its workspace posted in) with how many posts it read. */
+/** One read the ghost made while answering: a search with its hit count, a run of transcript entries, a drive file. */
 export const GhostReadSchema = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('search'), query: z.string(), hits: z.number().int().nonnegative().nullable() }),
   z.strictObject({ kind: z.literal('read'), from: entry.nullable(), to: entry.nullable() }),
   z.strictObject({ kind: z.literal('drive'), url: z.string(), generation: z.number().int().nonnegative().nullable() }),
-  z.strictObject({ kind: z.literal('chatter'), topic: z.string().nullable(), posts: z.number().int().nonnegative().nullable() }),
 ]);
 export type GhostRead = z.infer<typeof GhostReadSchema>;
 
@@ -77,22 +73,19 @@ const at = z.iso.datetime();
 
 export const GhostServerMessageSchema = z.discriminatedUnion('type', [
   /** The ghost is ready: the session it reads, its size in entries (up to `until` when it has one), the time it reads
-   * the drive and Chatter as of, whether it reads Chatter, whether the conversation is the workspace's main one, and the
-   * model answering. */
+   * the drive as of, whether the conversation is the workspace's main one, and the model answering. */
   z.strictObject({
     type: z.literal('ready'), ghostId: z.string().min(1), conversationId: id, title: z.string(), main: z.boolean(), entries: z.number().int().nonnegative(),
-    until: entry.nullable(), archived: z.boolean(), driveAsOf: at, chatter: z.boolean(), expiresAt: at, model: z.string(),
+    until: entry.nullable(), archived: z.boolean(), driveAsOf: at, expiresAt: at, model: z.string(),
   }),
   /** A read of answer `turn`: started (`done` false), finished, or failed with why. */
   z.strictObject({ type: z.literal('read'), turn, index: z.number().int().nonnegative(), read: GhostReadSchema, done: z.boolean(), failed: z.string().optional() }),
   /** Text of answer `turn` as it streams; a new `round` replaces the text of the round before. */
   z.strictObject({ type: z.literal('text'), turn, round: z.number().int().nonnegative(), delta: z.string() }),
-  /** Answer `turn` whole: its text with citations, and, asked to act, the message it drafted for the person to send:
-   * `everyone` when the draft is something for everyone (a finding, a workaround, a heads-up) that the person may post
-   * to Chatter as `kind`, null when it asks one workspace to act. */
+  /** Answer `turn` whole: its text with citations, and, asked to act, the message it drafted for the person to send. */
   z.strictObject({
     type: z.literal('answer'), turn, parts: z.array(GhostPartSchema), draft: z.string().nullable(),
-    everyone: z.enum(['status', 'discovery', 'workaround', 'coordination']).nullable(), rounds: z.number().int().nonnegative(), truncated: z.boolean(), expiresAt: at,
+    rounds: z.number().int().nonnegative(), truncated: z.boolean(), expiresAt: at,
   }),
   z.strictObject({ type: z.literal('failed'), turn, message: z.string(), expiresAt: at }),
   /** `keep` moved the deadline. */
@@ -105,19 +98,24 @@ export type GhostServerMessage = z.infer<typeof GhostServerMessageSchema>;
 const count = z.number().int().nonnegative();
 const ref = z.string().min(1);
 /** A citation as the asking agent reads it, with `ref`: a `history://<workspace>/<conversation>#<entry>[-<entry>]`
- * reference for entries, for a file the `drive://` path the asker reads it by, with its lines, and for a Chatter post
- * `chatter:<offset>` with its topic (`chatter_read({ topic })` reads its thread). */
-export const GhostAskCiteSchema = z.discriminatedUnion('kind', [entryCite.extend({ ref }), driveCite.extend({ ref }), chatterCite.extend({ ref, topic: z.string().nullable() })]);
+ * reference for entries, and for a file the `drive://` path the asker reads it by, with its lines. */
+export const GhostAskCiteSchema = z.discriminatedUnion('kind', [entryCite.extend({ ref }), driveCite.extend({ ref })]);
 export type GhostAskCite = z.infer<typeof GhostAskCiteSchema>;
+/** A Chatter citation or read in a `ghost_ask` result recorded before ghosts stopped reading Chatter (2026-11-22): it
+ * parses and is dropped; the answer's `[chatter:N]` stays plain text. */
+const recordedChatter = z.looseObject({ kind: z.literal('chatter') });
 /** `ghost_ask`'s result: one answer of an agent's ghost about one session. `answer` cites inline as the ghost wrote it,
- * by the session's entry numbers, its workspace's drive paths and Chatter offsets; `cites` names each citation as the
- * asker can read it. `until` is the last entry it could read (results recorded before `until` existed have none),
- * `driveAsOf` the time it read the drive and Chatter as of. `ghostId` asks the same ghost again until `expiresAt`. */
+ * by the session's entry numbers and its workspace's drive paths; `cites` names each citation as the asker can read it.
+ * `until` is the last entry it could read (results recorded before `until` existed have none), `driveAsOf` the time it
+ * read the drive as of. `ghostId` asks the same ghost again until `expiresAt`. */
 export const GhostAskResultSchema = z.strictObject({
   ghostId: z.uuid(), expiresAt: at,
   session: z.strictObject({ workspaceId: id, workspace: z.string(), conversationId: id, title: z.string(), main: z.boolean(), archived: z.boolean() }),
   until: entry.nullable().default(null),
-  answer: z.string(), cites: z.array(GhostAskCiteSchema), reads: z.array(GhostReadSchema), driveAsOf: at,
+  answer: z.string(),
+  cites: z.array(z.union([GhostAskCiteSchema, recordedChatter])).transform(cites => cites.flatMap(cite => cite.kind === 'chatter' ? [] : [cite])),
+  reads: z.array(z.union([GhostReadSchema, recordedChatter])).transform(reads => reads.flatMap(read => read.kind === 'chatter' ? [] : [read])),
+  driveAsOf: at,
   /** Asked to act: the message the ghost drafted, for the asker to send or post itself. */
   draft: z.string().nullable(),
   rounds: count, truncated: z.boolean(),
@@ -126,9 +124,8 @@ export const GhostAskResultSchema = z.strictObject({
 });
 export type GhostAskResult = z.infer<typeof GhostAskResultSchema>;
 
-/** `[#118]`, `[#93-117]` (or an en dash), `[drive://workspace/notes/plan.md:19-20]`, `[chatter:412]`: how an answer
- * cites, inline. */
-const CITE = /\[(?:#(\d+)(?:\s*[-–]\s*#?(\d+))?|(drive:\/\/[^\]\s]+?)(?::(\d+)(?:[-–](\d+))?)?|chatter:(\d+))\]/gu;
+/** `[#118]`, `[#93-117]` (or an en dash), `[drive://workspace/notes/plan.md:19-20]`: how an answer cites, inline. */
+const CITE = /\[(?:#(\d+)(?:\s*[-–]\s*#?(\d+))?|(drive:\/\/[^\]\s]+?)(?::(\d+)(?:[-–](\d+))?)?)\]/gu;
 
 /** An answer's text as parts: text and citations, in order. `versions` names the version each drive file was read
  * at. */
@@ -137,34 +134,17 @@ export function ghostParts(text: string, versions: ReadonlyMap<string, GhostDriv
   let from = 0;
   for (const match of text.matchAll(CITE)) {
     if (match.index > from) parts.push(text.slice(from, match.index));
-    const [, start, end, url, first, last, post] = match;
+    const [, start, end, url = '', first, last] = match;
     if (start !== undefined) {
       const cite: GhostCite = end === undefined || end === start ? { kind: 'entry', from: Number(start) } : { kind: 'entry', from: Number(start), to: Number(end) };
       parts.push(cite);
-    } else if (url !== undefined) {
+    } else {
       const line = first === undefined ? null : Number(first);
       const version = versions.get(url);
       parts.push({ kind: 'drive', url, ...(line === null || line < 1 ? {} : { lines: [line, Math.max(line, last === undefined ? line : Number(last))] }), generation: version?.generation ?? null, hash: version?.hash ?? null });
-    } else if (post !== undefined && Number(post) > 0) {
-      parts.push({ kind: 'chatter', offset: Number(post) });
-    } else {
-      parts.push(match[0]);
     }
     from = match.index + match[0].length;
   }
   if (from < text.length) parts.push(text.slice(from));
   return parts;
-}
-
-/** What a session reference names, for "Ask a ghost about this": `history://<workspace>[/<conversation>][#<entry>[-…]]`
- * or `result://<workspace>/<conversation>/<call>`. Null for anything else. */
-export function ghostReference(reference: string): { workspaceId: string; conversationId: string | null; entry: number | null } | null {
-  const history = /^history:\/\/([^/#\s]+)(?:\/([^/#\s]+))?\/?(?:#(\d+)(?:-\d+)?)?$/u.exec(reference);
-  if (history) {
-    const [, workspaceId = '', conversationId, entry] = history;
-    return { workspaceId: decodeURIComponent(workspaceId), conversationId: conversationId === undefined ? null : decodeURIComponent(conversationId), entry: entry === undefined ? null : Number(entry) };
-  }
-  const result = /^result:\/\/([^/\s]+)\/([^/\s]+)\/[^\s]+$/u.exec(reference);
-  if (result) return { workspaceId: decodeURIComponent(result[1] ?? ''), conversationId: decodeURIComponent(result[2] ?? ''), entry: null };
-  return null;
 }

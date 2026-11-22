@@ -1,12 +1,11 @@
 // An agent's question to a ghost (`ghost_ask`) as its conversation shows it: the session asked about, the question and
 // the ghost's cited answer. A citation opens that workspace at the entry or the drive lines (in the version the ghost
-// read), as a person's ghost's do; a Chatter post opens in the Chatter pane.
+// read), as a person's ghost's do.
 import type { ToolCallBlock } from '@gitspace/blocks';
 import { GhostAskResultSchema, RuntimeGhostAskArgumentsSchema, ghostParts, type GhostAskResult, type GhostCite, type GhostDriveVersion } from '@gitspace/protocol-runtime';
 import { Tooltip, useShape } from '@gitspace/ui';
 import { Check, Copy01, Lock01 } from '@untitledui/icons';
 import { useMemo, useState } from 'react';
-import { openChatter } from '../chatter/chatter-open.js';
 import type { ItemInteractionProps } from '../chat/TranscriptItemView.js';
 import { selectInspection } from '../routes.js';
 import { AMBER, CiteChip, GHOST, GhostGlyph, Inline, readLabel } from './ghost-parts.js';
@@ -50,16 +49,12 @@ export function GhostAskCall({ block, state, onStateChange }: { block: ToolCallB
   const subject = session ? session.workspace : followUp ? 'its ghost' : args.success && args.data.workspaceId !== undefined ? args.data.workspaceId : 'this conversation';
   const running = block.status === 'running' || block.status === 'pending';
   const failure = !running && !result ? output || 'The ghost did not answer.' : null;
-  // Entries open in the workspace's transcript, which shows its main conversation; drive lines open in its Drive; posts
-  // in the project's Chatter.
+  // Entries open in the workspace's transcript, which shows its main conversation; drive lines open in its Drive.
   const onCite = (cite: GhostCite): void => {
     const projectId = new URL(window.location.href).searchParams.get('project');
     if (!session || !projectId) return;
-    if (cite.kind === 'chatter') openChatter({ projectId, offset: cite.offset });
-    else {
-      showGhostCite(session.workspaceId, cite);
-      selectInspection(projectId, session.workspaceId === projectId ? null : session.workspaceId);
-    }
+    showGhostCite(session.workspaceId, cite);
+    selectInspection(projectId, session.workspaceId === projectId ? null : session.workspaceId);
   };
   const folded = (result?.answer.length ?? 0) > FOLDED && !state?.open;
   return <div role="group" aria-label={`Asked a ghost of ${subject}`} data-ghost-ask={block.toolCallId} className={`flex min-w-0 flex-col gap-1.5 border border-border bg-surface-2 px-3 py-2 ${shape.container}`}>

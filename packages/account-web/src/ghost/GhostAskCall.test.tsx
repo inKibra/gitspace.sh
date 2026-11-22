@@ -64,6 +64,20 @@ it('still shows a result recorded before until and drive versions existed as a c
   expect(card()?.querySelector('[data-ghost-answer]')?.textContent).toBe('It moved exports to the archive bucket #12, as the plan says plan.md:3–4.');
 });
 
+it('shows a result recorded while ghosts read Chatter without its Chatter parts: the cite as plain text, no Chatter read', async () => {
+  const recorded = answer({});
+  const older = {
+    ...recorded, answer: 'Billing reads the bucket too [chatter:412], see [#12].',
+    cites: [...recorded.cites, { kind: 'chatter', offset: 412, ref: 'chatter:412', topic: 'archive bucket' }],
+    reads: [...recorded.reads, { kind: 'chatter', topic: null, posts: 6 }],
+  };
+  await render([call(null, 'done', JSON.stringify(older))]);
+  expect(card()?.querySelector('[data-ghost-answer]')?.textContent).toBe('Billing reads the bucket too [chatter:412], see #12.');
+  expect(container.querySelectorAll('[data-cite]')).toHaveLength(1);
+  expect(card()?.querySelector('[title^="searched"]')?.getAttribute('title')).toBe('searched “bucket” · 2 hits\nread transcript 10–14');
+  expect(card()?.textContent).not.toContain('Chatter');
+});
+
 it('a citation opens the asked workspace at the entry or the drive lines', async () => {
   await render([call(answer({}))]);
   const request = renderHook(() => useGhostRequest('billing-1a2b'));

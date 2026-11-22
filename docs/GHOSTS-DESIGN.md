@@ -5,8 +5,7 @@ conversation or a subagent's, live or archived. It answers from that session's t
 as the drive was at that time, cites what it read, can't change or send anything, and leaves nothing behind when it
 fades. People open ghosts from the web; agents ask them with `ghost_ask`, their own conversation included. This doc
 covers what the mock shows, how it maps onto what GitSpace already has, where a ghost's state lives, what it may do,
-cost, milestones and the decisions still open. Where ghosts meet Chatter is in
-[CHATTER-DESIGN.md §11](./CHATTER-DESIGN.md#11-where-ghosts-and-chatter-meet).
+cost, milestones and the decisions still open.
 
 ## 1. Summary
 
@@ -165,7 +164,7 @@ Milestone 5 is built (2026-11-21, not deployed): agents ask ghosts with `ghost_a
   `cites` with a `ref` each (`history://<workspace>/<conversation>#<entry>[-<entry>]`; a drive file as the asker reads
   it, another workspace's under `drive://workspaces/<id>/`), `reads`, `driveAsOf`, `draft`, `rounds`, `truncated`,
   `usage` (model, requests, tokens, cost). Asked to act, the answer is the refusal and `draft` the message the agent may
-  send or post itself (CHATTER-DESIGN.md §11).
+  send itself.
 - **Web.** A `ghost_ask` call is a card of its own in the asking transcript (`account-web/src/ghost/GhostAskCall.tsx`):
   the session asked about, the question, the answer with citation chips, the draft with Copy, what it read, model, cost
   and when it fades. A chip opens the asked workspace and jumps to the entry, as a person's ghost's do; entries of a
@@ -174,7 +173,7 @@ Milestone 5 is built (2026-11-21, not deployed): agents ask ghosts with `ghost_a
 - **Not yet** (as built in milestone 5). `driveNote` (the drive-history note reaches the ghost in its read, not the
   result). `until` came with milestone 8.
 
-Milestones 6–9 and the milestone-4 follow-ups are built (2026-11-21, not deployed).
+Milestones 6–8 and the milestone-4 follow-ups are built (2026-11-21, not deployed).
 - **Entry points (6).** "Ask a ghost about this" on every entry of the workspace's main transcript (hover; the ghost
   icon beside the row, `ghost/GhostEntry.tsx` `GhostEntry` in `VirtualTranscript`), which opens the conversation's ghost
   with the entry as `about` and "Why did the agent do this?" in its composer; the question goes as `ask { text, about }`
@@ -195,20 +194,9 @@ Milestones 6–9 and the milestone-4 follow-ups are built (2026-11-21, not deplo
   this browser (`localStorage` `gitspace.ghosts.placement`).
 - **From a point in time (8).** The socket and `ghost_ask` take `until` (an entry number). The ghost's reads are capped
   at its ordinal (`before` = (until+1)·1024 on every transcript range; a content read past it is refused), its size is
-  counted up to it, and its `asOf` (drive and Chatter) is the newest event's time at or before it. A compaction row
+  counted up to it, and its `asOf` (the drive's) is the newest event's time at or before it. A compaction row
   in the transcript carries "Ghost from here" (`until` = the row's entry), whose suggestions start with "What did
   this summary leave out?"; the header shows "up to #N". `GhostAskResult.until` says what it read up to.
-- **Chatter (9, CHATTER-DESIGN.md §11).** A fourth read tool `chatter_read { topic?, kind?, everywhere?, limit? }`,
-  offered only when the asker may read the project's Chatter (a person's device scope reaches the project; an agent's
-  ghost always, its project being the asker's). It calls `ProjectChatterDO.read` with `before: asOf` and, unless a
-  topic or `everywhere` is named, `workspaceId` (the topics the ghost's workspace posted in), and drops anything not
-  before `asOf` again. Posts are cited `[chatter:412]`, a chip that opens the post in the Chatter pane
-  (`openChatter({ projectId, offset })`); `ghost_ask` cites them as `chatter:<offset>` with their topic. A draft for
-  everyone is written `<draft for="everyone" kind="…">` and arrives as `answer.everyone` (a kind); only such a draft
-  gets **Post to Chatter** (the Chatter composer opens with it and the kind), and never Put in composer; a draft that
-  asks a workspace to act gets only the composer (or New workspace with it). A tooling post whose reference names a
-  session offers "Ask a ghost about this" (`askGhostAboutReference`, `ghostReference` in `protocol-runtime/src/ghost.ts`).
-  Ghosts never post, get no digest and are no listener.
 - **Usage view (4 follow-up).** `providers.serviceUsage { profileId, days }` reads the vault's `service_usage` for one
   profile (`CredentialVaultDO.serviceUsage`, newest day first); Inference → Providers shows "Ghosts and decisions"
   under the providers: totals per service and a row per day, service, model and workspace (workspace names from the
@@ -308,7 +296,7 @@ another session, with its own ghost. History is untrusted material, as `history_
 the ghost's instructions say to answer only from reads, cite every claim, say when the record is silent, and draft
 instead of acting.
 
-**What it can't do.** No `write`, `edit`, `bash`, `proc`, `agents`, `space_*`, `report_issue`, `chatter_post`,
+**What it can't do.** No `write`, `edit`, `bash`, `proc`, `agents`, `space_*`, `report_issue`,
 `ghost_ask`, `web_search`, `web_fetch`, no browser, no machine, no other workspace or session, no questions to people.
 These are absent, not forbidden by prompt. It can't read another ghost.
 
@@ -442,8 +430,6 @@ Each step ships alone.
 7. **Several ghosts and the dock.** Pills, idle rings, the docked column with tabs and its start page. Built (§3).
 8. **From a point in time.** Start from a compaction row or any entry with `until`, the drive read as of that entry
    (decision 3). Built (§3).
-9. **Chatter.** A ghost reads Chatter, and its draft can be posted there by the person (CHATTER-DESIGN.md §11). Built
-   (§3).
 
 ## 10. Open decisions
 

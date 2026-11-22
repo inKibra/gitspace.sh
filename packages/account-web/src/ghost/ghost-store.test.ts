@@ -5,7 +5,7 @@ import { act, createElement, type ReactElement } from 'react';
 import { createRoot } from 'react-dom/client';
 import { TooltipProvider } from '@gitspace/ui';
 import { renderHook } from '@testing-library/react';
-import { askGhost, askGhostAboutReference, citeGhost, closeGhost, dismissGhost, setGhostPlacement, summonGhost, useGhostRequest, useGhosts, type GhostSocket, type GhostSubject } from './ghost-store.js';
+import { askGhost, citeGhost, closeGhost, dismissGhost, setGhostPlacement, summonGhost, useGhostRequest, useGhosts, type GhostSocket, type GhostSubject } from './ghost-store.js';
 import { GhostDock, GhostLayer } from './GhostWindow.js';
 import { GhostEntry, GhostMainTranscript, GhostWorkspace } from './GhostEntry.js';
 
@@ -19,8 +19,8 @@ class FakeSocket extends EventTarget {
 }
 const at = (minutes: number) => new Date(Date.now() + minutes * 60_000).toISOString();
 const subject: GhostSubject = { projectId: 'project', workspaceId: 'workspace', workspaceName: 'exports', archived: false, conversationId: null, title: null, until: null };
-const ready = (until: number | null = null): GhostServerMessage => ({ type: 'ready', ghostId: 'g', conversationId: '1', title: 'Main', main: true, entries: 3, until, archived: false, driveAsOf: at(0), chatter: true, expiresAt: at(10), model: 'openai/fast' });
-const answer = (draft: string | null, everyone: 'discovery' | null): GhostServerMessage => ({ type: 'answer', turn: 1, parts: ['The archive bucket ', { kind: 'entry', from: 2 }], draft, everyone, rounds: 1, truncated: false, expiresAt: at(10) });
+const ready = (until: number | null = null): GhostServerMessage => ({ type: 'ready', ghostId: 'g', conversationId: '1', title: 'Main', main: true, entries: 3, until, archived: false, driveAsOf: at(0), expiresAt: at(10), model: 'openai/fast' });
+const answer = (draft: string | null): GhostServerMessage => ({ type: 'answer', turn: 1, parts: ['The archive bucket ', { kind: 'entry', from: 2 }], draft, rounds: 1, truncated: false, expiresAt: at(10) });
 
 /** Summons a ghost on a fake socket; the query it opened with is kept. */
 async function open(of: GhostSubject = subject, options: { about?: number; question?: string } = {}): Promise<{ socket: FakeSocket; query: GhostQuery | null }> {
@@ -48,12 +48,12 @@ it('asks through the socket, builds the answer from its stream, and a citation a
   // Asking again while it answers sends nothing.
   askGhost(key, 'And why?');
   expect(socket.sent).toHaveLength(1);
-  socket.play(answer(null, null));
+  socket.play(answer(null));
   expect(citeGhost(key, { kind: 'entry', from: 2 })).toEqual(subject);
   expect(renderHook(() => useGhostRequest('workspace')).result.current).toMatchObject({ kind: 'entry', ordinal: 2048 });
 });
 
-it('entry points open a ghost scoped to them: about an entry, from a point in time, of another conversation, from a tooling post', async () => {
+it('entry points open a ghost scoped to them: about an entry, from a point in time, of another conversation', async () => {
   const about = await open(subject, { about: 7 });
   const aboutKey = state().active!;
   expect(state().ghosts.find(ghost => ghost.key === aboutKey)).toMatchObject({ about: 7, input: 'Why did the agent do this?' });
@@ -63,14 +63,6 @@ it('entry points open a ghost scoped to them: about an entry, from a point in ti
 
   expect((await open({ ...subject, until: 88 })).query).toEqual({ projectId: 'project', workspaceId: 'workspace', until: '88' });
   expect((await open({ ...subject, conversationId: 'subagent-1', title: 'tests' })).query).toEqual({ projectId: 'project', workspaceId: 'workspace', conversationId: 'subagent-1' });
-
-  const queries: GhostQuery[] = [];
-  const socket: GhostSocket = new FakeSocket();
-  expect(askGhostAboutReference({ projectId: 'project', reference: 'not a reference', workspaceName: 'billing' })).toBe(false);
-  // A reference names a workspace, conversation and entry: a ghost of that conversation, about that entry.
-  summonGhost({ ...subject, workspaceId: 'billing', conversationId: 'main-1' }, {}, async query => { queries.push(query); return socket; });
-  expect(askGhostAboutReference({ projectId: 'project', reference: 'history://billing/main-1#41', workspaceName: 'billing' })).toBe(true);
-  expect(state().ghosts.find(ghost => ghost.key === state().active)).toMatchObject({ subject: { workspaceId: 'billing', conversationId: 'main-1' }, about: 41 });
 });
 
 it('keeps several ghosts: a session already read is brought back, not opened twice, and a question asked before it is ready waits for it', async () => {
@@ -119,23 +111,14 @@ it('floating, the open ghost is a window and the others pills with a ring; docke
   await vi.waitFor(() => expect(docked.querySelector('[data-ghost-start]')?.textContent).toContain('Ask a ghost about exports'));
 });
 
-it('offers Post to Chatter only for a draft for everyone, never for a request that a workspace act', async () => {
+it('a draft offers Put in composer and Copy, for the agent in its workspace', async () => {
   const { socket } = await open();
   socket.play(ready());
-  askGhost(state().active!, 'Tell everyone where exports go.');
-  socket.play(answer('Exports go to the archive bucket.', 'discovery'));
-  const shown = await render(createElement(GhostLayer, { onOpenWorkspace: () => undefined }));
-  const buttons = () => [...shown.querySelectorAll('[aria-label="Draft"] button')].map(button => button.textContent);
-  expect(shown.querySelector('[aria-label="Draft"]')?.getAttribute('data-draft-for')).toBe('everyone');
-  expect(buttons()).toEqual(['Post to Chatter', 'Copy']);
-
-  const act2 = await open({ ...subject, workspaceId: 'billing', workspaceName: 'billing' });
-  act2.socket.play(ready());
   askGhost(state().active!, 'Merge it.');
-  await act(async () => act2.socket.play(answer('Please merge the export change.', null)));
-  // The billing ghost's window (it is now the open one) has the draft for its agent.
-  await vi.waitFor(() => expect(shown.querySelector('[aria-label="Ghost of billing"] [aria-label="Draft"]')?.getAttribute('data-draft-for')).toBe('agent'));
-  expect([...shown.querySelectorAll('[aria-label="Ghost of billing"] [aria-label="Draft"] button')].map(button => button.textContent)).toEqual(['Put in composer', 'Copy']);
+  socket.play(answer('Please merge the export change.'));
+  const shown = await render(createElement(GhostLayer, { onOpenWorkspace: () => undefined }));
+  await vi.waitFor(() => expect(shown.querySelector('[aria-label="Draft"]')?.textContent).toContain('for the agent in exports'));
+  expect([...shown.querySelectorAll('[aria-label="Draft"] button')].map(button => button.textContent)).toEqual(['Put in composer', 'Copy']);
 });
 
 it('a transcript entry of the main conversation asks a ghost about itself; a compaction row starts one from that point', async () => {

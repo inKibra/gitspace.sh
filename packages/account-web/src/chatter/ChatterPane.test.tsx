@@ -50,7 +50,7 @@ async function render(props: Partial<ChatterPaneProps> = {}) {
   const all: ChatterPaneProps = {
     projectId: 'demo', projectName: 'demo', workspaceCount: 3, workspaceId: 'ws-1', workspaces: [{ id: 'ws-2', name: 'Bo' }], state: mergeChatter(EMPTY_CHATTER, events, topics, { cursor: 4 }), active: topics, error: null,
     onPost, onAct: vi.fn(async () => null), onLoadOlder: vi.fn(async () => undefined), onHearAs: vi.fn(async () => 'unread'), onHearings: vi.fn(async () => 'unread'),
-    onShowPost: vi.fn(async () => null), onOpenWorkspace: vi.fn(), openRequest: null, ...props,
+    onOpenWorkspace: vi.fn(), ...props,
   };
   await act(() => root.render(<TooltipProvider><ChatterPane {...all} /></TooltipProvider>));
   return all;
@@ -225,11 +225,11 @@ it('shows what the project agent\'s reply links: a workspace chip that opens it,
   expect(document.querySelector('[data-post="post-3"] [data-link]')).toBeNull();
 });
 
-it('offers a ghost of the session a tooling post references, and none for a reference that names no session', async () => {
+it('offers no ghost: a tooling post whose reference names a session has no Ask a ghost', async () => {
   const failed: ChatterPost = { ...post(5, 'bun test hang', 'bun test hangs.', 'tooling', bo), spot: { tool: 'bash', reference: 'history://ws-2/main#12', machine: null } };
-  const result: ChatterPost = { ...post(6, 'bun test hang', 'It hangs again.', 'tooling', bo), spot: { tool: 'bash', reference: 'result://output.txt', machine: null } };
-  await open({ state: mergeChatter(EMPTY_CHATTER, [...events, failed, result], topics, { cursor: 6 }) });
-  expect([...document.querySelectorAll('[data-post]')].filter(element => [...element.querySelectorAll('button')].some(entry => entry.textContent === 'Ask a ghost about this')).map(element => element.getAttribute('data-post'))).toEqual(['post-5']);
+  await open({ state: mergeChatter(EMPTY_CHATTER, [...events, failed], topics, { cursor: 5 }) });
+  expect(document.querySelector('[data-post="post-5"]')).not.toBeNull();
+  expect(pane()!.textContent).not.toMatch(/ghost/iu);
 });
 
 it('suggests a topic is the same as another on its header: Merge merges it, Not the same is remembered and the suggestion goes', async () => {
@@ -248,19 +248,4 @@ it('suggests a topic is the same as another on its header: Merge merges it, Not 
   // The row the action returns has no suggestion: it goes.
   await render({ ...props, state: mergeChatter(state, [], [{ ...same, sameAs: null }]) });
   expect(suggestion()).toBeNull();
-});
-
-it('opens on a request from elsewhere: a post it loads, expands and highlights, or a draft in the composer', async () => {
-  const older = post(9, 'deploy freeze', 'No deploys until Monday.');
-  const props = await render({ onShowPost: vi.fn(async () => 'deploy freeze') });
-  await render({ ...props, openRequest: { projectId: 'demo', offset: 9, serial: 1 }, state: mergeChatter(props.state, [older], [topic('deploy freeze', 'deploy freeze', 1)]) });
-  expect(pane()).not.toBeNull();
-  expect(props.onShowPost).toHaveBeenCalledWith(9);
-  await act(async () => { await Promise.resolve(); });
-  expect(document.querySelector('[data-post-offset="9"]')!.getAttribute('data-flash')).toBe('true');
-
-  await render({ ...props, openRequest: { projectId: 'demo', draft: { text: 'The CDN purge takes ten minutes.', kind: 'discovery' }, serial: 2 } });
-  expect(field('Post').value).toBe('The CDN purge takes ten minutes.');
-  expect(field('Topic').value).toBe('The CDN purge takes ten');
-  expect(document.querySelector('button[aria-label^="Kind:"]')!.getAttribute('aria-label')).toBe('Kind: discovery');
 });

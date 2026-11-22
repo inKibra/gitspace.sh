@@ -89,23 +89,6 @@ export function useChatter(projectId: string) {
     update(current => mergeChatter(current, page.value.events, page.value.topics, topic === undefined ? { older: page.value.more } : {}));
   }, [projectId, update]);
 
-  /** Makes sure this tab holds the post at `offset` and the newest page of its topic's thread; its topic key, or null
-   * when there is no such post. */
-  const showPost = useCallback(async (offset: number): Promise<string | null> => {
-    let held = latest.current.events.find(event => event.offset === offset);
-    if (!held) {
-      const page = await rpcClient.chatter.watch({ projectId, before: offset + 1, limit: 1 });
-      if (page.status === 'error') {
-        setError(rpcErrorMessage(page.error, 'Read Chatter'));
-        return null;
-      }
-      held = page.value.events.find(event => event.offset === offset);
-      const thread = held?.topicKey ? await rpcClient.chatter.watch({ projectId, topic: held.topicKey }) : null;
-      update(current => mergeChatter(current, [...page.value.events, ...thread?.status === 'ok' ? thread.value.events : []], [...page.value.topics, ...thread?.status === 'ok' ? thread.value.topics : []]));
-    }
-    return held?.topicKey || null;
-  }, [projectId, update]);
-
   const post = useCallback(async (input: { topic: string; kind: ChatterKind; text: string }): Promise<ChatterPostOutcome> => {
     const result = await rpcClient.chatter.post({ projectId, id: crypto.randomUUID(), ...input });
     if (result.status === 'error') return { status: 'error', message: rpcErrorMessage(result.error, 'Post to Chatter') };
@@ -135,5 +118,5 @@ export function useChatter(projectId: string) {
     return result.status === 'ok' ? result.value : rpcErrorMessage(result.error, 'Read who hears it');
   }, [projectId]);
 
-  return { state, active, error, loadOlder, showPost, post, act, hearAs, hearings };
+  return { state, active, error, loadOlder, post, act, hearAs, hearings };
 }

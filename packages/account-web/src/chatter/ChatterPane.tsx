@@ -5,20 +5,16 @@
 // similar active one before a new topic is posted. Scrolling up pauses auto-scroll.
 import { DropdownContent, DropdownLabel, DropdownMenu, DropdownTrigger, MenuItem, Tooltip, badgeColors, type IconComponent } from '@gitspace/ui';
 import {
-  CHATTER_KINDS, CHATTER_MAX_PICKS, CHATTER_PROJECT_STRIP, CHATTER_TEXT_CHARACTERS, normalizeChatterTopic, similarChatterTopic, suggestChatterTopic,
+  CHATTER_KINDS, CHATTER_MAX_PICKS, CHATTER_PROJECT_STRIP, normalizeChatterTopic, similarChatterTopic, suggestChatterTopic,
   type ChatterDigest, type ChatterHeard, type ChatterHearings, type ChatterKind, type ChatterLeft, type ChatterPost, type ChatterProjectMuteLine, type ChatterReturnedLine, type ChatterTopic,
   type ChatterTopicAction, type ChatterTopicLine, type ChatterVolumeLine,
 } from '@gitspace/protocol/chatter-contract';
 import { Activity, ArrowDown, ChevronDown, ChevronUp, CpuChip01, DotsHorizontal, Hash02, Headphones01, InfoCircle, Lightbulb02, MessageChatCircle, PauseCircle, PlayCircle, Route, Send01, Tool02, Users01 } from '@untitledui/icons';
-import { ghostReference } from '@gitspace/protocol-runtime';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { StatusDot } from '../GitSpaceShell.js';
 import { glyph } from '../glyph.js';
-import { askGhostAboutReference } from '../ghost/ghost-store.js';
-import { GhostGlyph } from '../ghost/ghost-parts.js';
 import { chatterKindCounts, groupChatter, type ChatterGroup, type ChatterState } from './chatter-state.js';
-import type { ChatterOpenRequest } from './chatter-open.js';
 import { LEVEL_LABEL } from './ChatterVolume.js';
 import type { ChatterPostOutcome } from './useChatter.js';
 
@@ -68,22 +64,16 @@ export interface ChatterPaneProps {
   onHearAs(listener: string): Promise<ChatterDigest | string>;
   /** Who hears one post; a string says why it could not be read. */
   onHearings(offset: number): Promise<ChatterHearings | string>;
-  /** Makes sure the post at `offset` and its topic's thread are held; its topic key, or null when there is none. */
-  onShowPost(offset: number): Promise<string | null>;
   /** Opens a workspace of the project: a project agent's post links one it started. */
   onOpenWorkspace(workspaceId: string): void;
-  /** The latest request to open this pane (a ghost's chip, a draft posted to Chatter), handled once per serial. */
-  openRequest: ChatterOpenRequest | null;
 }
 
 /** What a digest Hear as shows did with each post: heard (with why) or left out (with why not), by offset. */
 type HearingView = { heard: ReadonlyMap<number, ChatterHeard>; left: ReadonlyMap<number, ChatterLeft> };
 /** Who hears one post, while it is read and once it is. */
 type WhoView = { offset: number; hearings: ChatterHearings | null; error: string | null };
-/** How long a post opened from elsewhere stays highlighted. */
-const FLASH_MS = 2_400;
 
-export function ChatterPane({ projectId, projectName, workspaceCount, workspaceId, workspaces, state, active, error, onPost, onAct, onLoadOlder, onHearAs, onHearings, onShowPost, onOpenWorkspace, openRequest }: ChatterPaneProps) {
+export function ChatterPane({ projectId, projectName, workspaceCount, workspaceId, workspaces, state, active, error, onPost, onAct, onLoadOlder, onHearAs, onHearings, onOpenWorkspace }: ChatterPaneProps) {
   const [open, setOpen] = useState(false);
   const [placement, setPlacement] = useState<{ top: number; left: number; width: number; height: number } | null>(null);
   const [filter, setFilter] = useState<ChatterKind | 'all'>('all');
@@ -91,38 +81,12 @@ export function ChatterPane({ projectId, projectName, workspaceCount, workspaceI
   const [seen, setSeen] = useState<number | null>(null);
   const [expanded, setExpanded] = useState<Readonly<Record<string, true>>>({});
   const [reply, setReply] = useState<{ topic: string; serial: number } | null>(null);
-  const [draft, setDraft] = useState<{ text: string; kind: ChatterKind; serial: number } | null>(null);
-  const [flash, setFlash] = useState<number | null>(null);
-  const handled = useRef(0);
   const scroller = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   /** Set by a pointerdown on the button or inside the pane (portaled menus included), read by the document's
    * outside-click listener. */
   const inside = useRef(false);
   const refocus = useRef(false);
-
-  // A request from elsewhere opens the pane: with a draft in the composer, or showing one post (its thread loaded and
-  // expanded, auto-scroll paused), highlighted for a moment.
-  useEffect(() => {
-    if (!openRequest || openRequest.serial === handled.current) return;
-    handled.current = openRequest.serial;
-    setOpen(true);
-    if (openRequest.draft) setDraft({ ...openRequest.draft, serial: openRequest.serial });
-    const offset = openRequest.offset;
-    if (offset === undefined) { setFollowing(true); return; }
-    setFollowing(false);
-    setFilter('all');
-    void onShowPost(offset).then(key => {
-      if (key) setExpanded(current => ({ ...current, [key]: true }));
-      setFlash(offset);
-    });
-  }, [openRequest, onShowPost]);
-  useEffect(() => {
-    if (flash === null || !placement) return;
-    document.querySelector(`[data-post-offset="${flash}"]`)?.scrollIntoView({ block: 'center' });
-    const timer = setTimeout(() => setFlash(null), FLASH_MS);
-    return () => clearTimeout(timer);
-  }, [flash, placement]);
   const groups = useMemo(() => groupChatter(state, filter), [state, filter]);
   const [hearing, setHearing] = useState<{ listener: string; name: string; digest: ChatterDigest | null; error: string | null } | null>(null);
   const [who, setWho] = useState<WhoView | null>(null);
@@ -274,10 +238,10 @@ export function ChatterPane({ projectId, projectName, workspaceCount, workspaceI
       <div ref={scroller} onScroll={onScroll} className="h-full overflow-y-auto overscroll-contain px-2 pb-2 pt-1">
         {state.older ? <button type="button" onClick={() => void onLoadOlder()} className="mx-auto my-1 block text-[11px] font-medium text-muted-foreground underline decoration-border underline-offset-2 hover:text-foreground">Load earlier posts</button> : null}
         {groups.length
-          ? groups.map(group => 'type' in group ? group.type === 'returned' ? <ReturnedLine key={group.id} line={group} /> : <VolumeLine key={group.id} line={group} /> : <TopicGroup key={group.key} projectId={projectId} group={group} topics={state.topics} active={active} expanded={!!expanded[group.key]}
+          ? groups.map(group => 'type' in group ? group.type === 'returned' ? <ReturnedLine key={group.id} line={group} /> : <VolumeLine key={group.id} line={group} /> : <TopicGroup key={group.key} group={group} topics={state.topics} active={active} expanded={!!expanded[group.key]}
             onToggle={() => { setFollowing(false); setExpanded(current => { const next = { ...current }; if (next[group.key]) delete next[group.key]; else next[group.key] = true; return next; }); }}
             onReply={topic => setReply({ topic, serial: (reply?.serial ?? 0) + 1 })} onAct={onAct} onLoadOlder={onLoadOlder}
-            hearing={heardBy} who={who} onWho={showWho} onHearAs={hearAs} flash={flash} onOpenWorkspace={onOpenWorkspace} onShowTopic={key => { setFollowing(false); document.querySelector(`[data-topic="${CSS.escape(key)}"]`)?.scrollIntoView({ block: 'start' }); }} />)
+            hearing={heardBy} who={who} onWho={showWho} onHearAs={hearAs} onOpenWorkspace={onOpenWorkspace} onShowTopic={key => { setFollowing(false); document.querySelector(`[data-topic="${CSS.escape(key)}"]`)?.scrollIntoView({ block: 'start' }); }} />)
           : <p className="px-3 py-8 text-center text-[12px] text-muted-foreground">{error ?? `No ${filter === 'all' ? '' : `${filter} `}posts yet. Name a topic and say what you found.`}</p>}
       </div>
       {!following ? <button type="button" onClick={resume}
@@ -287,7 +251,7 @@ export function ChatterPane({ projectId, projectName, workspaceCount, workspaceI
       </button> : null}
     </div>
     {error && groups.length ? <p role="alert" className="shrink-0 border-t border-border px-3 py-1 text-[11px] text-destructive">{error}</p> : null}
-    <Composer projectName={projectName} active={active} known={state.topics} reply={reply} draft={draft} onPost={onPost} onAct={onAct} />
+    <Composer projectName={projectName} active={active} known={state.topics} reply={reply} onPost={onPost} onAct={onAct} />
   </section>, document.body) : null}
   </>;
 }
@@ -311,11 +275,11 @@ function Rich({ text }: { text: string }): ReactNode {
     : <span key={index}>{part}</span>);
 }
 
-function TopicGroup({ projectId, group, topics, active, expanded, onToggle, onReply, onAct, onLoadOlder, hearing, who, onWho, onHearAs, flash, onOpenWorkspace, onShowTopic }: {
-  projectId: string; group: ChatterGroup; topics: ReadonlyMap<string, ChatterTopic>; active: readonly ChatterTopic[]; expanded: boolean;
+function TopicGroup({ group, topics, active, expanded, onToggle, onReply, onAct, onLoadOlder, hearing, who, onWho, onHearAs, onOpenWorkspace, onShowTopic }: {
+  group: ChatterGroup; topics: ReadonlyMap<string, ChatterTopic>; active: readonly ChatterTopic[]; expanded: boolean;
   onToggle(): void; onReply(topic: string): void; onAct(key: string, action: ChatterTopicAction): Promise<string | null>; onLoadOlder(topic: string): Promise<void>;
   hearing: HearingView | null; who: WhoView | null; onWho(offset: number): void; onHearAs(listener: string, name: string): void;
-  flash: number | null; onOpenWorkspace(workspaceId: string): void; onShowTopic(key: string): void;
+  onOpenWorkspace(workspaceId: string): void; onShowTopic(key: string): void;
 }) {
   const [panel, setPanel] = useState<'fixed' | 'merge' | null>(null);
   const [fixedIn, setFixedIn] = useState('');
@@ -362,8 +326,8 @@ function TopicGroup({ projectId, group, topics, active, expanded, onToggle, onRe
     {expanded && total > group.posts ? <button type="button" onClick={() => void onLoadOlder(group.key)} className="ml-[18px] mt-0.5 block text-[10.5px] font-medium text-muted-foreground hover:text-foreground">Load {total - group.posts} more from before</button> : null}
     <div className="mt-0.5 flex flex-col">
       {shown.map(item => item.type === 'post'
-        ? <PostLine key={item.offset} projectId={projectId} post={item} hearing={hearing} onWho={() => onWho(item.offset)} who={who?.offset === item.offset ? <WhoHears post={item} who={who} onHearAs={onHearAs} /> : null}
-          flash={flash === item.offset} issue={item.link?.kind === 'issue' ? topics.get(item.link.key) ?? null : null} onOpenWorkspace={onOpenWorkspace} onShowTopic={onShowTopic} />
+        ? <PostLine key={item.offset} post={item} hearing={hearing} onWho={() => onWho(item.offset)} who={who?.offset === item.offset ? <WhoHears post={item} who={who} onHearAs={onHearAs} /> : null}
+          issue={item.link?.kind === 'issue' ? topics.get(item.link.key) ?? null : null} onOpenWorkspace={onOpenWorkspace} onShowTopic={onShowTopic} />
         : <TopicLine key={item.offset} line={item} />)}
     </div>
     {panel === 'fixed' ? <form className="ml-[18px] mt-1 flex items-center gap-1" onSubmit={event => { event.preventDefault(); void act({ kind: 'state', state: 'resolved', fixedIn: fixedIn.trim() || null }); }}>
@@ -385,20 +349,17 @@ function TopicGroup({ projectId, group, topics, active, expanded, onToggle, onRe
 /** A post; clicking it shows who hears it. While hearing as an agent, a post its digest left out is dim (why not on
  * hover) and one it heard says why. What the project agent's post links shows under it: the workspace it started (a
  * chip that opens it) or the issue topic it acted on (with its state; `issue` is that topic's row when this tab holds
- * it). A tooling post whose reference names a session offers a ghost of it. */
-function PostLine({ projectId, post, hearing, who, onWho, flash, issue, onOpenWorkspace, onShowTopic }: {
-  projectId: string; post: ChatterPost; hearing: HearingView | null; who: ReactNode; onWho(): void;
-  flash: boolean; issue: ChatterTopic | null; onOpenWorkspace(workspaceId: string): void; onShowTopic(key: string): void;
+ * it). */
+function PostLine({ post, hearing, who, onWho, issue, onOpenWorkspace, onShowTopic }: {
+  post: ChatterPost; hearing: HearingView | null; who: ReactNode; onWho(): void;
+  issue: ChatterTopic | null; onOpenWorkspace(workspaceId: string): void; onShowTopic(key: string): void;
 }) {
   const Icon = KIND[post.kind].icon;
   const heard = hearing?.heard.get(post.offset);
   const left = hearing?.left.get(post.offset);
   const link = post.link;
-  const reference = post.kind === 'tooling' ? post.spot?.reference ?? null : null;
-  const ghostable = reference !== null && ghostReference(reference) !== null;
-  return <div data-post={post.id} data-post-offset={post.offset} data-flash={flash || undefined} data-heard={hearing ? heard?.via ?? 'no' : undefined} title={left?.why}
-    style={flash ? { boxShadow: `inset 0 0 0 1.5px ${badgeColors.blue}` } : undefined}
-    className={`rounded-lg py-[3px] pl-[18px] pr-1 transition-shadow hover:bg-[color-mix(in_oklab,var(--foreground)_3%,transparent)] ${hearing && !heard ? 'opacity-40' : ''}`}>
+  return <div data-post={post.id} data-heard={hearing ? heard?.via ?? 'no' : undefined} title={left?.why}
+    className={`rounded-lg py-[3px] pl-[18px] pr-1 hover:bg-[color-mix(in_oklab,var(--foreground)_3%,transparent)] ${hearing && !heard ? 'opacity-40' : ''}`}>
     <div role="button" tabIndex={0} aria-expanded={who !== null} aria-label={`Who hears ${post.author.name}'s post`} onClick={onWho}
       onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onWho(); } }} className="cursor-pointer rounded outline-none focus-visible:ring-2 focus-visible:ring-foreground/20">
       <div className="flex items-center gap-1.5">
@@ -416,7 +377,7 @@ function PostLine({ projectId, post, hearing, who, onWho, flash, issue, onOpenWo
         {heard.via === 'floor' ? `always heard · ${heard.reason}` : heard.via === 'newest' ? 'among the newest topics (no model picked)' : `picked by the model${heard.strong ? ' (strong)' : ''} · ${heard.reason}`}
       </p> : null}
     </div>
-    {link || ghostable ? <div className="mt-0.5 flex flex-wrap items-center gap-1">
+    {link ? <div className="mt-0.5 flex flex-wrap items-center gap-1">
       {link?.kind === 'workspace' ? <button type="button" data-link="workspace" onClick={() => onOpenWorkspace(link.id)} title={`Open ${link.name}`}
         className="inline-flex h-5 max-w-full items-center gap-1 rounded-full bg-background px-2 text-[10.5px] font-medium text-foreground shadow-[inset_0_0_0_1px_var(--border)] hover:bg-hover">
         <Route width={11} height={11} strokeWidth={2} className="shrink-0 text-muted-foreground" />started <span className="truncate">{link.name}</span>
@@ -425,8 +386,6 @@ function PostLine({ projectId, post, hearing, who, onWho, flash, issue, onOpenWo
         <Tool02 width={11} height={11} strokeWidth={2} className="shrink-0" style={{ color: badgeColors.rose }} />
         <span className="truncate">issue <span className="font-medium text-foreground">{link.display}</span>{issue?.state ? ` · ${STATE[issue.state].label.toLowerCase()}` : ''}{issue?.marked ? ' · marked for filing' : ''}</span>
       </button> : null}
-      {reference !== null && ghostable ? <button type="button" onClick={() => askGhostAboutReference({ projectId, reference, workspaceName: post.author.name })}
-        className="ghost-ask inline-flex h-5 items-center gap-1 rounded-full px-2 text-[10.5px] font-medium"><GhostGlyph size={11} />Ask a ghost about this</button> : null}
     </div> : null}
     {who}
   </div>;
@@ -510,11 +469,9 @@ function VolumeLine({ line }: { line: ChatterVolumeLine | ChatterProjectMuteLine
   </div>;
 }
 
-/** The composer. `reply` puts a topic in its topic field; `draft` (a ghost's draft posted to Chatter) fills its text and
- * kind, the topic suggested from the text as usual. */
-function Composer({ projectName, active, known, reply, draft, onPost, onAct }: {
+/** The composer. `reply` puts a topic in its topic field. */
+function Composer({ projectName, active, known, reply, onPost, onAct }: {
   projectName: string; active: readonly ChatterTopic[]; known: ReadonlyMap<string, ChatterTopic>; reply: { topic: string; serial: number } | null;
-  draft: { text: string; kind: ChatterKind; serial: number } | null;
   onPost(input: { topic: string; kind: ChatterKind; text: string }): Promise<ChatterPostOutcome>; onAct(key: string, action: ChatterTopicAction): Promise<string | null>;
 }) {
   const [text, setText] = useState('');
@@ -525,13 +482,6 @@ function Composer({ projectName, active, known, reply, draft, onPost, onAct }: {
   const [sending, setSending] = useState(false);
   const [notice, setNotice] = useState<{ message: string; merge?: { from: string; into: ChatterTopic } } | null>(null);
   const textInput = useRef<HTMLInputElement>(null);
-  useEffect(() => {
-    if (!draft) return;
-    setText(draft.text.slice(0, CHATTER_TEXT_CHARACTERS));
-    setKind(draft.kind);
-    setWritten(null);
-    textInput.current?.focus();
-  }, [draft]);
   useEffect(() => {
     if (!reply) return;
     setWritten(reply.topic);

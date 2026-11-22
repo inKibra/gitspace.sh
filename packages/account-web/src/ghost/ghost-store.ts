@@ -1,4 +1,4 @@
-import { GHOST_ENTRY_ORDINALS, GHOST_PATH, GhostServerMessageSchema, ghostReference, type GhostCite, type GhostPart, type GhostQuery, type GhostRead, type GhostServerMessage } from '@gitspace/protocol-runtime';
+import { GHOST_ENTRY_ORDINALS, GHOST_PATH, GhostServerMessageSchema, type GhostCite, type GhostPart, type GhostQuery, type GhostRead, type GhostServerMessage } from '@gitspace/protocol-runtime';
 import { DEVICE_SOCKET_PROTOCOL } from '@gitspace/protocol/socket-auth';
 import { useSyncExternalStore } from 'react';
 import { signDeviceRequest } from '../device.js';
@@ -10,7 +10,7 @@ export type GhostSubject = { projectId: string; workspaceId: string; workspaceNa
 export type GhostReadLine = { index: number; read: GhostRead; done: boolean; failed: string | null };
 export type GhostTurn =
   | { role: 'person'; turn: number; text: string; about: number | null }
-  | { role: 'ghost'; turn: number; reads: GhostReadLine[]; round: number; text: string; parts: GhostPart[] | null; draft: string | null; everyone: Extract<GhostServerMessage, { type: 'answer' }>['everyone']; truncated: boolean; failed: string | null };
+  | { role: 'ghost'; turn: number; reads: GhostReadLine[]; round: number; text: string; parts: GhostPart[] | null; draft: string | null; truncated: boolean; failed: string | null };
 export type GhostAnswer = Extract<GhostTurn, { role: 'ghost' }>;
 export type GhostReady = Omit<Extract<GhostServerMessage, { type: 'ready' }>, 'type' | 'expiresAt'>;
 export type GhostEnding = { reason: Extract<GhostServerMessage, { type: 'ended' }>['reason']; at: string; questions: number; message: string | null };
@@ -50,7 +50,7 @@ const PLACEMENT_KEY = 'gitspace.ghosts.placement';
 
 /** The ghost answering `turn`, as it reads and writes. */
 function answering(ghost: Ghost, turn: number, change: (answer: GhostAnswer) => GhostAnswer): Ghost {
-  const blank: GhostAnswer = { role: 'ghost', turn, reads: [], round: 0, text: '', parts: null, draft: null, everyone: null, truncated: false, failed: null };
+  const blank: GhostAnswer = { role: 'ghost', turn, reads: [], round: 0, text: '', parts: null, draft: null, truncated: false, failed: null };
   const found = ghost.turns.some(item => item.role === 'ghost' && item.turn === turn);
   const turns = found ? ghost.turns.map(item => item.role === 'ghost' && item.turn === turn ? change(item) : item) : [...ghost.turns, change(blank)];
   return { ...ghost, turns };
@@ -69,7 +69,7 @@ export function applyGhostMessage(ghost: Ghost, message: GhostServerMessage): Gh
       return { ...answer, reads };
     });
     case 'text': return answering(ghost, message.turn, answer => message.round === answer.round ? { ...answer, text: answer.text + message.delta } : { ...answer, round: message.round, text: message.delta });
-    case 'answer': return { ...answering(ghost, message.turn, answer => ({ ...answer, parts: message.parts, draft: message.draft, everyone: message.everyone, truncated: message.truncated })), expiresAt: Date.parse(message.expiresAt) };
+    case 'answer': return { ...answering(ghost, message.turn, answer => ({ ...answer, parts: message.parts, draft: message.draft, truncated: message.truncated })), expiresAt: Date.parse(message.expiresAt) };
     case 'failed': return { ...answering(ghost, message.turn, answer => ({ ...answer, failed: message.message })), expiresAt: Date.parse(message.expiresAt) };
     case 'expires': return { ...ghost, expiresAt: Date.parse(message.expiresAt) };
     case 'ended': return { ...ghost, ended: { reason: message.reason, at: message.endedAt, questions: message.questions, message: message.message ?? null } };
@@ -177,15 +177,6 @@ export function summonGhost(subject: GhostSubject, options: { about?: number; qu
   }, (error: unknown) => ending(error instanceof Error ? error.message : String(error)));
 }
 
-/** A ghost of the session a reference names (a tooling post's `history://` or `result://` reference), about its entry
- * when it names one. False, and nothing opens, when it names no session. */
-export function askGhostAboutReference(input: { projectId: string; reference: string; workspaceName: string }): boolean {
-  const named = ghostReference(input.reference);
-  if (!named) return false;
-  summonGhost({ projectId: input.projectId, workspaceId: named.workspaceId, workspaceName: input.workspaceName, archived: false, conversationId: named.conversationId, title: null, until: null }, named.entry === null ? {} : { about: named.entry });
-  return true;
-}
-
 export function setGhostInput(key: number, text: string): void {
   update(key, ghost => ({ ...ghost, input: text }));
 }
@@ -244,7 +235,7 @@ export function resummonGhost(key: number): void {
  * there is nothing to show there. */
 export function citeGhost(key: number, cite: GhostCite): GhostSubject | null {
   const ghost = find(key);
-  if (!ghost || cite.kind === 'chatter') return null;
+  if (!ghost) return null;
   if (cite.kind === 'entry' && ghost.ready?.main === false) return null;
   showGhostCite(ghost.subject.workspaceId, cite);
   return ghost.subject;
@@ -252,7 +243,7 @@ export function citeGhost(key: number, cite: GhostCite): GhostSubject | null {
 
 /** Asks `workspaceId`'s view, once it shows, for a citation: its main transcript at the entry, or its drive at the
  * lines in the version the ghost read. An agent's ghost's answer (`ghost_ask`) cites this way too. */
-export function showGhostCite(workspaceId: string, cite: Exclude<GhostCite, { kind: 'chatter' }>): void {
+export function showGhostCite(workspaceId: string, cite: GhostCite): void {
   set({ ...state, request: cite.kind === 'entry'
     ? { serial: ++serials, kind: 'entry', workspaceId, ordinal: cite.from * GHOST_ENTRY_ORDINALS }
     : { serial: ++serials, kind: 'drive', workspaceId, url: cite.lines ? `${cite.url}:${cite.lines[0]}-${cite.lines[1]}` : cite.url, hash: cite.hash } });

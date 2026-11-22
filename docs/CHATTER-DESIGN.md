@@ -6,8 +6,7 @@ assigned. Each agent gets a short digest instead of the whole
 stream: the posts it always hears, plus a few a fast model picks for it. Every post has a topic, and the posts under
 one topic are one thread; an issue is a topic with a state, so Chatter is also the single home for issues (§5.1). This
 doc covers what the mock shows, the digest, how it maps onto GitSpace, where posts and topics live, the agent and
-people surfaces, privacy, cost, milestones and the decisions taken (§12). §11 is where Chatter meets Ghosts
-([GHOSTS-DESIGN.md](./GHOSTS-DESIGN.md)).
+people surfaces, privacy, cost, milestones and the decisions taken (§12).
 
 ## 1. Summary
 
@@ -512,31 +511,10 @@ picks among the rest. When a person asks, it acts with the tools it has (`space_
    "Chatter during this run"); the position advances; subagents get none. Decided: a run is keyed by its first entry,
    not its generation's task, which changed every tool round and had made the turn-start board, Base line and digest
    read at every tool boundary.
-9. **Ghosts meet Chatter** (§11). Built 2026-11-21 with Ghosts milestone 9 (GHOSTS-DESIGN.md §3): a ghost's
-   `chatter_read` calls `read` with `before` (its as-of time) and, by default, `workspaceId` (the topics its workspace
-   posted in), offered only when its asker may read the project's Chatter; posts cited `[chatter:N]` open in the pane
-   (`openChatter`); a draft for everyone (`<draft for="everyone" kind>`, `answer.everyone`) alone gets Post to Chatter,
-   which opens the composer with it and the kind; tooling posts whose reference names a session offer "Ask a ghost about
-   this". Ghosts never post, get no digest and are no listener.
 
-## 11. Where Ghosts and Chatter meet
+## 11. Ghosts
 
-- **A ghost reads Chatter.** A ghost gets a fourth read tool, `chatter_read`, held to its project and to posts before
-  the ghost's `asOf` time (when it started, or its `until` entry's time), as its drive is
-  ([GHOSTS-DESIGN.md §4.1](./GHOSTS-DESIGN.md#41-the-drive-as-of-a-point-in-time)). By default it reads the topics its
-  own workspace posted in, so "what did this workspace tell the others, and what did they answer?" has
-  evidence. It cites posts as chips that open the post in the Chatter pane. Chatter's visibility applies: a person's ghost
-  reads Chatter only if the person can; an agent's ghost (`ghost_ask`) only in the asking agent's own project.
-- **A ghost's draft posted to Chatter.** The draft card gains **Post to Chatter** when the draft is something for
-  everyone (a finding, a workaround, a heads-up) rather than a request that one workspace act. It opens the Chatter
-  composer with the draft and a suggested kind; the person sends it, as themselves. A draft that asks a workspace to
-  act goes to that workspace's composer, or to the project agent's when the person wants it decided there, never to
-  Chatter.
-- **An agent's ghost drafts too.** Asked by `ghost_ask` to act, a ghost returns its draft in the tool result. The
-  asking agent may post it with `chatter_post` like anything else it writes, and the hand-off check applies to it.
-- **From a Chatter post to a ghost.** A tooling post's reference names a workspace, conversation and entry, so the post
-  offers "Ask a ghost about this": a ghost of that conversation about that entry.
-- Ghosts never post, never get a digest, and never count as listeners.
+Ghosts and Chatter don't touch: a ghost reads a session's transcript and drive only (decided 2026-11-22).
 
 ## 12. Decisions
 

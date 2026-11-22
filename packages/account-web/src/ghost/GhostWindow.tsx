@@ -5,10 +5,9 @@
 // fades, and when it ends it leaves a tombstone that says nothing was kept.
 import { Button, Tooltip } from '@gitspace/ui';
 import { GHOST_LIFETIME_MS, GHOST_WARN_MS, type GhostCite, type GhostRead } from '@gitspace/protocol-runtime';
-import { ArrowUp, BookOpen01, Check, ClockRewind, Copy01, File02, Hourglass03, LayoutRight, Lock01, MessageChatCircle, Minus, Plus, SearchSm, XClose } from '@untitledui/icons';
+import { ArrowUp, BookOpen01, Check, ClockRewind, Copy01, File02, Hourglass03, LayoutRight, Lock01, Minus, Plus, SearchSm, XClose } from '@untitledui/icons';
 import { AnimatePresence, motion } from 'framer-motion';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { openChatter } from '../chatter/chatter-open.js';
 import { AMBER, CiteChip, GHOST, GhostGlyph, IdleRing, Inline, readLabel } from './ghost-parts.js';
 import {
   askGhost, citeGhost, clearGhostAbout, closeGhost, composeGhostDraft, dismissGhost, focusGhost, ghostBusy, keepGhost, resummonGhost, setGhostInput, setGhostPlacement,
@@ -16,7 +15,7 @@ import {
 } from './ghost-store.js';
 
 const ICON = { width: 14, height: 14, strokeWidth: 1.75 };
-const READ_ICON: Record<GhostRead['kind'], typeof SearchSm> = { search: SearchSm, read: BookOpen01, drive: File02, chatter: MessageChatCircle };
+const READ_ICON: Record<GhostRead['kind'], typeof SearchSm> = { search: SearchSm, read: BookOpen01, drive: File02 };
 const SUGGESTIONS = ['What is it doing now?', 'What has been decided so far?', 'Where did it leave off?'];
 /** From a point in time (a compaction row, or any entry with `until`). */
 const UNTIL_SUGGESTIONS = ['What did this summary leave out?', 'What did the agent know at this point?', 'What was it about to do next?'];
@@ -84,11 +83,11 @@ function GhostHeader({ ghost, remaining, docked }: { ghost: Ghost; remaining: nu
     </div>
     <div className="flex min-w-0 items-center gap-1.5 pl-9 text-[11px] text-muted-foreground">
       <span className="min-w-0 truncate" title={ready ? `${ready.title} · ${ready.entries} entries · model ${ready.model}` : undefined}>{ready ? `${ready.main ? '' : 'Subagent or earlier · '}${ready.title} · ${ready.entries} entries` : 'Opening…'}</span>
-      {until !== null ? <Tooltip side="bottom" content={<span className="block max-w-[240px] whitespace-normal leading-snug">It reads the session only up to entry {until}, and the drive{ready?.chatter ? ' and Chatter' : ''} as they were then.</span>}>
+      {until !== null ? <Tooltip side="bottom" content={<span className="block max-w-[240px] whitespace-normal leading-snug">It reads the session only up to entry {until}, and the drive as it was then.</span>}>
         <span className="inline-flex shrink-0 cursor-help items-center gap-0.5 rounded-full border border-border px-1.5 leading-4"><ClockRewind width={10} height={10} strokeWidth={2} />up to #{until}</span>
       </Tooltip> : null}
       {subject.archived || ready?.archived ? <span className="shrink-0 rounded-full border border-border px-1.5 leading-4">Archived</span> : null}
-      <Tooltip side="bottom" content={<span className="block max-w-[260px] whitespace-normal leading-snug"><b>Reads only.</b> It can search and read this conversation’s transcript (history_search, history_read), read the workspace drive{ready?.chatter ? ' and the project’s Chatter (chatter_read)' : ''}. It can’t write, edit, run, post, send to agents, delegate or report issues.</span>}>
+      <Tooltip side="bottom" content={<span className="block max-w-[260px] whitespace-normal leading-snug"><b>Reads only.</b> It can search and read this conversation’s transcript (history_search, history_read) and read the workspace drive. It can’t write, edit, run, post, send to agents, delegate or report issues.</span>}>
         <span className="inline-flex shrink-0 cursor-help items-center gap-0.5 rounded-full px-1.5 leading-4" style={{ background: `color-mix(in oklab, ${GHOST} 14%, transparent)`, color: `color-mix(in oklab, ${GHOST} 70%, var(--foreground))` }}><Lock01 width={10} height={10} strokeWidth={2} />read-only</span>
       </Tooltip>
       {ghost.expiresAt === null ? null : <Tooltip side="bottom" content={<span className="block max-w-[240px] whitespace-normal leading-snug">Fades 10 minutes after your last question, or when closed. Nothing is kept: no transcript, no drive file, no memory.</span>}>
@@ -113,27 +112,22 @@ function Warning({ ghost, remaining }: { ghost: Ghost; remaining: number }) {
 }
 
 /**
- * A ghost's draft. One for the agent goes to its workspace's composer (Put in composer), or, the workspace archived, to
- * the composer of a new workspace of the project (New workspace with it); one for everyone (a finding, a workaround, a
- * heads-up) opens the Chatter composer with it and a suggested kind, when the person can read Chatter. Copy is always
- * there; the person sends it, never the ghost.
+ * A ghost's draft for the agent: it goes to its workspace's composer (Put in composer), or, the workspace archived, to
+ * the composer of a new workspace of the project (New workspace with it). Copy is always there; the person sends it,
+ * never the ghost.
  */
 function DraftCard({ ghost, answer }: { ghost: Ghost; answer: GhostAnswer }) {
   const [copied, setCopied] = useState(false);
   const draft = answer.draft ?? '';
-  const everyone = answer.everyone;
   const archived = ghost.subject.archived || ghost.ready?.archived === true;
-  const projectId = ghost.subject.projectId;
-  return <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} className="mt-2 overflow-hidden rounded-[12px] border border-dashed border-border bg-background/70" aria-label="Draft" data-draft-for={everyone ? 'everyone' : 'agent'}>
+  return <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} className="mt-2 overflow-hidden rounded-[12px] border border-dashed border-border bg-background/70" aria-label="Draft">
     <div className="flex items-center gap-1.5 border-b border-dashed border-border px-2.5 py-1.5 text-[11px] text-muted-foreground">
       <span className="font-medium text-foreground">Draft</span>
-      <span className="truncate">· {everyone ? `for everyone in the project · ${everyone}` : archived ? `for a new workspace (${ghost.subject.workspaceName} is archived)` : `for the agent in ${ghost.subject.workspaceName}`}</span>
+      <span className="truncate">· {archived ? `for a new workspace (${ghost.subject.workspaceName} is archived)` : `for the agent in ${ghost.subject.workspaceName}`}</span>
     </div>
     <p className="whitespace-pre-wrap px-2.5 py-2 text-[12.5px] leading-relaxed text-foreground">{draft}</p>
     <div className="flex flex-wrap items-center gap-1 border-t border-dashed border-border px-1.5 py-1">
-      {everyone
-        ? ghost.ready?.chatter ? <Button size="compact" variant="secondary" onClick={() => { show(ghost.subject); openChatter({ projectId, draft: { text: draft, kind: everyone } }); }}>Post to Chatter</Button> : null
-        : <Button size="compact" variant="secondary" onClick={() => { const subject = composeGhostDraft(ghost.key, draft); if (subject) show(subject); }}>{archived ? 'New workspace with it' : 'Put in composer'}</Button>}
+      <Button size="compact" variant="secondary" onClick={() => { const subject = composeGhostDraft(ghost.key, draft); if (subject) show(subject); }}>{archived ? 'New workspace with it' : 'Put in composer'}</Button>
       <Button size="compact" variant="ghost" onClick={() => { void navigator.clipboard.writeText(draft).then(() => setCopied(true)); }}>
         {copied ? <Check width={13} height={13} strokeWidth={1.75} className="mr-1" /> : <Copy01 width={13} height={13} strokeWidth={1.75} className="mr-1" />}{copied ? 'Copied' : 'Copy'}
       </Button>
@@ -142,11 +136,10 @@ function DraftCard({ ghost, answer }: { ghost: Ghost; answer: GhostAnswer }) {
   </motion.div>;
 }
 
-/** What a citation of `ghost` does: entries of its main conversation and drive lines open in its workspace, posts in
- * the Chatter pane; entries of a conversation the workspace view doesn't show are only named. */
+/** What a citation of `ghost` does: entries of its main conversation and drive lines open in its workspace; entries of a
+ * conversation the workspace view doesn't show are only named. */
 function citer(ghost: Ghost): (cite: GhostCite) => void {
   return cite => {
-    if (cite.kind === 'chatter') { show(ghost.subject); openChatter({ projectId: ghost.subject.projectId, offset: cite.offset }); return; }
     const subject = citeGhost(ghost.key, cite);
     if (subject) show(subject);
   };
@@ -202,7 +195,7 @@ function GhostConversation({ ghost }: { ghost: Ghost }) {
   return <div className="flex min-h-0 flex-1 flex-col">
     <div ref={scroller} className="ghost-scroll flex min-h-0 flex-1 flex-col gap-3.5 overflow-y-auto px-3.5 pb-3 pt-1">
       <p className="text-[12px] leading-relaxed text-muted-foreground" data-ghost-intro>
-        {ready ? <>I read <span className="text-foreground">{what}</span> ({until === null ? `${ready.entries} entries` : `up to entry ${until}`}), its drive{ready.chatter ? ' and the project’s Chatter' : ''} as {until === null ? 'it was' : 'they were'} at {time(ready.driveAsOf)}{ready.archived ? ', archived' : ''}. I can’t change, run, post or send anything, and I fade 10 minutes after your last question.</> : 'Opening the ghost…'}
+        {ready ? <>I read <span className="text-foreground">{what}</span> ({until === null ? `${ready.entries} entries` : `up to entry ${until}`}), its drive as it was at {time(ready.driveAsOf)}{ready.archived ? ', archived' : ''}. I can’t change, run, post or send anything, and I fade 10 minutes after your last question.</> : 'Opening the ghost…'}
       </p>
       {ghost.turns.map(turn => turn.role === 'person'
         ? <div key={`person-${turn.turn}`} className="flex flex-col items-end gap-1">
@@ -222,7 +215,7 @@ function GhostConversation({ ghost }: { ghost: Ghost }) {
           placeholder={ready?.main === false ? 'Ask about this session…' : 'Ask about this conversation…'}
           className="min-h-[38px] w-full resize-none bg-transparent text-[13px] leading-snug text-foreground outline-none placeholder:text-muted-foreground/70" />
         <div className="flex items-center gap-2">
-          <span className="flex min-w-0 items-center gap-1 text-[10.5px] text-muted-foreground"><Lock01 width={10} height={10} strokeWidth={2} className="shrink-0" /><span className="truncate">reads the transcript{ready?.chatter ? ', drive and Chatter' : ' and drive'} · keeps nothing</span></span>
+          <span className="flex min-w-0 items-center gap-1 text-[10.5px] text-muted-foreground"><Lock01 width={10} height={10} strokeWidth={2} className="shrink-0" /><span className="truncate">reads the transcript and drive · keeps nothing</span></span>
           <button type="button" aria-label="Ask" onClick={send} disabled={!ghost.input.trim() || busy || !ready}
             className="ml-auto flex size-7 shrink-0 items-center justify-center rounded-full text-white transition-opacity disabled:opacity-35" style={{ background: GHOST }}><ArrowUp width={15} height={15} strokeWidth={2} /></button>
         </div>

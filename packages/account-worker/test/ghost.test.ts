@@ -9,7 +9,6 @@ import { GHOST_LIFETIME_MS, GHOST_MAX_ROUNDS, GHOST_PATH, GhostAskResultSchema, 
 import { InspectorCloudArtifacts, readInspectorContext } from '../src/account-inspector-data.js';
 import { createDocumentMarkdown } from '../src/document-markdown.js';
 import { GhostSession, type GhostModel } from '../src/ghost-session.js';
-import type { ChatterAuthor } from '@gitspace/protocol/chatter-contract';
 import { createGhostTools } from '../src/ghost-tools.js';
 import { serveGhost } from '../src/ghost.js';
 import { SpaceAuthorityDO } from '../src/space-authority.js';
@@ -83,9 +82,9 @@ function scripted(replies: Array<(context: Context) => AssistantMessage>) {
   return { model, contexts };
 }
 
-/** A ghost of `identity`'s main conversation with `model`, its drive (and Chatter, when it reads it) read as of
- * `driveAsOf`, up to entry `until`; what it sends, collected. */
-async function ghost(identity: z.infer<typeof RuntimeIdentitySchema>, model: GhostModel, driveAsOf = new Date().toISOString(), options: { until?: number; chatter?: boolean } = {}) {
+/** A ghost of `identity`'s main conversation with `model`, its drive read as of `driveAsOf`, up to entry `until`; what
+ * it sends, collected. */
+async function ghost(identity: z.infer<typeof RuntimeIdentitySchema>, model: GhostModel, driveAsOf = new Date().toISOString(), options: { until?: number } = {}) {
   const sent: GhostServerMessage[] = [];
   const recorded: unknown[] = [];
   const session = new GhostSession({
@@ -97,10 +96,9 @@ async function ghost(identity: z.infer<typeof RuntimeIdentitySchema>, model: Gho
     ended() {},
   });
   const target = { ...identity, conversationId: 'main', until: options.until ?? null };
-  const chatter = options.chatter ?? false;
   await session.start({
-    asker: 'person', target, title: 'Main', main: true, entries: 3, archived: false, driveAsOf, chatter, profileId: 'default', model,
-    tools: createGhostTools({ env, target, driveAsOf, chatter, judge: async (_state, questions) => Object.fromEntries(Object.keys(questions).map(id => [id, 1])), documentMarkdown: createDocumentMarkdown(null, env.AI) }),
+    asker: 'person', target, title: 'Main', main: true, entries: 3, archived: false, driveAsOf, profileId: 'default', model,
+    tools: createGhostTools({ env, target, driveAsOf, judge: async (_state, questions) => Object.fromEntries(Object.keys(questions).map(id => [id, 1])), documentMarkdown: createDocumentMarkdown(null, env.AI) }),
   });
   const answer = async (text: string, about: number | null = null) => {
     await session.ask(text, about);
@@ -249,61 +247,14 @@ describe('a ghost of one session', () => {
     expect(contexts[0]!.messages[0]).toMatchObject({ role: 'user', content: 'About entry #2: Why did the agent do this?' });
   });
 
-  test('a draft for everyone says so with its kind; a draft asking a workspace to act does not', async () => {
+  test('it has exactly its three read tools: a chatter_read call finds no tool, and a [chatter:N] it writes stays text', async () => {
     const { identity } = await fixture();
     transcripts();
-    const { model } = scripted([
-      () => reply([{ type: 'text', text: 'I can\'t post.\n<draft for="everyone" kind="workaround">Exports go to the archive bucket: uploads is public.</draft>' }], 'stop'),
-      () => reply([{ type: 'text', text: 'I can\'t merge.\n<draft>Please merge the export change.</draft>' }], 'stop'),
-    ]);
+    const { model, contexts } = scripted([() => reply([call('chatter', 'chatter_read', {})], 'toolUse'), () => reply([{ type: 'text', text: 'I can only read the transcript [chatter:2].' }], 'stop')]);
     const { answer } = await ghost(identity, model);
 
-    expect(await answer('Tell everyone where exports go.')).toMatchObject({ draft: 'Exports go to the archive bucket: uploads is public.', everyone: 'workaround', parts: ['I can\'t post.'] });
-    expect(await answer('Merge it.')).toMatchObject({ draft: 'Please merge the export change.', everyone: null });
-  });
-
-  test('reads Chatter held to its project and to posts before its time, by default the topics its workspace posted in', async () => {
-    const { identity } = await fixture();
-    transcripts();
-    const chatter = env.PROJECT_CHATTER.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`);
-    const otherProject = crypto.randomUUID();
-    const elsewhere = env.PROJECT_CHATTER.getByName(`${env.ACCOUNT_ID}:${otherProject}`);
-    const own: ChatterAuthor = { kind: 'workspace', id: identity.workspaceId, name: 'exports' };
-    const neighbour: ChatterAuthor = { kind: 'workspace', id: 'neighbour', name: 'billing' };
-    vi.useFakeTimers({ toFake: ['Date'] });
-    vi.setSystemTime(new Date('2026-11-20T09:00:00.000Z'));
-    await chatter.post({ projectId: identity.projectId, id: 'p1', topic: 'archive bucket', kind: 'discovery', text: 'Uploads is public; exports go to the archive bucket.', author: own });
-    vi.setSystemTime(new Date('2026-11-20T09:01:00.000Z'));
-    await chatter.post({ projectId: identity.projectId, id: 'p2', topic: 'archive bucket', kind: 'workaround', text: 'Billing reads the archive bucket too.', author: neighbour });
-    await chatter.post({ projectId: identity.projectId, id: 'p3', topic: 'invoice rounding', kind: 'discovery', text: 'Invoices round half up.', author: neighbour });
-    vi.setSystemTime(new Date('2026-11-20T09:05:00.000Z'));
-    await chatter.post({ projectId: identity.projectId, id: 'p4', topic: 'archive bucket', kind: 'status', text: 'The archive bucket moved to cold storage.', author: own });
-    await elsewhere.post({ projectId: otherProject, id: 'x1', topic: 'archive bucket', kind: 'discovery', text: 'Another project keeps its own notes.', author: own });
-    vi.useRealTimers();
-    const { model, contexts } = scripted([
-      () => reply([call('mine', 'chatter_read', {}), call('all', 'chatter_read', { everywhere: 'true' })], 'toolUse'),
-      () => reply([{ type: 'text', text: 'Billing answered that it reads the bucket too [chatter:2].' }], 'stop'),
-    ]);
-    const { answer } = await ghost(identity, model, '2026-11-20T09:03:00.000Z', { chatter: true });
-
-    const answered = await answer('What did it tell the others?');
-    expect(answered.parts).toContainEqual({ kind: 'chatter', offset: 2 });
-    expect(contexts[0]!.tools?.map(tool => tool.name)).toContain('chatter_read');
-    const result = (id: string) => contexts[1]!.messages.flatMap(message => message.role === 'toolResult' && message.toolCallId === id ? message.content.flatMap(part => part.type === 'text' ? [part.text] : []) : []).join('');
-    const posts = (id: string) => z.object({ posts: z.array(z.object({ text: z.string() })) }).parse(JSON.parse(result(id))).posts.map(post => post.text);
-    expect(posts('mine')).toEqual(['Billing reads the archive bucket too.', 'Uploads is public; exports go to the archive bucket.']);
-    expect(posts('all')).toEqual(expect.arrayContaining(['Invoices round half up.', 'Billing reads the archive bucket too.']));
-    expect(posts('all').join('\n')).not.toMatch(/cold storage|Another project/u);
-  });
-
-  test('without Chatter (a device that may not read the project\'s) it has no chatter_read', async () => {
-    const { identity } = await fixture();
-    transcripts();
-    const { model, contexts } = scripted([() => reply([call('chatter', 'chatter_read', {})], 'toolUse'), () => reply([{ type: 'text', text: 'I can only read the transcript.' }], 'stop')]);
-    const { answer } = await ghost(identity, model);
-
-    await answer('What did it post?');
-    expect(contexts[0]!.tools?.map(tool => tool.name)).not.toContain('chatter_read');
+    expect(await answer('What did it post?')).toMatchObject({ parts: ['I can only read the transcript [chatter:2].'] });
+    expect(contexts[0]!.tools?.map(tool => tool.name)).toEqual(['history_search', 'history_read', 'read']);
     expect(toolText(contexts[1]!)).toContain('This ghost has no chatter_read tool');
   });
 

@@ -247,7 +247,7 @@ export const RuntimeGhostAskArgumentsSchema = z.object({
   question: z.string().trim().min(1).max(GHOST_QUESTION_MAX).describe('What to ask the ghost about the session, up to 4,000 characters.'),
   workspaceId: path.optional().describe('A workspace of this project whose conversation the ghost reads; this workspace when omitted.'),
   conversationId: path.optional().describe('One conversation of that workspace (an earlier one, a subagent\'s); its main conversation when omitted, and this conversation when workspaceId is omitted too.'),
-  until: z.number().int().nonnegative().optional().describe('An entry number: the ghost reads the session only up to this entry, and the drive and Chatter as they were at its time, so it answers as the agent could have known then.'),
+  until: z.number().int().nonnegative().optional().describe('An entry number: the ghost reads the session only up to this entry, and the drive as it was at its time, so it answers as the agent could have known then.'),
   ghostId: z.uuid().optional().describe('Ask a live ghost this conversation started again, by the ghostId its last answer returned; leave workspaceId, conversationId and until out.'),
 }).strict().refine(args => args.ghostId === undefined || (args.workspaceId === undefined && args.conversationId === undefined && args.until === undefined), { message: 'A follow-up names only ghostId: the ghost already reads its session', path: ['ghostId'] });
 export type RuntimeGhostAskArguments = z.infer<typeof RuntimeGhostAskArgumentsSchema>;

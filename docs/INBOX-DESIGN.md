@@ -435,8 +435,6 @@ Decision 10 covers which of these ship first.
   `WaitingItem` carries `entry`, computed when the report is built.
 - A ghost's **draft** goes into the row's note field instead of a workspace composer. The person sends it with the
   answer.
-- An issue row's topic posts each carry their `history://` or `result://` reference. Each offers "Ask a ghost about
-  this", as Chatter tooling posts do (`CHATTER-DESIGN.md` §11).
 - Requires Ghosts milestones 4 and 6.
 
 **Chatter** (`docs/CHATTER-DESIGN.md`):
