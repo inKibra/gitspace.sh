@@ -809,6 +809,17 @@ test('a rejected tool call names only the problems of the method it asked for, o
   expect(reject({ method: 'status' })).toMatch(/workspaceId/);
 });
 
+test('space_guide takes one-section edits, with the author left to the host', () => {
+  const guide = scriptToolSources.find(source => source.name === 'space_guide');
+  if (!guide) throw new Error('space_guide is not a script tool');
+  const section = { id: 'parse', title: 'Parse', kind: 'behavior', explanation: 'Reads the version first.', why: '', exhibits: [], requirementIds: [] };
+  expect(parseToolArguments('space_guide', guide.schema, { method: 'putSection', expectedRevision: 3, section, position: { after: 'intro' } })).toEqual({ method: 'putSection', expectedRevision: 3, section, position: { after: 'intro' } });
+  expect(parseToolArguments('space_guide', guide.schema, { method: 'removeSection', expectedRevision: 3, sectionId: 'parse' })).toEqual({ method: 'removeSection', expectedRevision: 3, sectionId: 'parse' });
+  expect(parseToolArguments('space_guide', guide.schema, { method: 'moveSection', expectedRevision: 3, sectionId: 'parse', position: 'first' })).toEqual({ method: 'moveSection', expectedRevision: 3, sectionId: 'parse', position: 'first' });
+  expect(() => parseToolArguments('space_guide', guide.schema, { method: 'putSection', expectedRevision: 3, section, createdBy: 'someone' })).toThrow('createdBy');
+  expect(() => parseToolArguments('space_guide', guide.schema, { method: 'moveSection', expectedRevision: 3, sectionId: 'parse', position: 'middle' })).toThrow('position');
+});
+
 /** `count` numbered lines of 30 bytes each. */
 const numbered = (count: number) => Array.from({ length: count }, (_, index) => `line ${String(index + 1).padStart(6, '0')}: ${'x'.repeat(15)}\n`).join('');
 /** The result the model saw for call `id`. */

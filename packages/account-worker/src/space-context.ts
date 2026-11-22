@@ -14,10 +14,13 @@ import {
   inspectorOverviewSchema,
   journalEntryViewSchema,
   markGuideSectionReadInputSchema,
+  moveChangeGuideSectionInputSchema,
   putChangeGuideInputSchema,
+  putChangeGuideSectionInputSchema,
   putGoalInputSchema,
   putRubricInputSchema,
   putWorkflowInputSchema,
+  removeChangeGuideSectionInputSchema,
   reviewAnchorContextSchema,
   reviewAnchorSchema,
   reviewMessageViewSchema,
@@ -35,6 +38,7 @@ import {
   type AppendRubricJudgmentInput,
   type AttachRequirementEvidenceInput,
   type ChangeGuideRevisionSummary,
+  type ChangeGuideSection,
   type ChangeGuideView,
   type EndJournalPhaseInput,
   type EvidenceReference,
@@ -45,10 +49,14 @@ import {
   type JournalEntryView,
   type JournalStateSnapshot,
   type MarkGuideSectionReadInput,
+  type MoveChangeGuideSectionInput,
   type PutChangeGuideInput,
+  type PutChangeGuideSectionInput,
   type PutGoalInput,
   type PutRubricInput,
   type PutWorkflowInput,
+  type RemoveChangeGuideSectionInput,
+  type GuideSectionPosition,
   type ReviewAnchorContext,
   type ReviewThreadView,
   type RubricJudgment,
@@ -666,6 +674,41 @@ export class SpaceContextDO extends BudgetedDurableObject {
     });
   }
 
+  /** Adds or replaces one section as a new guide revision; the other sections and the guide's other parts carry over. */
+  putChangeGuideSection(input: PutChangeGuideSectionInput): ChangeGuideView {
+    const parsed = putChangeGuideSectionInputSchema.parse(input);
+    return this.editChangeGuide(parsed, (sections) => {
+      const at = sections.findIndex((section) => section.id === parsed.section.id);
+      if (parsed.position === undefined) return at === -1 ? [...sections, parsed.section] : sections.with(at, parsed.section);
+      return placeGuideSection(sections.filter((section) => section.id !== parsed.section.id), parsed.section, parsed.position);
+    });
+  }
+
+  /** Removes one section as a new guide revision. */
+  removeChangeGuideSection(input: RemoveChangeGuideSectionInput): ChangeGuideView {
+    const parsed = removeChangeGuideSectionInputSchema.parse(input);
+    return this.editChangeGuide(parsed, (sections) => {
+      requireGuideSection(sections, parsed.sectionId);
+      return sections.filter((section) => section.id !== parsed.sectionId);
+    });
+  }
+
+  /** Moves one section in the reading order as a new guide revision. */
+  moveChangeGuideSection(input: MoveChangeGuideSectionInput): ChangeGuideView {
+    const parsed = moveChangeGuideSectionInputSchema.parse(input);
+    return this.editChangeGuide(parsed, (sections) => placeGuideSection(sections.filter((section) => section.id !== parsed.sectionId), requireGuideSection(sections, parsed.sectionId), parsed.position));
+  }
+
+  /** Writes the latest guide with its sections changed by `edit` as the next revision, through `putChangeGuide`. */
+  private editChangeGuide(input: InspectorIdentity & { expectedRevision: number; createdBy: string }, edit: (sections: ChangeGuideSection[]) => ChangeGuideSection[]): ChangeGuideView {
+    const current = this.readChangeGuide(this.requireIdentity(input));
+    if (!current) throw new InspectorStateError('Change Guide does not exist; put the whole guide first');
+    this.assertRevision('change-guide', input.expectedRevision, current.revision);
+    const { projectId, spaceId, revision, reviewerStates, createdAt, baseCommit, ...guide } = current;
+    if (baseCommit === null) throw new InspectorStateError('This Change Guide predates recorded base commits; put the whole guide to edit it');
+    return this.putChangeGuide({ projectId, spaceId, expectedRevision: revision, guide: { ...guide, baseCommit, sections: edit(current.sections), createdBy: input.createdBy } });
+  }
+
   markGuideSectionRead(input: MarkGuideSectionReadInput): ChangeGuideView {
     const parsed = markGuideSectionReadInputSchema.parse(input);
     const identity = this.requireIdentity(parsed);
@@ -1148,6 +1191,23 @@ function withThemeColours(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(withThemeColours);
   if (typeof value !== 'object' || value === null) return value;
   return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, withThemeColours(item)]));
+}
+
+/** The guide section with id `sectionId`; refused when the guide has none. */
+function requireGuideSection(sections: readonly ChangeGuideSection[], sectionId: string): ChangeGuideSection {
+  const section = sections.find((candidate) => candidate.id === sectionId);
+  if (!section) throw new InspectorStateError(`Guide section ${sectionId} does not exist`);
+  return section;
+}
+
+/** `others` with `section` placed at `position`; `others` holds every other section. */
+function placeGuideSection(others: readonly ChangeGuideSection[], section: ChangeGuideSection, position: GuideSectionPosition): ChangeGuideSection[] {
+  if (position === 'first') return [section, ...others];
+  if (position === 'last') return [...others, section];
+  if (position.after === section.id) throw new InspectorStateError(`Guide section ${section.id} cannot be placed after itself`);
+  const at = others.findIndex((candidate) => candidate.id === position.after);
+  if (at === -1) throw new InspectorStateError(`Guide section ${position.after} does not exist`);
+  return others.toSpliced(at + 1, 0, section);
 }
 
 /** A Markdown field of a write, named by its path in the write's input. */

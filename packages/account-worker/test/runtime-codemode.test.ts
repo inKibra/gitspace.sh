@@ -2,6 +2,8 @@ import { env, runInDurableObject } from 'cloudflare:test';
 import { exports } from 'cloudflare:workers';
 import { expect, test } from 'vitest';
 import { createCloudCodemode } from '../src/runtime-codemode.js';
+import { invokeRuntimeSpaceTool } from '../src/runtime-space-tools.js';
+import { z } from 'zod';
 import { storedImages } from '../src/runtime-images.js';
 import { tenantRootPrivateKey } from './setup.js';
 import { ed25519 } from '@noble/curves/ed25519.js';
@@ -11,7 +13,7 @@ import { Harness, MemoryStorage, createRegistry, defineExtension } from '@earend
 import { createModels, createAssistantMessageEventStream, type AssistantMessage, type Models, type Model, type Api } from '@earendil-works/pi-ai';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { createRuntimeTools, WorkspaceDoc, type ToolServices } from '@gitspace/runtime-core';
-import { RuntimeToolResultRequestSchema, toolResultReference, WORKSPACE_TOOL_RESULTS_MAX_BYTES, type RuntimeToolResult } from '@gitspace/protocol-runtime';
+import { RuntimeIdentitySchema, RuntimeToolResultRequestSchema, toolResultReference, WORKSPACE_TOOL_RESULTS_MAX_BYTES, type RuntimeToolResult } from '@gitspace/protocol-runtime';
 
 const noModel = async (): Promise<never> => { throw new Error('No inference in local isolate proof'); };
 type Invocation = Parameters<WorkspaceRuntimeOptions['tools']['invoke']>[0];
@@ -246,5 +248,60 @@ test('a script reads its workspace\'s stored images with images.read, and not an
     expect(result).toMatchObject({ status: 'completed' });
     const content = result.content.at(-1);
     expect(JSON.parse(content?.type === 'text' ? content.text : '')).toEqual({ size: png.byteLength, signature: [0x89, 0x50, 0x4e, 0x47], refused: expect.stringContaining("is not this workspace's") });
+  });
+});
+
+test('a script passes a tool up to 1 MiB of arguments but still shows the model at most 64 KiB', async () => {
+  await runInDurableObject(env.SPACE_AUTHORITY.getByName(`codemode-limits:${crypto.randomUUID()}`), async (_instance, ctx) => {
+    const sandbox = createCloudCodemode({ loader: env.CODEMODE_LOADER, storage: ctx.storage, model: noModel, images: exports.ImageReader({ props: { workspaceId: 'codemode-images' } }) });
+    const received: number[] = [];
+    const codemodeTools: Invocation['codemodeTools'] = async ({ args }) => { received.push(JSON.stringify(args).length); return { status: 'completed', value: null }; };
+    const sent = await sandbox.execute({ ...invocation('await tools.write({ path: "large", content: "x".repeat(200_000) }); try { await tools.write({ path: "huge", content: "x".repeat(1_048_576) }); return "sent"; } catch (error) { return error.message; }'), attemptId: 'arguments', codemodeTools });
+    expect(sent).toMatchObject({ status: 'completed', content: [{ type: 'text', text: '"Codemode tool arguments exceed 1 MiB"' }] });
+    expect(received).toEqual([200_000 + '{"path":"large","content":""}'.length]);
+    const shown = await sandbox.execute({ ...invocation('return "x".repeat(70_000);'), attemptId: 'output', codemodeTools });
+    expect(shown).toMatchObject({ status: 'failed', content: [{ type: 'text', text: 'Codemode output limit exceeded' }] });
+  });
+});
+
+test('a script edits one section of a Change Guide larger than 64 KiB through space_guide', async () => {
+  const identity = RuntimeIdentitySchema.parse({ projectId: 'project-guide', workspaceId: 'workspace-guide' });
+  const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`);
+  const project = await authority.bootstrap({ id: identity.projectId, name: 'Large guide', repositoryReference: null, baseBranch: 'main', createdBy: 'user' });
+  await authority.setProjectLifecycle(project.revision, 'active');
+  await authority.putWorkspace({ id: identity.workspaceId, projectId: identity.projectId, kind: 'worktree', name: 'guide', branch: 'main', phase: 'code', sourceKind: 'base', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
+  await runInDurableObject(env.SPACE_AUTHORITY.getByName(`codemode-guide:${crypto.randomUUID()}`), async (_instance, ctx) => {
+    const sandbox = createCloudCodemode({ loader: env.CODEMODE_LOADER, storage: ctx.storage, model: noModel, images: exports.ImageReader({ props: { workspaceId: 'codemode-images' } }) });
+    const codemodeTools: Invocation['codemodeTools'] = async ({ tool, args, callId }) => {
+      const value = await invokeRuntimeSpaceTool(env, identity, { tool, args, conversationId: 'agent-a', attemptId: callId });
+      return { status: 'completed', value: [{ type: 'text', text: JSON.stringify(value) }] };
+    };
+    const run = async (attemptId: string, code: string) => {
+      const result = await sandbox.execute({ ...invocation(code), args: { code, timeoutMs: 20_000 }, attemptId, codemodeTools });
+      const text = result.content.at(-1);
+      expect(result.status).toBe('completed');
+      return z.record(z.string(), z.unknown()).parse(JSON.parse(text?.type === 'text' ? text.text : 'null'));
+    };
+    const created = await run('create', `
+      const diagram = "\`\`\`mermaid\\ngraph LR\\n  a --> b\\n\`\`\`";
+      const sections = Array.from({ length: 25 }, (_, index) => ({ id: "s" + index, title: "Section " + index, kind: "behavior", explanation: "Explains. ".repeat(300), why: "", diagram, exhibits: [], requirementIds: [] }));
+      const walkthrough = { root: "tour", elements: { tour: { type: "Sequence", props: { title: "Large", frames: [{ content: { ref: "overview" }, say: "The guide." }, { content: { ref: "section:s0" }, say: "The first section." }] }, children: [] } } };
+      const guide = { headCommit: "${'a'.repeat(40)}", baseRef: "main", baseCommit: "${'b'.repeat(40)}", title: "Large guide", sections, walkthrough };
+      const written = JSON.parse((await tools.space_guide({ method: "put", expectedRevision: 0, guide }))[0].text);
+      return { revision: written.revision, bytes: JSON.stringify(guide).length };
+    `);
+    expect(created).toMatchObject({ revision: 1, bytes: expect.any(Number) });
+    expect(Number(created.bytes)).toBeGreaterThan(65_536);
+    const edited = await run('edit', `
+      const guide = JSON.parse((await tools.space_guide({ method: "get" }))[0].text);
+      const section = guide.sections.find(item => item.id === "s7");
+      const written = JSON.parse((await tools.space_guide({ method: "putSection", expectedRevision: guide.revision, section: { ...section, explanation: "Rewritten." }, position: "first" }))[0].text);
+      return { revision: written.revision, order: written.sections.slice(0, 2).map(item => item.id), toAdd: written.toAdd ?? null };
+    `);
+    expect(edited).toStrictEqual({ revision: 2, order: ['s7', 's0'], toAdd: null });
+    const stored = await env.SPACE_CONTEXT.getByName(JSON.stringify([env.ACCOUNT_ID, identity.projectId, identity.workspaceId])).getChangeGuide({ projectId: identity.projectId, spaceId: identity.workspaceId });
+    expect(stored?.sections).toHaveLength(25);
+    expect(stored?.sections[0]).toMatchObject({ id: 's7', explanation: 'Rewritten.' });
+    expect(stored?.createdBy).toBe('conversation:agent-a');
   });
 });

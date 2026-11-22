@@ -28,7 +28,7 @@ function reviewGuideNarrator(): string {
   const frames = NARRATOR_EXAMPLE.frames.map((frame) => `  ${JSON.stringify(frame)}`).join(',\n');
   return `---
 name: review-guide-narrator
-description: Write a reviewable Change Guide grounded in the Goal, the Journal and the current Git diff, with a diagram per section and a narrated walkthrough. Use whenever you write or update a Change Guide (space_guide put), including when told to write one with a pull request.
+description: Write a reviewable Change Guide grounded in the Goal, the Journal and the current Git diff, with a diagram per section and a narrated walkthrough. Use whenever you write or update a Change Guide (space_guide put, putSection, removeSection or moveSection), including when told to write one with a pull request.
 ---
 
 # Review Guide Narrator
@@ -97,14 +97,16 @@ ${frames}
 
 ## Put
 
-Read the arguments with \`await tools.describe('space_guide', 'put')\`, then \`put\` with the revision from \`get\` (0 creates); the host records who wrote it. Every Markdown field and diagram is validated; an error names the field and the path inside the block. Fix and resubmit until accepted. The result leads with \`toAdd\` when a section has no diagram or the guide no walkthrough: add what each line asks and put again in the same turn.
+Read the arguments with \`await tools.describe('space_guide', 'put')\`, then \`put\` with the revision from \`get\` (0 creates); the host records who wrote it. Every Markdown field and diagram is validated; an error names the field and the path inside the block. Fix and resubmit until accepted. The result leads with \`toAdd\` when a section has no diagram or the guide no walkthrough: add what each line asks in the same turn.
+
+To change an existing guide, edit one section at a time instead of re-sending the guide: \`putSection\` adds or replaces one section by id (\`position\`: \`"first"\`, \`"last"\` or \`{ after: "<section id>" }\`; omitted, a replaced section keeps its place and a new one goes last), \`removeSection\` removes one, \`moveSection\` moves one. Each takes \`expectedRevision\` from \`get\` (or the last write's result), writes one new revision, and keeps every other part of the guide as it was. Use \`put\` only to create the guide or change its title, intro, captures, map or walkthrough.
 
 ## Hard rules
 
 - HEAD and \`baseCommit\` are the checkout's; the guide's diffs compare against \`baseCommit\`.
 - Every changed file appears in some section's exhibits; leftovers go in one mechanical section.
 - Reader order is authoritative.
-- A revision is the whole guide: carry every field you are not changing forward from \`get\`.
+- A \`put\` is the whole guide: carry every field you are not changing forward from \`get\`.
 - Only a person approves a guide or accepts a requirement; never claim either.
 `;
 }

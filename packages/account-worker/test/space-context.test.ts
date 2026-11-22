@@ -200,6 +200,47 @@ describe('SpaceContextDO', () => {
     expect((await inside('inspector-walkthrough', (context) => context.listGuideRevisions(identity))).map((summary) => summary.revision)).toEqual([2, 1]);
   });
 
+  it('edits one guide section at a time as new revisions, carrying the rest of the guide byte for byte', async () => {
+    const section = (id: string, explanation = `Section ${id}.`) => ({ id, title: `Title ${id}`, kind: 'behavior' as const, explanation, why: '', diagram: '```mermaid\ngraph LR\n  a --> b\n```', exhibits: [{ path: `src/${id}.ts`, blobId: null, note: '', slowRead: false }], requirementIds: [] });
+    const tour = { root: 'tour', elements: { tour: { type: 'Sequence', props: { title: 'Sections', frames: [{ content: { ref: 'overview' }, say: 'The guide.' }, { content: { ref: 'section:a' }, say: 'Section a.' }] }, children: [] } } };
+    const name = 'inspector-sections';
+    const rows = (revision: number) => runInDurableObject(env.SPACE_CONTEXT.getByName(name), (_context: SpaceContextDO, state) =>
+      state.storage.sql.exec<{ section_id: string; value_json: string }>('SELECT section_id, value_json FROM inspector_guide_sections WHERE revision = ? ORDER BY ordinal', revision).toArray().map((row) => [row.section_id, row.value_json]));
+    const order = (guide: { sections: { id: string }[] }) => guide.sections.map((item) => item.id);
+    const first = await inside(name, (context) => context.putChangeGuide({ ...identity, expectedRevision: 0, guide: { headCommit: head, baseRef: 'main', baseCommit: movedHead, title: 'Sections', intro: 'Three parts.', createdBy: 'narrator-a', sections: [section('a'), section('b'), section('c')], walkthrough: tour } }));
+
+    const replaced = await inside(name, (context) => context.putChangeGuideSection({ ...identity, expectedRevision: first.revision, section: section('b', 'Rewritten.'), createdBy: 'narrator-b' }));
+    expect(replaced).toMatchObject({ revision: 2, createdBy: 'narrator-b', intro: 'Three parts.', walkthrough: tour, headCommit: head, baseCommit: movedHead });
+    expect(order(replaced)).toEqual(['a', 'b', 'c']);
+    expect(replaced.sections[1]?.explanation).toBe('Rewritten.');
+    const [before, after] = [await rows(1), await rows(2)];
+    expect([after[0], after[2]]).toStrictEqual([before[0], before[2]]);
+    expect(after[1]).not.toStrictEqual(before[1]);
+
+    const added = await inside(name, (context) => context.putChangeGuideSection({ ...identity, expectedRevision: 2, section: section('d'), createdBy: 'narrator-b' }));
+    expect(order(added)).toEqual(['a', 'b', 'c', 'd']);
+    const placed = await inside(name, (context) => context.putChangeGuideSection({ ...identity, expectedRevision: 3, section: section('e'), position: { after: 'a' }, createdBy: 'narrator-b' }));
+    expect(order(placed)).toEqual(['a', 'e', 'b', 'c', 'd']);
+    const firsted = await inside(name, (context) => context.putChangeGuideSection({ ...identity, expectedRevision: 4, section: section('d', 'First now.'), position: 'first', createdBy: 'narrator-b' }));
+    expect(order(firsted)).toEqual(['d', 'a', 'e', 'b', 'c']);
+    expect(firsted.sections[0]?.explanation).toBe('First now.');
+
+    const removed = await inside(name, (context) => context.removeChangeGuideSection({ ...identity, expectedRevision: 5, sectionId: 'e', createdBy: 'narrator-b' }));
+    expect(order(removed)).toEqual(['d', 'a', 'b', 'c']);
+    const moved = await inside(name, (context) => context.moveChangeGuideSection({ ...identity, expectedRevision: 6, sectionId: 'd', position: 'last', createdBy: 'narrator-b' }));
+    expect(order(moved)).toEqual(['a', 'b', 'c', 'd']);
+    const movedAfter = await inside(name, (context) => context.moveChangeGuideSection({ ...identity, expectedRevision: 7, sectionId: 'a', position: { after: 'c' }, createdBy: 'narrator-b' }));
+    expect(order(movedAfter)).toEqual(['b', 'c', 'a', 'd']);
+    expect(new Set((await rows(8)).map(([, value]) => value))).toStrictEqual(new Set((await rows(7)).map(([, value]) => value)));
+
+    await expect(inside(name, (context) => context.putChangeGuideSection({ ...identity, expectedRevision: 7, section: section('f'), createdBy: 'narrator-c' }))).rejects.toThrow('change-guide revision conflict: expected 7, actual 8');
+    await expect(inside(name, (context) => context.moveChangeGuideSection({ ...identity, expectedRevision: 8, sectionId: 'missing', position: 'first', createdBy: 'narrator-c' }))).rejects.toThrow('Guide section missing does not exist');
+    await expect(inside(name, (context) => context.moveChangeGuideSection({ ...identity, expectedRevision: 8, sectionId: 'b', position: { after: 'b' }, createdBy: 'narrator-c' }))).rejects.toThrow('cannot be placed after itself');
+    await expect(inside(name, (context) => context.removeChangeGuideSection({ ...identity, expectedRevision: 8, sectionId: 'a', createdBy: 'narrator-c' }))).rejects.toThrow('section:a');
+    expect((await inside(name, (context) => context.getChangeGuide(identity)))?.revision).toBe(8);
+    await expect(inside('inspector-sections-empty', (context) => context.putChangeGuideSection({ ...identity, expectedRevision: 1, section: section('a'), createdBy: 'narrator-c' }))).rejects.toThrow('put the whole guide first');
+  });
+
   it('reads goals, guides and journal entries stored before their new fields exactly as before', async () => {
     const section = { id: 'old', title: 'Old section', kind: 'risk', explanation: 'Changed.', why: '', exhibits: [{ path: 'src/a.ts', blobId: null, note: '', slowRead: false }], requirementIds: [] };
     await runInDurableObject(env.SPACE_CONTEXT.getByName('inspector-legacy'), (context: SpaceContextDO, state) => {

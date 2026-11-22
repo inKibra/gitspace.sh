@@ -781,6 +781,26 @@ export const appendJournalEntryInputSchema = inspectorIdentitySchema.extend({
   ...journalDecisionFields,
 }).strict();
 export const putChangeGuideInputSchema = inspectorIdentitySchema.extend({ expectedRevision: putRevisionSchema, guide: changeGuideDraftSchema.describe('The whole new guide revision.') }).strict();
+/** Where a section goes in the guide's reading order: first, last, or right after the named section. */
+export const guideSectionPositionSchema = z.union([z.enum(['first', 'last']), z.object({ after: idSchema.describe('The section it follows.') }).strict()])
+  .describe('"first", "last", or { "after": "<section id>" }.');
+export type GuideSectionPosition = z.infer<typeof guideSectionPositionSchema>;
+const guideSectionRevisionSchema = revisionSchema.describe('The guide\'s current revision, from get. A stale revision is refused.');
+/** One section added or replaced as a new guide revision; the guide's other parts carry over unchanged. */
+export const putChangeGuideSectionInputSchema = inspectorIdentitySchema.extend({
+  expectedRevision: guideSectionRevisionSchema,
+  section: changeGuideSectionSchema.describe('The whole section; one with an existing id replaces that section.'),
+  position: guideSectionPositionSchema.optional().describe('Where the section goes; when omitted, an existing section stays where it is and a new one goes last.'),
+  createdBy: idSchema.describe('Who wrote this revision.'),
+}).strict();
+/** One section removed as a new guide revision. */
+export const removeChangeGuideSectionInputSchema = inspectorIdentitySchema.extend({
+  expectedRevision: guideSectionRevisionSchema, sectionId: idSchema.describe('The section to remove.'), createdBy: idSchema.describe('Who wrote this revision.'),
+}).strict();
+/** One section moved in the reading order as a new guide revision. */
+export const moveChangeGuideSectionInputSchema = inspectorIdentitySchema.extend({
+  expectedRevision: guideSectionRevisionSchema, sectionId: idSchema.describe('The section to move.'), position: guideSectionPositionSchema, createdBy: idSchema.describe('Who wrote this revision.'),
+}).strict();
 export const analyzeChangeGuideInputSchema = inspectorIdentitySchema.extend({
   expectedGeneration: generationSchema,
   baseRef: z.string().trim().min(1).max(512),
@@ -820,6 +840,9 @@ export type StartJournalPhaseInput = z.infer<typeof startJournalPhaseInputSchema
 export type EndJournalPhaseInput = z.infer<typeof endJournalPhaseInputSchema>;
 export type AppendJournalEntryInput = z.infer<typeof appendJournalEntryInputSchema>;
 export type PutChangeGuideInput = z.infer<typeof putChangeGuideInputSchema>;
+export type PutChangeGuideSectionInput = z.infer<typeof putChangeGuideSectionInputSchema>;
+export type RemoveChangeGuideSectionInput = z.infer<typeof removeChangeGuideSectionInputSchema>;
+export type MoveChangeGuideSectionInput = z.infer<typeof moveChangeGuideSectionInputSchema>;
 export type AnalyzeChangeGuideInput = z.infer<typeof analyzeChangeGuideInputSchema>;
 export type SubmitChangeGuideInput = z.infer<typeof submitChangeGuideInputSchema>;
 export type MarkGuideSectionReadInput = z.infer<typeof markGuideSectionReadInputSchema>;
@@ -857,6 +880,9 @@ export const StartJournalPhaseInputCodec = asWireCodec(startJournalPhaseInputSch
 export const EndJournalPhaseInputCodec = asWireCodec(endJournalPhaseInputSchema, 'gitspace/end-journal-phase-input/v1');
 export const AppendJournalEntryInputCodec = asWireCodec(appendJournalEntryInputSchema, 'gitspace/append-journal-entry-input/v1');
 export const PutChangeGuideInputCodec = asWireCodec(putChangeGuideInputSchema, 'gitspace/put-change-guide-input/v1');
+export const PutChangeGuideSectionInputCodec = asWireCodec(putChangeGuideSectionInputSchema, 'gitspace/put-change-guide-section-input/v1');
+export const RemoveChangeGuideSectionInputCodec = asWireCodec(removeChangeGuideSectionInputSchema, 'gitspace/remove-change-guide-section-input/v1');
+export const MoveChangeGuideSectionInputCodec = asWireCodec(moveChangeGuideSectionInputSchema, 'gitspace/move-change-guide-section-input/v1');
 export const AnalyzeChangeGuideInputCodec = asWireCodec(analyzeChangeGuideInputSchema, 'gitspace/analyze-change-guide-input/v1');
 export const SubmitChangeGuideInputCodec = asWireCodec(submitChangeGuideInputSchema, 'gitspace/submit-change-guide-input/v1');
 export const MarkGuideSectionReadInputCodec = asWireCodec(markGuideSectionReadInputSchema, 'gitspace/mark-guide-section-read-input/v1');

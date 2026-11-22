@@ -396,6 +396,25 @@ describe('Change Guide revisions', () => {
 
     expect(await read('inspector.guide.get', { revision: 7 })).toMatchObject({ status: 'error', error: { _tag: 'gitspace/inspector-state', data: { message: 'Change Guide revision 7 does not exist' } } });
   });
+
+  it('edits one section at a time over RPC, each a new revision, refusing a stale revision', async () => {
+    const person = await account();
+    const { projectId, spaceId } = await inspectorWorkspace(person.userId);
+    const invoke = async (path: string, input: unknown) => parse(await (await SELF.fetch(person.request(single(path, { expectedGeneration: 0, input })))).text());
+    const identity = { projectId, spaceId };
+    const section = (id: string, explanation: string) => ({ id, title: `Section ${id}`, kind: 'behavior', explanation, why: '', exhibits: [], requirementIds: [] });
+    const ids = (result: { value: { sections: { id: string }[] } }) => result.value.sections.map((entry) => entry.id);
+    expect(await invoke('inspector.guide.put', { ...identity, expectedRevision: 0, guide: { headCommit: 'a'.repeat(40), baseRef: 'main', baseCommit: 'b'.repeat(40), title: 'Sections', createdBy: 'narrator-a', sections: [section('a', 'A'), section('b', 'B')] } })).toMatchObject({ status: 'ok' });
+    const put = await invoke('inspector.guide.putSection', { ...identity, expectedRevision: 1, section: section('c', 'C'), position: 'first', createdBy: 'narrator-b' });
+    expect(put).toMatchObject({ status: 'ok', value: { revision: 2, createdBy: 'narrator-b' } });
+    expect(ids(put)).toEqual(['c', 'a', 'b']);
+    const moved = await invoke('inspector.guide.moveSection', { ...identity, expectedRevision: 2, sectionId: 'c', position: { after: 'b' }, createdBy: 'narrator-b' });
+    expect(ids(moved)).toEqual(['a', 'b', 'c']);
+    const removed = await invoke('inspector.guide.removeSection', { ...identity, expectedRevision: 3, sectionId: 'a', createdBy: 'narrator-b' });
+    expect(removed).toMatchObject({ status: 'ok', value: { revision: 4 } });
+    expect(ids(removed)).toEqual(['b', 'c']);
+    expect(await invoke('inspector.guide.removeSection', { ...identity, expectedRevision: 3, sectionId: 'b', createdBy: 'narrator-b' })).toMatchObject({ status: 'error', error: { data: { message: 'change-guide revision conflict: expected 3, actual 4' } } });
+  });
 });
 
 describe('account cloud RPC without machines', () => {

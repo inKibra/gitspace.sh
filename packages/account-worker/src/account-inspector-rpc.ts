@@ -34,6 +34,9 @@ import {
   inspectorEndJournalPhaseContract,
   inspectorAppendJournalEntryContract,
   inspectorPutChangeGuideContract,
+  inspectorPutChangeGuideSectionContract,
+  inspectorRemoveChangeGuideSectionContract,
+  inspectorMoveChangeGuideSectionContract,
   inspectorMarkGuideSectionReadContract,
   inspectorSetGuideApprovalContract,
   inspectorGuideDiffContract,
@@ -355,6 +358,48 @@ export function inspectorCloudProcedures(env: Env, userId: string, currentDevice
       if (error instanceof InspectorStateError) return err(errors.InspectorState({ resource: 'inspector', message: error.message }));
       if (error instanceof InspectorConflictError) return err(errors.InspectorConflict({ resource: error.resource, expected: error.expected, actual: error.actual }));
       return err(errors.OperationFailed({ operation: 'Inspector putGuide', message: error instanceof Error ? error.message : String(error) }));
+    }
+  });
+  const putGuideSection = server.implement(inspectorPutChangeGuideSectionContract).handler(async ({ input, errors }) => {
+    try {
+      const source = await readInspectorContext(env, userId, input.input.spaceId, input.input.projectId, input.expectedGeneration);
+      const value = await source.context.putChangeGuideSection({ ...input.input, ...source.identity });
+      await source.authority.appendEvent({ scope: 'workspace', entity: 'change-guide', entityId: source.identity.spaceId, revision: value.revision, operation: 'updated', payload: { spaceId: source.identity.spaceId } });
+      return ok(value);
+    } catch (error) {
+      if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));
+      if (error instanceof InspectorGenerationConflict) return err(errors.SpaceGenerationConflict({ spaceId: error.spaceId, expected: error.expected, actual: error.actual }));
+      if (error instanceof InspectorStateError) return err(errors.InspectorState({ resource: 'inspector', message: error.message }));
+      if (error instanceof InspectorConflictError) return err(errors.InspectorConflict({ resource: error.resource, expected: error.expected, actual: error.actual }));
+      return err(errors.OperationFailed({ operation: 'Inspector putGuideSection', message: error instanceof Error ? error.message : String(error) }));
+    }
+  });
+  const removeGuideSection = server.implement(inspectorRemoveChangeGuideSectionContract).handler(async ({ input, errors }) => {
+    try {
+      const source = await readInspectorContext(env, userId, input.input.spaceId, input.input.projectId, input.expectedGeneration);
+      const value = await source.context.removeChangeGuideSection({ ...input.input, ...source.identity });
+      await source.authority.appendEvent({ scope: 'workspace', entity: 'change-guide', entityId: source.identity.spaceId, revision: value.revision, operation: 'updated', payload: { spaceId: source.identity.spaceId } });
+      return ok(value);
+    } catch (error) {
+      if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));
+      if (error instanceof InspectorGenerationConflict) return err(errors.SpaceGenerationConflict({ spaceId: error.spaceId, expected: error.expected, actual: error.actual }));
+      if (error instanceof InspectorStateError) return err(errors.InspectorState({ resource: 'inspector', message: error.message }));
+      if (error instanceof InspectorConflictError) return err(errors.InspectorConflict({ resource: error.resource, expected: error.expected, actual: error.actual }));
+      return err(errors.OperationFailed({ operation: 'Inspector removeGuideSection', message: error instanceof Error ? error.message : String(error) }));
+    }
+  });
+  const moveGuideSection = server.implement(inspectorMoveChangeGuideSectionContract).handler(async ({ input, errors }) => {
+    try {
+      const source = await readInspectorContext(env, userId, input.input.spaceId, input.input.projectId, input.expectedGeneration);
+      const value = await source.context.moveChangeGuideSection({ ...input.input, ...source.identity });
+      await source.authority.appendEvent({ scope: 'workspace', entity: 'change-guide', entityId: source.identity.spaceId, revision: value.revision, operation: 'updated', payload: { spaceId: source.identity.spaceId } });
+      return ok(value);
+    } catch (error) {
+      if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));
+      if (error instanceof InspectorGenerationConflict) return err(errors.SpaceGenerationConflict({ spaceId: error.spaceId, expected: error.expected, actual: error.actual }));
+      if (error instanceof InspectorStateError) return err(errors.InspectorState({ resource: 'inspector', message: error.message }));
+      if (error instanceof InspectorConflictError) return err(errors.InspectorConflict({ resource: error.resource, expected: error.expected, actual: error.actual }));
+      return err(errors.OperationFailed({ operation: 'Inspector moveGuideSection', message: error instanceof Error ? error.message : String(error) }));
     }
   });
   const markSectionRead = server.implement(inspectorMarkGuideSectionReadContract).handler(async ({ input, errors }) => {
@@ -722,7 +767,7 @@ export function inspectorCloudProcedures(env: Env, userId: string, currentDevice
     rubric: { put: putRubric, appendJudgment },
     journal: { list: journal, startPhase, endPhase, append: appendJournal },
     guide: {
-      put: putGuide, analyze: analyzeGuide, submit: submitGuide, markSectionRead, setApproval, diff: guideDiff, revisions: guideRevisions, get: getGuide,
+      put: putGuide, putSection: putGuideSection, removeSection: removeGuideSection, moveSection: moveGuideSection, analyze: analyzeGuide, submit: submitGuide, markSectionRead, setApproval, diff: guideDiff, revisions: guideRevisions, get: getGuide,
       shares: { list: listGuideShares, create: createGuideShareHandler, revoke: revokeGuideShare },
     },
     review: { list: threads },

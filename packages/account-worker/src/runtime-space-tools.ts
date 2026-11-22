@@ -1,8 +1,9 @@
 import { z } from 'zod';
 import {
   appendJournalEntryInputSchema, attachRequirementEvidenceInputSchema, changeGuideAgentDraftSchema,
-  endJournalPhaseInputSchema, goalAgentDraftSchema, markGuideSectionReadInputSchema,
-  putChangeGuideInputSchema, putGoalInputSchema, putRubricInputSchema, putWorkflowInputSchema,
+  endJournalPhaseInputSchema, goalAgentDraftSchema, markGuideSectionReadInputSchema, moveChangeGuideSectionInputSchema,
+  putChangeGuideInputSchema, putChangeGuideSectionInputSchema, putGoalInputSchema, putRubricInputSchema, putWorkflowInputSchema,
+  removeChangeGuideSectionInputSchema,
   reviewAnchorContextSchema, rubricAgentDraftSchema, startJournalPhaseInputSchema, workflowAgentDraftSchema,
 } from '@gitspace/protocol';
 import { guideVisualGaps } from '@gitspace/protocol/guide-walkthrough';
@@ -65,6 +66,14 @@ export async function invokeRuntimeSpaceTool(env: Env, identity: z.infer<typeof 
       const toAdd = guideVisualGaps(guide);
       return toAdd.length > 0 ? { toAdd, ...stored } : stored;
     }
+    case 'space_guide.putSection': {
+      const parsed = putChangeGuideSectionInputSchema.parse({ ...args, createdBy: actorId });
+      const stored = await publish('change-guide', await context.putChangeGuideSection(parsed));
+      const toAdd = guideVisualGaps({ title: stored.title, sections: [parsed.section], walkthrough: stored.walkthrough });
+      return toAdd.length > 0 ? { toAdd, ...stored } : stored;
+    }
+    case 'space_guide.removeSection': return publish('change-guide', await context.removeChangeGuideSection(removeChangeGuideSectionInputSchema.parse({ ...args, createdBy: actorId })));
+    case 'space_guide.moveSection': return publish('change-guide', await context.moveChangeGuideSection(moveChangeGuideSectionInputSchema.parse({ ...args, createdBy: actorId })));
     case 'space_guide.markRead': return publish('change-guide', await context.markGuideSectionRead(markGuideSectionReadInputSchema.parse({ ...args, reviewerId: actorId })));
     case 'space_review.list': return context.listReviewThreads(owned, reviewContext);
     default: throw new Error('Unknown workspace authority operation');

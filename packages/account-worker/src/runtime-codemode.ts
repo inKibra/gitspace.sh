@@ -9,7 +9,10 @@ import type { RuntimeModelHelper } from './runtime-inference.js';
 type Invocation = Parameters<WorkspaceRuntimeOptions['tools']['invoke']>[0];
 /** `images` reads the workspace's stored images (`ImageReader`), for a script's `images.read`. */
 type Options = { loader: WorkerLoader; storage: DurableObjectStorage; model: RuntimeModelHelper; images: Fetcher<ImageReader> };
-const MAX_BYTES = 65_536;
+/** What a script returns and displays reaches the model's context, so it stays small. */
+const MAX_OUTPUT_BYTES = 65_536;
+/** One tool call's arguments as UTF-8 JSON; they leave the isolate in one Workers RPC message (at most 32 MiB). */
+const MAX_ARGUMENT_BYTES = 1024 * 1024;
 /** A value crosses into the isolate as UTF-8 JSON in one Workers RPC message, at most 32 MiB: room for a tool's whole
  * output, which is kept up to `TOOL_RESULT_MAX_BYTES` of text. */
 const MAX_VALUE_BYTES = 32 * 1024 * 1024 - 64 * 1024;
@@ -68,7 +71,7 @@ export function createCloudCodemode(options: Options) {
       };
       const invoke = async (tool: string, raw: unknown) => {
         const request = callSchema.parse({ tool, args: raw });
-        if (new TextEncoder().encode(JSON.stringify(request)).length > MAX_BYTES) throw new Error('Codemode tool arguments exceed 64 KiB');
+        if (new TextEncoder().encode(JSON.stringify(request)).length > MAX_ARGUMENT_BYTES) throw new Error('Codemode tool arguments exceed 1 MiB');
         if (tool === 'codemode' || tool === 'agents') throw new Error('Nested codemode and subagents are unavailable in codemode');
         controller.signal.throwIfAborted();
         if (revoked) throw new Error('Codemode capability revoked');
@@ -116,12 +119,12 @@ import { WorkerEntrypoint } from 'cloudflare:workers';
 export default class Sandbox extends WorkerEntrypoint { async execute(capability, reader) {
   const output = []; let bytes = 0;
   const images = Object.freeze({ read: async image => new Uint8Array(await new Response(await reader.read(typeof image === 'string' ? image : image?.data)).arrayBuffer()) });
-  const display = value => { const text = JSON.stringify(value) ?? 'null'; bytes += new TextEncoder().encode(text).length; if (bytes > ${MAX_BYTES}) throw new Error('Codemode output limit exceeded'); output.push(text); };
+  const display = value => { const text = JSON.stringify(value) ?? 'null'; bytes += new TextEncoder().encode(text).length; if (bytes > ${MAX_OUTPUT_BYTES}) throw new Error('Codemode output limit exceeded'); output.push(text); };
   const unwrap = async pending => { const result = await pending; if (!result.ok) throw new Error(result.error); return JSON.parse(new TextDecoder().decode(result.value)); };
   const tools = new Proxy(Object.create(null), { get: (_, name) => name === 'describe' ? (tool, op) => unwrap(capability.describe(tool ?? null, op ?? null)) : typeof name === 'string' ? args => unwrap(capability.tool(name, args ?? {})) : undefined });
   const mcp = Object.freeze(Object.fromEntries(['list','search','describe','call'].map(method => [method, args => unwrap(capability.mcp(method, args ?? {}))])));
   const cancelled = capability.cancelled().then(reason => { throw new Error(reason); });
-  try { const value = await Promise.race([run(tools, args => unwrap(capability.model('completion', args)), args => unwrap(capability.model('judge', args)), mcp, display, images), cancelled]); const body = JSON.stringify({ ok: true, value: value ?? null, output }); if (new TextEncoder().encode(body).length > ${MAX_BYTES}) throw new Error('Codemode output limit exceeded'); return body; }
+  try { const value = await Promise.race([run(tools, args => unwrap(capability.model('completion', args)), args => unwrap(capability.model('judge', args)), mcp, display, images), cancelled]); const body = JSON.stringify({ ok: true, value: value ?? null, output }); if (new TextEncoder().encode(body).length > ${MAX_OUTPUT_BYTES}) throw new Error('Codemode output limit exceeded'); return body; }
   catch (error) { const text = String(error instanceof Error ? error.message : error); return JSON.stringify({ ok: false, error: (error instanceof ReferenceError ? text + '. Codemode globals are tools, mcp, completion, judge, display and images; call any tool as tools.<name>(args), for example await tools.space_workspace({ method: "create", ... }), and await tools.describe(name) for its declaration.' : text).slice(0, 4096) }); }
 } }`,
         }, globalOutbound: null, limits: { cpuMs: 10_000, subRequests: MAX_CALLS } });
@@ -131,7 +134,7 @@ export default class Sandbox extends WorkerEntrypoint { async execute(capability
         revoked = true;
         await Promise.race([Promise.allSettled([...pending]), cancelled.promise]);
         if (uncertain) throw new Error('Codemode child effect requires reconciliation');
-        if (new TextEncoder().encode(body).length > MAX_BYTES) throw new Error('Codemode output limit exceeded');
+        if (new TextEncoder().encode(body).length > MAX_OUTPUT_BYTES) throw new Error('Codemode output limit exceeded');
         const value = z.discriminatedUnion('ok', [z.object({ ok: z.literal(true), value: RuntimeJsonSchema, output: z.array(z.string()) }), z.object({ ok: z.literal(false), error: z.string() })]).parse(JSON.parse(body));
         if (!value.ok) throw new Error(value.error);
         const result: RuntimeToolResult = { requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [...value.output.map(text => ({ type: 'text' as const, text })), { type: 'text', text: JSON.stringify(value.value) }] };

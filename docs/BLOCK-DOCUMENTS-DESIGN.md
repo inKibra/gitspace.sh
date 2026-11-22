@@ -142,6 +142,13 @@ while the frame plays. The player makes the next frames' clips while one plays, 
 refused or is late shows its line on its reading time with a note that the voice is off. Shares carry the
 walkthrough; they still carry no comments.
 
+A guide is written whole once (`put`) and then edited a section at a time: `space_guide.putSection` adds or replaces
+one section by id (optionally placed `first`, `last` or `{ after }` a section), `removeSection` and `moveSection`
+remove or move one. Each is one new revision at the caller's expected revision, built from the latest revision with
+every other section and the intro, captures, map and walkthrough carried over, and stored through the same write as
+`put` (`SpaceContextDO.editChangeGuide`), so a large guide never has to be re-sent to fix one section. People's clients
+reach the same edits as `inspector.guide.putSection`, `removeSection` and `moveSection`.
+
 ## 7. Build order
 
 | Slice | Contents | Depends on |

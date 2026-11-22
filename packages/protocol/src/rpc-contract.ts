@@ -55,10 +55,13 @@ import {
   InspectorWorkspaceCodec,
   JournalEntryViewCodec,
   MarkGuideSectionReadInputCodec,
+  MoveChangeGuideSectionInputCodec,
   PutChangeGuideInputCodec,
+  PutChangeGuideSectionInputCodec,
   PutGoalInputCodec,
   PutRubricInputCodec,
   PutWorkflowInputCodec,
+  RemoveChangeGuideSectionInputCodec,
   RepositoryDiffViewCodec,
   RepositoryFileViewCodec,
   RepositoryStatusEntryCodec,
@@ -2437,6 +2440,27 @@ export const inspectorPutChangeGuideContract = gitspaceRpc
   .errors(inspectorMutationErrors)
   .mutation();
 
+export const inspectorPutChangeGuideSectionContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ expectedGeneration: wire.integer({ min: 0 }), input: PutChangeGuideSectionInputCodec }))
+  .output(ChangeGuideViewCodec)
+  .errors(inspectorMutationErrors)
+  .mutation();
+
+export const inspectorRemoveChangeGuideSectionContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ expectedGeneration: wire.integer({ min: 0 }), input: RemoveChangeGuideSectionInputCodec }))
+  .output(ChangeGuideViewCodec)
+  .errors(inspectorMutationErrors)
+  .mutation();
+
+export const inspectorMoveChangeGuideSectionContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ expectedGeneration: wire.integer({ min: 0 }), input: MoveChangeGuideSectionInputCodec }))
+  .output(ChangeGuideViewCodec)
+  .errors(inspectorMutationErrors)
+  .mutation();
+
 export const inspectorAnalyzeChangeGuideContract = gitspaceRpc
   .procedure()
   .input(AnalyzeChangeGuideInputCodec)
@@ -2828,6 +2852,9 @@ export const gitspaceContract = gitspaceRpc.contract({
     },
     guide: {
       put: inspectorPutChangeGuideContract,
+      putSection: inspectorPutChangeGuideSectionContract,
+      removeSection: inspectorRemoveChangeGuideSectionContract,
+      moveSection: inspectorMoveChangeGuideSectionContract,
       analyze: inspectorAnalyzeChangeGuideContract,
       submit: inspectorSubmitChangeGuideContract,
       markSectionRead: inspectorMarkGuideSectionReadContract,
