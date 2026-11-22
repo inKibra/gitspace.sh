@@ -57,6 +57,13 @@ it('shows an agent\'s ghost question as its own card: the session, the question 
   expect(shown?.textContent).toContain('searched “bucket” · 2 hits · read transcript 10–14');
 });
 
+it('still shows a result recorded before until and drive versions existed as a card, not raw JSON', async () => {
+  const { until: _until, cites, ...recorded } = answer({});
+  const older = { ...recorded, cites: cites.map(cite => cite.kind === 'drive' ? { kind: cite.kind, url: cite.url, lines: cite.lines, generation: cite.generation, ref: cite.ref } : cite) };
+  await render([call(null, 'done', JSON.stringify(older))]);
+  expect(card()?.querySelector('[data-ghost-answer]')?.textContent).toBe('It moved exports to the archive bucket #12, as the plan says plan.md:3–4.');
+});
+
 it('a citation opens the asked workspace at the entry or the drive lines', async () => {
   await render([call(answer({}))]);
   const request = renderHook(() => useGhostRequest('billing-1a2b'));

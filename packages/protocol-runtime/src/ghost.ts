@@ -36,11 +36,12 @@ export const GhostQuerySchema = z.strictObject({ projectId: id, workspaceId: id,
 export type GhostQuery = z.input<typeof GhostQuerySchema>;
 
 /** What an answer points at: a transcript entry or run of entries, lines of a drive file in the version read (its
- * generation and the file's `sha256:` hash there), or a Chatter post by its offset. */
+ * generation and the file's `sha256:` hash there; results recorded before the hash existed have none), or a Chatter post
+ * by its offset. */
 const entryCite = z.strictObject({ kind: z.literal('entry'), from: entry, to: entry.optional() });
 const driveCite = z.strictObject({
   kind: z.literal('drive'), url: z.string().min(1), lines: z.tuple([z.number().int().positive(), z.number().int().positive()]).optional(),
-  generation: z.number().int().nonnegative().nullable(), hash: z.string().min(1).nullable(),
+  generation: z.number().int().nonnegative().nullable(), hash: z.string().min(1).nullable().default(null),
 });
 const chatterCite = z.strictObject({ kind: z.literal('chatter'), offset: z.number().int().positive() });
 export const GhostCiteSchema = z.discriminatedUnion('kind', [entryCite, driveCite, chatterCite]);
@@ -110,12 +111,12 @@ export const GhostAskCiteSchema = z.discriminatedUnion('kind', [entryCite.extend
 export type GhostAskCite = z.infer<typeof GhostAskCiteSchema>;
 /** `ghost_ask`'s result: one answer of an agent's ghost about one session. `answer` cites inline as the ghost wrote it,
  * by the session's entry numbers, its workspace's drive paths and Chatter offsets; `cites` names each citation as the
- * asker can read it. `until` is the last entry it could read, `driveAsOf` the time it read the drive and Chatter as of.
- * `ghostId` asks the same ghost again until `expiresAt`. */
+ * asker can read it. `until` is the last entry it could read (results recorded before `until` existed have none),
+ * `driveAsOf` the time it read the drive and Chatter as of. `ghostId` asks the same ghost again until `expiresAt`. */
 export const GhostAskResultSchema = z.strictObject({
   ghostId: z.uuid(), expiresAt: at,
   session: z.strictObject({ workspaceId: id, workspace: z.string(), conversationId: id, title: z.string(), main: z.boolean(), archived: z.boolean() }),
-  until: entry.nullable(),
+  until: entry.nullable().default(null),
   answer: z.string(), cites: z.array(GhostAskCiteSchema), reads: z.array(GhostReadSchema), driveAsOf: at,
   /** Asked to act: the message the ghost drafted, for the asker to send or post itself. */
   draft: z.string().nullable(),
