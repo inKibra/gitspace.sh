@@ -1,4 +1,4 @@
-import { defineErrors, rpc, type InputOf } from 'result-rpc'; import { wire } from './json-wire.js';
+import { defineErrors, rpc, type InputOf } from 'result-rpc'; import { base64String, uriString, wire } from './json-wire.js';
 import {
   RuntimeSnapshotInputSchema, RuntimeSnapshotSchema, RuntimeSubmitInputSchema,
   RuntimeCancelInputSchema, RuntimeAnswerInputSchema, RuntimeWatchInputSchema,
@@ -2153,7 +2153,7 @@ export const InspectorArtifactContentCodec = wire.union([
     text: wire.boolean,
     size: wire.integer({ min: 0, max: 16 * 1024 * 1024 }),
   }),
-  wire.object({ type: wire.literal('chunk'), base64: wire.string }),
+  wire.object({ type: wire.literal('chunk'), base64: base64String }),
 ]);
 
 export const inspectorReadArtifactContract = gitspaceRpc
@@ -2171,13 +2171,14 @@ export const inspectorReadArtifactPageContract = gitspaceRpc
   .errors(inspectorReadErrors)
   .query();
 
-/** A short-lived URL serving one drive file over plain HTTP (byte ranges, caching): media elements play it and
- * downloads save it, with no bytes copied through RPC. `hash` asks for that version (`sha256:…`) rather than the
- * current one; `hash` in the output is the version served. */
+/** A short-lived absolute URL on the account origin (`https://<account>/files/…`) serving one drive file over plain HTTP
+ * (byte ranges, caching): media elements play it, downloads save it and MCP clients fetch it, with no bytes copied
+ * through RPC and no credentials. `hash` asks for that version (`sha256:…`) rather than the current one; `hash` in the
+ * output is the version served. */
 export const inspectorArtifactFileContract = gitspaceRpc
   .procedure()
   .input(wire.object({ spaceId: wire.string, expectedGeneration: wire.integer({ min: 0 }), url: wire.string, hash: wire.nullable(wire.string) }))
-  .output(wire.object({ url: wire.string, downloadUrl: wire.string, size: wire.integer({ min: 0 }), mediaType: wire.nullable(wire.string), expiresAt: wire.string, hash: wire.string }))
+  .output(wire.object({ url: uriString, downloadUrl: uriString, size: wire.integer({ min: 0 }), mediaType: wire.nullable(wire.string), expiresAt: wire.string, hash: wire.string }))
   .errors(inspectorReadErrors)
   .query();
 
@@ -2197,7 +2198,22 @@ export const inspectorReadResourcePageContract = gitspaceRpc
 
 export const inspectorWriteArtifactContract = gitspaceRpc
   .procedure()
-  .input(wire.object({ spaceId: wire.string, expectedGeneration: wire.integer({ min: 0 }), url: wire.string, mediaType: wire.nullable(wire.string), base64: wire.string }))
+  .input(wire.object({ spaceId: wire.string, expectedGeneration: wire.integer({ min: 0 }), url: wire.string, mediaType: wire.nullable(wire.string), base64: base64String }))
+  .output(ArtifactViewCodec)
+  .errors(inspectorMutationErrors)
+  .mutation();
+
+/** Fetches a public https file (`url`, typically a short-lived signed link) into `<folder>/<fileName>` of the space's
+ * writable drive, placed as `inspectorBeginArtifactUploadContract` places an upload (`folder` absent: `uploads`).
+ * `fileName` absent: the response's `Content-Disposition` name, else the URL's last path segment; `mediaType` absent:
+ * the response's `Content-Type`. The bytes are stored as they arrive, up to `DRIVE_FILE_MAX_BYTES`, so no request body
+ * cap applies; `sha256` (hexadecimal) is checked before the file is listed. */
+export const inspectorImportArtifactContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({
+    spaceId: wire.string, expectedGeneration: wire.integer({ min: 0 }), url: uriString,
+    folder: wire.optional(wire.string), fileName: wire.optional(wire.string), mediaType: wire.optional(wire.string), sha256: wire.optional(wire.string),
+  }))
   .output(ArtifactViewCodec)
   .errors(inspectorMutationErrors)
   .mutation();
@@ -2230,7 +2246,7 @@ export const inspectorBeginArtifactUploadContract = gitspaceRpc
 /** Offsets are strictly sequential; resending the last stored chunk is idempotent. */
 export const inspectorUploadArtifactChunkContract = gitspaceRpc
   .procedure()
-  .input(wire.object({ ...artifactUploadRequestFields, offset: wire.integer({ min: 0 }), sha256: wire.string, data: wire.string }))
+  .input(wire.object({ ...artifactUploadRequestFields, offset: wire.integer({ min: 0 }), sha256: wire.string, data: base64String }))
   .output(wire.object({ received: wire.integer({ min: 0 }) }))
   .errors(inspectorMutationErrors)
   .mutation();
@@ -2255,7 +2271,7 @@ export const InspectorArtifactCatalogCodec = wire.object({
 });
 export const ArtifactShareViewCodec = wire.object({
   id: wire.string,
-  url: wire.string,
+  url: uriString,
   artifactUrl: wire.string,
   hash: wire.string,
   createdAt: wire.string,
@@ -2290,7 +2306,7 @@ export const inspectorRevokeArtifactShareContract = gitspaceRpc.procedure()
  * repository); `github`: readers sign in with GitHub and must be able to read `repository`. */
 export const GuideShareViewCodec = wire.object({
   id: wire.string,
-  url: wire.string,
+  url: uriString,
   access: wire.enum(['public', 'github']),
   repository: wire.string,
   guideRevision: wire.integer({ min: 0 }),
@@ -2876,7 +2892,7 @@ export const gitspaceContract = gitspaceRpc.contract({
     },
     resources: { read: inspectorReadResourceContract, readPage: inspectorReadResourcePageContract },
     artifacts: {
-      read: inspectorReadArtifactContract, write: inspectorWriteArtifactContract,
+      read: inspectorReadArtifactContract, write: inspectorWriteArtifactContract, import: inspectorImportArtifactContract,
       uploadBegin: inspectorBeginArtifactUploadContract, uploadChunk: inspectorUploadArtifactChunkContract,
       uploadCommit: inspectorCommitArtifactUploadContract, uploadAbort: inspectorAbortArtifactUploadContract,
       readPage: inspectorReadArtifactPageContract, file: inspectorArtifactFileContract,

@@ -735,32 +735,35 @@ describe('GitHub App', () => {
 
     const shared = await share(pantry.id);
     expect(shared).toMatchObject({ access: 'github', repository: 'inKibra/Pantry', guideRevision: 1, headCommit: shared.head, expiresAt: null });
-    const anonymous = await read(shared.url);
+    // The link is absolute on the account origin; the reads below address its path.
+    const link = new URL(shared.url).pathname;
+    expect(shared.url).toBe(`${env.ACCOUNT_URL}${link}`);
+    const anonymous = await read(link);
     expect(anonymous.status).toBe(401);
-    expect(await anonymous.json()).toEqual({ denied: 'sign-in', repository: 'inKibra/Pantry', signIn: `/v1${shared.url}/sign-in`, login: null });
+    expect(await anonymous.json()).toEqual({ denied: 'sign-in', repository: shared.repository, signIn: `/v1${link}/sign-in`, login: null });
 
-    const member = await signIn(shared.url, 'code-member');
+    const member = await signIn(link, 'code-member');
     expect(member).not.toContain('user-token-member');
-    const guide = await read(shared.url, member);
+    const guide = await read(link, member);
     expect(guide.status).toBe(200);
     expect(await guide.json()).toMatchObject({ repository: 'inKibra/Pantry', title: 'Pantry search', baseRef: 'origin/staging', baseCommit: shared.base, headCommit: shared.head });
     expect(repositoryReads.filter((entry) => entry.token === 'user-token-member')).toHaveLength(1);
-    const diff = await read(`${shared.url}/diff?path=${encodeURIComponent('src/search.ts')}`, member);
+    const diff = await read(`${link}/diff?path=${encodeURIComponent('src/search.ts')}`, member);
     expect(diff.status).toBe(200);
     const patch = z.object({ patch: z.string(), baseCommit: z.string(), headCommit: z.string() }).parse(await diff.json());
     expect(patch).toMatchObject({ baseCommit: shared.base, headCommit: shared.head });
     expect(patch.patch).toContain('-export const search = null;\n+export const search = (query: string) => query;');
-    const notExhibit = await read(`${shared.url}/diff?path=${encodeURIComponent('src/other.ts')}`, member);
+    const notExhibit = await read(`${link}/diff?path=${encodeURIComponent('src/other.ts')}`, member);
     expect(notExhibit.status).toBe(404);
 
-    const outsider = await read(shared.url, await signIn(shared.url, 'code-outsider'));
+    const outsider = await read(link, await signIn(link, 'code-outsider'));
     expect(outsider.status).toBe(403);
     expect(await outsider.json()).toMatchObject({ denied: 'no-access', login: 'outsider' });
     // A tampered cookie is no session.
-    expect((await read(shared.url, `${member}x`)).status).toBe(401);
+    expect((await read(link, `${member}x`)).status).toBe(401);
 
     expect(await env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${pantry.id}`).revokeGuideShare(shared.id, shared.workspaceId)).toBe(true);
-    expect((await read(shared.url, member)).status).toBe(404);
+    expect((await read(link, member)).status).toBe(404);
 
     // The Inspector's own base comparison reads origin's `staging` from the project repository: the workspace
     // repository holds only the branches it pushed.
@@ -780,7 +783,7 @@ describe('GitHub App', () => {
     // Anyone with the link reads a public repository's guide.
     const opened = await share(open.id);
     expect(opened.access).toBe('public');
-    const publicGuide = await read(opened.url);
+    const publicGuide = await read(new URL(opened.url).pathname);
     expect(publicGuide.status).toBe(200);
     // The guide's walkthrough travels with its share; its comments do not.
     expect(await publicGuide.json()).toMatchObject({ title: 'Pantry search', walkthrough: tour });

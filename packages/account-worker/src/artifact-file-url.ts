@@ -27,11 +27,13 @@ export const ArtifactFileGrantSchema = FileGrantSchema.omit({ version: true, exp
 
 const FILE_URL: SealedTokenKind = { scope: 'file-url:v1', context: 'gitspace-artifact-file-url-v1' };
 
-/** A sealed URL for one file version: it names nothing readable and cannot be altered or extended. */
+/** A sealed absolute URL on the account origin for one file version: it names nothing readable and cannot be altered
+ * or extended, and serves without credentials (an MCP client fetches it as it is). */
 export async function mintArtifactFileUrl(env: Env, grant: ArtifactFileGrant): Promise<{ url: string; downloadUrl: string; expiresAt: string }> {
   const expiresAt = (Math.floor(Date.now() / HOUR_MS) + 3) * HOUR_MS;
   const token = await sealToken(env, FILE_URL, FileGrantSchema.parse({ version: 1, ...grant, expiresAt }), { stable: true });
-  return { url: `/files/${token}`, downloadUrl: `/files/${token}?download=1`, expiresAt: new Date(expiresAt).toISOString() };
+  const url = new URL(`/files/${token}`, env.ACCOUNT_URL).href;
+  return { url, downloadUrl: `${url}?download=1`, expiresAt: new Date(expiresAt).toISOString() };
 }
 
 /** One `bytes=` range of a file of `size` bytes; null serves the whole file (no range, or several, which HTTP lets a

@@ -93,7 +93,7 @@ export function workspaceDrive(env: Env, workspace: { projectId: string; workspa
     },
     async url(path) {
       const drive = await artifacts();
-      return new URL((await drive.file(drive.writableUrl(path))).url, env.ACCOUNT_URL).href;
+      return (await drive.file(drive.writableUrl(path))).url;
     },
     async grant(path) {
       const drive = await artifacts();

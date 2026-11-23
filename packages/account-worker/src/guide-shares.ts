@@ -28,9 +28,10 @@ export const guideShareRecordSchema = z.object({
 }).strict();
 export type GuideShareRecord = z.infer<typeof guideShareRecordSchema>;
 
-export function guideShareView(projectId: string, record: GuideShareRecord): GuideShareView {
+/** A share as its owner sees it, with its absolute link on the account origin. */
+export function guideShareView(env: Env, projectId: string, record: GuideShareRecord): GuideShareView {
   return {
-    id: record.token, url: `/shared-guides/${encodeURIComponent(projectId)}/${record.token}`, access: record.access,
+    id: record.token, url: new URL(`/shared-guides/${encodeURIComponent(projectId)}/${record.token}`, env.ACCOUNT_URL).href, access: record.access,
     repository: record.guide.repository, guideRevision: record.guideRevision, headCommit: record.guide.headCommit,
     createdAt: record.createdAt, expiresAt: record.expiresAt,
   };
@@ -58,7 +59,7 @@ export async function createGuideShare(env: Env, source: InspectorCloudContext, 
     },
     createdAt: new Date().toISOString(), expiresAt: expiresAt === null ? null : new Date(expiresAt).toISOString(),
   });
-  return guideShareView(source.project.id, record);
+  return guideShareView(env, source.project.id, record);
 }
 
 function cookie(request: Request, name: string): string | null {

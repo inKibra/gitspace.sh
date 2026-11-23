@@ -208,6 +208,7 @@ export const ACCOUNT_RPC_AUTHORITY = {
   'inspector.resources.readPage': 'cloud',
   'inspector.artifacts.read': 'cloud',
   'inspector.artifacts.write': 'cloud',
+  'inspector.artifacts.import': 'cloud',
   'inspector.artifacts.uploadBegin': 'cloud',
   'inspector.artifacts.uploadChunk': 'cloud',
   'inspector.artifacts.uploadCommit': 'cloud',

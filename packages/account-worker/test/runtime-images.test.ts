@@ -30,6 +30,7 @@ it('stores an image once by its bytes, with the dimensions its header declares, 
   await expect(images.load({ ...image, data: image.data.replace('ws-images', 'ws-other') })).rejects.toThrow("is not this workspace's");
 
   const url = images.url(`${image.data};image/png`);
+  expect(url.startsWith(`${env.ACCOUNT_URL}/images/ws-images/`)).toBe(true);
   vi.setSystemTime(Date.UTC(2026, 9, 29, 12, 50));
   expect(images.url(`${image.data};image/png`)).toBe(url);
   const served = await get(url);

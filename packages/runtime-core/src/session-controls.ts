@@ -329,6 +329,8 @@ export function createSessionControls(services: SessionControlServices) {
         return { control: await control(target), browserGroupId: z.string().uuid().parse(await services.browser(String(target.id), undefined, { action: 'tabGroup', pairingId: command.pairingId })) };
       }
       case 'prompt': {
+        // The account turns a prompt's attachments into <attachment … /> tags in its text before it gets here.
+        if (command.attachments) throw new Error('A prompt\'s attachments are resolved by the account before the workspace takes it');
         await services.lifecycle.userInput(String(target.id), async () => {
           const requestId = command.requestId ?? crypto.randomUUID();
           await applyInferenceThinking(target, await admitted(requestId));

@@ -178,7 +178,9 @@ async function dispatchMachineControl(env: Env, request: SignedControlRequest): 
       if (operation === 'runtime.answer') return access.authority.runtimeAnswer(payload, { deviceId: machineId, kind: 'machine', canApprove: false, lifecycleControl: false });
       const input = RuntimeSessionInputSchema.parse(payload);
       if (['setWorkspacePhase', 'saveAgentDefinition'].includes(input.command.type)) throw new Error('Administrative session changes require the direct device-signed cloud API');
-      return RuntimeSessionResultSchema.parse(await (await access.authority.runtimeSession(input, { canApprove: false })).json());
+      // Loaded here, not at startup: the account worker's startup is near Cloudflare's limit.
+      const command = input.command.type === 'prompt' && input.command.attachments ? await (await import('./prompt-attachments.js')).resolvePromptAttachments(env, userId, input, input.command) : input.command;
+      return RuntimeSessionResultSchema.parse(await (await access.authority.runtimeSession({ ...input, command }, { canApprove: false })).json());
     }
     case 'runtime.process.exited': return access.authority.runtimeProcessExited(RuntimeProcessExitedInputSchema.parse(payload));
     case 'runtime.attachment.ready': {

@@ -1,7 +1,7 @@
 import { imageReference } from '@gitspace/protocol-runtime/image-reference';
 import { z } from 'zod';
 import { APPROVE, REJECT, type AskAnswerSource } from '@gitspace/blocks';
-import { canonicalJson, isToolResultReference, parseToolResultReference, RuntimeDispatchSelectionSchema, RuntimeIdentitySchema, RuntimeJsonSchema, RuntimeSnapshotSchema, RuntimeToolDispatchSchema, RuntimeToolResultRequestSchema, RuntimeToolResultSchema, type RuntimeAttachment, type RuntimeSnapshot, type RuntimeToolResult, type RuntimeToolDispatch, type WorkspaceBoardRow } from '@gitspace/protocol-runtime';
+import { canonicalJson, isToolResultReference, parseToolResultReference, RuntimeDispatchSelectionSchema, RuntimeIdentitySchema, RuntimeJsonSchema, RuntimeToolDispatchSchema, RuntimeToolResultRequestSchema, RuntimeToolResultSchema, type RuntimeAttachment, type RuntimeSnapshot, type RuntimeToolResult, type RuntimeToolDispatch, type WorkspaceBoardRow } from '@gitspace/protocol-runtime';
 import { LifecycleMutationSchema, approvedBrowserSites, projectEnvironmentState, type LifecycleRun } from '@gitspace/protocol-environment';
 import type { WorkspaceEnvironment } from './space-environment.js';
 import { lifecycleApprovalRequest } from './lifecycle-approval-card.js';
@@ -24,7 +24,7 @@ import { DEFAULT_SKILLS } from '@gitspace/protocol/default-skills';
 import { UI_BLOCK_BRIEF } from '@gitspace/protocol/gitspace-ui';
 import { parseResourceUri, resourceMediaType, selectResourceText } from '@gitspace/protocol/resource-uri';
 import { searchHistory, type RuntimeTranscriptRange } from '@gitspace/runtime-core/history';
-import { readRuntimeTranscript, readRuntimeHistory } from './runtime-transcript-reader.js';
+import { readRuntimeHistory } from './runtime-transcript-reader.js';
 import type { RuntimeInstructionLoader } from './runtime-instruction-loader.js';
 import { createDispatchSelector } from './runtime-dispatch-selection.js';
 import { invokeRuntimeSpaceTool, runtimeSpaceToolNames } from './runtime-space-tools.js';
@@ -1045,18 +1045,18 @@ export function createRuntimeServices(options: ServicesOptions): Pick<WorkspaceR
         return completed(input, await searchHistory(request.query, {
           workspaceIds,
           ...(request.conversationId === undefined ? {} : { conversationId: request.conversationId }),
-          async conversations(workspaceId) {
-            const snapshot = workspaceId === identity.workspaceId ? await options.runtime().snapshot() : RuntimeSnapshotSchema.parse(await (await env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${workspaceId}`).runtimeSnapshot(RuntimeIdentitySchema.parse({ projectId: identity.projectId, workspaceId }))).json());
-            return snapshot.conversations.map(conversation => conversation.id);
-          },
-          async *events(workspaceId, conversationId, before) { yield* readRuntimeTranscript(await transcript(workspaceId, conversationId, before === undefined ? { newestFirst: true } : { newestFirst: true, before })); },
+          search: (workspaceId, search) => workspaceId === identity.workspaceId ? options.runtime().historySearch(search)
+            : env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${workspaceId}`).runtimeHistorySearch(RuntimeIdentitySchema.parse({ projectId: identity.projectId, workspaceId }), search),
         }, (state, questions) => options.judge(input.conversationId, state, questions), request.cursor));
       }
       if (input.tool === 'web_search') return completed(input, await options.webSearch({ ...input, args: RuntimeWebSearchArgumentsSchema.parse(input.args) }));
       if (input.tool === 'decide') return completed(input, await options.decide(input));
       if (input.tool === 'web_fetch') {
         const request = RuntimeWebFetchArgumentsSchema.parse(input.args);
-        const page = await fetchWeb({ url: request.url, ...(request.format ? { format: request.format } : {}) }, { binding: env.AI, ...(input.signal ? { signal: input.signal } : {}) });
+        // Every hop goes through `publicFetch`, which refuses hosts resolving to private or local addresses. Loaded here,
+        // not at startup: the account worker's startup is near Cloudflare's limit.
+        const { publicFetch } = await import('./public-fetch.js');
+        const page = await fetchWeb({ url: request.url, ...(request.format ? { format: request.format } : {}) }, { binding: env.AI, fetch: publicFetch, ...(input.signal ? { signal: input.signal } : {}) });
         // One window of the page, inside <untrusted_web_content>, under a header naming the offset to continue from.
         return { requestId: input.requestId, attemptId: input.attemptId, status: 'completed', content: [{ type: 'text', text: renderWebFetchPage(windowWebFetchPage(page, request.offset === undefined ? {} : { offset: request.offset })) }] };
       }

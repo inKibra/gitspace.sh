@@ -335,4 +335,11 @@ export const wire: JsonWireNamespace = {
   }),
 };
 
+/** `wire.string` published with `contentEncoding: "base64"`: an MCP client stores the decoded bytes as a file instead
+ * of passing the text to a model. Encoding and the contract digest are `wire.string`'s. */
+export const base64String = retain({ ...rpcWire.string }, () => ({ type: 'string', contentEncoding: 'base64' }));
+/** `wire.string` published with `format: "uri"`: an absolute URL a client fetches as it is. Encoding and the contract
+ * digest are `wire.string`'s. */
+export const uriString = retain({ ...rpcWire.string }, () => ({ type: 'string', format: 'uri' }));
+
 export { richObjectJsonSchema };

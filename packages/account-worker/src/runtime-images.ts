@@ -10,8 +10,9 @@
  *   rendition, `chat-attachments.ts`).
  * - `load` returns a stored image's block with its bytes again, for `generate_image`.
  * - Model requests and codemode scripts read images through `ImageReader` (`image-reader.ts`), never here.
- * - `url` resolves a transcript row's stored image to `/images/…`, a URL signed for a window of whole hours: the same
- *   for one image all hour, so transcript content read in parts stays one text, and valid two to three hours.
+ * - `url` resolves a transcript row's stored image to `<account origin>/images/…`, an absolute URL signed for a window
+ *   of whole hours: the same for one image all hour, so transcript content read in parts stays one text, and valid two
+ *   to three hours. It needs no credentials, so an MCP client fetches it as it is.
  */
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { ImageContent } from '@earendil-works/pi-ai';
@@ -89,7 +90,7 @@ export async function createRuntimeImages(env: Env, workspaceId: string) {
       if (!image || image.workspaceId !== workspaceId || !IMAGE_TYPES[mimeType]) return stored;
       const expiresAt = (Math.floor(Date.now() / HOUR_MS) + 3) * HOUR_MS;
       const path = `/images/${workspaceId}/${image.sha256}/${image.size}/${mimeType.slice('image/'.length)}/${expiresAt}`;
-      return `${path}/${createHmac('sha256', urlKey).update(path).digest('base64url')}`;
+      return new URL(`${path}/${createHmac('sha256', urlKey).update(path).digest('base64url')}`, env.ACCOUNT_URL).href;
     },
   };
 }

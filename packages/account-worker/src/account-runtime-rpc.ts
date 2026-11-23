@@ -84,7 +84,11 @@ export function runtimeCloudProcedures(env: Env, userId: string, deviceId: strin
       // Only an API client (an MCP access's device) answers as an MCP client, and it always does: a person answers as
       // themselves only from their browser, which is what a question only a person may answer requires.
       if (input.command.type === 'answerAsk' && input.command.answeredBy === 'mcp-client' && device.kind !== 'client') throw new Error('Only an API client answers as an MCP client');
-      const command = input.command.type === 'answerAsk' && device.kind === 'client' ? { ...input.command, answeredBy: 'mcp-client' as const } : input.command;
+      const answered = input.command.type === 'answerAsk' && device.kind === 'client' ? { ...input.command, answeredBy: 'mcp-client' as const } : input.command;
+      // A prompt's attachments are written into the workspace drive, which takes rpc.write as a drive write does.
+      if (answered.type === 'prompt' && answered.attachments && !deviceHasCapability(device, 'rpc.write')) throw new Error('Attaching files writes them to the workspace drive, which requires rpc.write');
+      // Loaded here, not at startup: the account worker's startup is near Cloudflare's limit.
+      const command = answered.type === 'prompt' && answered.attachments ? await (await import('./prompt-attachments.js')).resolvePromptAttachments(env, userId, input, answered) : answered;
       return ok(RuntimeSessionResultSchema.parse(await (await authority.runtimeSession({ ...input, command }, { deviceId, canApprove: deviceHasCapability(device, 'operator.decide') && deviceCanAdminister(device, 'account.admin') })).json()));
     } catch (error) { return err(errors.OperationFailed({ operation: 'control cloud session', message: message(error) })); }
   }));

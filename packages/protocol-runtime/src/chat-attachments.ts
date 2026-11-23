@@ -1,9 +1,15 @@
+import { z } from 'zod';
+
 /**
  * Chat attachments: every file a person attaches is stored in the workspace drive (`uploads/<YYYY-MM-DD>/<name>`) and
  * named in the message's text by one tag:
  * `<attachment name="…" url="drive://workspace/uploads/…" type="<mime>" size="<bytes>" hash="sha256:<hex>" />`.
  * Before the turn's first model request the workspace makes one model-ready rendition of each (an image resized, a
  * document as Markdown, a recording's transcript) and each model request carries what fits beside the tag.
+ *
+ * A `prompt` sent through the API names files in `attachments` instead (`PromptAttachmentSchema`): the account imports
+ * each `url` into `uploads/<YYYY-MM-DD>/` with the same guards as `inspector.artifacts.import`, checks each `driveUrl`
+ * names a file, and adds the tags after the text, so the agent sees what a pasted file gives.
  */
 
 /**
@@ -28,6 +34,20 @@ export const CHAT_ATTACHMENT_ACCEPT = ['text/*', ...Object.keys(CHAT_ATTACHMENT_
 export function isChatAttachmentType(type: string): boolean {
   return type.startsWith('text/') || Object.hasOwn(CHAT_ATTACHMENT_TYPES, type);
 }
+
+/** The most files one prompt attaches. */
+export const PROMPT_ATTACHMENTS_MAX = 10;
+const promptAttachmentFields = {
+  mediaType: z.string().refine(isChatAttachmentType, 'Attach images, PDFs, Office documents, audio or text').describe('The file\'s media type: image/png, image/jpeg, image/webp, image/gif, application/pdf, a Word, Excel or PowerPoint document, audio, or any text/* type.'),
+  name: z.string().min(1).max(255).optional().describe('The name the agent sees; absent: the downloaded file\'s name, or the drive file\'s.'),
+};
+/** One file a `prompt` attaches: a public https URL to fetch (typically a short-lived signed link), or a file already
+ * in a drive this workspace reads. */
+export const PromptAttachmentSchema = z.union([
+  z.object({ url: z.url({ protocol: /^https$/u }).describe('A public https URL the account fetches into the workspace drive\'s uploads folder.'), ...promptAttachmentFields }).strict(),
+  z.object({ driveUrl: z.string().min(1).describe('A drive file: drive://workspace/<path>, drive://base/<path> or drive://workspaces/<id>/<path>.'), ...promptAttachmentFields }).strict(),
+]);
+export type PromptAttachment = z.infer<typeof PromptAttachmentSchema>;
 
 /** One attached file: its drive address, media type, size in bytes and `sha256:<hex>` digest. */
 export type ChatAttachment = { name: string; url: string; type: string; size: number; hash: string };

@@ -60,7 +60,7 @@ export function GuideShareButton({ revision, shares }: { revision: number; share
           <h3 className="text-body font-medium">Active links</h3>
           {links === null && !error ? <ThinkingIndicator aria-label="Loading share links" /> : links?.length === 0 ? <p className="text-caption text-muted-foreground">No active links for this guide.</p> : null}
           <div className="flex max-h-[35vh] flex-col gap-3 overflow-y-auto">{links?.map((link) => <div className="flex flex-col gap-1" key={link.id}>
-            <InputCopy label={link.access === 'public' ? 'Anyone with the link' : `GitHub readers of ${link.repository}`} value={new URL(link.url, window.location.origin).href} />
+            <InputCopy label={link.access === 'public' ? 'Anyone with the link' : `GitHub readers of ${link.repository}`} value={link.url} />
             <div className="flex items-center justify-between gap-2">
               <span className="text-caption text-muted-foreground tabular-nums">Revision {link.guideRevision} · {link.headCommit.slice(0, 7)} · {link.expiresAt ? `Expires ${new Date(link.expiresAt).toLocaleString()}` : 'Does not expire'}</span>
               <Button variant="secondary" size="compact" className="min-h-10" disabled={pending} onClick={() => void revoke(link.id)}>Revoke</Button>

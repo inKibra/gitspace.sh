@@ -14,6 +14,7 @@ import { serveGhost } from '../src/ghost.js';
 import { SpaceAuthorityDO } from '../src/space-authority.js';
 import { network } from './network.js';
 import { tenantRootPrivateKey } from './setup.js';
+import { HistorySearchRequestSchema, matchHistoryText, parseHistoryQuery } from '@gitspace/runtime-core/history';
 
 const origin = 'https://test.gitspace.sh';
 afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
@@ -47,8 +48,19 @@ const TRANSCRIPTS: Record<string, string[]> = {
 };
 const RangeSchema = z.object({ from: z.number().optional(), before: z.number().optional(), newestFirst: z.boolean().optional() });
 
-/** The workspace object's transcripts as NDJSON, one entry per message (ordinal entry*1024), honouring the range. */
+/** The workspace object's transcripts as NDJSON, one entry per message (ordinal entry*1024), honouring the range; its
+ * history search matches them as its index would, honouring the conversation and the ordinal bound. */
 function transcripts() {
+  vi.spyOn(SpaceAuthorityDO.prototype, 'runtimeHistorySearch').mockImplementation(async (_raw, raw) => {
+    const request = HistorySearchRequestSchema.parse(raw);
+    const query = parseHistoryQuery(request.query);
+    const conversationId = request.conversationId ?? 'main';
+    const hits = (TRANSCRIPTS[conversationId] ?? []).flatMap((text, entry) => {
+      const found = query && (request.before === undefined || entry * 1024 < request.before) ? matchHistoryText(text, query) : null;
+      return found ? [{ conversationId, ordinal: entry * 1024, createdAt: `2026-11-20T09:0${entry}:00.000Z`, snippet: text, indexed: true, score: found.matches }] : [];
+    });
+    return { hits: hits.slice(request.offset, request.offset + request.limit), more: hits.length > request.offset + request.limit, coverage: { complete: true, unindexedEntries: 0, scannedEvents: 0, scanComplete: true, failure: null } };
+  });
   return vi.spyOn(SpaceAuthorityDO.prototype, 'runtimeTranscript').mockImplementation(async (raw, _format, range) => {
     const conversationId = z.object({ conversationId: z.string() }).parse(raw).conversationId;
     const { from, before, newestFirst } = RangeSchema.parse(range);

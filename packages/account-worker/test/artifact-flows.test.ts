@@ -423,6 +423,8 @@ describe('user artifact flows', () => {
     const minted = await client.inspector.artifacts.file({ spaceId: workspaceId, expectedGeneration: 0, url: 'drive://workspace/take%20one.wav', hash: null });
     if (minted.status === 'error') throw minted.error;
     expect(minted.value).toMatchObject({ size: 1000, mediaType: 'audio/wav' });
+    // Absolute on the account origin, so a client that is not a page of it fetches it as it is.
+    expect([minted.value.url.startsWith(`${env.ACCOUNT_URL}/files/`), minted.value.downloadUrl]).toEqual([true, `${minted.value.url}?download=1`]);
     const get = (path: string, headers: Record<string, string> = {}, method = 'GET') => worker.fetch(new Request(new URL(path, origin), { method, headers }), env);
     const whole = await get(minted.value.url);
     expect(whole.status).toBe(200);
@@ -441,7 +443,7 @@ describe('user artifact flows', () => {
     const head = await get(minted.value.url, {}, 'HEAD');
     expect([head.status, head.headers.get('content-length'), await head.text()]).toEqual([200, '1000', '']);
     // A token cannot be altered, and stops working when it expires.
-    const token = minted.value.url.slice('/files/'.length);
+    const token = new URL(minted.value.url).pathname.slice('/files/'.length);
     expect((await get(`/files/${token.slice(0, -2)}${token.endsWith('AA') ? 'BB' : 'AA'}`)).status).toBe(404);
     vi.spyOn(Date, 'now').mockReturnValue(Date.parse(minted.value.expiresAt) + 1);
     try { expect((await get(minted.value.url)).status).toBe(404); } finally { vi.restoreAllMocks(); }

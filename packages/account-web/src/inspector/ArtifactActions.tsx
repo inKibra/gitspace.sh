@@ -114,7 +114,7 @@ export function ArtifactActions({ selected, actions }: { selected: readonly Arti
           <h3 className="text-body font-medium">Active links</h3>
           {links === null && !error ? <ThinkingIndicator aria-label="Loading share links" /> : links?.length === 0 ? <p className="text-caption text-muted-foreground">No active links for this artifact.</p> : null}
           <div className="flex max-h-[35vh] flex-col gap-3 overflow-y-auto">{links?.map((link) => <div className="flex flex-col gap-1" key={link.id}>
-            <InputCopy label="Public download link" value={new URL(link.url, window.location.origin).href} />
+            <InputCopy label="Public download link" value={link.url} />
             <div className="flex items-center justify-between gap-2"><span className="text-caption text-muted-foreground tabular-nums">{link.hash.slice(7, 19)} · {link.expiresAt ? `Expires ${new Date(link.expiresAt).toLocaleString()}` : 'Does not expire'}</span><Button variant="secondary" size="compact" className="min-h-10" disabled={pending} onClick={() => void revoke(link.id)}>Revoke</Button></div>
           </div>)}</div>
           {error ? <p role="alert" className="text-caption text-destructive">{error}</p> : null}

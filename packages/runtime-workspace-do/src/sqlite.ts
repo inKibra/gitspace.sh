@@ -2,11 +2,12 @@ import type { SqliteDatabase, SqliteExecutor, SqliteValue } from '@earendil-work
 import type { StorageReads } from './storage-reads.js';
 
 /** Queue the portable asynchronous driver over DO transactions; never serialize a memory database. Every row a read
- * returns is counted in `reads`. */
+ * returns is counted in `reads`. `written` runs at the end of each transaction, inside it (history search indexes the
+ * entries the transaction wrote). */
 export class DurableObjectSqliteDatabase implements SqliteDatabase {
   private line: Promise<void> = Promise.resolve();
   private closed = false;
-  constructor(private readonly storage: DurableObjectStorage, private readonly reads: StorageReads) {}
+  constructor(private readonly storage: DurableObjectStorage, private readonly reads: StorageReads, private readonly written: () => void = () => {}) {}
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
     const result = this.line.then(() => { if (this.closed) throw new Error('SQLite driver is closed'); return operation(); });
     this.line = result.then(() => {}, () => {});
@@ -43,7 +44,11 @@ export class DurableObjectSqliteDatabase implements SqliteDatabase {
   transaction<T>(callback: (transaction: SqliteExecutor) => Promise<T>): Promise<T> {
     return this.enqueue(() => this.storage.transaction(async () => {
       const executor = this.executor(this.storage);
-      try { return await callback(executor); }
+      try {
+        const value = await callback(executor);
+        this.written();
+        return value;
+      }
       finally { executor.end(); }
     }));
   }

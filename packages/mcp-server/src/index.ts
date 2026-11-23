@@ -1,4 +1,4 @@
-import { createMcpHandler, isLegacyRequest, ProtocolError, ProtocolErrorCode, Server, WebStandardStreamableHTTPServerTransport, type Tool } from '@modelcontextprotocol/server';
+import { createMcpHandler, isLegacyRequest, ProtocolError, ProtocolErrorCode, Server, WebStandardStreamableHTTPServerTransport, type ContentBlock, type Tool } from '@modelcontextprotocol/server';
 import { CfWorkerJsonSchemaValidator } from '@modelcontextprotocol/server/validators/cf-worker';
 import { createGitSpaceClient, type GitSpaceClient } from '@gitspace/protocol/client';
 import { gitspaceContract } from '@gitspace/protocol/rpc-contract';
@@ -11,6 +11,7 @@ import { toolDescriptions } from './descriptions.js';
 import { OperationFailure, type RpcResult } from './rpc-result.js';
 import { TASKS_EXTENSION_ID_V2 } from '@modelcontextprotocol/ext-tasks/core/v2';
 import { createGitSpaceTasks, declaredCapabilities } from './tasks.js';
+import { z } from 'zod';
 
 export interface GitSpaceMcpOptions {
   key: string;
@@ -26,7 +27,7 @@ const pagedStreams: Record<string, true> = {
 };
 const resourceReaders: Record<string, { path: string; description: string }> = {
   files: { path: 'inspector.repository.file', description: 'Read one repository file in the selected repository view; use this for source inspection, not saved artifacts or agent output. Percent-encode the JSON input accepted by gitspace_inspector_repository_file, including the workspace placement generation.' },
-  artifacts: { path: 'inspector.artifacts.readPage', description: 'Read a saved artifact as metadata and base64 content chunks. Percent-encode the input for gitspace_inspector_artifacts_read_page. Start with cursor null, then pass nextCursor until it is null; a changed snapshot requires a fresh read.' },
+  artifacts: { path: 'inspector.artifacts.readPage', description: 'Read a saved artifact as metadata and base64 content chunks. Percent-encode the input for gitspace_inspector_artifacts_read_page. Start with cursor null, then pass nextCursor until it is null; a changed snapshot requires a fresh read. For a binary file, gitspace_inspector_artifacts_file gives a URL to fetch instead.' },
   resources: { path: 'inspector.resources.readPage', description: 'Read a published encrypted cloud artifact using its drive:// resource URL, including line or byte selectors. Percent-encode the input for gitspace_inspector_resources_read_page. Follow nextCursor to collect all content. Machine-session artifact:// spills are not retained cloud resources.' },
   goals: { path: 'inspector.overview', description: 'Inspect a workspace goal, workflow, rubric, and other saved Inspector state without editing them. Percent-encode the JSON input for gitspace_inspector_overview. Use the returned revisions when proposing subsequent edits.' },
   transcripts: { path: 'inspector.transcriptPage', description: 'Read a bounded page of cloud conversation rows using an Inspector context. Percent-encode the input for gitspace_inspector_transcript_page and preserve the returned generation when paging. Use transcript-content for a shortened row.' },
@@ -66,6 +67,19 @@ const record = (value: unknown): Record<string, unknown> => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'Expected an input object');
   return value as Record<string, unknown>;
 };
+const ArtifactFileSchema = z.object({ url: z.string(), size: z.number(), mediaType: z.string().nullable() });
+const DriveFileInputSchema = z.object({ url: z.string() });
+/** A result that names one file (`inspector.artifacts.file`) also carries a `resource_link` to it beside its JSON, so a
+ * client fetches the bytes itself; lists and every other result carry none. */
+function fileLinks(path: string, args: unknown, result: unknown): ContentBlock[] {
+  if (path !== 'inspector.artifacts.file') return [];
+  const file = ArtifactFileSchema.parse(result);
+  const drive = DriveFileInputSchema.parse(args).url;
+  const segment = drive.slice(drive.lastIndexOf('/') + 1);
+  let name = segment;
+  try { name = decodeURIComponent(segment); } catch { /* A name that is not percent-encoded is shown as written. */ }
+  return [{ type: 'resource_link', uri: file.url, name: name || 'file', size: file.size, ...(file.mediaType ? { mimeType: file.mediaType } : {}) }];
+}
 
 /** Keys and credential values never appear in exception messages or model-visible output. */
 export function redactCredentials(value: unknown, secrets: readonly string[] = []): unknown {
@@ -262,7 +276,7 @@ export function createGitSpaceMcpHandler(options: GitSpaceMcpOptions): { fetch(r
           return await tasks.start(entry.path, message.params.arguments, signal);
         }
         const value = await execute(entry.path, message.params.arguments, signal);
-        return { content: [{ type: 'text', text: JSON.stringify(value) }], structuredContent: value };
+        return { content: [{ type: 'text', text: JSON.stringify(value) }, ...fileLinks(entry.path, message.params.arguments, value.result)], structuredContent: value };
       } catch (error) { if (error instanceof ProtocolError) throw error; return errorResult(error); }
     });
     server.setRequestHandler('resources/templates/list', async () => ({ resourceTemplates: [

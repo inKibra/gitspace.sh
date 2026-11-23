@@ -22,7 +22,7 @@ import { secureFillTab, type SecureInputRecord } from './secure-input.js';
 import { createAccountWorkspaceRuntime, ensureProjectCodeRepository } from './account-runtime-host.js';
 import { runtimeFailureReporter } from './runtime-failures.js';
 import { RuntimeSessionInputSchema, type PendingAskAnswer } from '@gitspace/protocol-runtime/session-controls';
-import { RuntimeTranscriptRangeSchema } from '@gitspace/runtime-core/history';
+import { HistorySearchRequestSchema, RuntimeTranscriptRangeSchema, type HistoryWorkspaceHits } from '@gitspace/runtime-core/history';
 import { RuntimeDraftSaveInputSchema } from '@gitspace/protocol-runtime/draft';
 import { RuntimeServiceInputSchema } from '@gitspace/protocol-runtime/services';
 import { RuntimeSyncRequestInputSchema, RuntimeSyncRequestResultSchema, type RuntimeSyncRequestResult } from '@gitspace/protocol-runtime/tool-arguments';
@@ -1321,6 +1321,12 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
   async runtimeTranscript(raw: unknown, format: 'json' | 'ndjson' = 'json', range: unknown = {}): Promise<Response> {
     const input = RuntimeIdentitySchema.extend({ conversationId: z.string().optional() }).parse(raw);
     return (await this.getRuntime(input)).transcript(input.conversationId, format, RuntimeTranscriptRangeSchema.parse(range));
+  }
+
+  /** This workspace's part of a `history_search` (its index, and a scan of what the index does not cover yet). */
+  async runtimeHistorySearch(raw: unknown, request: unknown): Promise<HistoryWorkspaceHits> {
+    const input = RuntimeIdentitySchema.parse(raw);
+    return (await this.getRuntime(input)).historySearch(HistorySearchRequestSchema.parse(request));
   }
 
   /** A `read` or `grep` of a tool output this workspace kept, for a conversation of another workspace in the project

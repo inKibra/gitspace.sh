@@ -5,10 +5,13 @@ const base = z.object({ id: z.string().min(1) });
  * recorded before items kept it. */
 const at = z.string().optional();
 /** An image a message carries: its bytes, or (a stored image) a URL. A transcript row names a stored image as
- * `gs-image:…;<mimeType>` until the workspace that serves the row resolves it to a URL a browser can load. */
+ * `gs-image:…;<mimeType>` until the workspace that serves the row resolves it to an absolute URL anyone holding it can
+ * load. The published JSON Schema marks the bytes `contentEncoding: "base64"` with their `contentMediaType` (one member
+ * per type) and the URL `format: "uri"`, so an MCP client stores the bytes as a file and fetches the URL. */
+const MESSAGE_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp'] as const;
 const messageImageSchema = z.union([
-  z.object({ data: z.string().min(1), mimeType: z.enum(['image/png', 'image/jpeg', 'image/webp']) }),
-  z.object({ url: z.string().min(1), mimeType: z.enum(['image/png', 'image/jpeg', 'image/webp']) }),
+  ...MESSAGE_IMAGE_TYPES.map(type => z.object({ data: z.string().min(1).meta({ contentEncoding: 'base64', contentMediaType: type }), mimeType: z.literal(type) })),
+  z.object({ url: z.string().min(1).meta({ format: 'uri' }), mimeType: z.enum(MESSAGE_IMAGE_TYPES) }),
 ]);
 
 /** A block of a message the agent corrected in place after it was stored: the block's index among the message's blocks

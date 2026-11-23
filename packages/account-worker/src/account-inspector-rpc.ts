@@ -10,6 +10,7 @@ import {
   inspectorReadArtifactContract,
   inspectorReadResourceContract,
   inspectorWriteArtifactContract,
+  inspectorImportArtifactContract,
   inspectorBeginArtifactUploadContract,
   inspectorUploadArtifactChunkContract,
   inspectorCommitArtifactUploadContract,
@@ -480,6 +481,16 @@ export function inspectorCloudProcedures(env: Env, userId: string, currentDevice
       return err(errors.InspectorState({ resource: 'artifacts', message: error instanceof Error ? error.message : String(error) }));
     }
   });
+  const importArtifact = server.implement(inspectorImportArtifactContract).handler(async ({ input, errors }) => {
+    try {
+      const source = await readInspectorContext(env, userId, input.spaceId, undefined, input.expectedGeneration);
+      return ok(await new InspectorCloudArtifacts(env, userId, source).importUrl(input.url, input));
+    } catch (error) {
+      if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));
+      if (error instanceof InspectorGenerationConflict) return err(errors.SpaceGenerationConflict({ spaceId: error.spaceId, expected: error.expected, actual: error.actual }));
+      return err(errors.InspectorState({ resource: 'artifacts', message: error instanceof Error ? error.message : String(error) }));
+    }
+  });
   // Upload rejections are terminal for the client; only transport failures are retried at the same offset.
   const beginUpload = server.implement(inspectorBeginArtifactUploadContract).handler(async ({ input, errors }) => {
     try {
@@ -628,7 +639,7 @@ export function inspectorCloudProcedures(env: Env, userId: string, currentDevice
   const listGuideShares = server.implement(inspectorListGuideSharesContract).handler(async ({ input, errors }) => {
     try {
       const source = await readInspectorContext(env, userId, input.spaceId, undefined, input.expectedGeneration);
-      return ok((await source.authority.listGuideShares(source.workspace.id)).map(record => guideShareView(source.project.id, record)));
+      return ok((await source.authority.listGuideShares(source.workspace.id)).map(record => guideShareView(env, source.project.id, record)));
     } catch (error) {
       if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));
       if (error instanceof InspectorGenerationConflict) return err(errors.SpaceGenerationConflict({ spaceId: error.spaceId, expected: error.expected, actual: error.actual }));
@@ -772,7 +783,7 @@ export function inspectorCloudProcedures(env: Env, userId: string, currentDevice
     },
     review: { list: threads },
     artifacts: {
-      read: readArtifact, readPage: readArtifactPage, file: artifactFile, write: writeArtifact, list: listArtifacts, copyToProject: copyArtifacts, delete: deleteArtifacts, shares: { list: listShares, create: createShare, revoke: revokeShare },
+      read: readArtifact, readPage: readArtifactPage, file: artifactFile, write: writeArtifact, import: importArtifact, list: listArtifacts, copyToProject: copyArtifacts, delete: deleteArtifacts, shares: { list: listShares, create: createShare, revoke: revokeShare },
       uploadBegin: beginUpload, uploadChunk, uploadCommit: commitUpload, uploadAbort: abortUpload,
     },
     resources: { read: readResource, readPage: readResourcePage },

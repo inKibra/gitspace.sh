@@ -9,6 +9,7 @@ import { RuntimeBrowserConnectedTabSchema, RuntimeBrowserShareExpirySchema, Runt
 import { RuntimeBrowserCommentAnchorSchema, RuntimeBrowserCommentPageSchema, RuntimeBrowserCommentSourceSchema, RuntimeBrowserCommentStatusSchema, RuntimeBrowserCommentTextSchema, RuntimeBrowserCommentThreadSchema, RuntimeBrowserCommentThreadViewSchema } from './browser-comments.js';
 import { RuntimeBrowserCaptureShareExpirySchema, RuntimeBrowserCaptureShareSchema } from './browser-capture-share.js';
 import { CommentAnchorSchema, CommentIdSchema, CommentLookupSchema, CommentNoteSchema, OPEN_DOCUMENT_KINDS, STAGED_ANSWERS_MAX, STAGED_COMMENTS_MAX, SentAnswerSchema } from './comments.js';
+import { PROMPT_ATTACHMENTS_MAX, PromptAttachmentSchema } from './chat-attachments.js';
 export { SessionUsageReportSchema, ServiceUsageSchema, UsageTotalsSchema, type SessionUsageReport, type ServiceUsage, type UsageTotals } from './usage.js';
 
 export const ModelSelectionIntentSchema = z.discriminatedUnion('kind', [
@@ -131,8 +132,10 @@ export const RuntimeSessionCommandSchema = z.union([
    * the conversation's inbox. `answers`: the person's staged answers (`stageAnswer`) it carries; the commit that takes it
    * answers each question, and they leave the staged answers. A message with answers may have no text. `requestId`: the
    * caller's key for the input, scoped to the conversation: a prompt sent again with a key the conversation already has
-   * adds nothing, and `run` reads what became of it. */
-  z.object({ type: z.literal('prompt'), text: z.string(), requestId: z.string().min(1).max(512).optional(), draftRevision: z.number().int().nonnegative().optional(), draftText: z.string().optional(), streamingBehavior: z.enum(['steer', 'followUp']).optional(), decisions: z.array(RuntimeMessageDecisionSchema).max(32).optional(), comments: z.array(CommentIdSchema).max(STAGED_COMMENTS_MAX).optional(), answers: z.array(SentAnswerSchema).max(STAGED_ANSWERS_MAX).optional() }),
+   * adds nothing, and `run` reads what became of it. `attachments`: files given to the agent as a person's attached
+   * files (`chat-attachments.ts`); the account resolves them into `<attachment … />` tags before the workspace sees the
+   * prompt, so the workspace never receives them. */
+  z.object({ type: z.literal('prompt'), text: z.string(), requestId: z.string().min(1).max(512).optional(), draftRevision: z.number().int().nonnegative().optional(), draftText: z.string().optional(), streamingBehavior: z.enum(['steer', 'followUp']).optional(), decisions: z.array(RuntimeMessageDecisionSchema).max(32).optional(), comments: z.array(CommentIdSchema).max(STAGED_COMMENTS_MAX).optional(), answers: z.array(SentAnswerSchema).max(STAGED_ANSWERS_MAX).optional(), attachments: z.array(PromptAttachmentSchema).min(1).max(PROMPT_ATTACHMENTS_MAX).optional().describe('Files for the agent, as if pasted: each a public https url (fetched into drive://workspace/uploads/<date>/) or a driveUrl, with its mediaType and an optional name. They reach the agent as <attachment …/> tags after the text.') }),
   /** What became of the input the conversation took with `requestId` (a `prompt`'s, or `runtime.submit`'s), followed
    * through the turns its questions' answers start (`RuntimeRun`). */
   z.object({ type: z.literal('run'), requestId: z.string().min(1).max(512) }),

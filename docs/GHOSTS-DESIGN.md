@@ -123,7 +123,9 @@ Milestone 4 is built (2026-11-20, not deployed): a person's ghost of a workspace
   `driveAsOf` (the ghost's start); their schemas take no workspace or conversation, and arguments naming another are
   refused. `read` takes the target workspace's drive (`drive://workspace/…`, the project drive only for the project
   agent's ghost) at `driveAsOf`, and the conversation's `result://` outputs; images are named, not shown. Reads carry
-  entry numbers, which answers cite.
+  entry numbers, which answers cite. `history_search` asks the workspace object's transcript index
+  (`SpaceAuthorityDO.runtimeHistorySearch`, `docs/PI-RUNTIME-DESIGN.md` §8.6): the whole conversation up to `until`,
+  ranked, in one call, with `coverage` while the index is still being built.
 - **Lifetime.** 10 minutes after the last answer, held while one runs; Keep 10 min; the window fades and warns in the
   last minute; a tombstone says "Ghost ended. Nothing was kept." Six tool rounds per answer, one question at a time.
 - **Web.** A ghost button on sidebar rows (archived too), Ask a ghost in the topbar, one floating window bottom right

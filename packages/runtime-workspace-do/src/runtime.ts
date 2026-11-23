@@ -22,9 +22,10 @@ import { WorkspaceDraftStore } from './draft.js';
 import type { WorkspaceDraftSave, WorkspaceDraftSaveResult } from '@gitspace/protocol-runtime/draft';
 import { CloudFileStore } from './cloud-files.js';
 import { CodeSearchIndex, type CodeSearchSource } from './cloud-search-index.js';
+import { HistorySearchIndex } from './history-search-index.js';
 import { artifactsWorkspaceRepository, type ArtifactsCodeStore } from './artifacts.js';
 import { cutForAgent, type GitLfsConfirmedObject, type GitLfsStore, type TextSource, type WorkspaceReport, type WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
-import type { RuntimeTranscriptRange } from '@gitspace/runtime-core/history';
+import type { HistorySearchRequest, HistoryWorkspaceHits, RuntimeTranscriptRange } from '@gitspace/runtime-core/history';
 import { transcriptResponse, type RuntimeTranscriptFormat, type TranscriptImageUrl } from './transcript.js';
 import { createRunningMarks, megabytes, messageCharacters, type RunningMarks, type RunningStep } from './running-marks.js';
 import { createRequestLoad, estimateMemory } from './memory-estimate.js';
@@ -150,6 +151,9 @@ export type WorkspaceRuntime = {
   /** A person's cancel: withdraws the instruction, or stops the workspace agent once it has started. */
   automationCancel(requestId: string): Promise<RuntimeRequestStatus>;
   transcript(conversationId?: string, format?: RuntimeTranscriptFormat, range?: RuntimeTranscriptRange): Promise<Response>;
+  /** `history_search` in this workspace: ranked hits from its transcript index, and a bounded scan of what it does not
+   * cover yet (`HistorySearchIndex`). */
+  historySearch(request: HistorySearchRequest): Promise<HistoryWorkspaceHits>;
   publish(): void;
 };
 type StoredTask = TaskRecord<JsonValue, JsonValue, JsonValue>;
@@ -235,9 +239,16 @@ export async function createWorkspaceRuntime(options: WorkspaceRuntimeOptions): 
   } finally { opening.end(); }
 }
 async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: RunningMarks, heartbeat: () => void, opening: RunningStep, wake: WakeRecord, reads: StorageReads, resident: IsolateRuntime): Promise<WorkspaceRuntime> {
-  const storage = await SqliteStorage.open(new DurableObjectSqliteDatabase(options.storage, reads));
+  // Each transaction indexes the transcript entries it wrote, inside it (`HistorySearchIndex.written`).
+  let indexWrites = () => {};
+  const storage = await SqliteStorage.open(new DurableObjectSqliteDatabase(options.storage, reads, () => indexWrites()));
   /** A reporter of failures from one source (`RuntimeHarnessOptions.onReport`). */
   const reporting = (source: string) => (error: unknown) => options.onReport(error, source);
+  const withdrawn = createWithdrawnNotices(options.storage.sql);
+  // Before the harness opens, so every entry it writes is indexed; the backfill of older entries runs from alarms.
+  const historySearch = new HistorySearchIndex({ storage: options.storage, withdrawn, schedule: options.schedule, report: reporting('history search'), mark: marks.stage });
+  indexWrites = () => historySearch.written();
+  options.waitUntil(historySearch.scheduleBackfill().catch(reporting('history search')));
   opening.update('opening the harness');
   const toolResults = createToolResultStore(options.storage.sql, options.identity.workspaceId, WORKSPACE_TOOL_RESULTS_MAX_BYTES);
   // pi keeps the context of each conversation with live work in memory, out of reach: its size is taken from the
@@ -250,7 +261,6 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
     contextCharacters.set(conversationId, sizes.characters + sizes.imageCharacters);
   } });
   const { harness } = runtime;
-  const withdrawn = createWithdrawnNotices(options.storage.sql);
   const attachments = new AttachmentStore(options.storage, { ...options.attachments, dispatch: input => { heartbeat(); return options.attachments.dispatch(input); } });
   // Sync merges and cloud writes build snapshots in memory: each is marked while it runs.
   const code: Pick<WorkspaceRuntimeOptions['code'], 'readFile' | 'writeSnapshot' | 'mergeSnapshot' | 'listSnapshotPaths' | 'changedSnapshotPaths'> = {
@@ -733,6 +743,13 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
     async transcript(conversationId, format, range) {
       return reads.within('transcript', async () => transcriptResponse(storage, await conversation(conversationId), withdrawn, format, range));
     },
+    async historySearch(request) {
+      if (request.conversationId === undefined) return historySearch.search(request, null);
+      let target: Conversation;
+      try { target = await conversation(request.conversationId); }
+      catch { throw new Error(`Conversation ${request.conversationId} is not in workspace ${options.identity.workspaceId}`); }
+      return historySearch.search(request, [target.id]);
+    },
     async snapshotCommit(raw) {
       const input = RuntimeSnapshotCommitInputSchema.parse(raw);
       const authorize = () => {
@@ -945,8 +962,8 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
       return replicaEvents(snapshot, after, replica.events);
     },
     async wake() {
-      // Indexing runs beside recovery: a failing recovery step must not keep code_search from being built.
-      const indexing = codeSearch.drive();
+      // Indexing runs beside recovery: a failing recovery step must not keep code_search or history_search from being built.
+      const indexing = Promise.all([codeSearch.drive(), historySearch.drive()]);
       // Tasks keep the object in memory only through their own pending I/O and timers; an alarm is re-armed only while
       // marked work or a machine command is still running (a step outliving those 15 minutes).
       try {

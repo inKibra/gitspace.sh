@@ -537,16 +537,21 @@ export class InspectorCloudArtifacts {
     return part;
   }
 
-  /** Reserves `<folder>/<fileName>` (`folder` absent: `uploads`; empty: the drive's root) in this session's writable
-   * scope; the file is listed only after commit. The file is
-   * stored under the digest the browser declares, and commit refuses other bytes. `link` is the upload's link
-   * (`upload-link.ts`): its parts, commit and abort without further signatures. */
-  async beginUpload(fileName: string, size: number, sha256: string, mediaType: string | null, folder = 'uploads') {
+  /** `<folder>/<fileName>` in this session's writable scope (`folder` absent: `uploads`; empty: the drive's root), the
+   * name cut to its last segment and stripped of control characters. */
+  private uploadPath(fileName: string, folder = 'uploads'): string {
     const name = (fileName.split(/[\\/]/u).at(-1) ?? '').replace(/[\u0000-\u001f\u007f]/gu, '').trim();
     if (!name || name === '.' || name === '..' || name.length > 255) throw new Error('Choose a file with a valid name');
-    if (!/^[a-f0-9]{64}$/u.test(sha256)) throw new Error('Declare the file’s SHA-256 as 64 hexadecimal digits');
     // The folder is checked like any written path: it stays inside this drive.
-    const path = this.writablePath(driveUrl(this.writable().mount, folder ? `${folder}/${name}` : name));
+    return this.writablePath(driveUrl(this.writable().mount, folder ? `${folder}/${name}` : name));
+  }
+
+  /** Reserves `uploadPath(fileName, folder)`; the file is listed only after commit. The file is
+   * stored under the digest the browser declares, and commit refuses other bytes. `link` is the upload's link
+   * (`upload-link.ts`): its parts, commit and abort without further signatures. */
+  async beginUpload(fileName: string, size: number, sha256: string, mediaType: string | null, folder?: string) {
+    const path = this.uploadPath(fileName, folder);
+    if (!/^[a-f0-9]{64}$/u.test(sha256)) throw new Error('Declare the file’s SHA-256 as 64 hexadecimal digits');
     await this.deleteAbandonedUploads();
     const upload = this.files.begin(this.stagingScope, { declared: { sha256: `sha256:${sha256}`, size } });
     const generation = this.source.placement?.generation ?? 0;
@@ -554,6 +559,23 @@ export class InspectorCloudArtifacts {
     await this.saveUpload(upload.id, state);
     const link = await mintUploadLink(this.env, { kind: 'drive', spaceId: state.spaceId, generation, uploadId: upload.id });
     return { uploadId: upload.id, url: driveUrl(this.writable().mount, state.path), link, chunkBytes: ARTIFACT_UPLOAD_CHUNK_BYTES, partBytes: upload.partBytes };
+  }
+
+  /** Fetches a public https file (`fetchPublicFile`) into `uploadPath(fileName, folder)` (`fileName` absent: the name
+   * the response gives), storing it as it arrives, so no request body cap applies; up to `DRIVE_FILE_MAX_BYTES` within
+   * `PUBLIC_FILE_TIMEOUT_MS`. `sha256` (hexadecimal) is checked before the file is listed; `mediaType` absent: the
+   * response's. */
+  async importUrl(url: string, options: { folder?: string; fileName?: string; mediaType?: string; sha256?: string }) {
+    if (options.sha256 !== undefined && !/^[a-f0-9]{64}$/u.test(options.sha256)) throw new Error('Give the file’s SHA-256 as 64 hexadecimal digits');
+    // Loaded here, not at startup: the account worker's startup is near Cloudflare's limit.
+    const { fetchPublicFile, PUBLIC_FILE_TIMEOUT_MS } = await import('./public-fetch.js');
+    const file = await fetchPublicFile(url, { maxBytes: DRIVE_FILE_MAX_BYTES, signal: AbortSignal.timeout(PUBLIC_FILE_TIMEOUT_MS), ...(options.sha256 === undefined ? {} : { sha256: options.sha256 }) });
+    let path: string;
+    try { path = this.uploadPath(options.fileName ?? file.fileName ?? 'file', options.folder); } catch (error) {
+      await file.body.cancel();
+      throw error;
+    }
+    return (await this.put(path, { stream: file.body, mediaType: options.mediaType ?? file.mediaType })).artifact;
   }
 
   /** Staged uploads untouched for a day were abandoned (a closed tab, a failed send); a new upload removes them. A
@@ -646,7 +668,7 @@ export class InspectorCloudArtifacts {
 
   async listShares(url: string) {
     const { scope, path } = await this.resolve(url);
-    return (await this.source.authority.listArtifactShares(scope.workspaceId, path)).map((record) => artifactShareView(this.userId, this.source.project.id, record, url));
+    return (await this.source.authority.listArtifactShares(scope.workspaceId, path)).map((record) => artifactShareView(this.env, this.userId, this.source.project.id, record, url));
   }
 
   async createShare(url: string, hash: string, expiresAt: string | null) {
@@ -673,7 +695,7 @@ export class InspectorCloudArtifacts {
       size: entry.size, mediaType: entry.mediaType, ...(entry.object ? { object: entry.object } : {}), createdAt: new Date().toISOString(),
       expiresAt: expiresAt === null ? null : new Date(expiresAt).toISOString(), revokedAt: null,
     });
-    return artifactShareView(this.userId, this.source.project.id, record, url);
+    return artifactShareView(this.env, this.userId, this.source.project.id, record, url);
   }
 
   async revokeShare(token: string) {
@@ -681,9 +703,10 @@ export class InspectorCloudArtifacts {
   }
 }
 
-function artifactShareView(userId: string, projectId: string, record: ArtifactShareRecord, artifactUrl: string) {
+/** A share as its owner sees it, with its absolute public link on the account origin. */
+function artifactShareView(env: Env, userId: string, projectId: string, record: ArtifactShareRecord, artifactUrl: string) {
   return {
-    id: record.token, url: `/shared-artifacts/${encodeURIComponent(userId)}/${encodeURIComponent(projectId)}/${record.token}`,
+    id: record.token, url: new URL(`/shared-artifacts/${encodeURIComponent(userId)}/${encodeURIComponent(projectId)}/${record.token}`, env.ACCOUNT_URL).href,
     artifactUrl, hash: record.hash, createdAt: record.createdAt, expiresAt: record.expiresAt,
   };
 }

@@ -15,6 +15,11 @@ import { PHASE_RULE } from '@gitspace/protocol-workspace';
 import { scriptToolSources } from '@gitspace/runtime-core';
 import { tenantRootPrivateKey } from './setup.js';
 import { passkeyChallenge } from './fixtures/passkeys.js';
+import { createHash } from 'node:crypto';
+import { HttpResponse, http } from 'msw';
+import { z } from 'zod';
+import { network } from './network.js';
+import { dnsAnswers, png } from './public-network.js';
 
 async function fixture(capabilities: DeviceCapability[], rights: Partial<DeviceInvite> = {}, enable = true) {
   const privateKey = crypto.getRandomValues(new Uint8Array(32));
@@ -283,4 +288,57 @@ describe('tenant MCP authority boundary', () => {
     expect((await value.management('disable', { expectedRevision: 0, connectionId: 'any' })).status).toBe(409);
     expect(await (await value.management('status')).json()).toMatchObject({ value: { revision: 1, connections: [{ active: true }] } });
   });
+});
+
+/** A project with one worktree workspace, owned by the account. */
+async function worktree() {
+  const projectId = crypto.randomUUID();
+  const workspaceId = crypto.randomUUID();
+  const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`);
+  const project = await authority.bootstrap({ id: projectId, name: 'MCP files', repositoryReference: null, baseBranch: 'main', createdBy: 'user' });
+  const index = env.USER_PROJECTS.getByName(env.ACCOUNT_ID);
+  await index.put(await authority.setProjectLifecycle(project.revision, 'active'));
+  for (const [id, kind] of [[projectId, 'base'], [workspaceId, 'worktree']] as const) {
+    await authority.putWorkspace({ id, projectId, kind, name: kind, branch: 'main', phase: kind === 'base' ? null : 'code', sourceKind: 'base', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
+    await index.putWorkspaceLocation(id, projectId);
+  }
+  return workspaceId;
+}
+
+describe('files over MCP by link (#241)', () => {
+  it('writes a PNG, fetches the URL artifacts_file returns as it is, imports one from a public https URL by its hash, and links only a single-file result', async () => {
+    const value = await fixture(['rpc.read', 'rpc.write']);
+    const space = { spaceId: await worktree(), expectedGeneration: 0 };
+    const hash = createHash('sha256').update(png).digest('hex');
+    const ResultSchema = z.object({ result: z.object({ url: z.string(), hash: z.string() }).loose() });
+    await value.client.connect(value.transport);
+    try {
+      const written = await value.client.callTool({ name: 'gitspace_inspector_artifacts_write', arguments: { ...space, url: 'drive://workspace/shots/dot.png', mediaType: 'image/png', base64: Buffer.from(png).toString('base64') } });
+      expect(ResultSchema.parse(written.structuredContent).result.hash).toBe(`sha256:${hash}`);
+
+      const file = await value.client.callTool({ name: 'gitspace_inspector_artifacts_file', arguments: { ...space, url: 'drive://workspace/shots/dot.png', hash: null } });
+      const minted = ResultSchema.parse(file.structuredContent).result;
+      expect(minted.url.startsWith(`${env.ACCOUNT_URL}/files/`)).toBe(true);
+      // The URL as returned, with no credentials.
+      const fetched = await worker.fetch(new Request(minted.url), env);
+      expect(fetched.status).toBe(200);
+      expect(createHash('sha256').update(new Uint8Array(await fetched.arrayBuffer())).digest('hex')).toBe(hash);
+      expect(file.content).toEqual([
+        { type: 'text', text: JSON.stringify(file.structuredContent) },
+        { type: 'resource_link', uri: minted.url, name: 'dot.png', mimeType: 'image/png', size: png.byteLength },
+      ]);
+      // A list names many files, and links none.
+      const listed = await value.client.callTool({ name: 'gitspace_inspector_artifacts_list', arguments: space });
+      expect(listed.content).toEqual([{ type: 'text', text: JSON.stringify(listed.structuredContent) }]);
+
+      network.use(dnsAnswers({ 'files.example.com': { A: ['93.184.216.34'] } }), http.get('https://files.example.com/signed/shot.png', () => new HttpResponse(png, { headers: { 'content-type': 'image/png' } })));
+      const imported = await value.client.callTool({ name: 'gitspace_inspector_artifacts_import', arguments: { ...space, url: 'https://files.example.com/signed/shot.png', sha256: hash } });
+      expect(imported.structuredContent).toMatchObject({ result: { url: 'drive://workspace/uploads/shot.png', hash: `sha256:${hash}`, size: png.byteLength, mediaType: 'image/png' } });
+      // Other bytes than the hash names are never listed.
+      const refused = await value.client.callTool({ name: 'gitspace_inspector_artifacts_import', arguments: { ...space, url: 'https://files.example.com/signed/shot.png', fileName: 'wrong.png', sha256: '0'.repeat(64) } });
+      expect(refused.isError).toBe(true);
+      expect(JSON.stringify(refused.content)).toContain('does not match the given sha256');
+      expect(JSON.stringify((await value.client.callTool({ name: 'gitspace_inspector_artifacts_list', arguments: space })).structuredContent)).not.toContain('wrong.png');
+    } finally { await value.client.close(); }
+  }, 30_000);
 });
