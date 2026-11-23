@@ -1,6 +1,6 @@
 import type { WorkspaceTurnReport } from '@gitspace/blocks';
 import type { RuntimeSubmitInput } from '@gitspace/protocol-runtime';
-import type { WorkspaceReport } from '@gitspace/protocol-workspace';
+import { mainQuestion, type WorkspaceReport } from '@gitspace/protocol-workspace';
 import type { RuntimeAccepted, RuntimeTurn, RuntimeTurnItem, WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
 import type { RuntimeIdentity } from './runtime-services.js';
 import { deleteProjectWatch, readProjectWatch, readWorkspaceReport, writeProjectWatch, type ProjectWatch } from './workspace-metadata.js';
@@ -62,8 +62,9 @@ export function projectWatchHooks(storage: DurableObjectStorage, identity: Runti
     // A question only counts once the watched turn runs: one still pending from an earlier turn is not this turn's.
     published: report => {
       const watch = readProjectWatch(storage);
-      if (!watch || watch.startedAt === null || !report.waitingOn) return;
-      end(watch, report.waitingOn.kind === 'approval' ? 'approval' : 'asked', report.waitingOn.prompt, null);
+      const question = mainQuestion(report.waiting);
+      if (!watch || watch.startedAt === null || !question) return;
+      end(watch, question.kind === 'approval' ? 'approval' : 'asked', question.prompt, null);
     },
     personPrompted: () => { deleteProjectWatch(storage); },
   };

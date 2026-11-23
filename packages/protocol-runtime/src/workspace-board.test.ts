@@ -8,7 +8,7 @@ const row = (workspaceId: string, name: string, changes: Partial<WorkspaceBoardR
   workspaceId, name, phase: 'code', lifecycle: 'active', status: colored('blue'), waitingOn: null, pullRequests: [], since: '2026-11-08T17:02:00Z', lastReply: null, lastReplySource: null, journal: [], ...changes,
 });
 const rows = [
-  row('billing', 'Billing export', { status: colored('orange'), waitingOn: { kind: 'ask', prompt: 'Which bucket should\nexports go to?' }, pullRequests: [{ number: 42, state: null, checks: null }], since: '2026-11-08T18:31:00Z' }),
+  row('billing', 'Billing export', { status: colored('orange'), waitingOn: { kind: 'ask', prompt: 'Which bucket should\nexports go to?', characters: 34 }, pullRequests: [{ number: 42, state: null, checks: null }], since: '2026-11-08T18:31:00Z' }),
   row('search', 'Search index', { phase: 'plan', status: colored('green'), since: '2026-11-07T23:10:00Z' }),
   row('docs', 'Docs refresh', { phase: 'review' }),
   row('sync', 'Sync repair', { status: colored('orange', 2), since: null }),

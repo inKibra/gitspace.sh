@@ -210,12 +210,21 @@ workspace and has not sent yet show on that row as staged (`gitspace.comments` `
 ## 5. Routes and navigation
 
 Today:
-- `routes.ts` has `AppView` = agent, kanban, projects, inference, plugins, skills, automations, secrets, monitoring.
+- `routes.ts` has `AppView` = agent, board, projects, inference, plugins, skills, automations, secrets, monitoring.
   `/` is the agent view.
-- `NAV` (`AppSidebar.tsx`) lists kanban … monitoring. Only automations carries a badge (`failedAutomationRuns`).
+- The rail's first entry is **Board** (built, SIMPLIFICATION 339), with the orange count of workspaces that need you;
+  then projects … monitoring. Automations carries the failed-runs dot (`failedAutomationRuns`).
 - The sidebar header's filters are All, Needs you, Running, Review, Ship. Needs you keeps rows whose colour is orange.
   `workspaceStatusColor` (`GitSpaceShell.tsx`) also makes rows orange when the holder is unknown or the status is
   stale, so today Needs you includes "status not confirmed" rows.
+
+**The Board** (built, SIMPLIFICATION 339; `account-web/src/board/`). The Inbox is not a page of its own: it is the
+first column, Needs you, of the board in State grouping. The board is the sidebar widened: dragging its edge past
+520 px reflows the list's groups into columns and releasing opens `/board`; the rail's Board entry and `B` open it too.
+`/board?group=state|phase|project&projects=<ids>&show=graph` holds its grouping, the Project filter and the graph view;
+`project` and `workspace` name the workspace open beside it. Cards lead with the workspace's goal (§9 milestone 8, now
+on the status row); Phase columns take a dragged card under the phase rule, with Undo; the Today strip has the tiles
+from existing data (decision 10 a). Spend, the per-hour chart and project health chips are not built.
 
 Changes:
 - **`/inbox`**: a new `AppView` `inbox` with its `PRODUCT_ROUTE_LABELS` label, `PATH_BY_ROUTE` path, `NAV` entry
@@ -456,6 +465,15 @@ Decision 10 covers which of these ship first.
 
 ## 9. Milestones
 
+**Built (2026-11-23, SIMPLIFICATION 340):** milestone 2's workspace list (`waiting` in the report, the send, `waiting_json`
+and the socket rows, every conversation, the caps; the previous release's `waitingOn` read as a one-item list), milestone
+3's in-place answers for asks and plans (one message through the staged-answer path, Undo held in the tab), milestone 4's
+approvals by content hash for lifecycle cards with Approve all declared, milestone 5's failed turn and failed setup step
+rows with Retry and the log, the account rows for offline machines and storage incidents from the sources the browser
+already reads, issue rows from each project's Chatter topics, and the count of decision 2a. Not built: sync-problem rows,
+declared approvals no agent has hit, the directory's account and Chatter source rows (`source_waiting`), mention rows,
+`inbox.list`, and the orange colour computed from the list.
+
 Each step ships alone.
 
 1. **The page, from data the browser has.**
@@ -540,6 +558,9 @@ update base, which also stop work. c brings back a badge nobody believes, the fa
 *Recommendation:* a. It is the decided "filter that opens it", and it stops counting rows whose status is merely
 unconfirmed (`workspaceStatusColor`). Those get their own explicit line on the Inbox.
 
+*Settled (2026-11-23):* Needs you opens the board in State grouping, whose first column, Needs you, is the Inbox; the
+sidebar keeps filtering. Not built yet: Needs you still only filters the list.
+
 **4. Answering a question from the Inbox, given that answers stage (SIMPLIFICATION 280).**
 - a. The row is its own composer: pick, add an optional note, send. One `prompt { answers, text? }` to that
   conversation.
@@ -606,6 +627,9 @@ exist. The per-hour activity chart adds counters to every tool call for a pictur
 - b. The Inbox is one `NAV` page among others.
 
 *Recommendation:* a. It is "the page" by decision. A workspace link and the sidebar still go straight to a workspace.
+
+*Settled (2026-11-23):* `/` with no workspace selected opens the board in State grouping. Not built yet: `/` still
+shows Projects.
 
 **12. Chatter in the Inbox.**
 - a. Mentions of the person as uncounted rows, one per topic, cleared on posting under it or opening it. Returned

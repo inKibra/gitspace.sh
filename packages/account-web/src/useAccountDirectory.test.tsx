@@ -148,9 +148,14 @@ it('populates every project and holder independently of the selected pane', asyn
 it('shows a cloud workspace by its status row, without its stale legacy placement or any machine', async () => {
   const scene = fixture();
   scene.cloud.add('a-work');
-  statuses.receive({ type: 'statuses', rows: [{ projectId: 'a', workspaceId: 'a-work', status: waiting, preview: 'The migration failed. · Timeline: Deploy' }] });
+  const goal = { title: 'Hold a pickup slot while the customer pays', emoji: null, met: 3, total: 5, step: { index: 2, count: 4, title: 'Redis-backed hold' } };
+  statuses.receive({ type: 'statuses', rows: [{ projectId: 'a', workspaceId: 'a-work', status: waiting, preview: 'The migration failed. · Timeline: Deploy', goal }] });
   await act(async () => { root.render(<Probe scene={scene} />); });
-  expect(workspaceSummary()).toEqual({ closedAt: null, holder: { kind: 'cloud' }, status: waiting, preview: 'The migration failed. · Timeline: Deploy', freshness: 'fresh', refreshing: false });
+  expect(workspaceSummary()).toEqual({ closedAt: null, holder: { kind: 'cloud' }, status: waiting, preview: 'The migration failed. · Timeline: Deploy', goal, freshness: 'fresh', refreshing: false });
+  // The goal moves with the row's next message.
+  const next = { ...goal, met: 4, step: { index: 3, count: 4, title: 'Release on payment or timeout' } };
+  await act(async () => { statuses.receive({ type: 'status', projectId: 'a', workspaceId: 'a-work', status: waiting, preview: 'The migration failed. · Timeline: Deploy', goal: next }); });
+  expect(workspaceSummary()?.goal).toEqual(next);
   expect(directory.a?.baseSummary?.holder).toEqual({ kind: 'held', machineId: 'desk', label: 'Desk machine' });
   expect(row('Alpha work').getAttribute('title')).toBe('feature · Waiting');
   expect(container.textContent).not.toContain('Desk machine');
@@ -175,7 +180,7 @@ it('updates one unopened cloud row and its last-message preview from its status 
 it('shows a machine-held workspace by its status row and updates it when the row changes', async () => {
   const scene = fixture();
   await act(async () => { root.render(<Probe scene={scene} />); });
-  expect(workspaceSummary()).toEqual({ closedAt: null, generation: 1, holder: { kind: 'held', machineId: 'desk', label: 'Desk machine' }, status: working, preview: null, freshness: 'fresh', refreshing: false, detail: null });
+  expect(workspaceSummary()).toEqual({ closedAt: null, generation: 1, holder: { kind: 'held', machineId: 'desk', label: 'Desk machine' }, status: working, preview: null, goal: null, freshness: 'fresh', refreshing: false, detail: null });
   expect(row('Alpha work').getAttribute('title')).toBe('feature · Working');
   await act(async () => { statuses.receive({ type: 'status', projectId: 'a', workspaceId: 'a-work', status: waiting }); });
   expect(workspaceSummary()).toMatchObject({ holder: { kind: 'held', machineId: 'desk' }, status: waiting, freshness: 'fresh' });
@@ -273,7 +278,7 @@ it('keeps canonical phases and source metadata for released, offline, and unknow
   );
   scene.placements.push({ spaceId: 'b-offline', projectId: 'b', kind: 'worktree', holderId: 'laptop', generation: 1, state: 'open', endpoint: '/machine/laptop/rpc' });
   scene.machines[1]!.state = 'offline';
-  await act(async () => { root.render(<Probe scene={scene} selected={{ projectId: 'a', workspaceId: 'a-work' }} view="kanban" />); });
+  await act(async () => { root.render(<Probe scene={scene} selected={{ projectId: 'a', workspaceId: 'a-work' }} view="projects" />); });
   expect(directory.a?.workspaces[0]?.definition?.phase).toBe('plan');
   expect(directory.b?.workspaces.map((space) => ({ id: space.id, phase: space.definition?.phase, holder: space.summary?.holder.kind }))).toEqual([
     { id: 'b-work', phase: 'review', holder: 'released' },

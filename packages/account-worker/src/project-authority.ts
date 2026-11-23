@@ -33,7 +33,7 @@ import { DEVICE_AUTHORITY_UNAVAILABLE, deviceAuthority, withDeviceAuthority } fr
 import type { CredentialVaultDO } from './application.js';
 import type { SpaceAuthorityDO } from './space-authority.js';
 import type { FleetCatalogDO } from './fleet-catalog.js';
-import { StackRestackSchema, WorkspaceDomainError, WorkspaceRelationsSchema, WorkspaceReportSchema, archiveRestack, emptyRelations, normalizeRelations, resolveWorkspaceRelations, stackBelow, type PhaseCarrier, type StackRestack, type WorkspaceFailure, type GitLfsSnapshot, type GitLfsObject, type GitLfsConfirmedObject, type WorkspacePhase, type WorkspaceRelations, type WorkspaceRelationsInput, type WorkspaceReport } from '@gitspace/protocol-workspace';
+import { StackRestackSchema, WAITING_TITLE_MAX, WorkspaceDomainError, WorkspaceGoalHeadSchema, WorkspacePlanStepSchema, WorkspaceRelationsSchema, WorkspaceReportSchema, WorkspaceWaitingSchema, archiveRestack, emptyRelations, emptyWaiting, normalizeRelations, resolveWorkspaceRelations, stackBelow, type PhaseCarrier, type StackRestack, type WorkspaceFailure, type GitLfsSnapshot, type GitLfsObject, type GitLfsConfirmedObject, type WorkspaceGoalHead, type WorkspacePhase, type WorkspacePlanStep, type WorkspaceRelations, type WorkspaceRelationsInput, type WorkspaceReport, type WorkspaceWaiting } from '@gitspace/protocol-workspace';
 import { GitLfsRetention, type RetainedLfsSnapshot } from './git-lfs-retention.js';
 import { confirmCloudOrigin } from './git-lfs-origin.js';
 import { gitLfsObjectKey } from './git-lfs-store.js';
@@ -375,9 +375,20 @@ function projectMcpGrant(row: ProjectMcpGrantRow): ProjectMcpGrant {
   };
 }
 
-/** One workspace's status as it sends it: the row (with its last-message preview), what its main conversation waits on,
- * its main agent's latest message, and the snapshot cursor that orders its sends. */
-export type WorkspaceStatusSend = z.input<typeof workspaceStatusRowSchema> & { waitingOn: WorkspaceReport['waitingOn']; lastReply: WorkspaceReport['lastReply']; lastReplySource?: WorkspaceReport['lastReplySource']; cursor: number };
+/** LEGACY (2026-11-23): a workspace still on the previous release sends what its main conversation waits on as
+ * `waitingOn` instead of the `waiting` list, for the minutes its object serves the old code, and rows stored before held
+ * that shape (rewritten once, in the directory's constructor). Either reads as a one-item list. Remove the send's
+ * `waitingOn` with the next release. */
+const LegacyWaitingOnSchema = z.object({ kind: z.enum(['ask', 'approval']), prompt: z.string(), characters: z.number().int().nonnegative().optional() }).nullable();
+function legacyWaiting(waitingOn: z.infer<typeof LegacyWaitingOnSchema>): WorkspaceWaiting {
+  if (!waitingOn) return emptyWaiting;
+  const item = { key: 'waiting-on', since: null, title: waitingOn.prompt.slice(0, WAITING_TITLE_MAX), characters: waitingOn.characters ?? waitingOn.prompt.length, conversation: { id: 'main', agent: null }, choices: [] };
+  return { items: [waitingOn.kind === 'approval' ? { kind: 'approval', ...item } : { kind: 'ask', ...item }], more: 0 };
+}
+
+/** One workspace's status as it sends it: the row (with its last-message preview and its open items), its main plan's
+ * step, its main agent's latest message, and the snapshot cursor that orders its sends. */
+export type WorkspaceStatusSend = Omit<z.input<typeof workspaceStatusRowSchema>, 'goal'> & { planStep?: WorkspacePlanStep | null; lastReply: WorkspaceReport['lastReply']; lastReplySource?: WorkspaceReport['lastReplySource']; cursor: number; waitingOn?: z.input<typeof LegacyWaitingOnSchema> };
 
 export class UserProjectIndexDO extends BudgetedDurableObject {
   private readonly directory: AccountDirectoryProjection;
@@ -414,11 +425,17 @@ export class UserProjectIndexDO extends BudgetedDurableObject {
         try { this.ctx.storage.sql.exec(`ALTER TABLE user_projects ADD COLUMN ${column}`); }
         catch (error) { if (!(error instanceof Error) || !/duplicate column name/u.test(error.message)) throw error; }
       }
-      for (const column of ['waiting_json TEXT', 'since TEXT', 'last_reply TEXT', 'status_cursor INTEGER', 'last_reply_source TEXT', 'preview TEXT']) {
+      for (const column of ['waiting_json TEXT', 'since TEXT', 'last_reply TEXT', 'status_cursor INTEGER', 'last_reply_source TEXT', 'preview TEXT', 'plan_step_json TEXT']) {
         try { this.ctx.storage.sql.exec(`ALTER TABLE workspace_statuses ADD COLUMN ${column}`); }
         catch (error) { if (!(error instanceof Error) || !/duplicate column name/u.test(error.message)) throw error; }
       }
       this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS workspace_journals(workspace_id TEXT PRIMARY KEY,project_id TEXT NOT NULL,journal_json TEXT NOT NULL)');
+      this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS workspace_goals(workspace_id TEXT PRIMARY KEY,project_id TEXT NOT NULL,goal_json TEXT NOT NULL)');
+      // One-time: rows stored before the waiting list hold what the main conversation waited on; they become one-item lists.
+      for (const row of this.ctx.storage.sql.exec<{ workspace_id: string; waiting_json: string }>("SELECT workspace_id,waiting_json FROM workspace_statuses WHERE waiting_json IS NOT NULL AND waiting_json NOT LIKE '{\"items\"%'").toArray()) {
+        const legacy = LegacyWaitingOnSchema.safeParse(JSON.parse(row.waiting_json));
+        this.ctx.storage.sql.exec('UPDATE workspace_statuses SET waiting_json=? WHERE workspace_id=?', JSON.stringify(legacyWaiting(legacy.success ? legacy.data : null)), row.workspace_id);
+      }
       addRemoteColumns(this.ctx.storage, 'user_projects');
       this.ctx.storage.sql.exec('CREATE UNIQUE INDEX IF NOT EXISTS user_project_role ON user_projects(role) WHERE role IS NOT NULL');
       // One-time: the directory was once a stored change log replayed by cursor, redelivered by alarm.
@@ -428,28 +445,48 @@ export class UserProjectIndexDO extends BudgetedDurableObject {
   }
 
 
-  /** A workspace's status, what its main conversation waits on, or its main agent's latest message changed: keep its one
-   * row, and send a changed status or preview to every open tab. `since` moves only when its activity (the status color)
-   * or what it waits on changes, not its machine or sync counts or its latest message. A workspace's sends can arrive out
-   * of order; one older than the row (by its snapshot `cursor`, which only grows) is dropped. */
+  /** A workspace's status, its open items, its plan step or its main agent's latest message changed: keep its one row,
+   * and send a changed row to every open tab. `since` moves only when its activity (the status color) or what it waits
+   * on changes, not its machine or sync counts or its latest message. A workspace's sends can arrive out of order; one
+   * older than the row (by its snapshot `cursor`, which only grows) is dropped. */
   setWorkspaceStatus(row: WorkspaceStatusSend): void {
-    const { projectId, workspaceId, status, preview } = workspaceStatusRowSchema.parse(row);
+    const parsed = workspaceStatusRowSchema.parse(row);
+    const { projectId, workspaceId, status, preview } = parsed;
     const cursor = z.number().int().nonnegative().parse(row.cursor);
     const summary = JSON.stringify(status);
-    const waiting = JSON.stringify(WorkspaceReportSchema.shape.waitingOn.parse(row.waitingOn));
+    const waiting = JSON.stringify(parsed.waiting ?? legacyWaiting(LegacyWaitingOnSchema.parse(row.waitingOn ?? null)));
+    const planStep = JSON.stringify(WorkspacePlanStepSchema.nullable().parse(row.planStep ?? null));
     const lastReply = WorkspaceReportSchema.shape.lastReply.parse(row.lastReply);
     const source = JSON.stringify(WorkspaceReportSchema.shape.lastReplySource.parse(row.lastReplySource ?? null));
-    const stored = this.ctx.storage.sql.exec<{ summary: string; waiting_json: string | null; since: string | null; last_reply: string | null; last_reply_source: string | null; status_cursor: number | null; preview: string | null }>('SELECT summary,waiting_json,since,last_reply,last_reply_source,status_cursor,preview FROM workspace_statuses WHERE workspace_id=?', workspaceId).toArray()[0];
+    const stored = this.ctx.storage.sql.exec<{ summary: string; waiting_json: string | null; plan_step_json: string | null; since: string | null; last_reply: string | null; last_reply_source: string | null; status_cursor: number | null; preview: string | null }>('SELECT summary,waiting_json,plan_step_json,since,last_reply,last_reply_source,status_cursor,preview FROM workspace_statuses WHERE workspace_id=?', workspaceId).toArray()[0];
     if (stored?.status_cursor != null && cursor < stored.status_cursor) return;
-    if (stored?.summary === summary && (stored.waiting_json ?? 'null') === waiting && stored.last_reply === lastReply && (stored.last_reply_source ?? 'null') === source && stored.preview === preview) {
+    const shown = stored?.summary === summary && stored.preview === preview && stored.waiting_json === waiting && (stored.plan_step_json ?? 'null') === planStep;
+    if (shown && stored?.last_reply === lastReply && (stored.last_reply_source ?? 'null') === source) {
       this.ctx.storage.sql.exec('UPDATE workspace_statuses SET status_cursor=? WHERE workspace_id=?', cursor, workspaceId);
       return;
     }
-    const activityChanged = !stored || (stored.waiting_json ?? 'null') !== waiting || workspaceStatusRowSchema.shape.status.parse(JSON.parse(stored.summary)).primaryColor !== status.primaryColor;
+    const activityChanged = !stored || stored.waiting_json !== waiting || workspaceStatusRowSchema.shape.status.parse(JSON.parse(stored.summary)).primaryColor !== status.primaryColor;
     const since = activityChanged ? new Date().toISOString() : stored?.since ?? null;
-    this.ctx.storage.sql.exec('INSERT INTO workspace_statuses(workspace_id,project_id,summary,waiting_json,since,last_reply,last_reply_source,status_cursor,preview) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(workspace_id) DO UPDATE SET project_id=excluded.project_id,summary=excluded.summary,waiting_json=excluded.waiting_json,since=excluded.since,last_reply=excluded.last_reply,last_reply_source=excluded.last_reply_source,status_cursor=excluded.status_cursor,preview=excluded.preview', workspaceId, projectId, summary, waiting, since, lastReply, source, cursor, preview);
-    if (stored?.summary === summary && stored.preview === preview) return;
-    const message = JSON.stringify({ type: 'status', projectId, workspaceId, status, preview });
+    this.ctx.storage.sql.exec('INSERT INTO workspace_statuses(workspace_id,project_id,summary,waiting_json,plan_step_json,since,last_reply,last_reply_source,status_cursor,preview) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(workspace_id) DO UPDATE SET project_id=excluded.project_id,summary=excluded.summary,waiting_json=excluded.waiting_json,plan_step_json=excluded.plan_step_json,since=excluded.since,last_reply=excluded.last_reply,last_reply_source=excluded.last_reply_source,status_cursor=excluded.status_cursor,preview=excluded.preview', workspaceId, projectId, summary, waiting, planStep, since, lastReply, source, cursor, preview);
+    if (!shown) this.sendStatus(workspaceId);
+  }
+
+  /** A workspace's goal as its goal record last reported it (null: it has none): the board's cards show it with the
+   * plan step its status sends carry. */
+  setWorkspaceGoal(row: { projectId: string; workspaceId: string; goal: WorkspaceGoalHead | null }): void {
+    const stored = this.ctx.storage.sql.exec<{ goal_json: string }>('SELECT goal_json FROM workspace_goals WHERE workspace_id=?', row.workspaceId).toArray()[0]?.goal_json ?? null;
+    const goal = row.goal === null ? null : JSON.stringify(WorkspaceGoalHeadSchema.parse(row.goal));
+    if (stored === goal) return;
+    if (goal === null) this.ctx.storage.sql.exec('DELETE FROM workspace_goals WHERE workspace_id=?', row.workspaceId);
+    else this.ctx.storage.sql.exec('INSERT INTO workspace_goals(workspace_id,project_id,goal_json) VALUES(?,?,?) ON CONFLICT(workspace_id) DO UPDATE SET project_id=excluded.project_id,goal_json=excluded.goal_json', row.workspaceId, row.projectId, goal);
+    this.sendStatus(row.workspaceId);
+  }
+
+  /** Sends a workspace's row, as the tabs read it, to every open tab; nothing before its first status. */
+  private sendStatus(workspaceId: string): void {
+    const row = this.statusRows(workspaceId)[0];
+    if (!row) return;
+    const message = JSON.stringify({ type: 'status', ...row });
     for (const socket of this.ctx.getWebSockets()) {
       if (socket.readyState !== WebSocket.OPEN) continue;
       try { socket.send(message); } catch { /* A reconnecting tab reads every row again. */ }
@@ -480,15 +517,15 @@ export class UserProjectIndexDO extends BudgetedDurableObject {
     await this.statusSeed;
   }
 
-  /** One project's stored status rows, by workspace: each status, what its main conversation waits on, since when its
-   * activity is what it is, and its main agent's latest message. The project view and the project agent's board read
-   * these, never the workspaces. */
-  async projectWorkspaceStatuses(projectId: string): Promise<Record<string, { status: WorkspaceStatusRow['status']; waitingOn: WorkspaceReport['waitingOn']; since: string | null; lastReply: string | null; lastReplySource: WorkspaceReport['lastReplySource'] }>> {
+  /** One project's stored status rows, by workspace: each status, its open items, since when its activity is what it
+   * is, and its main agent's latest message. The project view and the project agent's board read these, never the
+   * workspaces. */
+  async projectWorkspaceStatuses(projectId: string): Promise<Record<string, { status: WorkspaceStatusRow['status']; waiting: WorkspaceWaiting; since: string | null; lastReply: string | null; lastReplySource: WorkspaceReport['lastReplySource'] }>> {
     await this.seedWorkspaceStatuses();
     const rows = this.ctx.storage.sql.exec<{ workspace_id: string; summary: string; waiting_json: string | null; since: string | null; last_reply: string | null; last_reply_source: string | null }>('SELECT workspace_id,summary,waiting_json,since,last_reply,last_reply_source FROM workspace_statuses WHERE project_id=?', projectId).toArray();
     return Object.fromEntries(rows.map(row => [row.workspace_id, {
       status: workspaceStatusRowSchema.shape.status.parse(JSON.parse(row.summary)),
-      waitingOn: WorkspaceReportSchema.shape.waitingOn.parse(JSON.parse(row.waiting_json ?? 'null')),
+      waiting: WorkspaceWaitingSchema.nullable().parse(JSON.parse(row.waiting_json ?? 'null')) ?? emptyWaiting,
       since: row.since,
       lastReply: row.last_reply,
       lastReplySource: WorkspaceReportSchema.shape.lastReplySource.parse(JSON.parse(row.last_reply_source ?? 'null')),
@@ -501,9 +538,15 @@ export class UserProjectIndexDO extends BudgetedDurableObject {
     return Object.fromEntries(rows.map(row => [row.workspace_id, WorkspaceJournalLinesSchema.parse(JSON.parse(row.journal_json))]));
   }
 
-  private workspaceStatuses(): WorkspaceStatusRow[] {
-    return this.ctx.storage.sql.exec<{ workspace_id: string; project_id: string; summary: string; preview: string | null }>('SELECT workspace_id,project_id,summary,preview FROM workspace_statuses').toArray()
-      .map(row => workspaceStatusRowSchema.parse({ projectId: row.project_id, workspaceId: row.workspace_id, status: JSON.parse(row.summary), preview: row.preview }));
+  /** Status rows as the tabs read them, every row or one workspace's: the goal joins the plan step of its status. */
+  private statusRows(workspaceId?: string): WorkspaceStatusRow[] {
+    const filter = workspaceId === undefined ? '' : ' WHERE s.workspace_id=?';
+    return this.ctx.storage.sql.exec<{ workspace_id: string; project_id: string; summary: string; preview: string | null; waiting_json: string | null; plan_step_json: string | null; goal_json: string | null }>(
+      `SELECT s.workspace_id,s.project_id,s.summary,s.preview,s.waiting_json,s.plan_step_json,g.goal_json FROM workspace_statuses s LEFT JOIN workspace_goals g ON g.workspace_id=s.workspace_id${filter}`, ...(workspaceId === undefined ? [] : [workspaceId])).toArray()
+      .map(row => workspaceStatusRowSchema.parse({
+        projectId: row.project_id, workspaceId: row.workspace_id, status: JSON.parse(row.summary), preview: row.preview, waiting: JSON.parse(row.waiting_json ?? 'null'),
+        goal: row.goal_json === null ? null : { ...JSON.parse(row.goal_json), step: JSON.parse(row.plan_step_json ?? 'null') },
+      }));
   }
 
   /** A project's automation counts and newest runs, pushed by its automations object on every change; `day` is the UTC
@@ -664,7 +707,7 @@ export class UserProjectIndexDO extends BudgetedDurableObject {
     await this.sendDirectory(server, [JSON.stringify({ type: 'directory', snapshot: this.directory.snapshot(this.list()) } satisfies AccountDirectoryMessage)]);
     await this.seedWorkspaceStatuses();
     // Every status row once per socket; later changes arrive one row at a time.
-    server.send(JSON.stringify({ type: 'statuses', rows: this.workspaceStatuses() }));
+    server.send(JSON.stringify({ type: 'statuses', rows: this.statusRows() }));
     // After the socket is answered: a project read again arrives as its slice, and one that fails never fails the socket.
     this.ctx.waitUntil(this.readRelations());
     return new Response(null, { status: 101, webSocket: client, headers: { 'sec-websocket-protocol': offered.protocol } });
@@ -840,6 +883,7 @@ export class UserProjectIndexDO extends BudgetedDurableObject {
     this.ctx.storage.sql.exec('DELETE FROM workspace_projects WHERE project_id=?', projectId);
     this.ctx.storage.sql.exec('DELETE FROM workspace_statuses WHERE project_id=?', projectId);
     this.ctx.storage.sql.exec('DELETE FROM workspace_journals WHERE project_id=?', projectId);
+    this.ctx.storage.sql.exec('DELETE FROM workspace_goals WHERE project_id=?', projectId);
     this.ctx.storage.sql.exec('DELETE FROM automation_summaries WHERE project_id=?', projectId);
     return this.ctx.storage.sql.exec(
       'DELETE FROM user_projects WHERE project_id=? RETURNING project_id',
@@ -863,6 +907,7 @@ export class UserProjectIndexDO extends BudgetedDurableObject {
   removeWorkspaceLocation(workspaceId: string): boolean {
     this.ctx.storage.sql.exec('DELETE FROM workspace_statuses WHERE workspace_id=?', workspaceId);
     this.ctx.storage.sql.exec('DELETE FROM workspace_journals WHERE workspace_id=?', workspaceId);
+    this.ctx.storage.sql.exec('DELETE FROM workspace_goals WHERE workspace_id=?', workspaceId);
     return this.ctx.storage.sql.exec(
       'DELETE FROM workspace_projects WHERE workspace_id=? RETURNING workspace_id',
       workspaceId,

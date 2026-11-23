@@ -178,10 +178,10 @@ export async function createAccountWorkspaceRuntime(
       // run in the background and can arrive out of order (a turn's last message, then its end, a moment apart), so each
       // carries the snapshot's cursor and the account keeps the newest.
       const previous = readWorkspaceReport(ctx.storage);
-      const reportChanged = JSON.stringify(previous?.waitingOn ?? null) !== JSON.stringify(report.waitingOn) || (previous?.lastReply ?? null) !== report.lastReply || JSON.stringify(previous?.lastReplySource ?? null) !== JSON.stringify(report.lastReplySource) || sentPreview !== preview.text;
+      const reportChanged = JSON.stringify(previous?.waiting ?? null) !== JSON.stringify(report.waiting) || JSON.stringify(previous?.planStep ?? null) !== JSON.stringify(report.planStep) || (previous?.lastReply ?? null) !== report.lastReply || JSON.stringify(previous?.lastReplySource ?? null) !== JSON.stringify(report.lastReplySource) || sentPreview !== preview.text;
       const statusChanged = storeWorkspaceStatus(ctx.storage, summary);
       if (statusChanged || reportChanged || status.owed()) {
-        status.send({ ...identity, status: summary, preview: preview.text, waitingOn: report.waitingOn, lastReply: report.lastReply, lastReplySource: report.lastReplySource, cursor: snapshot.cursor });
+        status.send({ ...identity, status: summary, preview: preview.text, waiting: report.waiting, planStep: report.planStep, lastReply: report.lastReply, lastReplySource: report.lastReplySource, cursor: snapshot.cursor });
         sentPreview = preview.text;
       }
       storeWorkspaceReport(ctx.storage, report);

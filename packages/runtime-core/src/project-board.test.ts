@@ -73,7 +73,7 @@ test('the first turn carries the full board, a later one only what changed, and 
     expect(text(first!.messages.at(-1))).toMatch(/^Workspace board, \d{4}-\d\d-\d\d \d\d:\d\d:\d\d UTC \(2 workspaces\):\n- Billing export \(billing\) · code · idle · since 17:00\n- Search index \(search\) · code · working · since 17:00$/u);
     expect(instructions(first)).toContain(JSON.stringify(PROJECT_BOARD_INSTRUCTION).slice(1, -1));
 
-    f.board.rows = [row('billing', 'Billing export', { phase: 'plan', status: colored('orange'), waitingOn: { kind: 'ask', prompt: 'Which bucket?' }, since: today.replace('T17:00', 'T18:50') }), f.board.rows[1]!, row('onboarding', 'Onboarding')];
+    f.board.rows = [row('billing', 'Billing export', { phase: 'plan', status: colored('orange'), waitingOn: { kind: 'ask', prompt: 'Which bucket?', characters: 13 }, since: today.replace('T17:00', 'T18:50') }), f.board.rows[1]!, row('onboarding', 'Onboarding')];
     const [second] = await f.turn('And now?');
     // Everything the first turn sent is sent again unchanged; the change comes after it.
     expect(second!.messages.slice(0, first!.messages.length)).toEqual(first!.messages);

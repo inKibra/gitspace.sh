@@ -1,9 +1,9 @@
-export type AppView = 'agent' | 'kanban' | 'projects' | 'inference' | 'plugins' | 'skills' | 'automations' | 'secrets' | 'monitoring';
+export type AppView = 'agent' | 'board' | 'projects' | 'inference' | 'plugins' | 'skills' | 'automations' | 'secrets' | 'monitoring';
 export type ProductRoute = AppView | 'settings';
 
 export const PRODUCT_ROUTE_LABELS: Record<ProductRoute, string> = {
   agent: 'Workspace',
-  kanban: 'Kanban',
+  board: 'Board',
   projects: 'Projects',
   inference: 'Inference',
   plugins: 'Plugins',
@@ -14,13 +14,14 @@ export const PRODUCT_ROUTE_LABELS: Record<ProductRoute, string> = {
   settings: 'Account settings',
 };
 
-export function isGlobalView(route: ProductRoute): route is Exclude<AppView, 'agent'> {
-  return route !== 'agent' && route !== 'settings';
+/** A page that leaves the workspace selection behind. The board keeps it: the workspace opens beside it. */
+export function isGlobalView(route: ProductRoute): route is Exclude<AppView, 'agent' | 'board'> {
+  return route !== 'agent' && route !== 'board' && route !== 'settings';
 }
 
 const PATH_BY_ROUTE: Record<ProductRoute, string> = {
   agent: '/',
-  kanban: '/kanban',
+  board: '/board',
   projects: '/projects',
   inference: '/inference',
   plugins: '/plugins',
@@ -36,6 +37,12 @@ const ROUTE_BY_PATH: Record<string, ProductRoute> = Object.fromEntries(Object.en
 export const AUTOMATIONS_PROJECT_PARAM = 'for';
 /** The run whose detail the Automations page opens. */
 export const AUTOMATIONS_RUN_PARAM = 'run';
+/** How the board groups its columns: `state`, `phase` or `project`. */
+export const BOARD_GROUP_PARAM = 'group';
+/** The projects the board's Project filter picked, comma-separated; absent, this browser's last pick. */
+export const BOARD_PROJECTS_PARAM = 'projects';
+/** `graph`: the board shows the account's workspace graph in place of its columns. */
+export const BOARD_VIEW_PARAM = 'show';
 
 export function productRouteFromLocation(location: Pick<Location, 'pathname' | 'search'>): ProductRoute {
   const pathname = location.pathname.length > 1 ? location.pathname.replace(/\/+$/, '') : location.pathname;
@@ -54,6 +61,7 @@ export function setProductRoute(url: URL, route: ProductRoute): URL {
   if (route !== 'inference') url.searchParams.delete('profile');
   if (route !== 'plugins') { url.searchParams.delete('tab'); url.searchParams.delete('pair'); url.searchParams.delete('manage'); }
   if (route !== 'automations') { url.searchParams.delete(AUTOMATIONS_PROJECT_PARAM); url.searchParams.delete(AUTOMATIONS_RUN_PARAM); }
+  if (route !== 'board') { url.searchParams.delete(BOARD_GROUP_PARAM); url.searchParams.delete(BOARD_PROJECTS_PARAM); url.searchParams.delete(BOARD_VIEW_PARAM); }
   if (isGlobalView(route)) {
     url.searchParams.delete('project');
     url.searchParams.delete('workspace');

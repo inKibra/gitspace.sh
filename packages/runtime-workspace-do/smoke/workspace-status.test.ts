@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import { RuntimeSnapshotSchema, RuntimeWorkspaceStatusSchema, type RuntimeWorkspaceStatus } from '@gitspace/protocol-runtime';
-import { agentActivity, agentCounts, conversationStatus, workspaceStatusSummary, type LiveAgents } from '../src/workspace-status.js';
+import { agentActivity, agentCounts, conversationStatus, workspacePlanStep, workspaceStatusSummary, workspaceWaiting, type LiveAgents } from '../src/workspace-status.js';
 
 const noMachines: Pick<RuntimeWorkspaceStatus, 'cloud' | 'machines'> = { cloud: { version: null, conflicts: [] }, machines: [] };
 const main = { id: 'main', parentId: null, failure: null };
@@ -62,4 +62,41 @@ test('sync conflicts need a person; machines and sync problems are counted', () 
   const machines = RuntimeWorkspaceStatusSchema.shape.machines.parse([machine, { ...machine, attachmentId: 'b', machineId: 'laptop', online: false, sync: { ...machine.sync, problem: null } }]);
   const result = summarize({ conversations: [main], tasks: [], questions: [] }, { cloud: { version: 'abc', conflicts: ['src/a.ts'] }, machines });
   expect(result.summary).toEqual({ primaryColor: 'orange', agents: { green: 0, blue: 1, orange: 0, red: 0 }, machines: { attached: 2, online: 1, ready: 0 }, sync: { conflicts: 1, problems: 1 } });
+});
+
+test('a workspace with two open questions and an approval reports all three, with who asks and what it waits on', () => {
+  const hash = `sha256:${'a'.repeat(64)}`;
+  const questions = [
+    { id: 'bucket', conversationId: 'main', kind: 'ask' as const, prompt: 'Which bucket should exports go to?', choices: ['archive', 'hot'], answer: null, askedAt: '2026-11-23T10:00:00.000Z' },
+    { id: 'region', conversationId: 'child', kind: 'ask' as const, prompt: 'Which region?', choices: [], answer: null, askedAt: '2026-11-23T10:01:00.000Z' },
+    { id: 'setup', conversationId: 'main', kind: 'lifecycle-approval' as const, prompt: 'Run materialize', choices: [], answer: null, askedAt: '2026-11-23T10:02:00.000Z',
+      lifecycle: { phase: 'workspace/materialize' as const, callId: 'call-1', scripts: [{ hash, kind: 'script' as const, label: 'Materialize', phase: 'workspace/materialize' as const, fileName: 'scripts/materialize.sh', content: 'npm ci', previous: null }] } },
+    { id: 'done', conversationId: 'main', kind: 'ask' as const, prompt: 'Answered already', choices: [], answer: 'yes', askedAt: '2026-11-23T09:00:00.000Z' },
+  ];
+  const waiting = workspaceWaiting({ rootId: 'main', agents: new Map([['child', 'researcher']]), questions, failure: null, machines: [], attachments: [], conflicts: [] });
+  expect(waiting).toEqual({ more: 0, items: [
+    { kind: 'ask', key: 'bucket', since: '2026-11-23T10:00:00.000Z', title: 'Which bucket should exports go to?', characters: 34, conversation: { id: 'main', agent: null }, choices: ['archive', 'hot'] },
+    { kind: 'ask', key: 'region', since: '2026-11-23T10:01:00.000Z', title: 'Which region?', characters: 13, conversation: { id: 'child', agent: 'researcher' }, choices: [] },
+    { kind: 'lifecycle-approval', key: 'setup', since: '2026-11-23T10:02:00.000Z', title: 'Run materialize', characters: 15, conversation: { id: 'main', agent: null }, phase: 'workspace/materialize', more: 0,
+      scripts: [{ hash, label: 'Materialize', fileName: 'scripts/materialize.sh', phase: 'workspace/materialize' }] },
+  ] });
+});
+
+test('a failed setup step reports its last log line, and past twenty items the rest are counted', () => {
+  const machine = { machineId: 'desk', attachmentId: 'a', generation: 1, online: true, ready: false, sync: { lastSyncAt: null, unsent: null, unapplied: false, problem: null, conflicts: [] },
+    setup: [{ phase: 'workspace/materialize' as const, state: 'failed' as const, runId: 'run-7', error: 'fetching certificate\nerror: certificate expired\n' }] };
+  const questions = Array.from({ length: 21 }, (_, index) => ({ id: `q${index}`, conversationId: 'main', kind: 'ask' as const, prompt: `Question ${index}`, choices: [], answer: null, askedAt: `2026-11-23T10:${String(index).padStart(2, '0')}:00.000Z` }));
+  const waiting = workspaceWaiting({ rootId: 'main', agents: new Map(), questions, failure: 'Provider refused', machines: RuntimeWorkspaceStatusSchema.shape.machines.parse([machine]), attachments: [{ attachmentId: 'a', updatedAt: '2026-11-23T09:00:00.000Z' }], conflicts: [] });
+  expect(waiting.items).toHaveLength(20);
+  expect(waiting.more).toBe(3);
+  expect(waiting.items[0]).toMatchObject({ kind: 'setup-failed', machineId: 'desk', runId: 'run-7', lastLine: 'error: certificate expired', since: '2026-11-23T09:00:00.000Z' });
+});
+
+test('the plan step is the active step of the plan in effect; none without an approved plan', () => {
+  const step = (id: string, status: 'pending' | 'active' | 'completed') => ({ id, title: `Step ${id}`, detail: '', where: [], requirementIds: [], status });
+  expect(workspacePlanStep({ status: 'approved', steps: [step('a', 'completed'), step('b', 'active'), step('c', 'pending')] })).toEqual({ index: 2, count: 3, title: 'Step b' });
+  // A revision waiting for approval leaves the approved plan in effect.
+  expect(workspacePlanStep({ status: 'proposed', steps: [step('x', 'pending')], approved: { steps: [step('a', 'completed'), step('b', 'pending')] } })).toEqual({ index: 2, count: 2, title: 'Step b' });
+  expect(workspacePlanStep({ status: 'proposed', steps: [step('x', 'pending')], approved: null })).toBeNull();
+  expect(workspacePlanStep(undefined)).toBeNull();
 });

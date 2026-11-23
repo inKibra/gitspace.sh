@@ -14,7 +14,7 @@ import { AttachmentStore, isAttachmentOnline, isAttachmentReady, type Attachment
 import { applyInferenceThinking, createSessionControls, SessionControlsDoc, type SessionControlServices } from '@gitspace/runtime-core/session-controls';
 import type { PendingAskAnswer, RuntimeSessionCommand, RuntimeSessionResult } from '@gitspace/protocol-runtime/session-controls';
 import { RuntimeSnapshotCommitInputSchema, type RuntimeBrowsersDocument, type RuntimeProcessExitedInput, type RuntimeSecureInputAnswer, type RuntimeSnapshotCommitInput, type RuntimeSnapshotCommitResult } from '@gitspace/protocol-runtime';
-import { createAutomationRequests, UNANSWERED_INPUT, type RuntimeAutomationInput, type RuntimeRequestStatus } from '@gitspace/runtime-core';
+import { createAutomationRequests, PlanDoc, UNANSWERED_INPUT, type RuntimeAutomationInput, type RuntimeRequestStatus } from '@gitspace/runtime-core';
 import type { JsonValue } from '@earendil-works/chord/json';
 import { createSessionHistory } from './session-history.js';
 import { createReplicaStore, replicaEvents } from './replica-store.js';
@@ -34,7 +34,7 @@ import { measureEntries, measureTables, openWakeRecord, type WakeRecord } from '
 import { stubCodemodeChildren } from './entry-migrations.js';
 import { isolateRuntimes, openIsolateRuntime, type IsolateRuntime } from './isolate-runtimes.js';
 import { createStoredRetry } from './stored-retry.js';
-import { agentActivity, agentCounts, conversationStatus, workspaceStatusSummary } from './workspace-status.js';
+import { agentActivity, agentCounts, conversationStatus, workspacePlanStep, workspaceStatusSummary, workspaceWaiting } from './workspace-status.js';
 import { createToolResultStore, type WorkspaceToolResults } from './tool-results.js';
 import { createMessageDecisions, type SentDecisions } from './message-decisions.js';
 export type { SentDecisions } from './message-decisions.js';
@@ -586,15 +586,18 @@ async function openWorkspaceRuntime(options: WorkspaceRuntimeOptions, marks: Run
     placeholder = false;
     const rootId = String(runtime.root.id);
     const root = conversationViews.get(rootId);
-    const [agent, controls] = await Promise.all([runtime.root.agent(BACKGROUND_CONTEXT), harness.snapshot(SessionControlsDoc, runtime.root.id, BACKGROUND_CONTEXT)]);
-    const waiting = (questions?.items ?? []).find(item => item.conversationId === rootId && questionState(item) === 'open');
+    const [agent, controls, plan] = await Promise.all([runtime.root.agent(BACKGROUND_CONTEXT), harness.snapshot(SessionControlsDoc, runtime.root.id, BACKGROUND_CONTEXT), harness.snapshot(PlanDoc, runtime.root.id, BACKGROUND_CONTEXT)]);
+    const waiting = workspaceWaiting({
+      rootId, agents: new Map(views.flatMap((view): [string, string][] => view.id === rootId ? [] : [[view.id, view.title]])), questions: questions?.items ?? [],
+      failure: root?.failure ?? null, machines: status.machines, attachments: attachments.list(), conflicts: status.cloud.conflicts,
+    });
     const replied = root?.messages.findLast(message => message.role === 'assistant' && message.content.length > 0);
     const reply = replied?.content.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n') ?? null;
     // A view message's id is `entryId:index`, the history ordinal `entryId * 1024 + index`.
     const [replyEntry, replyIndex] = replied?.id.split(':').map(Number) ?? [];
     options.published?.(next, {
       summary: status.summary, phase: workspace?.phase ?? null,
-      waitingOn: waiting ? { kind: waiting.kind === 'approval' || waiting.kind === 'lifecycle-approval' ? 'approval' : 'ask', prompt: waiting.prompt.slice(0, 200), characters: waiting.prompt.length } : null,
+      waiting, planStep: workspacePlanStep(plan),
       failure: root?.failure ?? null,
       lastReply: reply ? reply.slice(0, 280) : null,
       lastReplySource: reply && replyEntry !== undefined && replyIndex !== undefined ? { conversationId: rootId, ordinal: replyEntry * 1024 + replyIndex, characters: reply.length } : null,

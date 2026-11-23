@@ -16,7 +16,6 @@ import { latestOperation, OperationCardActions, operationActive, OperationProgre
 import { useToasts, type Toast } from './toasts.js';
 
 export interface AccountWorkPagesProps {
-  view: 'kanban' | 'projects';
   projects: readonly ProjectLifecycleView[];
   directory: Directory;
   loading: boolean;
@@ -97,48 +96,36 @@ function DirectoryCoverage({ projects, directory, loading, onRefresh }: Pick<Acc
 }
 
 export function AccountWorkPages(props: AccountWorkPagesProps) {
-  const { view, projects, directory, loading, onRefresh, onOpenWorkspace, onOpenProject, actions, settingsProjectId, onSettingsProjectChange, operations = [] } = props;
+  const { projects, directory, loading, onRefresh, onOpenWorkspace, onOpenProject, actions, settingsProjectId, onSettingsProjectChange, operations = [] } = props;
   const accountSidebar = useContext(AccountSidebarContext);
   const current = useRef(props);
   current.current = props;
   const workspaces = useMemo(() => accountWorkspaces(projects, directory), [projects, directory]);
-  const activeProjects = projects.filter((project) => project.lifecycle !== 'archived' && project.lifecycle !== 'deleting');
-  const activeProjectIds = new Set(activeProjects.map((project) => project.id));
-  const activeWorkspaces = workspaces.filter((workspace) => !workspace.closedAt && activeProjectIds.has(workspace.projectId));
-  const [newWorkspacePhase, setNewWorkspacePhase] = useState<WorkspaceView['phase'] | null>(null);
   const [newWorkspaceProject, setNewWorkspaceProject] = useState<string | null>(null);
   const [newProject, setNewProject] = useState(false);
   const [pending, setPending] = useState(false);
   const pendingRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
-  const clearCreate = () => { setNewWorkspacePhase(null); setNewWorkspaceProject(null); setError(null); };
+  const clearCreate = () => { setNewWorkspaceProject(null); setError(null); };
   const open = (workspace: AccountWorkspace) => onOpenWorkspace(workspace.projectId, workspace.id);
   const canCreateProject = !!actions.onCreateProject;
   const canCreateWorkspace = !!actions.onCreateWorkspace;
   useLayoutEffect(() => {
     accountSidebar?.({
-      view, selected: null, machines: [],
+      view: 'projects', selected: null, machines: [],
       projects: projects.map((project) => ({ id: project.id, name: project.name, lifecycle: project.lifecycle, remote: project.remote, ...directory[project.id], workspaces: directory[project.id]?.workspaces ?? [] })),
       onView: (next) => navigateProductUrl(setProductRoute(new URL(window.location.href), next)),
       onSelectProject: (id) => current.current.onOpenProject(id),
       onSelectWorkspace: (workspace) => current.current.onOpenWorkspace(workspace.projectId, workspace.id),
       onNewProject: canCreateProject ? () => setNewProject(true) : undefined,
-      onNewWorkspace: canCreateWorkspace ? (projectId) => { setNewWorkspacePhase('plan'); setNewWorkspaceProject(projectId); } : undefined,
+      onNewWorkspace: canCreateWorkspace ? setNewWorkspaceProject : undefined,
     });
-  }, [accountSidebar, view, projects, directory, canCreateProject, canCreateWorkspace]);
+  }, [accountSidebar, projects, directory, canCreateProject, canCreateWorkspace]);
   useLayoutEffect(() => () => { accountSidebar?.(null); }, [accountSidebar]);
   return <div className="flex min-h-0 min-w-0 flex-1 flex-col">
     <DirectoryCoverage projects={projects} directory={directory} loading={loading} onRefresh={onRefresh} />
-    {view === 'kanban' ? <KanbanView workspaces={activeWorkspaces} onOpen={open} onSetRelations={actions.onSetWorkspaceRelations} onNewWorkspace={actions.onCreateWorkspace ? setNewWorkspacePhase : undefined} />
-      : <ProjectsView projects={projects} workspaces={workspaces} directory={directory} operations={operations} onOpen={open} onOpenProject={onOpenProject} {...actions} settingsProjectId={settingsProjectId} onSettingsProjectChange={onSettingsProjectChange} />}
-    <Dialog open={newWorkspacePhase !== null && newWorkspaceProject === null} onOpenChange={(next) => { if (!next) clearCreate(); }}>
-      <DialogContent><DialogHeader><DialogTitle>Choose a project</DialogTitle><DialogDescription>Choose which project the new {newWorkspacePhase ? PHASE_LABEL[newWorkspacePhase].toLowerCase() : ''} workspace belongs to.</DialogDescription></DialogHeader>
-        <CardGroup orientation="inline" border="outlined" separated>{activeProjects.filter((project) => project.lifecycle === 'active' || project.lifecycle === 'cloud-only').map((project, index) => <Card key={project.id} index={index} onClick={() => setNewWorkspaceProject(project.id)} label={`Create workspace in ${project.name}`}><CardHeader><CardTitle>{project.name}</CardTitle><CardDescription>{project.baseBranch}</CardDescription></CardHeader></Card>)}</CardGroup>
-        {!activeProjects.some((project) => project.lifecycle === 'active' || project.lifecycle === 'cloud-only') ? <p className="text-body text-muted-foreground">Create a project from Projects before adding a workspace.</p> : null}
-        <DialogFooter><Button variant="secondary" onClick={clearCreate}>Cancel</Button></DialogFooter>
-      </DialogContent>
-    </Dialog>
-    {actions.onCreateWorkspace && newWorkspaceProject ? <CreateWorkspaceDialog key={`${newWorkspaceProject}:${newWorkspacePhase}`} projectId={newWorkspaceProject} workspaces={workspaces} initialPhase={newWorkspacePhase ?? 'plan'} pending={pending} error={error} onOpenChange={(next) => { if (!next) clearCreate(); }} onSubmit={async (input) => {
+    <ProjectsView projects={projects} workspaces={workspaces} directory={directory} operations={operations} onOpen={open} onOpenProject={onOpenProject} {...actions} settingsProjectId={settingsProjectId} onSettingsProjectChange={onSettingsProjectChange} />
+    {actions.onCreateWorkspace && newWorkspaceProject ? <CreateWorkspaceDialog key={newWorkspaceProject} projectId={newWorkspaceProject} workspaces={workspaces} pending={pending} error={error} onOpenChange={(next) => { if (!next) clearCreate(); }} onSubmit={async (input) => {
       if (pendingRef.current) return;
       pendingRef.current = true; setPending(true); setError(null);
       try { await actions.onCreateWorkspace!(input); clearCreate(); onRefresh(); }
@@ -153,48 +140,6 @@ export function AccountWorkPages(props: AccountWorkPagesProps) {
       finally { pendingRef.current = false; setPending(false); }
     }} /> : null}
   </div>;
-}
-
-function KanbanView({ workspaces, onOpen, onSetRelations, onNewWorkspace }: { workspaces: readonly AccountWorkspace[]; onOpen: (workspace: AccountWorkspace) => void; onSetRelations?: GitSpaceShellProps['onSetWorkspaceRelations']; onNewWorkspace?: (phase: WorkspaceView['phase']) => void }) {
-  const [graph, setGraph] = useState(false);
-  const waiting = workspaces.filter((workspace) => workspace.stack?.waitsOn.length).length;
-  const header = <>
-    <PageHeader kicker="Work" title="Kanban" actions={<span className="text-caption text-muted-foreground tabular-nums">{workspaces.length} workspaces{waiting ? ` · ${waiting} with waits-on` : ''}</span>} />
-    <TabsSubtle size="compact" className="mb-4 self-start" selectedIndex={graph ? 1 : 0} onSelect={(index) => setGraph(index === 1)} aria-label="Kanban view"><TabsSubtleItem index={0} label="Board" /><TabsSubtleItem index={1} label="Graph" /></TabsSubtle>
-  </>;
-  if (graph) {
-    return <div className="flex min-h-0 flex-1 flex-col">
-      <div className="mx-auto flex w-full max-w-6xl flex-col px-8 pt-8">{header}</div>
-      <div className="mx-auto min-h-0 w-full max-w-6xl flex-1 px-8 pb-8"><WorkspaceGraph workspaces={workspaces} onSelect={(id) => { const target = workspaces.find((workspace) => workspace.id === id); if (target) onOpen(target); }} onSetRelations={onSetRelations} height="100%" /></div>
-    </div>;
-  }
-  return <PageCanvas className="flex max-w-6xl flex-col">
-    {header}
-    <div className="grid grid-cols-4 gap-4 max-md:grid-cols-1">
-      {[...PHASES, ...(workspaces.some((workspace) => workspace.phase === null) ? [null] : []), ...(workspaces.some((workspace) => workspace.phase === undefined) ? [undefined] : [])].map((phase) => {
-        const items = workspaces.filter((workspace) => workspace.phase === phase);
-        return <section key={phase === null ? 'unassigned' : phase ?? 'unknown'} aria-label={workspacePhaseLabel(phase)} className="flex min-w-0 flex-col gap-2">
-          <header className="flex items-center justify-between gap-1 px-1"><span className="text-caption font-medium text-muted-foreground">{workspacePhaseLabel(phase)}</span><span className="flex items-center gap-1"><span className="tabular-nums text-caption text-muted-foreground">{items.length}</span>{onNewWorkspace && phase != null ? <Tooltip content={`New ${PHASE_LABEL[phase].toLowerCase()} workspace`} side="top"><Button variant="ghost" size="icon-compact" aria-label={`New workspace in ${PHASE_LABEL[phase]}`} onClick={() => onNewWorkspace(phase)}><Plus width={14} height={14} strokeWidth={1.5} /></Button></Tooltip> : null}</span></header>
-          <CardGroup border="outlined">
-            {items.map((workspace, index) => <Card key={workspace.id} index={index} onClick={() => onOpen(workspace)} label={`Open ${workspace.name}`}>
-              <CardHeader>
-                <CardDescription>{workspace.projectName}</CardDescription>
-                <CardTitle>{workspace.name}</CardTitle>
-              </CardHeader>
-              <CardFooter>
-                <WorkspaceStatus workspace={workspace} />
-                <span className="ml-auto flex shrink-0 items-center gap-1">
-                  {workspace.relations?.stackedOn ? <Badge variant="dot" size="compact" color="blue" title={`Stacked on ${workspaces.find((candidate) => candidate.id === workspace.relations?.stackedOn)?.name ?? workspace.relations.stackedOn}`}>stacked</Badge> : null}
-                  {workspace.stack?.waitsOn.length ? <Badge size="compact" color="gray">waits on · {workspace.stack.waitsOn.length}</Badge> : null}
-                </span>
-              </CardFooter>
-            </Card>)}
-          </CardGroup>
-        </section>;
-      })}
-    </div>
-    {!workspaces.length ? <EmptyState title="No active workspaces in the available directory" description="Create a workspace in a project, or refresh if project coverage is incomplete." /> : null}
-  </PageCanvas>;
 }
 function ProjectsView({ projects, workspaces, directory, operations, onOpen, onOpenProject, onReleaseMachines, onArchiveWorkspace, onRestoreWorkspace, onCreateProject, onCreateWorkspace, onArchiveProject, onRestoreProject, onDeleteProject, onDeleteWorkspace, onSetProjectBaseBranch, settingsProjectId: requestedSettingsProjectId, onSettingsProjectChange }: {
   projects: readonly ProjectLifecycleView[];

@@ -218,9 +218,8 @@ it('forwards global navigation without rendering a workspace-scoped fallback pag
   const onNavigateView = vi.fn();
   await act(async () => { root.render(<GitSpaceShell {...verticalSliceFixture} onNavigateView={onNavigateView} />); });
   const conversation = container.querySelector('.conversation-stage');
-  const kanban = container.querySelector<HTMLElement>('nav[aria-label="Navigate"] button[aria-label="Kanban"]')!;
-  await act(() => kanban.click());
-  expect(onNavigateView).toHaveBeenCalledWith('kanban');
+  const projectsButton = container.querySelector<HTMLElement>('nav[aria-label="Navigate"] button[aria-label="Projects"]')!;
+  await act(() => projectsButton.click());
+  expect(onNavigateView).toHaveBeenCalledWith('projects');
   expect(container.querySelector('.conversation-stage')).toBe(conversation);
-  expect(container.querySelector('[aria-label="Kanban view"]')).toBeNull();
 });

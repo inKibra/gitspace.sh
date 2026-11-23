@@ -16,7 +16,7 @@ import { createDispatchSelector } from '../src/runtime-dispatch-selection.js';
 import { executorCapabilities } from '../src/runtime-attachments.js';
 import { QuestionsDoc, WorkspaceDoc } from '@gitspace/runtime-core';
 import { UI_BLOCK_BRIEF, UI_SKILL_DESCRIPTION, uiBlockPrompt } from '@gitspace/protocol/gitspace-ui';
-import { emptyWorkspaceStatus } from '@gitspace/protocol-workspace';
+import { emptyWaiting, emptyWorkspaceStatus } from '@gitspace/protocol-workspace';
 import { ServiceTokenGrantSchema } from '@gitspace/protocol-environment';
 import { decodeJwt } from 'jose';
 import type { ProfileDecision } from '@gitspace/runtime-core/inference';
@@ -644,8 +644,9 @@ test('space_workspace list and board give every workspace\'s status in one read 
   await authority.putWorkspace({ ...workspace, id: 'search', name: 'Search index', branch: 'search', phase: 'plan' });
   const index = env.USER_PROJECTS.getByName(env.ACCOUNT_ID);
   // The stored reply is the first characters of a 900-character one; the row says where the whole is.
-  await index.setWorkspaceStatus({ projectId, workspaceId: 'billing', status: { ...emptyWorkspaceStatus, primaryColor: 'orange', agents: { ...emptyWorkspaceStatus.agents, orange: 1 } }, waitingOn: { kind: 'ask', prompt: 'Which bucket should exports go to?' }, lastReply: 'Exports are ready;\nwhich bucket?', lastReplySource: { conversationId: '1', ordinal: 7168, characters: 900 }, cursor: 1 });
-  await index.setWorkspaceStatus({ projectId, workspaceId: 'search', status: { ...emptyWorkspaceStatus, primaryColor: 'green', agents: { ...emptyWorkspaceStatus.agents, green: 1 } }, waitingOn: null, lastReply: null, cursor: 1 });
+  const asked = { kind: 'ask' as const, key: 'bucket', since: null, title: 'Which bucket should exports go to?', characters: 34, conversation: { id: '1', agent: null }, choices: [] };
+  await index.setWorkspaceStatus({ projectId, workspaceId: 'billing', status: { ...emptyWorkspaceStatus, primaryColor: 'orange', agents: { ...emptyWorkspaceStatus.agents, orange: 1 } }, waiting: { items: [asked], more: 0 }, lastReply: 'Exports are ready;\nwhich bucket?', lastReplySource: { conversationId: '1', ordinal: 7168, characters: 900 }, cursor: 1 });
+  await index.setWorkspaceStatus({ projectId, workspaceId: 'search', status: { ...emptyWorkspaceStatus, primaryColor: 'green', agents: { ...emptyWorkspaceStatus.agents, green: 1 } }, waiting: emptyWaiting, lastReply: null, cursor: 1 });
   // A journal entry reaches the account index from the journal's own object, after its write.
   await env.SPACE_CONTEXT.getByName(JSON.stringify([env.ACCOUNT_ID, projectId, 'billing'])).appendJournalEntry({
     projectId, spaceId: 'billing', id: 'bucket', kind: 'decision', phase: 'code', title: 'Exports go to the archive bucket', body: '', outcome: null, decisions: [], evidence: [], createdBy: 'agent-a',
@@ -661,7 +662,7 @@ test('space_workspace list and board give every workspace\'s status in one read 
     try {
       const listed = z.array(z.object({ id: z.string(), name: z.string(), status: z.unknown() })).parse(JSON.parse(text(await invoke('space_workspace', { method: 'list' }))));
       expect(listed.find(item => item.id === 'billing')?.status).toEqual({
-        activity: 'waiting on a person to answer "Which bucket should exports go to?"', waitingOn: { kind: 'ask', prompt: 'Which bucket should exports go to?' }, pullRequests: [{ number: 42, state: null, checks: null }], since: expect.any(String),
+        activity: 'waiting on a person to answer "Which bucket should exports go to?"', waitingOn: { kind: 'ask', prompt: 'Which bucket should exports go to?', characters: 34 }, pullRequests: [{ number: 42, state: null, checks: null }], since: expect.any(String),
         lastReply: '"Exports are ready; which bucket?…" (32 of 900 characters; whole: tools.history_read({ workspaceId: "billing", conversationId: "1", offset: 7168, limit: 1, textOnly: true }))', journal: [{ kind: 'decision', title: 'Exports go to the archive bucket', at: expect.any(String) }],
       });
       expect(listed.find(item => item.id === 'search')?.status).toMatchObject({ activity: 'working', waitingOn: null, pullRequests: [] });
@@ -709,7 +710,7 @@ async function stackProject() {
   const names: Array<[string, string]> = [['alpha', 'Alpha'], ['billing', 'Billing export'], ['ledger', 'Ledger'], ['invoices', 'Invoices'], ['old', 'Old ledger'], ['search', 'Search index'], ['zeta', 'Zeta']];
   for (const [id, name] of names) {
     await authority.putWorkspace({ ...workspace, id, name, branch: id, lifecycle: id === 'old' ? 'archived' : 'active' });
-    await index.setWorkspaceStatus({ projectId, workspaceId: id, status: emptyWorkspaceStatus, waitingOn: null, lastReply: null, cursor: 1 });
+    await index.setWorkspaceStatus({ projectId, workspaceId: id, status: emptyWorkspaceStatus, waiting: emptyWaiting, lastReply: null, cursor: 1 });
   }
   const stacked: Array<[string, string]> = [['ledger', 'billing'], ['invoices', 'ledger'], ['old', 'billing'], ['zeta', 'alpha']];
   for (const [id, stackedOn] of stacked) expect(await authority.setWorkspaceRelations(id, { dependsOn: [], relatedTo: [], stackedOn })).toMatchObject({ status: 'ok' });

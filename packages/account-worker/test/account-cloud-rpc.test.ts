@@ -4,7 +4,7 @@ import { createDeviceBinding, createSignedRpcFetch, credentialProtocolBase64, DE
 import { accountLiveKey, liveNoticeMessageSchema, workspaceLiveKey, type LiveKey, type LiveNotice } from '@gitspace/protocol/live-notice';
 import { workspaceStatusMessageSchema } from '@gitspace/protocol/account-directory';
 import { createGitSpaceClient } from '@gitspace/protocol/client';
-import { spaceCheckpointManifestKey, spaceGitCheckpointRef, spaceOmpCheckpointKey, type SpaceCheckpointManifest } from '@gitspace/protocol-workspace';
+import { spaceCheckpointManifestKey, spaceGitCheckpointRef, spaceOmpCheckpointKey, type SpaceCheckpointManifest, type WorkspaceWaiting } from '@gitspace/protocol-workspace';
 import type { ProviderView, ReleaseArtifact } from '@gitspace/protocol';
 import { executionHash, loadEnvironmentBundle, serviceIngressContent, type LifecycleRun } from '@gitspace/protocol-environment';
 import { gitspaceContract, rpcErrors, UserSettingsViewCodec } from '@gitspace/protocol/rpc-contract';
@@ -79,7 +79,8 @@ describe('cloud lifecycle inspection and explicit authorization', () => {
     const { projectId, spaceId } = await inspectorWorkspace(fixture.userId);
     const index = env.USER_PROJECTS.getByName(fixture.userId);
     const idle = { primaryColor: 'blue' as const, agents: { green: 0, blue: 1, orange: 0, red: 0 }, machines: { attached: 0, online: 0, ready: 0 }, sync: { conflicts: 0, problems: 0 } };
-    await index.setWorkspaceStatus({ projectId, workspaceId: spaceId, status: idle, waitingOn: null, lastReply: null, cursor: 1 });
+    const none = { items: [], more: 0 };
+    await index.setWorkspaceStatus({ projectId, workspaceId: spaceId, status: idle, waiting: none, lastReply: null, cursor: 1 });
     const path = '/v1/directory/events';
     const auth = signRpcRequest({ deviceId: fixture.deviceId, signingPrivateKey: fixture.signingPrivateKey, method: 'GET', path, body: new Uint8Array() });
     const response = await SELF.fetch(new Request(`${env.ACCOUNT_URL}${path}`, { headers: { origin: env.ACCOUNT_URL, upgrade: 'websocket', 'sec-websocket-protocol': `${DEVICE_SOCKET_PROTOCOL}${auth}` } }));
@@ -90,24 +91,74 @@ describe('cloud lifecycle inspection and explicit authorization', () => {
       if (parsed.success) messages.push(parsed.data);
     });
     socket.accept();
-    await vi.waitFor(() => expect(messages).toEqual([{ type: 'statuses', rows: expect.arrayContaining([{ projectId, workspaceId: spaceId, status: idle, preview: null }]) }]));
+    await vi.waitFor(() => expect(messages).toEqual([{ type: 'statuses', rows: expect.arrayContaining([{ projectId, workspaceId: spaceId, status: idle, preview: null, waiting: none, goal: null }]) }]));
     const working = { ...idle, primaryColor: 'green' as const, agents: { green: 1, blue: 0, orange: 0, red: 0 } };
-    await index.setWorkspaceStatus({ projectId, workspaceId: spaceId, status: working, waitingOn: null, lastReply: null, cursor: 2 });
-    await index.setWorkspaceStatus({ projectId, workspaceId: spaceId, status: working, waitingOn: null, lastReply: null, cursor: 3 });
-    await vi.waitFor(() => expect(messages.slice(1)).toEqual([{ type: 'status', projectId, workspaceId: spaceId, status: working, preview: null }]));
+    await index.setWorkspaceStatus({ projectId, workspaceId: spaceId, status: working, waiting: none, lastReply: null, cursor: 2 });
+    await index.setWorkspaceStatus({ projectId, workspaceId: spaceId, status: working, waiting: none, lastReply: null, cursor: 3 });
+    await vi.waitFor(() => expect(messages.slice(1)).toEqual([{ type: 'status', projectId, workspaceId: spaceId, status: working, preview: null, waiting: none, goal: null }]));
     // A turn's end and its last message, sent a moment apart, arrive out of order: the older send is dropped.
-    await index.setWorkspaceStatus({ projectId, workspaceId: spaceId, status: idle, preview: 'Done. · Timeline: Deploy', waitingOn: null, lastReply: 'Done.', lastReplySource: { conversationId: '1', ordinal: 5120, characters: 5 }, cursor: 5 });
-    await index.setWorkspaceStatus({ projectId, workspaceId: spaceId, status: working, waitingOn: null, lastReply: 'Done.', cursor: 4 });
+    await index.setWorkspaceStatus({ projectId, workspaceId: spaceId, status: idle, preview: 'Done. · Timeline: Deploy', waiting: none, lastReply: 'Done.', lastReplySource: { conversationId: '1', ordinal: 5120, characters: 5 }, cursor: 5 });
+    await index.setWorkspaceStatus({ projectId, workspaceId: spaceId, status: working, waiting: none, lastReply: 'Done.', cursor: 4 });
     // The row keeps where the whole reply is, for the board's cut note.
     expect((await index.projectWorkspaceStatuses(projectId))[spaceId]).toMatchObject({ status: idle, lastReply: 'Done.', lastReplySource: { conversationId: '1', ordinal: 5120, characters: 5 } });
     // A new last message with the status unchanged sends its preview.
-    await index.setWorkspaceStatus({ projectId, workspaceId: spaceId, status: idle, preview: 'Rolled back.', waitingOn: null, lastReply: 'Rolled back.', cursor: 6 });
+    await index.setWorkspaceStatus({ projectId, workspaceId: spaceId, status: idle, preview: 'Rolled back.', waiting: none, lastReply: 'Rolled back.', cursor: 6 });
     await vi.waitFor(() => expect(messages.slice(1)).toEqual([
-      { type: 'status', projectId, workspaceId: spaceId, status: working, preview: null },
-      { type: 'status', projectId, workspaceId: spaceId, status: idle, preview: 'Done. · Timeline: Deploy' },
-      { type: 'status', projectId, workspaceId: spaceId, status: idle, preview: 'Rolled back.' },
+      { type: 'status', projectId, workspaceId: spaceId, status: working, preview: null, waiting: none, goal: null },
+      { type: 'status', projectId, workspaceId: spaceId, status: idle, preview: 'Done. · Timeline: Deploy', waiting: none, goal: null },
+      { type: 'status', projectId, workspaceId: spaceId, status: idle, preview: 'Rolled back.', waiting: none, goal: null },
     ]));
     socket.close();
+  });
+
+  it('keeps every open item a workspace reports in its row, and reads a send from the previous release as one item', async () => {
+    const index = env.USER_PROJECTS.getByName(env.ACCOUNT_ID);
+    const projectId = `project-${crypto.randomUUID()}`;
+    const orange = { primaryColor: 'orange' as const, agents: { green: 0, blue: 0, orange: 2, red: 0 }, machines: { attached: 0, online: 0, ready: 0 }, sync: { conflicts: 0, problems: 0 } };
+    const main = { id: '1', agent: null };
+    const waiting = { items: [
+      { kind: 'ask', key: 'q-bucket', since: '2026-11-23T10:00:00.000Z', title: 'Which bucket should exports go to?', characters: 34, conversation: main, choices: ['archive', 'hot'] },
+      { kind: 'ask', key: 'q-region', since: '2026-11-23T10:01:00.000Z', title: 'Which region?', characters: 13, conversation: { id: '7', agent: 'researcher' }, choices: [] },
+      { kind: 'lifecycle-approval', key: 'q-setup', since: '2026-11-23T10:02:00.000Z', title: 'Run workspace/materialize', characters: 25, conversation: main, phase: 'workspace/materialize', more: 0,
+        scripts: [{ hash: `sha256:${'a'.repeat(64)}`, label: 'Materialize', fileName: 'scripts/materialize.sh', phase: 'workspace/materialize' }] },
+    ], more: 0 } satisfies WorkspaceWaiting;
+    await index.setWorkspaceStatus({ projectId, workspaceId: 'billing', status: orange, waiting, lastReply: null, cursor: 1 });
+    expect((await index.projectWorkspaceStatuses(projectId)).billing?.waiting).toEqual(waiting);
+    // A workspace still on the previous release sends what its main conversation waits on.
+    await index.setWorkspaceStatus({ projectId, workspaceId: 'search', status: orange, waitingOn: { kind: 'approval', prompt: 'Approve the plan?' }, lastReply: null, cursor: 1 });
+    expect((await index.projectWorkspaceStatuses(projectId)).search?.waiting).toEqual({ items: [expect.objectContaining({ kind: 'approval', title: 'Approve the plan?', characters: 17 })], more: 0 });
+  });
+
+  it('gives a workspace with a goal its goal and plan step in its row, and one without a goal none', async () => {
+    const fixture = await account();
+    const { projectId, spaceId } = await inspectorWorkspace(fixture.userId);
+    const index = env.USER_PROJECTS.getByName(fixture.userId);
+    const blue = { primaryColor: 'blue' as const, agents: { green: 0, blue: 1, orange: 0, red: 0 }, machines: { attached: 0, online: 0, ready: 0 }, sync: { conflicts: 0, problems: 0 } };
+    const none = { items: [], more: 0 };
+    await index.setWorkspaceStatus({ projectId, workspaceId: spaceId, status: blue, waiting: none, planStep: { index: 2, count: 3, title: 'Print the stamp on the receipt' }, lastReply: null, cursor: 1 });
+    await index.setWorkspaceStatus({ projectId, workspaceId: projectId, status: blue, waiting: none, planStep: null, lastReply: null, cursor: 1 });
+    const requirement = { description: '', required: true, workflowNodeId: null, criterionId: null, evidence: [] };
+    await env.SPACE_CONTEXT.getByName(JSON.stringify([fixture.userId, projectId, spaceId])).putGoal({ projectId, spaceId, expectedRevision: 0, goal: {
+      id: 'stamps', title: '🥐 Loyalty stamps on the receipt', summary: '', phase: 'code', updatedBy: 'agent',
+      requirements: [{ ...requirement, id: 'earn', title: 'A paid order earns a stamp', status: 'accepted' }, { ...requirement, id: 'refund', title: 'A refund takes it back', status: 'missing' }],
+    } });
+    const path = '/v1/directory/events';
+    const goals = async () => {
+      const auth = signRpcRequest({ deviceId: fixture.deviceId, signingPrivateKey: fixture.signingPrivateKey, method: 'GET', path, body: new Uint8Array() });
+      const response = await SELF.fetch(new Request(`${env.ACCOUNT_URL}${path}`, { headers: { origin: env.ACCOUNT_URL, upgrade: 'websocket', 'sec-websocket-protocol': `${DEVICE_SOCKET_PROTOCOL}${auth}` } }));
+      const socket = response.webSocket!;
+      const { promise, resolve } = Promise.withResolvers<Map<string, unknown>>();
+      socket.addEventListener('message', (event) => {
+        const parsed = workspaceStatusMessageSchema.safeParse(JSON.parse(String(event.data)));
+        if (parsed.success && parsed.data.type === 'statuses') resolve(new Map(parsed.data.rows.map(row => [row.workspaceId, row.goal])));
+      });
+      socket.accept();
+      const read = await promise;
+      socket.close();
+      return read;
+    };
+    await vi.waitFor(async () => expect((await goals()).get(spaceId)).toEqual({ title: 'Loyalty stamps on the receipt', emoji: '🥐', met: 1, total: 2, step: { index: 2, count: 3, title: 'Print the stamp on the receipt' } }));
+    expect((await goals()).get(projectId)).toBeNull();
   });
 
   it('sends a watching tab one notice per committed change, and its read after the cursor returns only newer changes', async () => {

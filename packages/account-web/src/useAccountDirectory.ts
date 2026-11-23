@@ -114,13 +114,14 @@ export function useWorkspaceProjection(projects: readonly Pick<ProjectLifecycleV
           const row = closedAt ? undefined : statuses.get(id);
           const status = row?.status;
           const preview = row?.preview ?? null;
+          const goal = row?.goal ?? null;
           // Cloud-only projects have canonical workspaces before their first runtime opens; neither needs a machine.
           if (project.lifecycle === 'cloud-only' || (definitionsById.get(id)?.cloudRuntime ?? previous?.holder.kind === 'cloud')) {
-            return { closedAt, holder: { kind: 'cloud' }, status, preview, freshness: status ? 'fresh' : 'unknown', refreshing: false };
+            return { closedAt, holder: { kind: 'cloud' }, status, preview, goal, freshness: status ? 'fresh' : 'unknown', refreshing: false };
           }
           const placement = placements.get(id);
           if (closedAt) return { closedAt, holder: { kind: 'released' }, generation: placement?.generation, freshness: 'fresh' };
-          if (!placement) return { closedAt, holder: { kind: 'unknown' }, status, preview, freshness: status ? 'fresh' : 'unknown', refreshing: false, detail: 'Placement unavailable' };
+          if (!placement) return { closedAt, holder: { kind: 'unknown' }, status, preview, goal, freshness: status ? 'fresh' : 'unknown', refreshing: false, detail: 'Placement unavailable' };
           const machine = machines.get(placement.holderId);
           const released = placement.state === 'closed' || (placement.holderId === 'unassigned' && placement.state !== 'opening');
           const compatible = !previous?.closedAt && previous?.holder.kind === 'held' && previous.holder.machineId === placement.holderId && previous.generation === placement.generation;
@@ -131,7 +132,7 @@ export function useWorkspaceProjection(projects: readonly Pick<ProjectLifecycleV
           };
           if (released) return summary;
           const detail = placement.state === 'opening' ? 'Opening' : placement.state === 'closing' ? 'Closing' : placement.state !== 'open' ? 'Status unknown' : null;
-          return { ...summary, status, preview, freshness: status ? 'fresh' : 'unknown', refreshing: false, detail };
+          return { ...summary, status, preview, goal, freshness: status ? 'fresh' : 'unknown', refreshing: false, detail };
         };
         const base = definitions.find((space) => space.kind === 'base' && space.lifecycle !== 'deleting');
         if (base || (!value && prior?.baseSummary)) summaries.set(project.id, summarize(project.id, base ? base.archivedAt ? new Date(base.archivedAt) : null : prior?.baseSummary?.closedAt ?? null, prior?.baseSummary));
@@ -171,9 +172,10 @@ export function useWorkspaceProjection(projects: readonly Pick<ProjectLifecycleV
         const row = statuses.get(id);
         const status = row?.status;
         const preview = row?.preview ?? null;
-        if (status === summary.status && preview === (summary.preview ?? null)) return summary;
+        const goal = row?.goal ?? null;
+        if (status === summary.status && preview === (summary.preview ?? null) && goal === (summary.goal ?? null)) return summary;
         changed = true;
-        return { ...summary, status, preview, freshness: status ? 'fresh' : 'unknown' };
+        return { ...summary, status, preview, goal, freshness: status ? 'fresh' : 'unknown' };
       };
       const next = Object.fromEntries(Object.entries(accepted.current).map(([projectId, project]) => [projectId,
         { ...project, baseSummary: apply(projectId, project.baseSummary), workspaces: project.workspaces.map(space => ({ ...space, summary: apply(space.id, space.summary) })) }]));

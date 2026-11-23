@@ -85,7 +85,7 @@ export function StorageIncidents(): ReactElement {
 
 /** What one object stores, read without running its code (paused or not): its size, each table's row count (largest
  * first) and the newest rows of the largest tables, every value cut short by the server. */
-function StorageInspection({ objectId, label }: { objectId: string; label: string }): ReactElement {
+export function StorageInspection({ objectId, label }: { objectId: string; label: string }): ReactElement {
   const inspection = useResultQuery(rpcClient.storageIncidents.inspect, { objectId });
   const read = useRetainedRead(inspection, `storage-inspection:${objectId}`);
   const value = read.value;

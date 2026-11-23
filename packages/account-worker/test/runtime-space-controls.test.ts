@@ -63,7 +63,7 @@ describe('Cloud workspace authority controls', () => {
     const headCommit = 'a'.repeat(40);
     await runInDurableObject(env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:workspace-a`), async (_instance, ctx) => {
       createWorkspaceMetadataTables(ctx.storage);
-      storeWorkspaceReport(ctx.storage, { summary: emptyWorkspaceStatus, phase: 'code', waitingOn: null, failure: null, lastReply: null, lastReplySource: null, lastActivityAt: null, model: null, code: { branch: 'main', headCommit, uncommitted: false } });
+      storeWorkspaceReport(ctx.storage, { summary: emptyWorkspaceStatus, phase: 'code', waiting: { items: [], more: 0 }, planStep: null, failure: null, lastReply: null, lastReplySource: null, lastActivityAt: null, model: null, code: { branch: 'main', headCommit, uncommitted: false } });
     });
     const started = await call('space_journal', { method: 'startPhase', phase: 'build', intent: 'Build the parser.' });
     expect(started).toMatchObject({ kind: 'phase-start', createdBy: 'conversation:agent-a', snapshot: { headCommit } });

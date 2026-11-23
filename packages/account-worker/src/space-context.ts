@@ -73,6 +73,7 @@ import { extractBlocks, mapBlockColours, validateMarkdownBlocks } from '@gitspac
 import { BOARD_JOURNAL_ENTRIES } from '@gitspace/protocol-runtime';
 import type { z } from 'zod';
 import { BudgetedDurableObject } from './storage-quarantine.js';
+import { acrossRelease } from './release-worker.js';
 
 interface MetaRow extends Record<string, SqlStorageValue> {
   project_id: string;
@@ -295,6 +296,7 @@ export class SpaceContextDO extends BudgetedDurableObject {
         }
       }
       this.bump();
+      this.ctx.waitUntil(Promise.resolve().then(() => this.reportGoal(identity)));
       return this.readGoal(identity)!;
     });
   }
@@ -330,6 +332,7 @@ export class SpaceContextDO extends BudgetedDurableObject {
       );
       this.ctx.storage.sql.exec('UPDATE inspector_goals SET revision = ?, updated_at = ? WHERE id = 1', nextRevision, timestamp);
       this.bump();
+      this.ctx.waitUntil(Promise.resolve().then(() => this.reportGoal(identity)));
       return this.readGoal(identity)!;
     });
   }
@@ -371,6 +374,7 @@ export class SpaceContextDO extends BudgetedDurableObject {
         createdBy: actorId,
       });
       this.bump();
+      this.ctx.waitUntil(Promise.resolve().then(() => this.reportGoal(identity)));
       return { goal: this.readGoal(identity)!, entry };
     });
   }
@@ -488,6 +492,7 @@ export class SpaceContextDO extends BudgetedDurableObject {
       ).rowsWritten;
       if (goalChanges > 0) this.ctx.storage.sql.exec('UPDATE inspector_goals SET revision = revision + 1, updated_at = ?, updated_by = ? WHERE id = 1', timestamp, parsed.judgment.actorId);
       this.bump();
+      if (goalChanges > 0) this.ctx.waitUntil(Promise.resolve().then(() => this.reportGoal(identity)));
       return this.readRubric(identity)!;
     });
   }
@@ -1034,6 +1039,17 @@ export class SpaceContextDO extends BudgetedDurableObject {
       .map(row => ({ kind: row.kind, title: row.title.slice(0, 200), at: row.created_at }));
     try { await this.env.USER_PROJECTS.getByName(this.env.ACCOUNT_ID).setWorkspaceJournal({ projectId: identity.projectId, workspaceId: identity.spaceId, journal }); }
     catch (error) { console.error(JSON.stringify({ event: 'workspace_journal_report_failed', workspaceId: identity.spaceId, error: error instanceof Error ? error.message : String(error) })); }
+  }
+
+  /** Sends the goal's title, its leading emoji and how many requirements are accepted to the account's index, where the
+   * board's cards read them. A failed send is only logged: the next goal change sends it again. */
+  private async reportGoal(identity: InspectorIdentity): Promise<void> {
+    const goal = this.goalRow();
+    const counts = this.ctx.storage.sql.exec<{ total: number; met: number | null }>("SELECT COUNT(*) AS total, SUM(status = 'accepted') AS met FROM inspector_goal_requirements").one();
+    const lead = goal ? /^(\p{Extended_Pictographic}(?:\uFE0F|\u200D\p{Extended_Pictographic})*)\s*/u.exec(goal.title) : null;
+    const head = goal ? { title: goal.title.slice(lead?.[0].length ?? 0).slice(0, 120), emoji: lead?.[1] ?? null, met: counts.met ?? 0, total: counts.total } : null;
+    try { await acrossRelease(() => this.env.USER_PROJECTS.getByName(this.env.ACCOUNT_ID).setWorkspaceGoal({ projectId: identity.projectId, workspaceId: identity.spaceId, goal: head })); }
+    catch (error) { console.error(JSON.stringify({ event: 'workspace_goal_report_failed', workspaceId: identity.spaceId, error: error instanceof Error ? error.message : String(error) })); }
   }
 
   private journalRecord(identity: InspectorIdentity, row: JournalRow): JournalEntryView {

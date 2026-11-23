@@ -8,28 +8,46 @@ export class WorkspaceStatuses {
   private readonly rows = new Map<string, WorkspaceStatusRow>();
   private readonly listeners = new Set<() => void>();
   private received = false;
+  private version = 0;
 
   constructor(private readonly saved?: SavedCopy<WorkspaceStatusRow[]>) {}
 
   receive(message: z.input<typeof workspaceStatusMessageSchema>): void {
     if (message.type === 'statuses') {
       this.rows.clear();
-      for (const row of message.rows) this.rows.set(row.workspaceId, { ...row, preview: row.preview ?? null });
-    } else this.rows.set(message.workspaceId, { projectId: message.projectId, workspaceId: message.workspaceId, status: message.status, preview: message.preview ?? null });
+      for (const row of message.rows) this.rows.set(row.workspaceId, workspaceStatusRowSchema.parse(row));
+    } else {
+      const { type: _type, ...row } = message;
+      this.rows.set(message.workspaceId, workspaceStatusRowSchema.parse(row));
+    }
     this.received = true;
+    this.version += 1;
     this.saved?.write([...this.rows.values()]);
     for (const listener of [...this.listeners]) listener();
   }
 
-  /** A workspace's status row: its status and its last-message preview. */
-  get(workspaceId: string): Pick<WorkspaceStatusRow, 'status' | 'preview'> | undefined {
-    if (!this.received && this.rows.size === 0) for (const row of this.saved?.read() ?? []) this.rows.set(row.workspaceId, row);
+  /** A workspace's status row: its status, its last-message preview, its open items and its goal. */
+  get(workspaceId: string): WorkspaceStatusRow | undefined {
+    this.restore();
     return this.rows.get(workspaceId);
   }
 
-  subscribe(listener: () => void): () => void {
+  /** Every row. */
+  all(): WorkspaceStatusRow[] {
+    this.restore();
+    return [...this.rows.values()];
+  }
+
+  /** Grows with every message, for `useSyncExternalStore`. */
+  revision = (): number => this.version;
+
+  subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener);
     return () => { this.listeners.delete(listener); };
+  };
+
+  private restore(): void {
+    if (!this.received && this.rows.size === 0) for (const row of this.saved?.read() ?? []) this.rows.set(row.workspaceId, row);
   }
 }
 

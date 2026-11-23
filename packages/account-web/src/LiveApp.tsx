@@ -55,6 +55,9 @@ import { SynchronizationProvider, useAccountDirectorySnapshot, useAccountSetting
 import { liveTicks, useLiveChanges } from './live-notices.js';
 import { accountLiveKey } from '@gitspace/protocol/live-notice';
 import { ProjectGraphsContext, useProjectGraphs } from './sidebar/project-graph.js';
+import { BoardBesideContext } from './board/beside.js';
+import { closeBeside, foldBoard } from './board/location.js';
+import { InboxProvider } from './inbox/index.js';
 import { StackToasts } from './sidebar/stack-toast.js';
 import type { GitHubAppManifestForm, GitHubAppOwner } from '@gitspace/protocol/github';
 import { RuntimeWorkspace, type RuntimeInspectorContext } from './RuntimeWorkspace.js';
@@ -472,7 +475,9 @@ function AccountFrame({ children }: { children: ReactNode }) {
   const projectValues = useMemo(() => retainedProjects ?? [], [retainedProjects]);
   const { directory, acceptRuntime } = useWorkspaceProjection(projectValues);
   // A link naming the project's own id as its workspace opens the base space, which the shell selects as null.
-  const live = route === 'agent' && runtimeSidebar?.selected?.projectId === projectId && runtimeSidebar.selected.workspaceId === (workspaceId === projectId ? null : workspaceId) ? runtimeSidebar : null;
+  const live = (route === 'agent' || route === 'board') && runtimeSidebar?.selected?.projectId === projectId && runtimeSidebar.selected.workspaceId === (workspaceId === projectId ? null : workspaceId) ? runtimeSidebar : null;
+  // The workspace beside the board: its header's sidebar toggle folds the board, its ✕ leaves the whole board.
+  const beside = useMemo(() => route === 'board' && projectId ? { onFold: () => foldBoard(null), onClose: closeBeside } : null, [route, projectId]);
   const operations = useAccountOperations();
   const graphProjects = useMemo(() => projectValues.filter((project) => project.lifecycle !== 'archived' && project.lifecycle !== 'deleting'), [projectValues]);
   const directoryWorkspaces = useAccountDirectorySnapshot().value?.workspaces;
@@ -530,11 +535,11 @@ function AccountFrame({ children }: { children: ReactNode }) {
     projectsError ? { key: `project-directory:${projectsError}`, tone: 'error', persistent: true, message: projectsError, action: { label: 'Retry', onClick: () => void projects.refetch() } } : null,
     sidebarActionError ? { key: `sidebar-action:${sidebarActionError}`, tone: 'error', message: sidebarActionError, onDismiss: () => setSidebarActionError(null) } : null,
   ]);
-  return <AccountWorkActionsContext.Provider value={actions}><ProjectSettingsContext.Provider value={projectSettings}><AccountSidebarContext.Provider value={setRuntimeSidebar}><AccountDirectoryContext.Provider value={accountDirectory}><ProjectGraphsContext.Provider value={graphs}><StackToasts>
+  return <AccountWorkActionsContext.Provider value={actions}><ProjectSettingsContext.Provider value={projectSettings}><AccountSidebarContext.Provider value={setRuntimeSidebar}><AccountDirectoryContext.Provider value={accountDirectory}><ProjectGraphsContext.Provider value={graphs}><BoardBesideContext.Provider value={beside}><InboxProvider><StackToasts>
     {graphReaders}
     <SidebarProvider className="gitspace-shell" persist={false} width="19rem">
       <ChatterVolumesProvider projectIds={sidebarProjects.map((project) => project.id)}>
-      <AppSidebar {...(live ?? globalSidebar)} view={frameView} onView={navigate} selected={route === 'agent' && projectId ? { projectId, workspaceId } : null} projects={sidebarProjects} machines={(machineValues ?? []).filter((machine) => machine.state === 'online' && machine.rpcEndpoint !== null).map(({ id, label }) => ({ id, label }))} onSelectProject={(id) => selectInspection(id, null)} onSelectWorkspace={(workspace) => selectInspection(workspace.projectId, workspace.id)} onOpenSettings={(section) => navigate('settings', section)} user={settingsValue ? { name: settingsValue.profile.displayName, handle: settingsValue.profile.handle } : undefined}
+      <AppSidebar {...(live ?? globalSidebar)} view={frameView} onView={navigate} selected={(route === 'agent' || route === 'board') && projectId ? { projectId, workspaceId } : null} projects={sidebarProjects} machines={(machineValues ?? []).filter((machine) => machine.state === 'online' && machine.rpcEndpoint !== null).map(({ id, label }) => ({ id, label }))} onSelectProject={(id) => selectInspection(id, null)} onSelectWorkspace={(workspace) => selectInspection(workspace.projectId, workspace.id)} onOpenSettings={(section) => navigate('settings', section)} user={settingsValue ? { name: settingsValue.profile.displayName, handle: settingsValue.profile.handle } : undefined}
         releasePendingSpaceId={releasePendingSpaceId}
         onReleaseMachines={async (spaceId) => {
           if (releasePendingSpaceId) return;
@@ -550,13 +555,16 @@ function AccountFrame({ children }: { children: ReactNode }) {
         onOpenProjectSettings={(id) => { setSettingsProjectId(id); navigate('projects'); }}
         onOpenProjectAutomations={(id) => navigateProductUrl(automationsUrl(id))}
         failedAutomationRuns={automationSummaries.reduce((sum, summary) => sum + summary.failedToday, 0)}
+        machineCount={machineValues ? { online: machineValues.filter((machine) => machine.state === 'online').length, total: machineValues.length } : undefined}
+        proposedAutomations={Object.fromEntries(automationSummaries.map((summary) => [summary.projectId, summary.proposed]))}
         onSetRelations={setRelations}
         onSetPhase={setPhase}
         onAskGhost={(workspace) => summonGhost({ projectId: workspace.projectId, workspaceId: workspace.id, workspaceName: workspace.name, archived: workspace.closedAt !== null, conversationId: null, title: null, until: null })}
       />
       </ChatterVolumesProvider>
-      <SidebarInset className="min-w-0 overflow-hidden">
-        {!live ? <SidebarInsetTopbar><nav aria-label="Location" className="min-w-0"><span aria-current="page" className="truncate text-body font-medium">{frameView === 'agent' ? projectValues.find((project) => project.id === projectId)?.name ?? 'Your account' : PRODUCT_ROUTE_LABELS[frameView]}</span></nav></SidebarInsetTopbar> : null}
+      {/* The whole board leaves no room beside it: the page shows only with a workspace open beside the board. */}
+      <SidebarInset className={`min-w-0 overflow-hidden ${route === 'board' && !projectId ? 'hidden' : ''}`}>
+        {!live ? <SidebarInsetTopbar><nav aria-label="Location" className="min-w-0"><span aria-current="page" className="truncate text-body font-medium">{frameView === 'agent' || frameView === 'board' ? projectValues.find((project) => project.id === projectId)?.name ?? 'Your account' : PRODUCT_ROUTE_LABELS[frameView]}</span></nav></SidebarInsetTopbar> : null}
         {children}
         {lfsTransition.dialog}
       </SidebarInset>
@@ -569,7 +577,7 @@ function AccountFrame({ children }: { children: ReactNode }) {
       }} />
       <GhostLayer onOpenWorkspace={selectInspection} />
     </SidebarProvider>
-  </StackToasts></ProjectGraphsContext.Provider></AccountDirectoryContext.Provider></AccountSidebarContext.Provider></ProjectSettingsContext.Provider></AccountWorkActionsContext.Provider>;
+  </StackToasts></InboxProvider></BoardBesideContext.Provider></ProjectGraphsContext.Provider></AccountDirectoryContext.Provider></AccountSidebarContext.Provider></ProjectSettingsContext.Provider></AccountWorkActionsContext.Provider>;
 }
 
 type LiveWorkspaceProps = { onOpenSettings: (section?: 'source' | 'github') => void };
@@ -584,7 +592,7 @@ function LiveWorkspace(props: LiveWorkspaceProps) {
   const projectSettings = useContext(ProjectSettingsContext);
   const operations = useAccountOperations();
   useOriginCheck(projectValues?.find((project) => project.id === projectId) ?? null);
-  if (!projectId) return <AccountWork view="projects" />;
+  if (!projectId) return <AccountWork />;
   if (!projectValues && projects.state === 'failure') return <PageCanvas><EmptyState title="Project directory unavailable" description={rpcErrorMessage(projects.error, 'Load project directory')} action={<Button variant="ghost" onClick={() => void projects.refetch()}>Retry</Button>} /></PageCanvas>;
   // The workspace opens at once; the directory, when it arrives, only says whether the project exists.
   const selectedProject = projectValues?.find((project) => project.id === projectId);
@@ -1437,13 +1445,13 @@ function useAccountWorkActions(account: NonNullable<ContextType<typeof AccountDi
   };
 }
 
-function AccountWork({ view }: { view: 'kanban' | 'projects' }) {
+function AccountWork() {
   const account = useContext(AccountDirectoryContext);
   const actions = useContext(AccountWorkActionsContext);
   const projectSettings = useContext(ProjectSettingsContext);
   const operations = useAccountOperations();
   if (!account || !actions || !projectSettings) throw new Error('Account work pages require the account directory, actions, and project settings');
-  return <AccountWorkPages view={view} projects={account.projects} directory={account.directory} loading={account.loading} onRefresh={account.refresh} onOpenWorkspace={selectInspection} onOpenProject={(projectId) => selectInspection(projectId, null)} actions={actions} settingsProjectId={projectSettings.projectId} onSettingsProjectChange={projectSettings.onChange} operations={operations} />;
+  return <AccountWorkPages projects={account.projects} directory={account.directory} loading={account.loading} onRefresh={account.refresh} onOpenWorkspace={selectInspection} onOpenProject={(projectId) => selectInspection(projectId, null)} actions={actions} settingsProjectId={projectSettings.projectId} onSettingsProjectChange={projectSettings.onChange} operations={operations} />;
 }
 
 function AccountConfiguration({ view }: { view: ConfigurationView }) {
@@ -1561,7 +1569,8 @@ function AccountProductRoute() {
     }
   }, [location.href, route]);
   const page = isConfigurationView(route) ? <AccountConfiguration view={route} />
-    : route === 'kanban' || route === 'projects' ? <AccountWork view={route} />
+    : route === 'projects' ? <AccountWork />
+      : route === 'board' ? location.searchParams.has('project') ? <GitSpaceProduct /> : null
       : route === 'automations' ? <AccountAutomations />
         : route === 'monitoring' ? <MonitoringPage />
           : <GitSpaceProduct />;

@@ -35,6 +35,7 @@ import {
 import { Archive, ArrowDown, ChevronDown, GitBranch01, LayoutRight, RefreshCcw01, Terminal, XClose } from '@untitledui/icons';
 import { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { AccountSidebarContext, AppSidebar, PhaseMenuItems, type AppSidebarProps, type SidebarDeploymentProps, type SidebarProject, type SidebarSpaceSummary } from './AppSidebar.js';
+import { BoardBesideContext } from './board/beside.js';
 import { phaseRefusal } from './sidebar/stack-rules.js';
 import { StackToasts, useStackToast } from './sidebar/stack-toast.js';
 import { Composer, type ComposerProps, type SendBehavior } from './Composer.js';
@@ -713,6 +714,7 @@ export function GitSpaceShell(props: GitSpaceShellProps) {
 function Shell({ project, projects, workspace, baseSpace, workspaces, mainAgent, turns, transcript, history, transport, runtimeSummary, machines = [], onSend, draft, artifactUpload, sessionCommand, resolveResourceFile, sessionControls, controlsError, onRetryControls, onRetryAgent, onContinueAgent, onSetWorkspacePhase, onUpdateBase, projectOperation, sendPending = false, sendError, onSelectWorkspace, onSelectProject, onArchiveWorkspace, onCreateProject, onCreateWorkspace, onOpenSettings, onNavigateView, terminals, skills, renderInspector, renderEnvironmentStatus, chatter, user, providers, deployment, access }: GitSpaceShellProps) {
   const accountSidebar = useContext(AccountSidebarContext);
   const accountDirectory = useContext(AccountDirectoryContext);
+  const beside = useContext(BoardBesideContext);
   // A link naming a capture (`?capture=<id>`, the extension's "Open in GitSpace") opens the Inspector's Browser tab,
   // which plays it.
   const capturing = typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('capture');
@@ -882,7 +884,12 @@ function Shell({ project, projects, workspace, baseSpace, workspaces, mainAgent,
     return () => { cancelAnimationFrame(frame); window.clearTimeout(timer); row?.classList.remove('ghost-flash'); };
   }, [flashRow, transcript?.navigation]);
   const content = <GhostWorkspace.Provider value={ghostHere}><BlockReferences.Provider value={referenceTargets}><ResourceFiles.Provider value={resolveResourceFile ?? null}><ResourceNavigation.Provider value={renderInspector ? (request) => { setResourceRequest({ spaceId: workspace.id, request }); setInspectorSection(undefined); setInspectorOpen(true); } : null}><GuideSectionNavigation.Provider value={renderInspector ? (id: string) => openGuideEntity(`section:${id}`) : null}><DocumentNavigation.Provider value={renderInspector ? openDocument : null}>
-    <div data-workspace-panel className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+    {/* Beside the board, the header's sidebar toggle folds the board back to the list instead of hiding the sidebar. */}
+    <div data-workspace-panel className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden" onClickCapture={beside ? (event) => {
+      if (!(event.target instanceof Element) || !event.target.closest('[data-sidebar="trigger"]')) return;
+      event.stopPropagation();
+      beside.onFold();
+    } : undefined}>
       <SidebarInsetTopbar className="pr-3">
         <nav aria-label="Location" className="flex flex-[1_0_auto] items-center gap-2 text-body">
           <span className="flex items-center gap-1.5 text-muted-foreground"><GitBranch01 width={14} height={14} strokeWidth={1.5} /><span className="max-w-48 truncate" title={workspace.projectName}>{workspace.projectName}</span><span>/</span><span className="max-w-64 truncate font-mono text-caption" title={workspace.branch}>{workspace.branch}</span></span>
@@ -900,7 +907,8 @@ function Shell({ project, projects, workspace, baseSpace, workspaces, mainAgent,
             {sessionControls?.value.context ? <Tooltip content={`${Math.round(sessionControls.value.context.tokens).toLocaleString()} of ${Math.round(sessionControls.value.context.contextWindow).toLocaleString()} tokens`} side="bottom"><span className="tabular-nums px-2 text-caption text-muted-foreground">{Math.round(sessionControls.value.context.percent)}%</span></Tooltip> : null}
         </div>
         {/* Pinned to the bar's end: when the bar scrolls sideways on a narrow screen these stay in view, labels hidden. */}
-        <div className="sticky right-0 z-10 flex shrink-0 items-center gap-1 bg-background max-sm:pl-1">
+        {/* On the inset's own surface, so it shows no slab of its own; where the bar scrolls under it, a short fade. */}
+        <div className="sticky right-0 z-10 flex shrink-0 items-center gap-1 bg-surface-2 before:pointer-events-none before:absolute before:inset-y-0 before:-left-6 before:w-6 before:bg-gradient-to-r before:from-transparent before:to-surface-2 max-sm:pl-1">
             <Tooltip content={`Ask a ghost about ${workspaceName} · reads, changes nothing`} side="bottom">
               <button type="button" aria-label="Ask a ghost" onClick={() => summonGhost(ghostHere)}
                 className="ghost-ask inline-flex h-7 shrink-0 items-center gap-1 rounded-full px-2.5 text-[11.5px] font-medium transition-colors max-sm:px-2"><GhostGlyph size={14} /><span className="max-sm:sr-only">Ask a ghost</span></button>
@@ -908,6 +916,7 @@ function Shell({ project, projects, workspace, baseSpace, workspaces, mainAgent,
             {chatter}
             {terminals ? <Tooltip content="Terminals" side="bottom"><Button variant="ghost" size="icon-compact" aria-label="Open terminals" aria-pressed={terminalOpen} onClick={() => setTerminalOpen((value) => !value)}><Terminal width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
             {renderInspector ? <Tooltip content="Inspector" side="bottom"><Button variant="ghost" size="icon-compact" aria-label="Open Inspector" aria-pressed={inspectorOpen} onClick={() => { if (inspectorOpen && inspectorFull) setInspectorFull(false); else setInspectorOpen((value) => !value); }}><LayoutRight width={16} height={16} strokeWidth={1.5} /></Button></Tooltip> : null}
+            {beside ? <><span aria-hidden className="mx-0.5 h-4 w-px bg-border" /><Tooltip content="Close · back to the whole board" side="bottom"><Button variant="ghost" size="icon-compact" aria-label="Close workspace" onClick={beside.onClose}><XClose width={16} height={16} strokeWidth={1.5} /></Button></Tooltip></> : null}
         </div>
       </SidebarInsetTopbar>
 

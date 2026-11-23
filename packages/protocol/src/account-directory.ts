@@ -2,7 +2,7 @@ import { z } from 'zod';
 import type { InputOf } from 'result-rpc';
 import { streamCursorSchema, streamEventSchema } from '@gitspace/protocol-sync';
 import { cloudProjectOperationSchema, cloudProjectSummarySchema, cloudWorkspaceDefinitionSchema } from './project-authority.js';
-import { WorkspaceRelationsSchema, WorkspaceStatusSummarySchema } from '@gitspace/protocol-workspace';
+import { WorkspaceGoalSummarySchema, WorkspaceRelationsSchema, WorkspaceStatusSummarySchema, WorkspaceWaitingSchema } from '@gitspace/protocol-workspace';
 import { FleetMachineViewCodec, SpacePlacementViewCodec, type SpacePlacementView } from './rpc-contract.js';
 
 export type FleetMachineDefinition = InputOf<typeof FleetMachineViewCodec>;
@@ -66,8 +66,13 @@ export function applyAccountDirectoryMessage(current: AccountDirectorySnapshot |
 export const WORKSPACE_PREVIEW_MAX = 160;
 /** One workspace's status row, sent on the directory socket when it changes. `preview`: its main agent's latest message
  * as one line of plain text (`messagePreview`: no Markdown, a block as its kind and title); null before the first one
- * and in rows stored before previews. */
-export const workspaceStatusRowSchema = z.object({ projectId: z.string().min(1), workspaceId: z.string().min(1), status: WorkspaceStatusSummarySchema, preview: z.string().max(WORKSPACE_PREVIEW_MAX).nullable().default(null) });
+ * and in rows stored before previews. `waiting`: every open item of the workspace (the Inbox's rows and Needs you);
+ * null in rows stored or sent before it. `goal`: its goal for the board's cards, null without a goal (and before
+ * goals reached the row). */
+export const workspaceStatusRowSchema = z.object({
+  projectId: z.string().min(1), workspaceId: z.string().min(1), status: WorkspaceStatusSummarySchema, preview: z.string().max(WORKSPACE_PREVIEW_MAX).nullable().default(null),
+  waiting: WorkspaceWaitingSchema.nullable().default(null), goal: WorkspaceGoalSummarySchema.nullable().default(null),
+});
 export type WorkspaceStatusRow = z.infer<typeof workspaceStatusRowSchema>;
 /** `statuses`: every row, once per socket open; `status`: one row that changed. */
 export const workspaceStatusMessageSchema = z.discriminatedUnion('type', [

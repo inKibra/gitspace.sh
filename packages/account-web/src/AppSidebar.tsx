@@ -1,6 +1,6 @@
 import type { DeploymentStatusView } from '@gitspace/protocol';
 import type { CloudProjectOperation, CloudWorkspaceDefinition, RemoteBranchState } from '@gitspace/protocol/project-authority';
-import { stackBelow, stackTree, type StackMove, type StackRestack, type WorkspaceStatusColor } from '@gitspace/protocol-workspace';
+import { stackBelow, type StackMove, type StackRestack, type WorkspaceGoalSummary } from '@gitspace/protocol-workspace';
 import type { IconComponentProps } from '@gitspace/ui';
 import {
   DropdownContent,
@@ -27,11 +27,12 @@ import {
   SidebarUserFooter,
   ThinkingIndicator,
   Tooltip,
+  useSidebar,
   DropdownLabel,
   DropdownSeparator,
   type IconComponent,
 } from '@gitspace/ui';
-import { Activity, Archive, ArrowDown, ArrowUp, BookOpen01, Check, ChevronRight, Columns03, DotsHorizontal, Edit03, FolderClosed, FolderPlus, GitBranch01, Hourglass03, Key01, Link03, Lock01, Plus, PuzzlePiece01, RefreshCcw01, Rocket02, Settings01, Square, Stars01, Trash01, Zap } from '@untitledui/icons';
+import { Archive, ArrowDown, ArrowUp, BookOpen01, Check, ChevronRight, DotsHorizontal, Edit03, FolderClosed, FolderPlus, GitBranch01, Hourglass03, Key01, Link03, Lock01, Plus, PuzzlePiece01, RefreshCcw01, Rocket02, Settings01, Square, Stars01, Trash01, Zap, Activity } from '@untitledui/icons';
 import { AnimatePresence, motion } from 'framer-motion';
 import { createContext, Fragment, useContext, useEffect, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from 'react';
 import { glyph } from './glyph.js';
@@ -39,17 +40,22 @@ import { GHOST, GhostGlyph } from './ghost/ghost-parts.js';
 import { converging, latestLaunchProgress, launchPhaseLabel, machineConvergence, RELEASE_TARGETS, runningLabel, workspaceRelease, type LaunchTrack } from './release.js';
 import { PRODUCT_ROUTE_LABELS, type AppView, type ProductRoute } from './routes.js';
 import { operationActive } from './OperationProgress.js';
-import { PHASE_LABEL, PHASES, STATUS_COLOR, StatusDot, workspaceStatusColor, workspaceStatusLabel, WorkspaceStatusDot, type AgentScopeView, type ProjectAgentView, type ProjectLifecycleView, type WorkspaceCreationState, type WorkspaceView } from './GitSpaceShell.js';
+import { PHASE_LABEL, PHASES, STATUS_COLOR, StatusDot, workspaceStatusLabel, WorkspaceStatusDot, type AgentScopeView, type ProjectAgentView, type ProjectLifecycleView, type WorkspaceCreationState, type WorkspaceView } from './GitSpaceShell.js';
 import { ProjectAgentVolume, StripVolume } from './chatter/ChatterVolume.js';
 import { blocks, lit, relation, type Lit, type Relation } from './sidebar/graph.js';
 import { ACCENT, DOWNSTREAM_TONE, GroupHeading, HeadTag, LabelText, PhaseTag, PrChips, StackCaption, StackMarker, UPSTREAM_TONE } from './sidebar/parts.js';
 import type { ProjectGraph } from './sidebar/project-graph.js';
-import { stackPosition, type ChainWorkspace } from './sidebar/StackChain.js';
+import { stackPosition } from './sidebar/StackChain.js';
 import { phaseRefusal, pickRefusal, type PickKind } from './sidebar/stack-rules.js';
 import { StackToasts, useStackToast } from './sidebar/stack-toast.js';
+import { FilterBar } from './sidebar/FilterBar.js';
+import { GROUP_BYS, listEntries, matches, relationsOf, rowItem, runsOf, STATE_COLOR, type RowItem, type SidebarFilter, type SidebarGroupBy } from './sidebar/rows.js';
+import { BoardBody, BoardHeader, BoardRailButton, InboxBoardRailButton, useViewportWidth } from './board/BoardView.js';
+import { InboxSourcesContext } from './inbox/index.js';
+import { BOARD_SNAP, CLOSE_BESIDE_SLOP, SidebarEdge } from './board/Edge.js';
+import { closeBeside, foldBoard, openBeside, openBoard, readBoardLocation, readPicked, setBoard, storePicked } from './board/location.js';
 
 const NAV: Array<{ view: Exclude<AppView, 'agent'>; icon: IconComponent }> = [
-  { view: 'kanban', icon: glyph(Columns03) },
   { view: 'projects', icon: glyph(FolderClosed) },
   { view: 'inference', icon: glyph(Stars01) },
   { view: 'plugins', icon: glyph(PuzzlePiece01) },
@@ -89,6 +95,8 @@ export interface SidebarSpaceSummary {
   creation?: WorkspaceCreationState;
   /** The main agent's latest message as one line of plain text (the status row's `preview`); null before one. */
   preview?: string | null;
+  /** The workspace's goal as its status row reports it (the board's card leads with it); null or absent before one. */
+  goal?: WorkspaceGoalSummary | null;
 }
 
 function summaryLabel(summary: SidebarSpaceSummary): string {
@@ -207,6 +215,10 @@ export interface AppSidebarProps {
   /** Moves any workspace's phase from `expectedPhase`, what the list last read (refused, by throwing, when it changed
    * since; null when unread). Absent: rows offer no phase section. */
   onSetPhase?(projectId: string, workspaceId: string, phase: WorkspaceView['phase'], expectedPhase: WorkspaceView['phase'] | null): Promise<void>;
+  /** The account's machines online, of all of them, for the board's Today strip; absent, the strip leaves them out. */
+  machineCount?: { online: number; total: number };
+  /** Automation proposals waiting for approval, by project id, for the board's Today strip. */
+  proposedAutomations?: Readonly<Record<string, number>>;
 }
 
 /** A row menu's stack and relation action. */
@@ -336,40 +348,11 @@ function SourcePill({ deployment, onOpenSettings }: { deployment: SidebarDeploym
  */
 const FOLDED_ACTION_REVEAL = 'opacity-0 group-hover/menu-item:opacity-100 group-focus-within/menu-item:opacity-100 data-[popup-open]:opacity-100';
 
-export type SidebarFilter = 'all' | 'needs-you' | 'running' | 'review' | 'ship';
-export type SidebarGroupBy = 'none' | 'state' | 'phase';
-/** A row's state for filters and Group by State: its status colour read as what it asks of you. */
-type RowState = 'needs-you' | 'failed' | 'running' | 'waiting' | 'idle';
-const STATE_OF: Record<WorkspaceStatusColor, RowState> = { orange: 'needs-you', red: 'failed', green: 'running', blue: 'waiting', dim: 'idle' };
-const STATE_LABEL: Record<RowState, string> = { 'needs-you': 'Needs you', failed: 'Failed', running: 'Running', waiting: 'Waiting', idle: 'Idle' };
-const STATE_COLOR: Record<RowState, WorkspaceStatusColor> = { 'needs-you': 'orange', failed: 'red', running: 'green', waiting: 'blue', idle: 'dim' };
-const STATE_ORDER: readonly RowState[] = ['needs-you', 'failed', 'running', 'waiting', 'idle'];
-const FILTERS: readonly { id: SidebarFilter; label: string }[] = [{ id: 'all', label: 'All' }, { id: 'needs-you', label: 'Needs you' }, { id: 'running', label: 'Running' }, { id: 'review', label: 'Review' }, { id: 'ship', label: 'Ship' }];
-const GROUP_BYS: readonly { id: SidebarGroupBy; label: string }[] = [{ id: 'none', label: 'None' }, { id: 'state', label: 'State' }, { id: 'phase', label: 'Phase' }];
 /** Left inset of a first-level row and of a row in a stack; the x of each tree guide line. */
 const INSET = { first: 14, stacked: 30 };
 const FIRST_GUIDES: readonly number[] = [7];
 const STACK_GUIDES: readonly number[] = [7, 21];
 const ROW = 'relative flex w-full min-w-0 select-none flex-col gap-0.5 rounded-[10px] py-[5px] text-left outline-none transition-[opacity,background-color] duration-150 focus-visible:ring-2 focus-visible:ring-[#6B97FF]/50';
-
-/** An open workspace as its row, the stack chain and the phase rule read it: its relations, as the account directory holds
- * them (`known` once listed there), and its branch's position against its parent and whether it is ahead of that parent,
- * as the project view last published them. */
-interface RowItem extends ChainWorkspace { workspace: SidebarWorkspace; summary: SidebarSpaceSummary | undefined; state: RowState; phase: WorkspaceView['phase'] | null; relatedTo: readonly string[]; aheadOfParent: string | null; known: boolean }
-
-function rowItem(workspace: SidebarWorkspace, graph: ProjectGraph | undefined): RowItem {
-  const summary = sidebarWorkspaceSummary(workspace);
-  const relations = graph?.relations[workspace.id];
-  return {
-    id: workspace.id, name: workspace.name, branch: workspace.branch, dependsOn: relations?.dependsOn ?? [], relatedTo: relations?.relatedTo ?? [], stackedOn: relations?.stackedOn ?? null,
-    position: relations?.position ?? null, aheadOfParent: relations?.aheadOfParent ?? null, known: relations !== undefined,
-    status: summary, workspace, summary, state: STATE_OF[summary ? workspaceStatusColor(summary) : 'dim'], phase: workspace.definition?.phase ?? workspace.phase ?? null,
-  };
-}
-
-function relationsOf(item: RowItem): WorkspaceView['relations'] {
-  return { dependsOn: item.dependsOn, relatedTo: item.relatedTo, stackedOn: item.stackedOn };
-}
 
 /** What the pill says once an archive ran: the workspace archived and where the workspaces stacked on it went, read
  * against `open`, the project's other open workspaces as stacked before the archive. One stacked on nothing with members
@@ -395,42 +378,6 @@ function archivedText(name: string, moved: readonly StackMove[], open: readonly 
 function restoredText(name: string, restack: StackRestack): string {
   if (restack.kept.length) return `${name} restored. Not put back: ${restack.kept.map((kept) => kept.reason).join('; ')}.`;
   return restack.moved.length ? `${name} restored, its stack put back` : `${name} restored`;
-}
-
-function matches(item: RowItem, filter: SidebarFilter): boolean {
-  if (filter === 'all') return true;
-  if (filter === 'needs-you' || filter === 'running') return item.state === filter;
-  return item.phase === filter;
-}
-
-/** What a project lists: a group heading, or a row (faded when it is only there to keep its stack whole). `key` names
- * the entry a landing preview follows. */
-type Entry = { kind: 'heading'; key: string; label: string; tone: string | undefined; count: number } | { kind: 'row'; key: string; item: RowItem; stacked: boolean; dimmed: boolean };
-
-/**
- * A project's rows under a filter and a grouping. Every grouping draws stacks whole, as the tree draws them: a stack shows
- * while any of it matches, the rest faded. State and Phase put each stack under its head's group; a heading counts the
- * project's workspaces whose own state or phase is the heading's and that pass the filter, wherever their stack is drawn,
- * so it agrees with the filter tabs.
- */
-function listEntries(items: readonly RowItem[], filter: SidebarFilter, groupBy: SidebarGroupBy): Entry[] {
-  const runs: { item: RowItem; stacked: boolean }[][] = [];
-  for (const entry of stackTree(items)) {
-    if (!entry.stacked || !runs.length) runs.push([entry]);
-    else runs.at(-1)?.push(entry);
-  }
-  const shown = runs.filter((run) => run.some(({ item }) => matches(item, filter)));
-  const rows = (run: readonly { item: RowItem; stacked: boolean }[]) => run.map(({ item, stacked }): Entry => ({ kind: 'row', key: item.id, item, stacked, dimmed: !matches(item, filter) }));
-  if (groupBy === 'none') return shown.flatMap(rows);
-  const groups: { key: string; label: string; tone: string | undefined; holds(item: RowItem): boolean }[] = groupBy === 'state'
-    ? STATE_ORDER.map((state) => ({ key: state, label: STATE_LABEL[state], tone: STATUS_COLOR[STATE_COLOR[state]], holds: (item: RowItem) => item.state === state }))
-    : [...[...PHASES].reverse().map((phase) => ({ key: phase, label: PHASE_LABEL[phase], tone: undefined, holds: (item: RowItem) => item.phase === phase })), { key: 'unknown', label: 'Phase unknown', tone: undefined, holds: (item: RowItem) => item.phase === null }];
-  return groups.flatMap((group): Entry[] => {
-    const held = shown.filter((run) => run[0] && group.holds(run[0].item));
-    if (!held.length) return [];
-    const count = items.filter((item) => group.holds(item) && matches(item, filter)).length;
-    return [{ kind: 'heading', key: `heading-${group.key}`, label: group.label, tone: group.tone, count }, ...held.flatMap(rows)];
-  });
 }
 
 /** Where stacking `source` onto `onto` (or `top`, the top level) would put it: after which entry and at which level,
@@ -752,22 +699,36 @@ function readCollapsedProjects(): ReadonlySet<string> {
 const GROUP_BY_KEY = 'gitspace.sidebar.groupBy';
 
 function readGroupBy(): SidebarGroupBy {
-  if (typeof window === 'undefined') return 'none';
+  if (typeof window === 'undefined') return 'project';
   let stored: string | null = null;
   try { stored = window.localStorage.getItem(GROUP_BY_KEY); } catch { /* private mode */ }
-  return GROUP_BYS.find((option) => option.id === stored)?.id ?? 'none';
+  return GROUP_BYS.find((option) => option.id === stored)?.id ?? 'project';
 }
+
+/** The workspace's width beside the board, and the narrowest the board gets beside it. */
+const BESIDE_WIDTH = 700;
+const BOARD_BESIDE_MIN = 640;
 
 /** The account sidebar. Stack, relation and phase changes made from it report in the stack pill, with Undo. */
 export function AppSidebar(props: AppSidebarProps) {
   return <StackToasts><SidebarBody {...props} /></StackToasts>;
 }
 
-function SidebarBody({ view, onView, selected, selectedSummary, projects, onSelectProject, onSelectWorkspace, onReleaseMachines, releasePendingSpaceId = null, onArchive, onRestore, onDelete, onRename, onNewWorkspace, onNewProject, onOpenSettings, onOpenProjectSettings, onOpenProjectAutomations, onAskGhost, failedAutomationRuns = 0, user, deployment, onSetRelations, onSetPhase }: AppSidebarProps) {
+function SidebarBody({ view, onView, selected, selectedSummary, projects, onSelectProject, onSelectWorkspace, onReleaseMachines, releasePendingSpaceId = null, onArchive, onRestore, onDelete, onRename, onNewWorkspace, onNewProject, onOpenSettings, onOpenProjectSettings, onOpenProjectAutomations, onAskGhost, failedAutomationRuns = 0, user, deployment, onSetRelations, onSetPhase, machineCount, proposedAutomations }: AppSidebarProps) {
   const userName = user?.name || 'Your account';
   const [collapsedProjects, setCollapsedProjects] = useState(readCollapsedProjects);
   const [filter, setFilter] = useState<SidebarFilter>('all');
-  const [groupBy, setGroupBy] = useState(readGroupBy);
+  const [storedGroupBy, setStoredGroupBy] = useState(readGroupBy);
+  const [storedPicked, setStoredPicked] = useState(readPicked);
+  // A drag past the snap width shows the list as the board's columns before the board opens.
+  const [reflowing, setReflowing] = useState(false);
+  const board = view === 'board';
+  // On the board its URL says how it groups, which projects it shows and whether it shows the graph.
+  const boardLocation = board ? readBoardLocation(new URL(window.location.href)) : null;
+  const groupBy = boardLocation?.group ?? storedGroupBy;
+  const picked = boardLocation?.projects ?? storedPicked;
+  const graphShown = boardLocation?.graph ?? false;
+  const columns = board || reflowing;
   const [hovered, setHovered] = useState<string | null>(null);
   const [showArchivedProjects, setShowArchivedProjects] = useState(false);
   // Archived projects start folded; the ones the user opened, not stored.
@@ -776,6 +737,8 @@ function SidebarBody({ view, onView, selected, selectedSummary, projects, onSele
   const [pickHover, setPickHover] = useState<string | null>(null);
   const [dragging, setDragging] = useState<string | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
+  // Under the account's InboxProvider the Board entry counts the Inbox's rows; elsewhere, the orange workspaces.
+  const inboxed = useContext(InboxSourcesContext) !== null;
   const toast = useStackToast();
   const collapseProject = (projectId: string, collapse: boolean): void => {
     const next = new Set(collapsedProjects);
@@ -784,15 +747,38 @@ function SidebarBody({ view, onView, selected, selectedSummary, projects, onSele
     setCollapsedProjects(next);
     try { window.localStorage.setItem(COLLAPSED_PROJECTS_KEY, JSON.stringify([...next])); } catch { /* private mode */ }
   };
-  const chooseGroupBy = (next: SidebarGroupBy): void => {
-    setGroupBy(next);
+  const keepGroupBy = (next: SidebarGroupBy): void => {
+    setStoredGroupBy(next);
     try { window.localStorage.setItem(GROUP_BY_KEY, next); } catch { /* private mode */ }
+  };
+  const keepPicked = (next: readonly string[]): void => {
+    setStoredPicked(next);
+    storePicked(next);
+  };
+  const chooseGroupBy = (next: SidebarGroupBy): void => {
+    keepGroupBy(next);
+    if (board) setBoard({ group: next, projects: picked, graph: graphShown });
+  };
+  const pick = (next: readonly string[]): void => {
+    keepPicked(next);
+    if (board) setBoard({ group: groupBy, projects: next, graph: graphShown });
+  };
+  const toBoard = (): void => { if (!board) openBoard({ group: groupBy, projects: picked, graph: false }); };
+  // The workspace the list opens with: the one beside the board, else the last one opened, else the board's first.
+  const lastOpen = useRef<{ projectId: string; workspaceId: string } | null>(null);
+  useEffect(() => { if (selected?.workspaceId) lastOpen.current = { projectId: selected.projectId, workspaceId: selected.workspaceId }; }, [selected?.projectId, selected?.workspaceId]);
+  // The list goes on as the board left it: its grouping and its project pick.
+  const toList = (): void => {
+    keepGroupBy(groupBy);
+    keepPicked(picked);
+    const first = scoped.flatMap((project) => runsOf(items.filter((item) => item.workspace.projectId === project.id)).flatMap((run) => run.map(({ item }) => item)))[0];
+    foldBoard(selected ? null : lastOpen.current ?? (first ? { projectId: first.workspace.projectId, workspaceId: first.id } : null));
   };
   // The open pane's status shows on its row; the row keeps the directory's last-message preview.
   const shown = projects.map((project) => selectedSummary && selected?.projectId === project.id
     ? selected.workspaceId === null
       ? { ...project, baseSummary: selectedSummary }
-      : { ...project, workspaces: project.workspaces.map((workspace) => workspace.id === selected.workspaceId ? { ...workspace, summary: { ...selectedSummary, preview: selectedSummary.preview ?? workspace.summary?.preview ?? null } } : workspace) }
+      : { ...project, workspaces: project.workspaces.map((workspace) => workspace.id === selected.workspaceId ? { ...workspace, summary: { ...selectedSummary, preview: selectedSummary.preview ?? workspace.summary?.preview ?? null, goal: selectedSummary.goal ?? workspace.summary?.goal ?? null } } : workspace) }
     : project);
   const active = shown.filter((project) => !ARCHIVED_PROJECT[project.lifecycle ?? '']);
   const archivedProjects = shown.filter((project) => ARCHIVED_PROJECT[project.lifecycle ?? '']);
@@ -803,7 +789,10 @@ function SidebarBody({ view, onView, selected, selectedSummary, projects, onSele
     else next.add(projectId);
     setOpenArchivedProjects(next);
   };
-  const all = active.flatMap((project) => project.workspaces.filter((workspace) => !workspace.closedAt).map((workspace) => rowItem(workspace, undefined)));
+  const everyItem = active.flatMap((project) => project.workspaces.filter((workspace) => !workspace.closedAt).map((workspace) => rowItem(workspace, project.graph)));
+  const pickedIds = picked.filter((id) => active.some((project) => project.id === id));
+  const scoped = active.filter((project) => !pickedIds.length || pickedIds.includes(project.id));
+  const items = everyItem.filter((item) => scoped.some((project) => project.id === item.workspace.projectId));
   const modeProject = mode ? shown.find((project) => project.id === mode.projectId) : undefined;
   const modeItems = modeProject ? modeProject.workspaces.filter((workspace) => !workspace.closedAt).map((workspace) => rowItem(workspace, modeProject.graph)) : [];
   const source = mode ? modeItems.find((item) => item.id === mode.id) : undefined;
@@ -877,76 +866,102 @@ function SidebarBody({ view, onView, selected, selectedSummary, projects, onSele
     window.addEventListener('keydown', key);
     return () => window.removeEventListener('keydown', key);
   });
+  // The board's width: the page's, or what the workspace beside it leaves; the list's, as a drag left it. The edge sets
+  // the width live while it moves. The kit provider resets the width to its own prop in its mount effect, which runs after
+  // this component's: the width is set once the effects of the render have run.
+  const { width, setWidth, isResizing } = useSidebar();
+  const [listWidth, setListWidth] = useState(width);
+  const viewport = useViewportWidth();
+  const wanted = board ? `${selected ? Math.max(BOARD_BESIDE_MIN, viewport - BESIDE_WIDTH) : viewport}px` : listWidth;
+  useEffect(() => { if (!isResizing && width !== wanted) queueMicrotask(() => setWidth(wanted)); });
+  // B opens and folds the board; on the board, Escape outside the workspace closes the workspace beside it.
+  useEffect(() => {
+    const key = (event: KeyboardEvent): void => {
+      if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || mode) return;
+      const target = event.target;
+      if (target instanceof HTMLElement && (target.isContentEditable || target.closest('input, textarea, select, [role="dialog"], [role="menu"]'))) return;
+      if (event.key === 'b' || event.key === 'B') { event.preventDefault(); if (board) toList(); else toBoard(); }
+      if (event.key === 'Escape' && board && selected && (target === document.body || (target instanceof Node && scroller.current?.contains(target)))) closeBeside();
+    };
+    window.addEventListener('keydown', key);
+    return () => window.removeEventListener('keydown', key);
+  });
+  const release = (released: number): void => {
+    setReflowing(false);
+    if (board && selected && released >= window.innerWidth - CLOSE_BESIDE_SLOP) { closeBeside(); return; }
+    if (released >= BOARD_SNAP) { if (!board) toBoard(); return; }
+    setListWidth(`${released}px`);
+    if (board) toList();
+  };
+  const filters = <FilterBar projects={active} items={items} everyItem={everyItem} filter={filter} onFilter={setFilter} groupBy={groupBy} onGroupBy={chooseGroupBy} picked={pickedIds} onPick={pick} inline={columns} resting={mode !== null} />;
+  const boardMove = move ? (item: RowItem, phase: WorkspaceView['phase']): void => {
+    const why = phaseRefusal(everyItem.filter((other) => other.workspace.projectId === item.workspace.projectId), item, phase);
+    if (why) toast.refused(new Error(why), 'Change phase');
+    else move(item, phase);
+  } : null;
   const rowProps = { selected, deployment, onSelectProject, onSelectWorkspace, onReleaseMachines, releasePendingSpaceId, onArchive: archive, onRestore, onDelete, onRename, onNewWorkspace, onOpenProjectSettings, onOpenProjectAutomations, onAskGhost, filter, groupBy, hovered, onHover: setHovered, picker, edit, move };
-  return <Sidebar ref={scroller} variant="inset">
+  return <Sidebar ref={scroller} variant="inset" rail={false}>
+    <SidebarEdge onReflow={setReflowing} onRelease={release} />
     <SidebarHeader>
-      <div className="relative">
-        <nav aria-label="Navigate" aria-hidden={mode ? true : undefined} className={`flex items-center justify-between px-0.5 transition-opacity duration-200 ${mode ? 'pointer-events-none opacity-0' : ''}`}>
-          {NAV.map((item) => <Tooltip key={item.view} content={item.view === 'automations' && failedAutomationRuns > 0 ? `${PRODUCT_ROUTE_LABELS[item.view]} · ${failedAutomationRuns} ${failedAutomationRuns === 1 ? 'run' : 'runs'} failed today` : PRODUCT_ROUTE_LABELS[item.view]} side="bottom">
-            <button type="button" aria-label={PRODUCT_ROUTE_LABELS[item.view]} aria-current={view === item.view ? 'page' : undefined} onClick={() => onView(item.view)}
-              className={`relative flex size-7 items-center justify-center rounded-lg hover:bg-hover hover:text-foreground ${view === item.view ? 'bg-active text-foreground' : 'text-muted-foreground'}`}>
-              <item.icon size={16} strokeWidth={1.5} />
-              {item.view === 'automations' && failedAutomationRuns > 0 ? <span className="absolute right-1 top-1 size-1.5 rounded-full" style={{ background: STATUS_COLOR.red }} /> : null}
-            </button>
-          </Tooltip>)}
-        </nav>
-        <AnimatePresence initial={false}>
-          {mode && source ? <PickerBar mode={mode} source={source} items={modeItems} hover={pickHover} onCancel={leave} onDone={done}
-            onReveal={() => scroller.current?.querySelector(`[data-workspace="${CSS.escape(mode.id)}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' })} /> : null}
-        </AnimatePresence>
+      <div className={columns ? 'flex items-center gap-3' : undefined}>
+        <div className={columns ? 'relative w-[264px] shrink-0' : 'relative'}>
+          <nav aria-label="Navigate" aria-hidden={mode ? true : undefined} className={`flex items-center justify-between gap-1 px-0.5 transition-opacity duration-200 ${mode ? 'pointer-events-none opacity-0' : ''}`}>
+            {inboxed ? <InboxBoardRailButton active={board} onClick={toBoard} /> : <BoardRailButton needs={everyItem.filter((item) => item.state === 'needs-you').length} active={board} onClick={toBoard} />}
+            {NAV.map((item) => <Tooltip key={item.view} content={item.view === 'automations' && failedAutomationRuns > 0 ? `${PRODUCT_ROUTE_LABELS[item.view]} · ${failedAutomationRuns} ${failedAutomationRuns === 1 ? 'run' : 'runs'} failed today` : PRODUCT_ROUTE_LABELS[item.view]} side="bottom">
+              <button type="button" aria-label={PRODUCT_ROUTE_LABELS[item.view]} aria-current={view === item.view ? 'page' : undefined} onClick={() => onView(item.view)}
+                className={`relative flex size-7 items-center justify-center rounded-lg hover:bg-hover hover:text-foreground ${view === item.view ? 'bg-active text-foreground' : 'text-muted-foreground'}`}>
+                <item.icon size={16} strokeWidth={1.5} />
+                {item.view === 'automations' && failedAutomationRuns > 0 ? <span className="absolute right-1 top-1 size-1.5 rounded-full" style={{ background: STATUS_COLOR.red }} /> : null}
+              </button>
+            </Tooltip>)}
+          </nav>
+          <AnimatePresence initial={false}>
+            {mode && source ? <PickerBar mode={mode} source={source} items={modeItems} hover={pickHover} onCancel={leave} onDone={done}
+              onReveal={() => scroller.current?.querySelector(`[data-workspace="${CSS.escape(mode.id)}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' })} /> : null}
+          </AnimatePresence>
+        </div>
+        {columns ? <BoardHeader workspaces={items.length} projects={scoped.length} reflowing={!board} graph={graphShown} onGraph={board ? (graph) => setBoard({ group: groupBy, projects: picked, graph }) : null} onSidebarView={board && !selected ? toList : null} /> : null}
       </div>
     </SidebarHeader>
 
-    <SidebarContent>
-      {/* The filters rest while the list is a picker. */}
-      <div className={`flex flex-col gap-1.5 pb-1 pt-1 transition-opacity duration-200 ${mode ? 'pointer-events-none opacity-35' : ''}`}>
-        <div role="group" aria-label="Filter workspaces" className="flex flex-wrap items-center gap-1 px-2">
-          {FILTERS.map((option) => {
-            const pressed = option.id === filter;
-            const count = all.filter((item) => matches(item, option.id)).length;
-            const tone = option.id === 'needs-you' ? STATUS_COLOR.orange : option.id === 'running' ? STATUS_COLOR.green : null;
-            return <button type="button" key={option.id} aria-pressed={pressed} onClick={() => setFilter(option.id)}
-              className={`inline-flex h-6 items-center gap-1.5 rounded-lg px-2 text-[12px] font-medium transition-colors duration-150 ${pressed ? 'bg-active text-foreground' : 'text-muted-foreground hover:bg-hover hover:text-foreground'}`}>
-              {tone ? <span className="size-1.5 rounded-full" style={{ background: tone }} /> : null}
-              {option.label}
-              <span className={`min-w-4 rounded-full px-1 text-center text-[10.5px] leading-4 tabular-nums ${pressed ? 'bg-background text-foreground' : 'bg-muted text-muted-foreground'}`}>{count}</span>
-            </button>;
-          })}
-        </div>
-        <div role="group" aria-label="Group by" className="flex items-center gap-1 px-2 text-[11px] text-muted-foreground">
-          Group by
-          {GROUP_BYS.map((option) => <button type="button" key={option.id} aria-pressed={groupBy === option.id} onClick={() => chooseGroupBy(option.id)}
-            className={`rounded-md px-1.5 py-0.5 ${groupBy === option.id ? 'bg-active text-foreground' : 'hover:bg-hover hover:text-foreground'}`}>{option.label}</button>)}
-        </div>
-      </div>
+    {columns ? <BoardBody filters={filters} narrowed={pickedIds.length > 0} machines={machineCount ?? null} groupBy={groupBy} filter={filter} selectedId={board ? selected?.workspaceId ?? null : null} preview={!board} graph={board && graphShown}
+      projects={scoped.map((project) => ({
+        id: project.id, name: project.name, items: items.filter((item) => item.workspace.projectId === project.id), pullRequests: project.graph?.pullRequests ?? {},
+        failedOperations: (project.operations ?? []).filter((operation) => operation.state === 'failed' && !operation.dismissedAt).length, proposals: proposedAutomations?.[project.id] ?? 0,
+      }))}
+      onOpen={(item) => { if (board) openBeside(item.workspace.projectId, item.id); else onSelectWorkspace(item.workspace); }}
+      onMove={boardMove} onNewWorkspace={onNewWorkspace} onSetRelations={edit ? (item, after) => edit(item, after, `${item.name}'s relations changed`) : null} />
+      : <>
+        <SidebarContent>
+          {filters}
+          <SidebarGroup collapsible>
+            <SidebarGroupLabel>Projects</SidebarGroupLabel>
+            <SidebarGroupActions>
+              {onNewProject ? <Tooltip content="New project" side="top">
+                <SidebarGroupAction aria-label="New project" onClick={onNewProject}><FolderPlus width={16} height={16} strokeWidth={1.5} /></SidebarGroupAction>
+              </Tooltip> : null}
+            </SidebarGroupActions>
+            <SidebarMenu>
+              {scoped.map((project) => <ProjectRows key={project.id} {...rowProps} project={project} archived={false} collapsed={collapsedProjects.has(project.id)} onCollapse={collapseProject} />)}
+              {archivedProjects.length && !pickedIds.length ? <SidebarMenuItem>
+                <SidebarMenuButton icon={ArchiveGlyph} aria-expanded={archivedOpen} onClick={() => setShowArchivedProjects((value) => !value)}>Archived projects</SidebarMenuButton>
+                <SidebarMenuBadge>{archivedProjects.length}</SidebarMenuBadge>
+              </SidebarMenuItem> : null}
+              {archivedOpen && !pickedIds.length ? archivedProjects.map((project) => <ProjectRows key={project.id} {...rowProps} project={project} archived collapsed={!openArchivedProjects.has(project.id)} onCollapse={collapseArchivedProject} />) : null}
+            </SidebarMenu>
+          </SidebarGroup>
+        </SidebarContent>
 
-      <SidebarGroup collapsible>
-        <SidebarGroupLabel>Projects</SidebarGroupLabel>
-        <SidebarGroupActions>
-          {onNewProject ? <Tooltip content="New project" side="top">
-            <SidebarGroupAction aria-label="New project" onClick={onNewProject}><FolderPlus width={16} height={16} strokeWidth={1.5} /></SidebarGroupAction>
-          </Tooltip> : null}
-        </SidebarGroupActions>
-        <SidebarMenu>
-          {active.map((project) => <ProjectRows key={project.id} {...rowProps} project={project} archived={false} collapsed={collapsedProjects.has(project.id)} onCollapse={collapseProject} />)}
-          {archivedProjects.length ? <SidebarMenuItem>
-            <SidebarMenuButton icon={ArchiveGlyph} aria-expanded={archivedOpen} onClick={() => setShowArchivedProjects((value) => !value)}>Archived projects</SidebarMenuButton>
-            <SidebarMenuBadge>{archivedProjects.length}</SidebarMenuBadge>
-          </SidebarMenuItem> : null}
-          {archivedOpen ? archivedProjects.map((project) => <ProjectRows key={project.id} {...rowProps} project={project} archived collapsed={!openArchivedProjects.has(project.id)} onCollapse={collapseArchivedProject} />) : null}
-        </SidebarMenu>
-      </SidebarGroup>
-    </SidebarContent>
-
-    <SidebarFooter>
-      {deployment ? <SourcePill deployment={deployment} onOpenSettings={onOpenSettings} /> : null}
-      <SidebarUserFooter
-        name={userName}
-        avatar={<span className="flex size-5 items-center justify-center rounded-full bg-muted-foreground text-[10px] font-semibold text-background">{userName.slice(0, 1).toUpperCase()}</span>}
-        menu={<>
-          <MenuItem index={0} icon={SettingsGlyph} label="Settings" onSelect={() => onOpenSettings?.()} />
-        </>}
-      />
-    </SidebarFooter>
+        <SidebarFooter>
+          {deployment ? <SourcePill deployment={deployment} onOpenSettings={onOpenSettings} /> : null}
+          <SidebarUserFooter
+            name={userName}
+            avatar={<span className="flex size-5 items-center justify-center rounded-full bg-muted-foreground text-[10px] font-semibold text-background">{userName.slice(0, 1).toUpperCase()}</span>}
+            menu={<>
+              <MenuItem index={0} icon={SettingsGlyph} label="Settings" onSelect={() => onOpenSettings?.()} />
+            </>}
+          />
+        </SidebarFooter>
+      </>}
   </Sidebar>;
 }

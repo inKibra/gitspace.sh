@@ -1,6 +1,6 @@
 import type { CloudWorkspaceDefinition } from '@gitspace/protocol';
 import type { WorkspaceBoardRow, WorkspaceJournalLine } from '@gitspace/protocol-runtime';
-import { emptyRelations, stackTree, type WorkspaceRelations } from '@gitspace/protocol-workspace';
+import { emptyRelations, mainQuestion, stackTree, type WorkspaceRelations } from '@gitspace/protocol-workspace';
 
 /** The project's workspaces with their board rows and relations, from five stored sources read once each: the project's
  * definitions and relations, the account's status rows (each with its main agent's latest message) and journal rows,
@@ -28,7 +28,7 @@ export async function readProjectWorkspaces(env: Env, projectId: string): Promis
     const related = relations[definition.id] ?? emptyRelations();
     return { definition, relations: related, id: definition.id, name: definition.name, phase: definition.phase ?? null, stackedOn: related.stackedOn, board: {
       workspaceId: definition.id, name: definition.name, phase: definition.phase ?? null, lifecycle: definition.lifecycle,
-      status: stored?.status ?? null, waitingOn: stored?.waitingOn ?? null, since: stored?.since ?? null,
+      status: stored?.status ?? null, waitingOn: stored ? mainQuestion(stored.waiting) : null, since: stored?.since ?? null,
       pullRequests: links.filter(link => link.workspaceId === definition.id).map(link => ({ number: link.number, state: link.state?.state ?? null, checks: link.state?.checks ?? null })),
       lastReply: stored?.lastReply ?? null, lastReplySource: stored?.lastReplySource ?? null, journal: journals[definition.id] ?? [],
     } };

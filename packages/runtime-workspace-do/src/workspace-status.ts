@@ -1,5 +1,5 @@
-import { questionState, type RuntimeSnapshot, type RuntimeWorkspaceStatus } from '@gitspace/protocol-runtime';
-import type { WorkspaceStatusColor, WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
+import { questionState, type RuntimeAttachment, type RuntimePlanStep, type RuntimeQuestion, type RuntimeSnapshot, type RuntimeWorkspaceStatus } from '@gitspace/protocol-runtime';
+import { WAITING_ITEMS_MAX, WAITING_TITLE_MAX, type WaitingItem, type WorkspacePlanStep, type WorkspaceStatusColor, type WorkspaceStatusSummary, type WorkspaceWaiting } from '@gitspace/protocol-workspace';
 
 type Conversation = RuntimeSnapshot['conversations'][number];
 
@@ -56,4 +56,68 @@ export function workspaceStatusSummary(agents: WorkspaceStatusSummary['agents'],
   const sync = { conflicts: status.cloud.conflicts.length, problems: status.machines.filter(machine => machine.sync.problem !== null).length };
   const primaryColor: WorkspaceStatusColor = agents.red ? 'red' : agents.orange || sync.conflicts ? 'orange' : agents.green ? 'green' : agents.blue ? 'blue' : 'dim';
   return { primaryColor, agents, machines, sync };
+}
+
+/** What one rebuild reads to list the workspace's open items. `agents`: subagent names by conversation id. */
+export interface WaitingSources {
+  rootId: string;
+  agents: ReadonlyMap<string, string>;
+  questions: readonly RuntimeQuestion[];
+  /** The main conversation's failure. */
+  failure: string | null;
+  machines: RuntimeWorkspaceStatus['machines'];
+  attachments: readonly Pick<RuntimeAttachment, 'attachmentId' | 'updatedAt'>[];
+  conflicts: readonly string[];
+}
+
+function cut(text: string): { title: string; characters: number } {
+  return { title: text.slice(0, WAITING_TITLE_MAX), characters: text.length };
+}
+
+function questionItem(question: RuntimeQuestion, agents: ReadonlyMap<string, string>, rootId: string): WaitingItem {
+  const base = { key: question.id, since: question.askedAt ?? null, ...cut(question.prompt), conversation: { id: question.conversationId, agent: question.conversationId === rootId ? null : (agents.get(question.conversationId) ?? 'Subagent').slice(0, 80) } };
+  const choices = question.choices.slice(0, 9).map(choice => choice.slice(0, 80));
+  switch (question.kind) {
+    case 'ask': return { kind: 'ask', ...base, choices };
+    // A plan's approval has no tool; a permission prompt names its tool.
+    case 'approval': return question.tool ? { kind: 'approval', ...base, choices } : { kind: 'plan', ...base, choices };
+    case 'lifecycle-approval': {
+      const scripts = question.lifecycle?.scripts ?? [];
+      return { kind: 'lifecycle-approval', ...base, phase: question.lifecycle?.phase ?? '', more: Math.max(0, scripts.length - 4),
+        scripts: scripts.slice(0, 4).map(script => ({ hash: script.hash, label: script.label.slice(0, 80), fileName: script.fileName?.slice(-160) ?? null, phase: script.phase })) };
+    }
+    case 'takeover': return { kind: 'takeover', ...base };
+    case 'secure-input': return { kind: 'secure-input', ...base };
+    case 'mcp-elicitation': return { kind: 'mcp-elicitation', ...base };
+  }
+}
+
+/** Every open item of the workspace, oldest first (items without a time last), at most `WAITING_ITEMS_MAX`: the open
+ * questions of every conversation, the main conversation's failure, failed setup steps, conflicted paths. */
+export function workspaceWaiting(sources: WaitingSources): WorkspaceWaiting {
+  const items: WaitingItem[] = sources.questions.filter(question => questionState(question) === 'open').map(question => questionItem(question, sources.agents, sources.rootId));
+  if (sources.failure) items.push({ kind: 'failed', key: `failed:${sources.rootId}`, since: null, ...cut(sources.failure), conversation: { id: sources.rootId, agent: null } });
+  for (const machine of sources.machines) {
+    const updatedAt = sources.attachments.find(attachment => attachment.attachmentId === machine.attachmentId)?.updatedAt ?? null;
+    for (const step of machine.setup) {
+      if (step.state !== 'failed') continue;
+      const error = step.error ?? 'Setup failed';
+      const lastLine = error.split('\n').map(line => line.trim()).filter(Boolean).at(-1) ?? error;
+      items.push({ kind: 'setup-failed', key: `setup:${machine.machineId}:${step.phase}`, since: updatedAt, ...cut(error), machineId: machine.machineId, phase: step.phase, runId: step.runId, lastLine: lastLine.slice(0, WAITING_TITLE_MAX) });
+    }
+  }
+  if (sources.conflicts.length) items.push({ kind: 'conflict', key: 'conflict', since: null, ...cut(sources.conflicts.join(', ')), paths: sources.conflicts.length });
+  // Items without a time sort last.
+  items.sort((left, right) => (left.since ?? '9999').localeCompare(right.since ?? '9999'));
+  return { items: items.slice(0, WAITING_ITEMS_MAX), more: Math.max(0, items.length - WAITING_ITEMS_MAX) };
+}
+
+/** The step being worked on of the plan in effect (an approved plan, or the one approved before a pending proposal):
+ * the active step, else the first pending one; null without an approved plan with a step left. */
+export function workspacePlanStep(plan: { status: string; steps?: RuntimePlanStep[]; approved?: { steps: RuntimePlanStep[] } | null } | undefined): WorkspacePlanStep | null {
+  const steps = plan?.status === 'approved' ? plan.steps ?? [] : plan?.approved?.steps ?? [];
+  const index = steps.findIndex(step => step.status === 'active');
+  const current = index >= 0 ? index : steps.findIndex(step => step.status === 'pending');
+  const step = steps[current];
+  return step ? { index: current + 1, count: steps.length, title: step.title.slice(0, 80) } : null;
 }

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { cutForAgent, type TextSource, type WorkspacePhase, type WorkspaceReport, type WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
+import { cutForAgent, type TextSource, type WorkspacePhase, type WorkspaceQuestionHead, type WorkspaceStatusSummary } from '@gitspace/protocol-workspace';
 
 /** One workspace as the project agent's board shows it, from stored rows only: the project's definition, the account's
  * status row and the project's pull-request links. No workspace object is read. */
@@ -12,7 +12,7 @@ export type WorkspaceBoardRow = {
   /** Null until the workspace first reported. */
   status: WorkspaceStatusSummary | null;
   /** The main conversation's oldest unanswered question or approval. */
-  waitingOn: WorkspaceReport['waitingOn'];
+  waitingOn: WorkspaceQuestionHead | null;
   /** Every pull request linked to it, newest link first (see `BoardPullRequest`). */
   pullRequests: BoardPullRequest[];
   /** When its activity (working, waiting on a person, idle, failed) or what it waits on last changed. */

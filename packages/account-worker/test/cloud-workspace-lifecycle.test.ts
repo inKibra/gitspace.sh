@@ -700,7 +700,7 @@ describe('cloud workspace lifecycle with no machines', () => {
     await vi.waitFor(async () => expect(await client.space.view({ projectId: project.id, workspaceId: null })).toMatchObject({ status: 'ok', value: { workspaces: [{ id: workspaceId, status: published }], statusError: null } }));
     // The project agent's report before any message: nothing waited on, no model admitted, no checkpoint yet.
     const report = await space.workspaceReport();
-    expect(report).toMatchObject({ summary: published, phase: 'plan', waitingOn: null, failure: null, lastReply: null, model: null, code: null });
+    expect(report).toMatchObject({ summary: published, phase: 'plan', waiting: { items: [], more: 0 }, planStep: null, failure: null, lastReply: null, model: null, code: null });
     await runInDurableObject(space, async (_instance, state) => {
       // The published snapshot is gone; only the stored summary remains, and the project is unreachable.
       state.storage.sql.exec("DELETE FROM runtime_replica WHERE kind='snapshot'");
@@ -718,7 +718,7 @@ describe('cloud workspace lifecycle with no machines', () => {
     const { userId, client, project, index, ready } = await cloudProject('Asleep');
     const created = await ready(client.workspace.create({ projectId: project.id, name: 'Idle', branch: 'idle', sourceKind: 'base', sourceRef: '' }));
     const status = { primaryColor: 'green' as const, agents: { green: 1, blue: 0, orange: 0, red: 0 }, machines: { attached: 0, online: 0, ready: 0 }, sync: { conflicts: 0, problems: 0 } };
-    await index.setWorkspaceStatus({ projectId: project.id, workspaceId: created.workspace.id, status, waitingOn: null, lastReply: null, cursor: 1 });
+    await index.setWorkspaceStatus({ projectId: project.id, workspaceId: created.workspace.id, status, waiting: { items: [], more: 0 }, lastReply: null, cursor: 1 });
     // Every workspace object is unreachable: a view that read one would fail (and would have woken it).
     const asleep = { ...env, SPACE_AUTHORITY: new Proxy(env.SPACE_AUTHORITY, { get() { throw new Error('A workspace object was read'); } }) };
     const view = await readCloudSpaceView(asleep, userId, project.id);

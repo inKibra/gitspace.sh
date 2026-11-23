@@ -3,7 +3,6 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi, type Mock } from 'vitest';
 import type { CloudWorkspaceDefinition } from '@gitspace/protocol/project-authority';
-import { emptyWorkspaceStatus as idle } from '@gitspace/protocol-workspace';
 import { AccountWorkPages, type AccountWorkPagesProps } from './AccountWorkPages.js';
 import { verticalSliceFixture } from './App.js';
 import type { SidebarWorkspace } from './AppSidebar.js';
@@ -52,49 +51,14 @@ afterEach(async () => {
   if (!animationDescriptor) Reflect.deleteProperty(Element.prototype, 'getAnimations');
   vi.unstubAllGlobals();
 });
-async function render(view: AccountWorkPagesProps['view'], actions: AccountWorkPagesProps['actions'] = {}, projectList = projects) {
-  await act(() => root.render(<Toasts><AccountWorkPages view={view} projects={projectList} directory={directory} loading={false} onRefresh={vi.fn()} onOpenWorkspace={onOpenWorkspace} onOpenProject={onOpenProject} actions={actions} /></Toasts>));
+async function render(actions: AccountWorkPagesProps['actions'] = {}, projectList = projects) {
+  await act(() => root.render(<Toasts><AccountWorkPages projects={projectList} directory={directory} loading={false} onRefresh={vi.fn()} onOpenWorkspace={onOpenWorkspace} onOpenProject={onOpenProject} actions={actions} /></Toasts>));
 }
 async function click(label: string) {
   const element = document.body.querySelector<HTMLElement>(`[aria-label="${label}"]`);
   if (!element) throw new Error(`Missing action: ${label}`);
   await act(() => element.click());
 }
-
-it('shows other projects and released workspaces without runtime, preserving canonical unassigned and unknown phases', async () => {
-  directory.alpha!.workspaces.push(saved('unassigned', 'alpha', null));
-  directory.beta!.workspaces.push(saved('unknown-phase', 'beta', 'code', { definition: undefined, summary: { holder: { kind: 'unknown' }, closedAt: null, status: idle, freshness: 'stale' } }));
-  await render('kanban');
-  expect(container.querySelector('[aria-label="Plan"]')?.textContent).toContain('alpha-work');
-  expect(container.querySelector('[aria-label="Review"]')?.textContent).toContain('beta-release');
-  expect(container.querySelector('[aria-label="Unassigned"]')?.textContent).toContain('unassigned');
-  expect(container.querySelector('[aria-label="Code"]')?.textContent).not.toContain('unassigned');
-  expect(container.querySelector('[aria-label="Phase unknown"]')?.textContent).toContain('unknown-phase');
-  expect(container.querySelector('[aria-label="Open beta-archive"]')).toBeNull();
-  expect(container.querySelector('[aria-label="Review"] [data-freshness="unknown"]')).not.toBeNull();
-  expect(container.querySelector('[aria-label="Phase unknown"] [data-freshness="stale"]')).not.toBeNull();
-  await click('Open beta-release');
-  expect(onOpenWorkspace).toHaveBeenCalledWith('beta', 'beta-release');
-});
-
-it('requires a project choice on board creation and submits the chosen project and phase', async () => {
-  const create = vi.fn();
-  await render('kanban', { onCreateWorkspace: create });
-  await click('New workspace in Plan');
-  expect(document.body.querySelector('#create-workspace-form')).toBeNull();
-  await click('Create workspace in Beta');
-  expect(document.body.querySelector('#create-workspace-form')).not.toBeNull();
-  await act(() => {
-    const inputs = document.body.querySelectorAll<HTMLInputElement>('#create-workspace-form input');
-    const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
-    for (const [index, value] of ['chosen-work', 'feature/chosen-work'].entries()) {
-      setValue.call(inputs[index], value);
-      inputs[index]!.dispatchEvent(new Event('input', { bubbles: true }));
-    }
-  });
-  await act(() => { document.body.querySelector<HTMLFormElement>('#create-workspace-form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); });
-  expect(create).toHaveBeenCalledWith(expect.objectContaining({ projectId: 'beta', phase: 'plan', name: 'chosen-work', branch: 'feature/chosen-work' }));
-});
 
 it.each([
   { initialPhase: undefined, expectedPhase: 'plan', expectedLabel: 'Plan' },
@@ -117,7 +81,7 @@ it.each([
 
 it('keeps the cloud workspace navigable after a cache-release failure and fences overlapping lifecycle actions', async () => {
   const pending = Promise.withResolvers<void>();
-  await render('projects', { onReleaseMachines: () => pending.promise, onArchiveWorkspace: vi.fn(), onRestoreWorkspace: vi.fn() });
+  await render({ onReleaseMachines: () => pending.promise, onArchiveWorkspace: vi.fn(), onRestoreWorkspace: vi.fn() });
   await click('Release machine caches for beta-release');
   expect(onOpenWorkspace).not.toHaveBeenCalled();
   expect(container.querySelector<HTMLButtonElement>('[aria-label="Archive beta-release"]')?.disabled).toBe(true);
@@ -132,7 +96,7 @@ it('keeps the cloud workspace navigable after a cache-release failure and fences
 
 it('keeps archived projects out of the active list and restores the chosen archived project', async () => {
   const restore = vi.fn();
-  await render('projects', { onRestoreProject: restore }, [projects[0]!, { ...projects[1]!, lifecycle: 'archived', archivedAt: new Date(stamp) }]);
+  await render({ onRestoreProject: restore }, [projects[0]!, { ...projects[1]!, lifecycle: 'archived', archivedAt: new Date(stamp) }]);
   expect(container.querySelector('[aria-label="Open beta-release"]')).toBeNull();
   await click('Project filter');
   const archived = [...document.body.querySelectorAll<HTMLElement>('[role="option"]')].find((option) => option.textContent?.includes('Archived'))!;
@@ -150,7 +114,7 @@ it('offers Update base only for a project behind its origin and reports the refu
     { ...projects[1]!, repositoryReference: 'git@github.com:inKibra/beta.git', remote: { head: 'b'.repeat(40), checkedAt, behind: false } },
   ];
   rpc.updateBase.mockResolvedValueOnce({ status: 'error', error: new Error('Commit or discard the base workspace changes first') });
-  await render('projects', {}, tracked);
+  await render({}, tracked);
   expect(container.textContent?.match(/Behind origin/gu)).toHaveLength(1);
   const update = [...container.querySelectorAll('button')].filter((button) => button.textContent === 'Update base');
   expect(update).toHaveLength(1);
@@ -163,7 +127,7 @@ it('changes a project base branch from Settings at its current revision, the Git
   const setBaseBranch = vi.fn();
   const source: ProjectLifecycleView = { ...projects[0]!, id: 'source', name: 'GitSpace', role: 'gitspace-source', baseBranch: 'develop', repositoryReference: 'https://github.com/inKibra/gitspace.sh.git' };
   const onSettingsProjectChange = vi.fn();
-  const open = (project: ProjectLifecycleView) => act(() => root.render(<Toasts><AccountWorkPages view="projects" projects={[...projects, project]} directory={directory} loading={false} onRefresh={vi.fn()} onOpenWorkspace={onOpenWorkspace} onOpenProject={onOpenProject} actions={{ onSetProjectBaseBranch: setBaseBranch }} settingsProjectId={project.id} onSettingsProjectChange={onSettingsProjectChange} /></Toasts>));
+  const open = (project: ProjectLifecycleView) => act(() => root.render(<Toasts><AccountWorkPages projects={[...projects, project]} directory={directory} loading={false} onRefresh={vi.fn()} onOpenWorkspace={onOpenWorkspace} onOpenProject={onOpenProject} actions={{ onSetProjectBaseBranch: setBaseBranch }} settingsProjectId={project.id} onSettingsProjectChange={onSettingsProjectChange} /></Toasts>));
   await open(source);
   expect(document.body.textContent).toContain('Published GitSpace releases launch as they are.');
   const row = [...document.body.querySelectorAll('span')].find((span) => span.textContent === 'Base branch')!.closest('div')!;

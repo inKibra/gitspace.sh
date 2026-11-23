@@ -1,4 +1,4 @@
-import type { WorkspaceReport } from '@gitspace/protocol-workspace';
+import { mainQuestion, type WorkspaceReport } from '@gitspace/protocol-workspace';
 import type { RuntimeTurn, WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
 import type { RuntimeAutomationInput, RuntimeRequestStatus } from '@gitspace/runtime-core';
 import type { RuntimeIdentity } from './runtime-services.js';
@@ -50,9 +50,10 @@ export function automationTurnHooks(storage: DurableObjectStorage, identity: Run
     },
     // A question only counts once the watched turn runs: one still pending from an earlier turn is not this turn's.
     published: report => {
-      if (!report.waitingOn) return;
+      const question = mainQuestion(report.waiting);
+      if (!question) return;
       for (const { request_id: requestId } of storage.sql.exec<{ request_id: string }>('SELECT request_id FROM workspace_automation_turns WHERE started=1').toArray()) {
-        deliver({ ...identity, requestId, state: 'ended', outcome: 'asked', text: report.waitingOn.prompt });
+        deliver({ ...identity, requestId, state: 'ended', outcome: 'asked', text: question.prompt });
       }
     },
   };

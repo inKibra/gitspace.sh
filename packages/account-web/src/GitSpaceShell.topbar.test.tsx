@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { verticalSliceFixture } from './App.js';
 import { GitSpaceShell, type ProjectAgentView, type ProjectLifecycleView } from './GitSpaceShell.js';
+import { BoardBesideContext } from './board/beside.js';
 
 let root: Root;
 let container: HTMLDivElement;
@@ -54,4 +55,23 @@ it('keeps every top bar item on one line that scrolls sideways at a narrow width
   for (const item of line.children) expect(item.classList.contains('shrink-0') || item.classList.contains('flex-[1_0_auto]')).toBe(true);
   // Nothing in the line is hidden by width: what doesn't fit is scrolled to.
   expect([...line.querySelectorAll('*')].filter((element) => /\bmax-(?:sm|md|lg|xl):hidden\b/u.test(element.getAttribute('class') ?? ''))).toEqual([]);
+});
+
+it('beside the board, the sidebar toggle folds the board back to the list and ✕ closes the workspace; elsewhere the toggle collapses the sidebar', async () => {
+  const onFold = vi.fn();
+  const onClose = vi.fn();
+  await act(() => root.render(<BoardBesideContext.Provider value={{ onFold, onClose }}><GitSpaceShell {...verticalSliceFixture} /></BoardBesideContext.Provider>));
+  const sidebarState = () => container.querySelector('[data-slot="sidebar"]')?.getAttribute('data-state');
+  expect(sidebarState()).toBe('expanded');
+  await act(() => container.querySelector<HTMLButtonElement>('[data-sidebar="trigger"]')?.click());
+  expect(onFold).toHaveBeenCalledTimes(1);
+  expect(sidebarState()).toBe('expanded');
+  await act(() => container.querySelector<HTMLButtonElement>('button[aria-label="Close workspace"]')?.click());
+  expect(onClose).toHaveBeenCalledTimes(1);
+
+  await act(() => root.render(<BoardBesideContext.Provider value={null}><GitSpaceShell {...verticalSliceFixture} /></BoardBesideContext.Provider>));
+  expect(container.querySelector('button[aria-label="Close workspace"]')).toBeNull();
+  await act(() => container.querySelector<HTMLButtonElement>('[data-sidebar="trigger"]')?.click());
+  expect(onFold).toHaveBeenCalledTimes(1);
+  expect(sidebarState()).toBe('collapsed');
 });
