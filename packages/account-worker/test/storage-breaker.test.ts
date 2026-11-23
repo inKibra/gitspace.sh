@@ -2,6 +2,7 @@ import { env, runInDurableObject, SELF } from 'cloudflare:test';
 import { expect, test, vi } from 'vitest';
 import { STORAGE_BREAKER_ROWS } from '@gitspace/protocol/storage-breaker';
 import type { UserSettingsDO } from '../src/user-settings.js';
+import { namedIncidents } from '../src/storage-quarantine.js';
 
 // One statement writes one row more than the budget allows.
 const RUNAWAY = `WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i <= ${STORAGE_BREAKER_ROWS}) INSERT INTO runaway SELECT i FROM n`;
@@ -145,4 +146,18 @@ test('incidents recorded before resolution existed stay listed as active', async
     await state.storage.put('storage-incidents', [...(Array.isArray(stored) ? stored : []), { objectId: id, className: 'SpaceAuthorityDO', name: null, kind: 'alert', reason: 'was awake 21.3 of the last 24 hours', at: '2026-10-24T22:20:29.000Z' }]);
   });
   expect((await account.listStorageIncidents()).filter(item => item.objectId === id)).toEqual([expect.objectContaining({ kind: 'alert', reason: 'was awake 21.3 of the last 24 hours', resolvedAt: null })]);
+});
+
+test('an incident the watchdog recorded by id alone is named after the workspace or project its object belongs to', async () => {
+  const projectId = `project-${crypto.randomUUID()}`;
+  const workspaceId = `space-${crypto.randomUUID()}`;
+  await env.USER_PROJECTS.getByName(env.ACCOUNT_ID).putWorkspaceLocation(workspaceId, projectId);
+  const at = new Date().toISOString();
+  const incident = (objectId: string, className: string) => ({ objectId, className, name: null, kind: 'alert' as const, reason: 'rows written', at, resolvedAt: null });
+  const space = env.SPACE_AUTHORITY.idFromName(`${env.ACCOUNT_ID}:${workspaceId}`).toString();
+  const context = env.SPACE_CONTEXT.idFromName(JSON.stringify([env.ACCOUNT_ID, projectId, workspaceId])).toString();
+  const chatter = env.PROJECT_CHATTER.idFromName(`${env.ACCOUNT_ID}:${projectId}`).toString();
+  const unknown = env.SPACE_AUTHORITY.idFromName(`${env.ACCOUNT_ID}:elsewhere`).toString();
+  const named = await namedIncidents(env, [incident(space, 'SpaceAuthorityDO'), incident(context, 'SpaceContextDO'), incident(chatter, 'ProjectChatterDO'), incident(unknown, 'SpaceAuthorityDO')]);
+  expect(named.map(item => item.name)).toEqual([`${env.ACCOUNT_ID}:${workspaceId}`, JSON.stringify([env.ACCOUNT_ID, projectId, workspaceId]), `${env.ACCOUNT_ID}:${projectId}`, null]);
 });

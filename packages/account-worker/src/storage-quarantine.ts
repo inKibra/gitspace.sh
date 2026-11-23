@@ -5,6 +5,7 @@ import type { GitSpaceRpcContext, VerifiedDevice } from '@gitspace/protocol';
 import { storageIncidentsInspectContract, storageIncidentsListContract, storageIncidentsPauseContract, storageIncidentsResumeContract, type StorageInspectionView } from '@gitspace/protocol/rpc-contract';
 import { err, ok } from 'result-rpc';
 import { serverRpc } from 'result-rpc/server';
+import { acrossRelease } from './release-worker.js';
 
 declare const GITSPACE_WORKER_SHA: string | undefined;
 
@@ -181,12 +182,39 @@ export async function platformStorageControl(request: Request, env: Env): Promis
   }
 }
 
+/**
+ * Incidents the platform's watchdog recorded by object id alone get the name their object was made under, found among
+ * the account's projects and workspaces (`idFromName` is computed here, no object is opened), so a reader can say which
+ * workspace or project each is about. Without the directory's locations (an index object still on the previous
+ * release), they stay unnamed.
+ */
+export async function namedIncidents(env: Env, incidents: StorageIncident[]): Promise<StorageIncident[]> {
+  if (incidents.every(incident => incident.name !== null || incident.resolvedAt !== null)) return incidents;
+  let locations: { workspaceId: string; projectId: string }[];
+  try { locations = await acrossRelease(() => env.USER_PROJECTS.getByName(env.ACCOUNT_ID).workspaceLocations()); }
+  catch (error) {
+    console.error(JSON.stringify({ event: 'storage_incident_names_unread', error: error instanceof Error ? error.message : String(error) }));
+    return incidents;
+  }
+  const names = new Map<string, string>();
+  for (const projectId of new Set(locations.map(location => location.projectId))) {
+    const name = `${env.ACCOUNT_ID}:${projectId}`;
+    for (const namespace of [env.PROJECT_AUTHORITY, env.PROJECT_AUTOMATIONS, env.PROJECT_CHATTER]) names.set(namespace.idFromName(name).toString(), name);
+  }
+  for (const { workspaceId, projectId } of locations) {
+    names.set(env.SPACE_AUTHORITY.idFromName(`${env.ACCOUNT_ID}:${workspaceId}`).toString(), `${env.ACCOUNT_ID}:${workspaceId}`);
+    const context = JSON.stringify([env.ACCOUNT_ID, projectId, workspaceId]);
+    names.set(env.SPACE_CONTEXT.idFromName(context).toString(), context);
+  }
+  return incidents.map(incident => incident.name !== null ? incident : { ...incident, name: names.get(incident.objectId) ?? null });
+}
+
 /** The account's storage incidents, and pausing, inspecting and resuming an object (account administration). */
 export function storageIncidentProcedures(env: Env, requireAdministration: () => Promise<VerifiedDevice>) {
   const server = serverRpc.context<GitSpaceRpcContext>();
   const account = env.ACCOUNT_STATE.getByName('account');
   const list = server.implement(storageIncidentsListContract).handler(async ({ errors }) => {
-    try { return ok(await account.listStorageIncidents()); }
+    try { return ok(await namedIncidents(env, await account.listStorageIncidents())); }
     catch (error) { return err(errors.OperationFailed({ operation: 'read storage incidents', message: error instanceof Error ? error.message : String(error) })); }
   });
   const resume = server.implement(storageIncidentsResumeContract).handler(async ({ input, errors }) => {

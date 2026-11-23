@@ -1,5 +1,5 @@
 import type { SpacePlacementView } from '@gitspace/protocol';
-import type { AccountDirectorySnapshot } from '@gitspace/protocol/account-directory';
+import type { AccountDirectorySnapshot, WorkspaceStatusRow } from '@gitspace/protocol/account-directory';
 import { createContext, useCallback, useEffect, useRef, useState } from 'react';
 import type { SidebarProject, SidebarSpaceSummary, SidebarWorkspace } from './AppSidebar.js';
 import type { ProjectLifecycleView } from './GitSpaceShell.js';
@@ -10,6 +10,14 @@ import type { SynchronizationSource } from './synchronization.js';
 import { workspaceStatuses, type WorkspaceStatuses } from './workspace-statuses.js';
 
 export type Directory = Record<string, Pick<SidebarProject, 'workspaces' | 'baseSummary' | 'error'>>;
+
+/** What a status row says of a workspace beyond its status: its agent's last message, its goal, since when it is in its
+ * state, and since when its oldest open item waits (the items come oldest first). */
+function rowParts(row: WorkspaceStatusRow | undefined): Pick<SidebarSpaceSummary, 'preview' | 'goal' | 'stateSince' | 'waitingSince'> {
+  const waitingSince = row?.waiting?.items[0]?.since;
+  return { preview: row?.preview ?? null, goal: row?.goal ?? null, stateSince: row?.since ? new Date(row.since) : null, waitingSince: waitingSince ? new Date(waitingSince) : null };
+}
+
 export interface WorkspaceProjection {
   directory: Directory;
   acceptRuntime: (projectId: string, spaceId: string, summary: SidebarSpaceSummary) => (() => void) | undefined;
@@ -113,15 +121,14 @@ export function useWorkspaceProjection(projects: readonly Pick<ProjectLifecycleV
         const summarize = (id: string, closedAt: Date | null, previous: SidebarSpaceSummary | undefined): SidebarSpaceSummary => {
           const row = closedAt ? undefined : statuses.get(id);
           const status = row?.status;
-          const preview = row?.preview ?? null;
-          const goal = row?.goal ?? null;
+          const parts = rowParts(row);
           // Cloud-only projects have canonical workspaces before their first runtime opens; neither needs a machine.
           if (project.lifecycle === 'cloud-only' || (definitionsById.get(id)?.cloudRuntime ?? previous?.holder.kind === 'cloud')) {
-            return { closedAt, holder: { kind: 'cloud' }, status, preview, goal, freshness: status ? 'fresh' : 'unknown', refreshing: false };
+            return { closedAt, holder: { kind: 'cloud' }, status, ...parts, freshness: status ? 'fresh' : 'unknown', refreshing: false };
           }
           const placement = placements.get(id);
           if (closedAt) return { closedAt, holder: { kind: 'released' }, generation: placement?.generation, freshness: 'fresh' };
-          if (!placement) return { closedAt, holder: { kind: 'unknown' }, status, preview, goal, freshness: status ? 'fresh' : 'unknown', refreshing: false, detail: 'Placement unavailable' };
+          if (!placement) return { closedAt, holder: { kind: 'unknown' }, status, ...parts, freshness: status ? 'fresh' : 'unknown', refreshing: false, detail: 'Placement unavailable' };
           const machine = machines.get(placement.holderId);
           const released = placement.state === 'closed' || (placement.holderId === 'unassigned' && placement.state !== 'opening');
           const compatible = !previous?.closedAt && previous?.holder.kind === 'held' && previous.holder.machineId === placement.holderId && previous.generation === placement.generation;
@@ -132,7 +139,7 @@ export function useWorkspaceProjection(projects: readonly Pick<ProjectLifecycleV
           };
           if (released) return summary;
           const detail = placement.state === 'opening' ? 'Opening' : placement.state === 'closing' ? 'Closing' : placement.state !== 'open' ? 'Status unknown' : null;
-          return { ...summary, status, preview, goal, freshness: status ? 'fresh' : 'unknown', refreshing: false, detail };
+          return { ...summary, status, ...parts, freshness: status ? 'fresh' : 'unknown', refreshing: false, detail };
         };
         const base = definitions.find((space) => space.kind === 'base' && space.lifecycle !== 'deleting');
         if (base || (!value && prior?.baseSummary)) summaries.set(project.id, summarize(project.id, base ? base.archivedAt ? new Date(base.archivedAt) : null : prior?.baseSummary?.closedAt ?? null, prior?.baseSummary));
@@ -171,11 +178,11 @@ export function useWorkspaceProjection(projects: readonly Pick<ProjectLifecycleV
         if (!summary || (summary.holder.kind !== 'cloud' && summary.holder.kind !== 'held') || summary.closedAt) return summary;
         const row = statuses.get(id);
         const status = row?.status;
-        const preview = row?.preview ?? null;
-        const goal = row?.goal ?? null;
-        if (status === summary.status && preview === (summary.preview ?? null) && goal === (summary.goal ?? null)) return summary;
+        const parts = rowParts(row);
+        if (status === summary.status && parts.preview === (summary.preview ?? null) && parts.goal === (summary.goal ?? null)
+          && parts.stateSince?.getTime() === summary.stateSince?.getTime() && parts.waitingSince?.getTime() === summary.waitingSince?.getTime()) return summary;
         changed = true;
-        return { ...summary, status, preview, goal, freshness: status ? 'fresh' : 'unknown' };
+        return { ...summary, status, ...parts, freshness: status ? 'fresh' : 'unknown' };
       };
       const next = Object.fromEntries(Object.entries(accepted.current).map(([projectId, project]) => [projectId,
         { ...project, baseSummary: apply(projectId, project.baseSummary), workspaces: project.workspaces.map(space => ({ ...space, summary: apply(space.id, space.summary) })) }]));

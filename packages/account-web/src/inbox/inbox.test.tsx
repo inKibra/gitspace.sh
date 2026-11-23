@@ -21,7 +21,7 @@ const main = { id: '1', agent: null };
 const hash = (letter: string) => `sha256:${letter.repeat(64)}`;
 
 function row(projectId: string, workspaceId: string, items: WaitingItem[]): WorkspaceStatusRow {
-  return { projectId, workspaceId, status: { ...emptyWorkspaceStatus, primaryColor: 'orange' }, preview: null, waiting: { items, more: 0 }, goal: null };
+  return { projectId, workspaceId, status: { ...emptyWorkspaceStatus, primaryColor: 'orange' }, preview: null, waiting: { items, more: 0 }, goal: null, since: null };
 }
 function sources(rows: WorkspaceStatusRow[], changes: Partial<InboxSources> = {}): InboxSources {
   const stamp = '2026-11-01T00:00:00.000Z';
@@ -161,4 +161,46 @@ it('counts fresh rows that block work, each approval once; issues and rows older
   expect(inboxCount(value, null, key => key === 'a:fresh', NOW)).toBe(1);
   // Out of scope: nothing.
   expect(inboxCount(value, new Set(['ledger']), () => false, NOW)).toBe(0);
+});
+
+function incident(objectId: string, kind: 'quarantine' | 'alert', at: string, name: string | null, reason = 'rows written'): InboxSources['incidents'][number] {
+  return { objectId, className: 'SpaceAuthorityDO', name, kind, reason, at, resolvedAt: null };
+}
+function withWorkspaces(value: InboxSources, ids: string[]): InboxSources {
+  const stamp = '2026-11-01T00:00:00.000Z';
+  return { ...value, directory: { ...value.directory!, workspaces: ids.map(id => ({ id, projectId: 'crumb', name: id, branch: id, phase: 'code', kind: 'worktree', sourceKind: 'base', sourceRef: '', sourceCommit: null, lifecycle: 'active', goalId: null, revision: 1, remote: null, archivedAt: null, createdAt: stamp, updatedAt: stamp, cloudRuntime: true, relations: null })) } };
+}
+
+it('names the workspace a storage incident is about, and keeps one row per object with how many alerts it has', () => {
+  const value = withWorkspaces(sources([], { incidents: [
+    incident('obj-a', 'alert', minutesAgo(50), 'acct:slot-holds', '1.0M rows written'),
+    incident('obj-a', 'alert', minutesAgo(5), null, '1.2M rows written'),
+    incident('obj-b', 'alert', minutesAgo(20), JSON.stringify(['acct', 'crumb', 'loyalty'])),
+  ] }), ['slot-holds', 'loyalty']);
+  render(value, <AccountRows scope={null} onOpen={() => {}} />);
+  const rows = [...container.querySelectorAll('section')].map(card => card.textContent ?? '');
+  expect(rows).toHaveLength(2);
+  expect(rows[0]).toContain('Storage alert: slot-holds');
+  expect(rows[0]).toContain('2 alerts');
+  expect(rows[0]).toContain('1.2M rows written');
+  expect(rows[0]).toContain('SpaceAuthorityDO');
+  expect(rows[1]).toContain('Storage alert: loyalty');
+});
+
+it('puts paused objects first, then fresh alerts newest first, and folds alerts older than two days into one uncounted line', () => {
+  const value = withWorkspaces(sources([], { incidents: [
+    incident('fresh-old', 'alert', minutesAgo(90), 'acct:a'),
+    incident('paused-old', 'quarantine', minutesAgo(30 * 24 * 60), 'acct:b'),
+    incident('fresh-new', 'alert', minutesAgo(10), 'acct:c'),
+    incident('stale', 'alert', minutesAgo(27 * 24 * 60), 'acct:d'),
+  ] }), ['a', 'b', 'c', 'd']);
+  const machine = { id: 'm', label: 'cloud-2', state: 'offline' as const, rpcEndpoint: null, kind: 'sandbox' as const, notes: '', provider: 'cloudflare-sandbox' as const, desiredState: 'online' as const, lifecycleRevision: 1, operationId: null, error: null };
+  render({ ...value, directory: { ...value.directory!, machines: [machine] } }, <AccountRows scope={null} onOpen={() => {}} />);
+  const titles = () => [...container.querySelectorAll('section')].map(card => /(Paused|Storage alert): (\w)since/u.exec(card.textContent ?? '')?.[2] ?? (card.textContent?.includes('Machine cloud-2') ? 'machine' : undefined));
+  expect(titles()).toEqual(['b', 'machine', 'c', 'a']);
+  expect(container.textContent).toContain('Older alerts · 1');
+  act(() => button(/^Older alerts/u).click());
+  expect(titles()).toEqual(['b', 'machine', 'c', 'a', 'd']);
+  // The paused object counts whatever its age; the stale alert does not.
+  expect(inboxCount(value, null, () => false, NOW)).toBe(3);
 });

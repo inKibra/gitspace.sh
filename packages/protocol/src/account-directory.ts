@@ -72,6 +72,8 @@ export const WORKSPACE_PREVIEW_MAX = 160;
 export const workspaceStatusRowSchema = z.object({
   projectId: z.string().min(1), workspaceId: z.string().min(1), status: WorkspaceStatusSummarySchema, preview: z.string().max(WORKSPACE_PREVIEW_MAX).nullable().default(null),
   waiting: WorkspaceWaitingSchema.nullable().default(null), goal: WorkspaceGoalSummarySchema.nullable().default(null),
+  /** When its activity (the status color) or what it waits on last changed; null in rows stored or sent before it. */
+  since: z.iso.datetime().nullable().default(null),
 });
 export type WorkspaceStatusRow = z.infer<typeof workspaceStatusRowSchema>;
 /** `statuses`: every row, once per socket open; `status`: one row that changed. */

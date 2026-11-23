@@ -25,6 +25,7 @@ vi.mock('../inbox/index.js', async () => {
 let root: Root;
 let container: HTMLDivElement;
 let panelWidth = 304;
+let shownProjects: readonly SidebarProject[] = [];
 let onSetPhase: Mock<NonNullable<AppSidebarProps['onSetPhase']>>;
 let onSelectWorkspace: Mock<AppSidebarProps['onSelectWorkspace']>;
 
@@ -32,11 +33,12 @@ function status(color: WorkspaceStatusColor) {
   return { primaryColor: color, agents: { green: color === 'green' ? 1 : 0, blue: 0, orange: color === 'orange' ? 1 : 0, red: color === 'red' ? 1 : 0 }, machines: { attached: 1, online: 1, ready: 1 }, sync: { conflicts: 0, problems: 0 } };
 }
 
-interface Spec { id: string; phase: WorkspacePhase; color: WorkspaceStatusColor; stackedOn?: string; dependsOn?: readonly string[] }
+interface Spec { id: string; phase: WorkspacePhase; color: WorkspaceStatusColor; stackedOn?: string; dependsOn?: readonly string[]; stateSince?: string; waitingSince?: string }
 
 function project(id: string, name: string, specs: readonly Spec[]): SidebarProject {
   const workspaces: SidebarWorkspace[] = specs.map((spec) => ({ id: spec.id, projectId: id, name: spec.id, branch: `feature/${spec.id}`, closedAt: null, phase: spec.phase,
-    summary: { holder: { kind: 'cloud' }, closedAt: null, freshness: 'fresh', status: status(spec.color), preview: `${spec.id} is at work` } }));
+    summary: { holder: { kind: 'cloud' }, closedAt: null, freshness: 'fresh', status: status(spec.color), preview: `${spec.id} is at work`,
+      stateSince: spec.stateSince ? new Date(spec.stateSince) : null, waitingSince: spec.waitingSince ? new Date(spec.waitingSince) : null } }));
   const relations = Object.fromEntries(specs.map((spec): [string, GraphRelations] => [spec.id, { dependsOn: spec.dependsOn ?? [], relatedTo: [], stackedOn: spec.stackedOn ?? null, position: null, aheadOfParent: null }]));
   return { id, name, lifecycle: 'active', workspaces, graph: { baseBranch: 'main', relations, pullRequests: {} } };
 }
@@ -69,7 +71,7 @@ function Frame() {
   const projectId = url.searchParams.get('project');
   return <SidebarProvider persist={false} width="19rem">
     <AppSidebar view={route === 'settings' ? 'agent' : route} onView={() => undefined} selected={projectId ? { projectId, workspaceId: url.searchParams.get('workspace') } : null}
-      projects={PROJECTS} machines={[]} onSelectWorkspace={onSelectWorkspace} onSetPhase={onSetPhase} />
+      projects={shownProjects} machines={[]} onSelectWorkspace={onSelectWorkspace} onSetPhase={onSetPhase} />
   </SidebarProvider>;
 }
 
@@ -119,6 +121,7 @@ beforeEach(() => {
   Object.defineProperty(HTMLElement.prototype, 'setPointerCapture', { configurable: true, value: () => undefined });
   Object.defineProperty(HTMLElement.prototype, 'offsetWidth', { configurable: true, get(this: HTMLElement) { return this.dataset.slot === 'sidebar' ? panelWidth : 0; } });
   panelWidth = 304;
+  shownProjects = PROJECTS;
   onSetPhase = vi.fn(async () => undefined);
   onSelectWorkspace = vi.fn();
   container = document.createElement('div');
@@ -198,8 +201,9 @@ it('puts each workspace in its grouping column with its stack whole under its he
   expect(cards('needs-you')).toEqual(['slot-holds', 'slot-picker-ui', 'loyalty-stamps', 'bank-feed']);
   expect(cards('running')).toEqual(['invoice-pdf']);
   expect(cards('failed')).toEqual(['checkout']);
-  expect(cards('waiting')).toEqual(['menu-cache']);
-  expect(cards('idle')).toEqual(['allergen-labels']);
+  // A workspace that never reported waits; there is no Idle.
+  expect(cards('waiting')).toEqual(['menu-cache', 'allergen-labels']);
+  expect(container.querySelector('[data-column="idle"]')).toBeNull();
   // The stacked workspace runs, but shows with its head, saying so; Running counts it.
   expect(column('needs-you').querySelector('[data-card="slot-picker-ui"]')?.textContent).toContain('Running · with its stack');
   expect(column('running').textContent).toMatch(/Running\s*2/u);
@@ -302,4 +306,29 @@ it('returns from the whole board to the list with the last workspace opened, or 
   await act(() => button('Sidebar view').click());
   expect(location().searchParams.get('project')).toBe('ledger');
   expect(location().searchParams.get('workspace')).toBe('bank-feed');
+});
+
+it('orders Waiting and Running by their latest change and Needs you by what has waited longest, on the board and in the list, stacks whole', async () => {
+  shownProjects = [project('crumb', 'Crumb', [
+    { id: 'old-wait', phase: 'review', color: 'blue', stateSince: '2026-11-20T09:00:00Z' },
+    { id: 'never-reported', phase: 'plan', color: 'dim' },
+    { id: 'new-wait', phase: 'review', color: 'blue', stateSince: '2026-11-23T09:00:00Z' },
+    { id: 'mid-wait', phase: 'code', color: 'dim', stateSince: '2026-11-22T09:00:00Z' },
+    { id: 'old-run', phase: 'code', color: 'green', stateSince: '2026-11-23T08:00:00Z' },
+    { id: 'new-run', phase: 'code', color: 'green', stateSince: '2026-11-23T10:00:00Z' },
+    { id: 'asked-late', phase: 'code', color: 'orange', stateSince: '2026-11-20T09:00:00Z', waitingSince: '2026-11-23T07:00:00Z' },
+    { id: 'its-member', phase: 'code', color: 'green', stackedOn: 'asked-late', stateSince: '2026-11-23T11:00:00Z' },
+    { id: 'asked-early', phase: 'code', color: 'orange', stateSince: '2026-11-23T09:00:00Z', waitingSince: '2026-11-22T07:00:00Z' },
+  ])];
+  await show('/board?group=state');
+  expect(cards('waiting')).toEqual(['new-wait', 'mid-wait', 'old-wait', 'never-reported']);
+  expect(cards('running')).toEqual(['new-run', 'old-run']);
+  expect(cards('needs-you')).toEqual(['asked-early', 'asked-late', 'its-member']);
+
+  window.localStorage.setItem('gitspace.sidebar.groupBy', 'state');
+  await act(() => root.unmount());
+  root = createRoot(container);
+  await show('/');
+  const listed = [...container.querySelectorAll<HTMLElement>('[data-workspace]')].map((row) => row.dataset.workspace);
+  expect(listed).toEqual(['asked-early', 'asked-late', 'its-member', 'new-run', 'old-run', 'new-wait', 'mid-wait', 'old-wait', 'never-reported']);
 });

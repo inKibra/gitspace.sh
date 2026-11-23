@@ -149,9 +149,10 @@ it('shows a cloud workspace by its status row, without its stale legacy placemen
   const scene = fixture();
   scene.cloud.add('a-work');
   const goal = { title: 'Hold a pickup slot while the customer pays', emoji: null, met: 3, total: 5, step: { index: 2, count: 4, title: 'Redis-backed hold' } };
-  statuses.receive({ type: 'statuses', rows: [{ projectId: 'a', workspaceId: 'a-work', status: waiting, preview: 'The migration failed. · Timeline: Deploy', goal }] });
+  const waitingItem = { kind: 'ask' as const, key: 'q-1', since: '2026-11-23T08:00:00.000Z', title: 'Which hold length?', characters: 18, conversation: { id: 'main', agent: null }, choices: [] };
+  statuses.receive({ type: 'statuses', rows: [{ projectId: 'a', workspaceId: 'a-work', status: waiting, preview: 'The migration failed. · Timeline: Deploy', goal, since: '2026-11-23T09:00:00.000Z', waiting: { items: [waitingItem], more: 0 } }] });
   await act(async () => { root.render(<Probe scene={scene} />); });
-  expect(workspaceSummary()).toEqual({ closedAt: null, holder: { kind: 'cloud' }, status: waiting, preview: 'The migration failed. · Timeline: Deploy', goal, freshness: 'fresh', refreshing: false });
+  expect(workspaceSummary()).toEqual({ closedAt: null, holder: { kind: 'cloud' }, status: waiting, preview: 'The migration failed. · Timeline: Deploy', goal, stateSince: new Date('2026-11-23T09:00:00.000Z'), waitingSince: new Date('2026-11-23T08:00:00.000Z'), freshness: 'fresh', refreshing: false });
   // The goal moves with the row's next message.
   const next = { ...goal, met: 4, step: { index: 3, count: 4, title: 'Release on payment or timeout' } };
   await act(async () => { statuses.receive({ type: 'status', projectId: 'a', workspaceId: 'a-work', status: waiting, preview: 'The migration failed. · Timeline: Deploy', goal: next }); });
@@ -180,7 +181,7 @@ it('updates one unopened cloud row and its last-message preview from its status 
 it('shows a machine-held workspace by its status row and updates it when the row changes', async () => {
   const scene = fixture();
   await act(async () => { root.render(<Probe scene={scene} />); });
-  expect(workspaceSummary()).toEqual({ closedAt: null, generation: 1, holder: { kind: 'held', machineId: 'desk', label: 'Desk machine' }, status: working, preview: null, goal: null, freshness: 'fresh', refreshing: false, detail: null });
+  expect(workspaceSummary()).toEqual({ closedAt: null, generation: 1, holder: { kind: 'held', machineId: 'desk', label: 'Desk machine' }, status: working, preview: null, goal: null, stateSince: null, waitingSince: null, freshness: 'fresh', refreshing: false, detail: null });
   expect(row('Alpha work').getAttribute('title')).toBe('feature · Working');
   await act(async () => { statuses.receive({ type: 'status', projectId: 'a', workspaceId: 'a-work', status: waiting }); });
   expect(workspaceSummary()).toMatchObject({ holder: { kind: 'held', machineId: 'desk' }, status: waiting, freshness: 'fresh' });

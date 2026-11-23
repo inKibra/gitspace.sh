@@ -226,20 +226,21 @@ function AccountRow({ item, held, now, onOpen }: { item: AccountItem; held: Held
       </div>
     </Held></ColumnCard>;
   }
-  const { incident } = item;
-  const label = incident.name ?? incident.className;
-  const paused = incident.kind === 'quarantine';
+  const { incident, paused, count, workspaceId, projectId } = item;
+  // Which workspace or project the object is about; an object of the account itself, or one not found, by its class.
+  const label = workspaceId !== null ? name.workspace(workspaceId) : projectId !== null ? name.project(projectId) : incident.className;
   return <ColumnCard tone={badgeColors.red}><Held rowKey={item.key} held={held} now={now}>
     <div className="flex min-w-0 items-start gap-2.5">
       <KindMark icon={PauseCircle} tone={badgeColors.red} />
       <div className="flex min-w-0 flex-1 flex-col gap-0.5">
         <span className="flex min-w-0 items-baseline justify-between gap-2"><span className="truncate text-[13.5px] font-medium text-foreground">{paused ? 'Paused' : 'Storage alert'}: {label}</span><Waited since={incident.at} now={now} agent={false} /></span>
-        <span className="text-[12px] leading-snug text-muted-foreground"><span className="text-foreground/80">Account · watchdog</span> · {incident.reason}</span>
+        <span className="text-[12px] leading-snug text-muted-foreground"><span className="text-foreground/80">{projectId !== null ? `${name.project(projectId)} · watchdog` : 'Account · watchdog'}</span>{count > 1 ? ` · ${count} alerts, newest` : ''} · {incident.reason}</span>
         <span className="truncate font-mono text-[11px] text-muted-foreground">{incident.className} · {incident.objectId.slice(0, 12)}…</span>
       </div>
     </div>
     {inspecting ? <StorageInspection objectId={incident.objectId} label={label} /> : null}
     <div className="-mx-1 flex flex-wrap items-center justify-end gap-1.5">
+      {workspaceId !== null && projectId !== null ? <Button variant="ghost" size="compact" onClick={() => onOpen(projectId, workspaceId)}>Open</Button> : null}
       <Button variant="ghost" size="compact" aria-expanded={inspecting} onClick={() => setInspecting(open => !open)}>{inspecting ? 'Hide storage' : 'Inspect'}</Button>
       {paused ? null : <>
         <Button variant="ghost" size="compact" onClick={() => held.hold(item.key, { label: 'Dismissed · alerts snoozed 6 h', about: label, run: () => resumeObject(incident.objectId) })}>Dismiss</Button>
@@ -365,14 +366,22 @@ function IssueRow({ issue, held, now, onOpen }: { issue: IssueItem; held: HeldAc
 export function AccountRows({ scope, onOpen }: { scope: Scope; onOpen: OpenWorkspace }) {
   const sources = useInboxSources();
   const held = useHeldActions();
-  const account = accountItems(sources, scope);
+  const account = accountItems(sources, scope, Date.now());
+  const [olderOpen, setOlderOpen] = useState(false);
   const groups = approvalGroups(sources, scope);
   const issues = issueItems(sources, scope);
   const keys = [...account.map(item => item.key), ...groups.flatMap(group => group.entries.map(entry => entry.key)), ...issues.map(issue => issue.key)];
   const now = useNow(held, keys);
   if (keys.every(key => held.state(key)?.kind === 'sent')) return null;
   return <div className="flex flex-col gap-2" data-inbox-account="">
-    {account.map(item => <AccountRow key={item.key} item={item} held={held} now={now} onOpen={onOpen} />)}
+    {account.filter(item => !item.stale).map(item => <AccountRow key={item.key} item={item} held={held} now={now} onOpen={onOpen} />)}
+    {account.some(item => item.stale) ? <button type="button" aria-expanded={olderOpen} onClick={() => setOlderOpen(open => !open)} data-older-alerts=""
+      className="flex min-h-8 items-center gap-2 rounded-xl border border-dashed border-border px-3 text-left text-[12.5px] text-muted-foreground hover:bg-hover hover:text-foreground">
+      <Clock width={12} height={12} strokeWidth={1.75} className="shrink-0" />
+      <span className="min-w-0 flex-1 truncate">Older alerts · {account.filter(item => item.stale).length} · over 2 days, not counted</span>
+      <span aria-hidden>{olderOpen ? '−' : '+'}</span>
+    </button> : null}
+    {olderOpen ? account.filter(item => item.stale).map(item => <AccountRow key={item.key} item={item} held={held} now={now} onOpen={onOpen} />) : null}
     {groups.map(group => ({ group, since: group.entries.map(entrySince).filter(since => since !== null).sort()[0] ?? '' })).sort((left, right) => left.since.localeCompare(right.since))
       .map(({ group }) => <ApprovalGroupCard key={group.key} group={group} held={held} now={now} />)}
     {issues.map(issue => <IssueRow key={issue.key} issue={issue} held={held} now={now} onOpen={onOpen} />)}

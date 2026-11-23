@@ -62,7 +62,7 @@ function WorkspaceCard({ item, items, pulls, column, waiting, selected, dimmed, 
   const preview = item.summary?.closedAt ? null : item.summary?.preview ?? null;
   return <article data-card={item.id} aria-label={item.name} aria-current={selected || undefined} onPointerDown={onDragStart ? (event) => onDragStart(item, event) : undefined}
     onClick={() => onOpen(item)}
-    className={`group/card relative flex min-w-0 cursor-pointer select-none flex-col gap-2 rounded-2xl border bg-card px-3 py-2.5 transition-[opacity,border-color,box-shadow] duration-150 ${selected ? 'border-[#6B97FF]/70 shadow-[0_0_0_1px_rgba(107,151,255,0.5)]' : 'border-border hover:border-foreground/20'} ${dimmed ? 'opacity-40' : dragging ? 'opacity-30' : item.state === 'idle' && !selected ? 'opacity-75' : ''}`}>
+    className={`group/card relative flex min-w-0 cursor-pointer select-none flex-col gap-2 rounded-2xl border bg-card px-3 py-2.5 transition-[opacity,border-color,box-shadow] duration-150 ${selected ? 'border-[#6B97FF]/70 shadow-[0_0_0_1px_rgba(107,151,255,0.5)]' : 'border-border hover:border-foreground/20'} ${dimmed ? 'opacity-40' : dragging ? 'opacity-30' : ''}`}>
     <div className="flex min-w-0 items-start gap-2.5">
       <IdentityTile item={item} />
       <div className="flex min-w-0 flex-1 flex-col gap-0.5">

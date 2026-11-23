@@ -8,12 +8,13 @@ export type SidebarFilter = 'all' | 'needs-you' | 'running' | 'review' | 'ship';
 /** How the list nests a project's rows and how the board makes its columns. Project: the list's plain tree; the board's
  * column per project. */
 export type SidebarGroupBy = 'project' | 'state' | 'phase';
-/** A row's state for filters and Group by State: its status colour read as what it asks of you. */
-export type RowState = 'needs-you' | 'failed' | 'running' | 'waiting' | 'idle';
-export const STATE_OF: Record<WorkspaceStatusColor, RowState> = { orange: 'needs-you', red: 'failed', green: 'running', blue: 'waiting', dim: 'idle' };
-export const STATE_LABEL: Record<RowState, string> = { 'needs-you': 'Needs you', failed: 'Failed', running: 'Running', waiting: 'Waiting', idle: 'Idle' };
-export const STATE_COLOR: Record<RowState, WorkspaceStatusColor> = { 'needs-you': 'orange', failed: 'red', running: 'green', waiting: 'blue', idle: 'dim' };
-export const STATE_ORDER: readonly RowState[] = ['needs-you', 'failed', 'running', 'waiting', 'idle'];
+/** A row's state for filters and Group by State: its status colour read as what it asks of you. A workspace with
+ * nothing to show (archived, released, never reported) waits. */
+export type RowState = 'needs-you' | 'failed' | 'running' | 'waiting';
+export const STATE_OF: Record<WorkspaceStatusColor, RowState> = { orange: 'needs-you', red: 'failed', green: 'running', blue: 'waiting', dim: 'waiting' };
+export const STATE_LABEL: Record<RowState, string> = { 'needs-you': 'Needs you', failed: 'Failed', running: 'Running', waiting: 'Waiting' };
+export const STATE_COLOR: Record<RowState, WorkspaceStatusColor> = { 'needs-you': 'orange', failed: 'red', running: 'green', waiting: 'blue' };
+export const STATE_ORDER: readonly RowState[] = ['needs-you', 'failed', 'running', 'waiting'];
 export const FILTERS: readonly { id: SidebarFilter; label: string }[] = [{ id: 'all', label: 'All' }, { id: 'needs-you', label: 'Needs you' }, { id: 'running', label: 'Running' }, { id: 'review', label: 'Review' }, { id: 'ship', label: 'Ship' }];
 export const GROUP_BYS: readonly { id: SidebarGroupBy; label: string }[] = [{ id: 'project', label: 'Project' }, { id: 'state', label: 'State' }, { id: 'phase', label: 'Phase' }];
 
@@ -55,19 +56,45 @@ export function runsOf(items: readonly RowItem[]): Run[] {
 }
 
 /** A group of a grouping: a heading in a project's list, a column on the board. `phase`: the phase a Phase group sets
- * (null for the others and for Phase unknown). */
-export interface RowGroup { key: string; label: string; tone: string | undefined; phase: WorkspaceView['phase'] | null; holds(item: RowItem): boolean }
+ * (null for the others and for Phase unknown). `order`: how its stacks are ordered, by their heads (null: the tree's
+ * order). */
+export interface RowGroup { key: string; label: string; tone: string | undefined; phase: WorkspaceView['phase'] | null; holds(item: RowItem): boolean; order: ((a: RowItem, b: RowItem) => number) | null }
+
+/** Orders by a time of each row, oldest or newest first; a row without one goes last. */
+function byTime(timeOf: (item: RowItem) => Date | null | undefined, newest: boolean): (a: RowItem, b: RowItem) => number {
+  return (a, b) => {
+    const left = timeOf(a)?.getTime();
+    const right = timeOf(b)?.getTime();
+    if (left === undefined || right === undefined) return left === undefined ? right === undefined ? 0 : 1 : -1;
+    return newest ? right - left : left - right;
+  };
+}
+
+/** Needs you: what has waited longest first (its oldest open item, else since it began to need you). The others: the
+ * latest change first. */
+const STATE_ORDERING: Record<RowState, (a: RowItem, b: RowItem) => number> = {
+  'needs-you': byTime((item) => item.summary?.waitingSince ?? item.summary?.stateSince, false),
+  failed: byTime((item) => item.summary?.stateSince, true),
+  running: byTime((item) => item.summary?.stateSince, true),
+  waiting: byTime((item) => item.summary?.stateSince, true),
+};
 
 export function stateGroups(): RowGroup[] {
-  return STATE_ORDER.map((state) => ({ key: state, label: STATE_LABEL[state], tone: STATUS_COLOR[STATE_COLOR[state]], phase: null, holds: (item: RowItem) => item.state === state }));
+  return STATE_ORDER.map((state) => ({ key: state, label: STATE_LABEL[state], tone: STATUS_COLOR[STATE_COLOR[state]], phase: null, holds: (item: RowItem) => item.state === state, order: STATE_ORDERING[state] }));
+}
+
+/** A group's stacks in its order, by their heads; a sort keeps the tree's order among equals. */
+export function ordered(runs: readonly Run[], group: RowGroup): readonly Run[] {
+  const order = group.order;
+  return order ? [...runs].sort((a, b) => a[0] && b[0] ? order(a[0].item, b[0].item) : 0) : runs;
 }
 
 /** Phase groups: the list nests them from Ship down, the board's columns run Plan to Ship. Phase unknown follows while
  * any of `items` has no phase. */
 export function phaseGroups(order: 'list' | 'board', items: readonly RowItem[]): RowGroup[] {
   const phases = order === 'list' ? [...PHASES].reverse() : PHASES;
-  const groups: RowGroup[] = phases.map((phase) => ({ key: phase, label: PHASE_LABEL[phase], tone: undefined, phase, holds: (item: RowItem) => item.phase === phase }));
-  return items.some((item) => item.phase === null) ? [...groups, { key: 'unknown', label: 'Phase unknown', tone: undefined, phase: null, holds: (item: RowItem) => item.phase === null }] : groups;
+  const groups: RowGroup[] = phases.map((phase) => ({ key: phase, label: PHASE_LABEL[phase], tone: undefined, phase, holds: (item: RowItem) => item.phase === phase, order: null }));
+  return items.some((item) => item.phase === null) ? [...groups, { key: 'unknown', label: 'Phase unknown', tone: undefined, phase: null, holds: (item: RowItem) => item.phase === null, order: null }] : groups;
 }
 
 /** What a project lists: a group heading, or a row (faded when it is only there to keep its stack whole). `key` names
@@ -86,7 +113,7 @@ export function listEntries(items: readonly RowItem[], filter: SidebarFilter, gr
   if (groupBy === 'project') return shown.flatMap(rows);
   const groups = groupBy === 'state' ? stateGroups() : phaseGroups('list', items);
   return groups.flatMap((group): Entry[] => {
-    const held = shown.filter((run) => run[0] && group.holds(run[0].item));
+    const held = ordered(shown.filter((run) => run[0] && group.holds(run[0].item)), group);
     if (!held.length) return [];
     const count = items.filter((item) => group.holds(item) && matches(item, filter)).length;
     return [{ kind: 'heading', key: `heading-${group.key}`, label: group.label, tone: group.tone, count }, ...held.flatMap(rows)];

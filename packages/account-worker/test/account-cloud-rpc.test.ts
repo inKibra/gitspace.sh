@@ -91,11 +91,11 @@ describe('cloud lifecycle inspection and explicit authorization', () => {
       if (parsed.success) messages.push(parsed.data);
     });
     socket.accept();
-    await vi.waitFor(() => expect(messages).toEqual([{ type: 'statuses', rows: expect.arrayContaining([{ projectId, workspaceId: spaceId, status: idle, preview: null, waiting: none, goal: null }]) }]));
+    await vi.waitFor(() => expect(messages).toEqual([{ type: 'statuses', rows: expect.arrayContaining([{ projectId, workspaceId: spaceId, status: idle, preview: null, waiting: none, goal: null, since: expect.any(String) }]) }]));
     const working = { ...idle, primaryColor: 'green' as const, agents: { green: 1, blue: 0, orange: 0, red: 0 } };
     await index.setWorkspaceStatus({ projectId, workspaceId: spaceId, status: working, waiting: none, lastReply: null, cursor: 2 });
     await index.setWorkspaceStatus({ projectId, workspaceId: spaceId, status: working, waiting: none, lastReply: null, cursor: 3 });
-    await vi.waitFor(() => expect(messages.slice(1)).toEqual([{ type: 'status', projectId, workspaceId: spaceId, status: working, preview: null, waiting: none, goal: null }]));
+    await vi.waitFor(() => expect(messages.slice(1)).toEqual([{ type: 'status', projectId, workspaceId: spaceId, status: working, preview: null, waiting: none, goal: null, since: expect.any(String) }]));
     // A turn's end and its last message, sent a moment apart, arrive out of order: the older send is dropped.
     await index.setWorkspaceStatus({ projectId, workspaceId: spaceId, status: idle, preview: 'Done. · Timeline: Deploy', waiting: none, lastReply: 'Done.', lastReplySource: { conversationId: '1', ordinal: 5120, characters: 5 }, cursor: 5 });
     await index.setWorkspaceStatus({ projectId, workspaceId: spaceId, status: working, waiting: none, lastReply: 'Done.', cursor: 4 });
@@ -104,9 +104,9 @@ describe('cloud lifecycle inspection and explicit authorization', () => {
     // A new last message with the status unchanged sends its preview.
     await index.setWorkspaceStatus({ projectId, workspaceId: spaceId, status: idle, preview: 'Rolled back.', waiting: none, lastReply: 'Rolled back.', cursor: 6 });
     await vi.waitFor(() => expect(messages.slice(1)).toEqual([
-      { type: 'status', projectId, workspaceId: spaceId, status: working, preview: null, waiting: none, goal: null },
-      { type: 'status', projectId, workspaceId: spaceId, status: idle, preview: 'Done. · Timeline: Deploy', waiting: none, goal: null },
-      { type: 'status', projectId, workspaceId: spaceId, status: idle, preview: 'Rolled back.', waiting: none, goal: null },
+      { type: 'status', projectId, workspaceId: spaceId, status: working, preview: null, waiting: none, goal: null, since: expect.any(String) },
+      { type: 'status', projectId, workspaceId: spaceId, status: idle, preview: 'Done. · Timeline: Deploy', waiting: none, goal: null, since: expect.any(String) },
+      { type: 'status', projectId, workspaceId: spaceId, status: idle, preview: 'Rolled back.', waiting: none, goal: null, since: expect.any(String) },
     ]));
     socket.close();
   });

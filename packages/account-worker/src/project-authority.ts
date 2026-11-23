@@ -445,6 +445,12 @@ export class UserProjectIndexDO extends BudgetedDurableObject {
   }
 
 
+  /** Every workspace the directory places, with its project (a project's base workspace has the project's id). */
+  workspaceLocations(): { workspaceId: string; projectId: string }[] {
+    return this.ctx.storage.sql.exec<{ workspace_id: string; project_id: string }>('SELECT workspace_id,project_id FROM workspace_projects').toArray()
+      .map(row => ({ workspaceId: row.workspace_id, projectId: row.project_id }));
+  }
+
   /** A workspace's status, its open items, its plan step or its main agent's latest message changed: keep its one row,
    * and send a changed row to every open tab. `since` moves only when its activity (the status color) or what it waits
    * on changes, not its machine or sync counts or its latest message. A workspace's sends can arrive out of order; one
@@ -541,10 +547,10 @@ export class UserProjectIndexDO extends BudgetedDurableObject {
   /** Status rows as the tabs read them, every row or one workspace's: the goal joins the plan step of its status. */
   private statusRows(workspaceId?: string): WorkspaceStatusRow[] {
     const filter = workspaceId === undefined ? '' : ' WHERE s.workspace_id=?';
-    return this.ctx.storage.sql.exec<{ workspace_id: string; project_id: string; summary: string; preview: string | null; waiting_json: string | null; plan_step_json: string | null; goal_json: string | null }>(
-      `SELECT s.workspace_id,s.project_id,s.summary,s.preview,s.waiting_json,s.plan_step_json,g.goal_json FROM workspace_statuses s LEFT JOIN workspace_goals g ON g.workspace_id=s.workspace_id${filter}`, ...(workspaceId === undefined ? [] : [workspaceId])).toArray()
+    return this.ctx.storage.sql.exec<{ workspace_id: string; project_id: string; summary: string; preview: string | null; waiting_json: string | null; plan_step_json: string | null; since: string | null; goal_json: string | null }>(
+      `SELECT s.workspace_id,s.project_id,s.summary,s.preview,s.waiting_json,s.plan_step_json,s.since,g.goal_json FROM workspace_statuses s LEFT JOIN workspace_goals g ON g.workspace_id=s.workspace_id${filter}`, ...(workspaceId === undefined ? [] : [workspaceId])).toArray()
       .map(row => workspaceStatusRowSchema.parse({
-        projectId: row.project_id, workspaceId: row.workspace_id, status: JSON.parse(row.summary), preview: row.preview, waiting: JSON.parse(row.waiting_json ?? 'null'),
+        projectId: row.project_id, workspaceId: row.workspace_id, status: JSON.parse(row.summary), preview: row.preview, waiting: JSON.parse(row.waiting_json ?? 'null'), since: row.since,
         goal: row.goal_json === null ? null : { ...JSON.parse(row.goal_json), step: JSON.parse(row.plan_step_json ?? 'null') },
       }));
   }

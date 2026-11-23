@@ -27,10 +27,12 @@ export interface ApprovalEntry {
 export interface ApprovalGroup { key: string; projectId: string; place: { kind: 'base' } | { kind: 'workspace'; workspaceId: string }; entries: readonly ApprovalEntry[] }
 
 /** A row no one workspace owns: a machine that should be online and is not, or an object the storage watchdog stopped
- * or flagged. */
+ * or flagged: one row per object, its newest incident with how many are open, about the workspace or project the
+ * object belongs to when its name says so. An alert whose newest occurrence is over two days old is `stale`: folded
+ * and not counted; a paused object never is, since it blocks work. */
 export type AccountItem =
-  | { key: string; kind: 'machine'; projectId: string | null; machineId: string; label: string; state: string; error: string | null; workspaces: readonly { projectId: string; workspaceId: string }[] }
-  | { key: string; kind: 'incident'; projectId: null; incident: StorageIncidentView };
+  | { key: string; kind: 'machine'; projectId: string | null; machineId: string; label: string; state: string; error: string | null; workspaces: readonly { projectId: string; workspaceId: string }[]; stale: false }
+  | { key: string; kind: 'incident'; projectId: string | null; workspaceId: string | null; incident: StorageIncidentView; count: number; paused: boolean; stale: boolean };
 
 /** An open Chatter issue topic of a project. */
 export interface IssueItem { key: string; projectId: string; topic: ChatterTopic }
@@ -100,9 +102,25 @@ export function entrySince(entry: ApprovalEntry): string | null {
   return entry.waiting.map(wait => wait.since).filter(since => since !== null).sort()[0] ?? null;
 }
 
-/** The account's rows in the scope: machines that should be online and are offline or failed (with the workspaces held
- * on them or whose setup failed there), then the storage incidents still open. */
-export function accountItems(sources: InboxSources, scope: Scope): AccountItem[] {
+/** The workspace or project an object belongs to, from the name it was made under: `<account>:<workspace or project>`,
+ * or a workspace context's `[account, project, workspace]`. A project's base workspace is the project. */
+function incidentPlace(name: string | null, directory: InboxSources['directory']): { projectId: string | null; workspaceId: string | null } {
+  const none = { projectId: null, workspaceId: null };
+  if (name === null || !directory) return none;
+  if (name.startsWith('[')) {
+    const parsed: unknown = JSON.parse(name);
+    if (!Array.isArray(parsed) || typeof parsed[1] !== 'string' || typeof parsed[2] !== 'string') return none;
+    return { projectId: parsed[1], workspaceId: parsed[2] === parsed[1] ? null : parsed[2] };
+  }
+  const id = name.slice(name.indexOf(':') + 1);
+  const workspace = directory.workspaces.find(candidate => candidate.id === id);
+  if (workspace) return { projectId: workspace.projectId, workspaceId: id === workspace.projectId ? null : id };
+  return directory.projects.some(project => project.id === id) ? { projectId: id, workspaceId: null } : none;
+}
+
+/** The account's rows in the scope, in order: paused objects, machines that should be online and are offline or failed
+ * (with the workspaces held on them or whose setup failed there), then the alerts, newest first, stale ones last. */
+export function accountItems(sources: InboxSources, scope: Scope, now: number): AccountItem[] {
   const machines: AccountItem[] = (sources.directory?.machines ?? []).flatMap(machine => {
     if (machine.desiredState !== 'online' || (machine.state !== 'offline' && machine.state !== 'error') || sources.dismissedMachines.has(machine.id)) return [];
     const held = (sources.directory?.placements ?? []).filter(placement => placement.holderId === machine.id).map(placement => ({ projectId: placement.projectId, workspaceId: placement.spaceId }));
@@ -111,10 +129,19 @@ export function accountItems(sources: InboxSources, scope: Scope): AccountItem[]
     const projects = new Set(workspaces.map(workspace => workspace.projectId));
     const projectId = projects.size === 1 ? [...projects][0] ?? null : null;
     if (!inScope(scope, projectId)) return [];
-    return [{ key: `machine:${machine.id}`, kind: 'machine', projectId, machineId: machine.id, label: machine.label, state: machine.state, error: machine.error, workspaces }];
+    return [{ key: `machine:${machine.id}`, kind: 'machine', projectId, machineId: machine.id, label: machine.label, state: machine.state, error: machine.error, workspaces, stale: false }];
   });
-  const incidents: AccountItem[] = sources.incidents.filter(incident => incident.resolvedAt === null).map(incident => ({ key: `incident:${incident.objectId}`, kind: 'incident', projectId: null, incident }));
-  return [...machines, ...incidents];
+  const byObject = new Map<string, StorageIncidentView[]>();
+  for (const incident of sources.incidents) if (incident.resolvedAt === null) byObject.set(incident.objectId, [...byObject.get(incident.objectId) ?? [], incident]);
+  const incidents = [...byObject.values()].flatMap((open): Extract<AccountItem, { kind: 'incident' }>[] => {
+    const newest = open.toSorted((left, right) => left.at.localeCompare(right.at)).at(-1);
+    if (!newest) return [];
+    const place = incidentPlace(open.find(incident => incident.name !== null)?.name ?? null, sources.directory);
+    if (!inScope(scope, place.projectId)) return [];
+    const paused = open.some(incident => incident.kind === 'quarantine');
+    return [{ key: `incident:${newest.objectId}`, kind: 'incident', ...place, incident: newest, count: open.length, paused, stale: !paused && !fresh(newest.at, now) }];
+  }).sort((left, right) => right.incident.at.localeCompare(left.incident.at));
+  return [...incidents.filter(item => item.paused), ...machines, ...incidents.filter(item => !item.paused && !item.stale), ...incidents.filter(item => item.stale)];
 }
 
 /** The open issue topics of the projects in the scope, newest first. */
@@ -133,7 +160,7 @@ export function issueItems(sources: InboxSources, scope: Scope): IssueItem[] {
 export function inboxCount(sources: InboxSources, scope: Scope, cleared: (key: string) => boolean, now: number): number {
   const items = workspaceItems(sources, scope).filter(entry => entry.item.kind !== 'lifecycle-approval' && fresh(entry.item.since, now) && !cleared(entry.key)).length;
   const approvals = approvalGroups(sources, scope).flatMap(group => group.entries).filter(entry => fresh(entrySince(entry), now) && !cleared(entry.key)).length;
-  const account = accountItems(sources, scope).filter(item => !cleared(item.key)).length;
+  const account = accountItems(sources, scope, now).filter(item => !item.stale && !cleared(item.key)).length;
   return items + approvals + account;
 }
 

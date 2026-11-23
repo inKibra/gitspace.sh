@@ -97,6 +97,10 @@ export interface SidebarSpaceSummary {
   preview?: string | null;
   /** The workspace's goal as its status row reports it (the board's card leads with it); null or absent before one. */
   goal?: WorkspaceGoalSummary | null;
+  /** Since when it is in its state (its status row's `since`: its colour or what it waits on last changed); null before. */
+  stateSince?: Date | null;
+  /** Since when its oldest open item waits; null with nothing open. */
+  waitingSince?: Date | null;
 }
 
 function summaryLabel(summary: SidebarSpaceSummary): string {
@@ -778,7 +782,7 @@ function SidebarBody({ view, onView, selected, selectedSummary, projects, onSele
   const shown = projects.map((project) => selectedSummary && selected?.projectId === project.id
     ? selected.workspaceId === null
       ? { ...project, baseSummary: selectedSummary }
-      : { ...project, workspaces: project.workspaces.map((workspace) => workspace.id === selected.workspaceId ? { ...workspace, summary: { ...selectedSummary, preview: selectedSummary.preview ?? workspace.summary?.preview ?? null, goal: selectedSummary.goal ?? workspace.summary?.goal ?? null } } : workspace) }
+      : { ...project, workspaces: project.workspaces.map((workspace) => workspace.id === selected.workspaceId ? { ...workspace, summary: { ...selectedSummary, preview: selectedSummary.preview ?? workspace.summary?.preview ?? null, goal: selectedSummary.goal ?? workspace.summary?.goal ?? null, stateSince: workspace.summary?.stateSince ?? null, waitingSince: workspace.summary?.waitingSince ?? null } } : workspace) }
     : project);
   const active = shown.filter((project) => !ARCHIVED_PROJECT[project.lifecycle ?? '']);
   const archivedProjects = shown.filter((project) => ARCHIVED_PROJECT[project.lifecycle ?? '']);
