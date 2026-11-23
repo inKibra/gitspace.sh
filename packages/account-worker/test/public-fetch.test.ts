@@ -76,6 +76,18 @@ describe('fetching a file a caller names', () => {
     await expect(bytesOf(await fetchFile('https://files.example.com/dot.png', { sha256: '0'.repeat(64) }))).rejects.toThrow('does not match the given sha256');
   });
 
+  it('serves the account\'s own /files/ link in place, never fetching its own hostname, and refuses its other paths', async () => {
+    const served: string[] = [];
+    const own = { origin: 'https://account.example.com', serve: async (request: Request) => { served.push(new URL(request.url).pathname); return new Response(png, { headers: { 'content-type': 'image/png' } }); } };
+    network.use(dnsAnswers({ 'files.example.com': PUBLIC }), http.get('https://files.example.com/to-own', () => new HttpResponse(null, { status: 302, headers: { location: 'https://account.example.com/files/token-2' } })));
+    const file = await fetchPublicFile('https://account.example.com/files/token-1', { maxBytes: 1024, signal: AbortSignal.timeout(5_000), own, sha256: sha256(png) });
+    expect(await bytesOf(file)).toEqual(png);
+    // A public link redirecting to the account's own file is served the same way.
+    expect(await bytesOf(await fetchPublicFile('https://files.example.com/to-own', { maxBytes: 1024, signal: AbortSignal.timeout(5_000), own }))).toEqual(png);
+    expect(served).toEqual(['/files/token-1', '/files/token-2']);
+    await expect(fetchPublicFile('https://account.example.com/v1/rpc', { maxBytes: 1024, signal: AbortSignal.timeout(5_000), own })).rejects.toThrow('Only account.example.com/files/ links');
+  });
+
   it('refuses a web_fetch hop to a name that resolves to a private address', async () => {
     network.use(dnsAnswers({ 'internal.example.com': { A: ['192.168.1.20'] }, 'files.example.com': PUBLIC }), http.get('https://*/*', () => HttpResponse.text('page')));
     await expect(publicFetch('https://internal.example.com/admin', { redirect: 'manual' })).rejects.toThrow('resolves to a private or local address');

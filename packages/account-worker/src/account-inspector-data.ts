@@ -568,8 +568,9 @@ export class InspectorCloudArtifacts {
   async importUrl(url: string, options: { folder?: string; fileName?: string; mediaType?: string; sha256?: string }) {
     if (options.sha256 !== undefined && !/^[a-f0-9]{64}$/u.test(options.sha256)) throw new Error('Give the file’s SHA-256 as 64 hexadecimal digits');
     // Loaded here, not at startup: the account worker's startup is near Cloudflare's limit.
-    const { fetchPublicFile, PUBLIC_FILE_TIMEOUT_MS } = await import('./public-fetch.js');
-    const file = await fetchPublicFile(url, { maxBytes: DRIVE_FILE_MAX_BYTES, signal: AbortSignal.timeout(PUBLIC_FILE_TIMEOUT_MS), ...(options.sha256 === undefined ? {} : { sha256: options.sha256 }) });
+    const [{ fetchPublicFile, PUBLIC_FILE_TIMEOUT_MS }, { serveArtifactFile }] = await Promise.all([import('./public-fetch.js'), import('./artifact-file-url.js')]);
+    const own = { origin: new URL(this.env.ACCOUNT_URL).origin, serve: (request: Request) => serveArtifactFile(request, this.env) };
+    const file = await fetchPublicFile(url, { maxBytes: DRIVE_FILE_MAX_BYTES, signal: AbortSignal.timeout(PUBLIC_FILE_TIMEOUT_MS), own, ...(options.sha256 === undefined ? {} : { sha256: options.sha256 }) });
     let path: string;
     try { path = this.uploadPath(options.fileName ?? file.fileName ?? 'file', options.folder); } catch (error) {
       await file.body.cancel();

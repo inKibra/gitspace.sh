@@ -110,14 +110,17 @@ function checked(maxBytes: number, sha256: string | undefined): TransformStream<
  * `PUBLIC_FILE_MAX_REDIRECTS` redirects are followed, `206 Partial Content` and any other non-2xx answer are refused,
  * and the body is capped at `maxBytes` as it streams (a `Content-Length` above it is refused at once; a smaller one is
  * not trusted). `sha256` is the whole file's hexadecimal digest. Messages name the host, never the URL, which may hold
- * a signature.
+ * a signature. `own` is this account: a Worker cannot fetch its own hostname (Cloudflare answers 530), so a hop to the
+ * account's `/files/` link is served by `own.serve` in this isolate, and any other path of the account is refused.
  */
-export async function fetchPublicFile(url: string, options: { maxBytes: number; sha256?: string; signal: AbortSignal }): Promise<PublicFile> {
+export async function fetchPublicFile(url: string, options: { maxBytes: number; sha256?: string; signal: AbortSignal; own?: { origin: string; serve(request: Request): Promise<Response> } }): Promise<PublicFile> {
   let target: URL;
   try { target = new URL(url); } catch { throw new Error('The file URL is not a valid URL'); }
   for (let redirects = 0; ; redirects++) {
     if (target.protocol !== 'https:') throw new Error(`Files are fetched over https only; ${target.host || target.protocol} is not https`);
-    const response = await publicFetch(target, { redirect: 'manual', signal: options.signal });
+    const own = options.own && target.origin === options.own.origin ? options.own : null;
+    if (own && !target.pathname.startsWith('/files/')) throw new Error(`Only ${target.host}/files/ links of this account are fetched`);
+    const response = own ? await own.serve(new Request(target, { signal: options.signal })) : await publicFetch(target, { redirect: 'manual', signal: options.signal });
     const location = REDIRECT_STATUSES[response.status] ? response.headers.get('location') : null;
     if (location !== null) {
       await response.body?.cancel();
