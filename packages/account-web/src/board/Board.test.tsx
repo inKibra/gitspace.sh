@@ -16,7 +16,8 @@ vi.mock('../inbox/index.js', async () => {
     InboxSourcesContext: createContext({}),
     AccountRows: () => null,
     InboxRows: ({ workspaceId }: { workspaceId: string }) => <div data-inbox-rows={workspaceId} />,
-    useInboxCount: () => 0,
+    // The rail's badge reads the Inbox's count, not the number of orange workspaces (3 in these rows).
+    useInboxCount: () => 7,
     useWaitingSummary: () => null,
   };
 });
@@ -177,7 +178,7 @@ it('closes the workspace beside the board when the divider is dragged to the win
 it('opens the board from the rail, which counts what needs you, and toggles it with B', async () => {
   await show('/');
   const rail = container.querySelector<HTMLButtonElement>('[data-rail="board"]');
-  expect(rail?.getAttribute('aria-label')).toBe('Board, 3 need you');
+  expect(rail?.getAttribute('aria-label')).toBe('Board, 7 need you');
   await act(() => rail?.click());
   expect(location().pathname).toBe('/board');
   expect(container.querySelector('[data-rail="board"]')?.getAttribute('aria-current')).toBe('page');
