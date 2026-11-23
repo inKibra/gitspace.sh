@@ -6,6 +6,7 @@ import { useEffect, useState, type ComponentType, type CSSProperties, type React
 import { AskUserQuestions, Badge, badgeColors, Button, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, InputField, InputGroup, Tooltip, type AskUserAnswer } from '@gitspace/ui';
 import { AlertCircle, ArrowUpRight, Check, ClipboardCheck, Clock, Flag01, GitBranch01, Hourglass03, MessageQuestionCircle, PauseCircle, Server01, TerminalSquare } from '@untitledui/icons';
 import type { WaitingItem } from '@gitspace/protocol-workspace';
+import type { ChatterTopicAction } from '@gitspace/protocol/chatter-contract';
 import { GitSpaceMarkdown } from '../GitSpaceMarkdown.js';
 import { StorageInspection } from '../StorageIncidents.js';
 import { rpcErrorMessage } from '../rpc-error-message.js';
@@ -324,36 +325,45 @@ function ApprovalGroupCard({ group, held, now }: { group: ApprovalGroup; held: H
   </ColumnCard>;
 }
 
-/** An open Chatter issue topic: listed, never counted. Open shows it in the workspace that posted last; Resolve… takes
- * the fixing commit (optional); Dismiss closes it. */
+/** An open issue: listed, never counted. The chip names its project, or how many projects have it open; the line says
+ * how many posts and repeats, from which workspaces. Open shows it in the workspace that posted last (a project picker
+ * first when several projects have it); Resolve… takes the fixing commit (optional); Dismiss closes it, in every
+ * project it is listed for. */
 function IssueRow({ issue, held, now, onOpen }: { issue: IssueItem; held: HeldActions; now: number; onOpen: OpenWorkspace }) {
   const sources = useInboxSources();
   const name = names(sources);
   const [resolving, setResolving] = useState(false);
+  const [picking, setPicking] = useState(false);
   const [commit, setCommit] = useState('');
-  const { topic } = issue;
-  const gitspace = topic.participants.some(author => author.kind === 'gitspace');
-  const posters = topic.participants.filter(author => author.kind === 'workspace');
-  const latest = posters[0]?.id ?? issue.projectId;
+  const first = issue.places[0];
+  const several = issue.places.length > 1;
+  const act = (label: string, action: ChatterTopicAction): void => {
+    held.hold(issue.key, { label, about: issue.display, run: async () => { for (const place of issue.places) await actOnTopic(place.projectId, issue.topicKey, action); } });
+  };
   const resolve = (): void => {
     const fixedIn = commit.trim() || null;
     setResolving(false);
-    held.hold(issue.key, { label: fixedIn ? `Resolved in ${fixedIn}` : 'Resolved', about: topic.display, run: () => actOnTopic(issue.projectId, topic.key, { kind: 'state', state: 'resolved', fixedIn }) });
+    act(fixedIn ? `Resolved in ${fixedIn}` : 'Resolved', { kind: 'state', state: 'resolved', fixedIn });
   };
+  const open = (place: IssueItem['places'][number]): void => onOpen(place.projectId, place.workspaceId ?? place.projectId);
+  const from = issue.workspaces.length === 0 ? '' : issue.workspaces.length <= 2 ? ` from ${issue.workspaces.map(name.workspace).join(' and ')}` : ` from ${issue.workspaces.length} workspaces`;
   return <ColumnCard><Held rowKey={issue.key} held={held} now={now}>
     <div className="flex min-w-0 items-start gap-2.5">
-      <KindMark icon={Flag01} tone={gitspace ? badgeColors.violet : badgeColors.blue} />
+      <KindMark icon={Flag01} tone={issue.gitspace ? badgeColors.violet : badgeColors.blue} />
       <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-        <span className="flex min-w-0 items-center gap-1.5"><span className="truncate text-[13.5px] font-medium text-foreground">{topic.display}</span>
-          <Badge size="compact" color={gitspace ? 'violet' : 'blue'}>{gitspace ? 'GitSpace' : `${name.project(issue.projectId)} code`}</Badge></span>
-        <span className="flex min-w-0 items-center gap-1">
-          <span className="min-w-0 flex-1 truncate text-[12px] text-muted-foreground">{topic.posts} {topic.posts === 1 ? 'post' : 'posts'} from {posters.length} {posters.length === 1 ? 'workspace' : 'workspaces'} · not counted{topic.marked ? ' · marked for filing' : ''}</span>
-          <Button variant="ghost" size="compact" className="h-6 shrink-0 px-2" onClick={() => held.hold(issue.key, { label: 'Dismissed', about: topic.display, run: () => actOnTopic(issue.projectId, topic.key, { kind: 'state', state: 'dismissed', fixedIn: null }) })}>Dismiss</Button>
-          <Button variant="ghost" size="compact" className="h-6 shrink-0 px-2" aria-expanded={resolving} onClick={() => setResolving(open => !open)}>Resolve…</Button>
+        <span className="flex min-w-0 items-center gap-1.5"><span className="truncate text-[13.5px] font-medium text-foreground" title={issue.display}>{issue.display}</span>
+          <Badge size="compact" color={issue.gitspace ? 'violet' : 'blue'}>{several ? `${issue.places.length} projects` : name.project(first?.projectId ?? null)}</Badge></span>
+        <span className="text-[12px] text-muted-foreground [overflow-wrap:anywhere]">{issue.posts} {issue.posts === 1 ? 'post' : 'posts'}{issue.repeats ? ` · ${issue.repeats} ${issue.repeats === 1 ? 'repeat' : 'repeats'}` : ''}{from}{several ? ` · in ${issue.places.map(place => name.project(place.projectId)).join(', ')}` : ''} · not counted{issue.marked ? ' · marked for filing' : ''}</span>
+        <span className="-mx-1 flex min-w-0 items-center justify-end gap-1">
+          <Button variant="ghost" size="compact" className="h-6 shrink-0 px-2" onClick={() => act('Dismissed', { kind: 'state', state: 'dismissed', fixedIn: null })}>Dismiss</Button>
+          <Button variant="ghost" size="compact" className="h-6 shrink-0 px-2" aria-expanded={resolving} onClick={() => setResolving(value => !value)}>Resolve…</Button>
         </span>
       </div>
-      <button type="button" onClick={() => onOpen(issue.projectId, latest)} className="inline-flex h-6 shrink-0 items-center gap-0.5 rounded-lg px-1.5 text-[12px] font-medium text-muted-foreground hover:bg-hover hover:text-foreground">Open<ArrowUpRight width={12} height={12} strokeWidth={2} /></button>
+      <button type="button" aria-expanded={several ? picking : undefined} onClick={() => { if (several) setPicking(value => !value); else if (first) open(first); }} className="inline-flex h-6 shrink-0 items-center gap-0.5 rounded-lg px-1.5 text-[12px] font-medium text-muted-foreground hover:bg-hover hover:text-foreground">Open<ArrowUpRight width={12} height={12} strokeWidth={2} /></button>
     </div>
+    {picking ? <div role="group" aria-label="Open in project" className="flex flex-wrap items-center gap-1.5 pl-8">
+      {issue.places.map(place => <Button key={place.projectId} variant="secondary" size="compact" onClick={() => { setPicking(false); open(place); }}>{name.project(place.projectId)} · {place.topic.posts + place.topic.repeats}</Button>)}
+    </div> : null}
     {resolving ? <div className="flex items-center gap-2">
       <InputGroup size="compact" className="min-w-0 flex-1"><InputField label="Fixed in" labelHidden index={0} placeholder="Fixed in commit (optional)…" value={commit} onChange={setCommit} onKeyDown={(event) => { if (event.key === 'Enter') resolve(); }} /></InputGroup>
       <Button variant="primary" size="compact" onClick={resolve}>Resolve</Button>

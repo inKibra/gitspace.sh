@@ -12,8 +12,9 @@ import { inboxCount, type InboxSources } from './model.js';
 const rpc = vi.hoisted(() => ({
   session: vi.fn(async (_input: unknown) => ({ status: 'ok', value: {} })),
   answer: vi.fn(async (_input: unknown) => ({ status: 'ok', value: { accepted: true, cursor: 1 } })),
+  topicAct: vi.fn(async (_input: unknown) => ({ status: 'ok', value: {} })),
 }));
-vi.mock('../rpc-client.js', () => ({ rpcClient: { runtime: { session: rpc.session, answer: rpc.answer } } }));
+vi.mock('../rpc-client.js', () => ({ rpcClient: { runtime: { session: rpc.session, answer: rpc.answer }, chatter: { topicAct: rpc.topicAct } } }));
 
 const NOW = Date.parse('2026-11-23T12:00:00.000Z');
 const minutesAgo = (minutes: number) => new Date(NOW - minutes * 60_000).toISOString();
@@ -203,4 +204,37 @@ it('puts paused objects first, then fresh alerts newest first, and folds alerts 
   expect(titles()).toEqual(['b', 'machine', 'c', 'a', 'd']);
   // The paused object counts whatever its age; the stale alert does not.
   expect(inboxCount(value, null, () => false, NOW)).toBe(3);
+});
+
+function issueTopic(key: string, posts: number, repeats: number, authors: { kind: 'workspace' | 'gitspace' | 'person'; id: string }[], minutes: number): ChatterTopic {
+  return { key, display: key, firstAt: new Date(NOW - 600 * 60_000), lastAt: new Date(NOW - minutes * 60_000), posts, participants: authors.map(author => ({ ...author, name: author.id })), state: 'open', stateBy: null, stateAt: null, fixedIn: null, repeats, filed: null, marked: null, sameAs: null };
+}
+
+it('names an issue\'s project, its posts, repeats and the workspaces GitSpace posted for, and groups one issue open in several projects', async () => {
+  const failure = 'gitspace.ProcessExit: machine unreachable';
+  const value = withWorkspaces(sources([], { topics: new Map([
+    ['crumb', [issueTopic(failure, 1, 13, [{ kind: 'gitspace', id: 'slot-holds' }], 5), issueTopic('menu prices off', 3, 0, [{ kind: 'workspace', id: 'a' }, { kind: 'workspace', id: 'b' }, { kind: 'person', id: 'maya' }, { kind: 'workspace', id: 'c' }], 50)]],
+    ['ledger', [issueTopic(failure, 1, 6, [{ kind: 'gitspace', id: 'bank-feed' }], 30)]],
+  ]) }), ['slot-holds', 'a', 'b', 'c']);
+  value.directory!.projects.push({ ...value.directory!.projects[0]!, id: 'ledger', name: 'Ledger' });
+  const opened: string[] = [];
+  render(value, <AccountRows scope={null} onOpen={(projectId, workspaceId) => opened.push(`${projectId}/${workspaceId}`)} />);
+  const rows = [...container.querySelectorAll('section')].map(card => card.textContent ?? '');
+  expect(rows).toHaveLength(2);
+  expect(rows[0]).toContain('2 projects');
+  expect(rows[0]).toContain('2 posts · 19 repeats from slot-holds and bank-feed · in Crumb, Ledger');
+  expect(rows[1]).toContain('Crumb');
+  expect(rows[1]).toContain('3 posts from 3 workspaces');
+  // Open on a grouped issue picks the project first, then opens the workspace that posted there.
+  act(() => [...container.querySelectorAll('button')].find(element => element.textContent === 'Open')!.click());
+  expect(opened).toEqual([]);
+  act(() => button(/^Ledger/u).click());
+  expect(opened).toEqual(['ledger/bank-feed']);
+  // Dismiss closes the topic in every project it is open in.
+  act(() => [...container.querySelectorAll('section')][0]!.querySelectorAll('button').forEach(element => { if (element.textContent === 'Dismiss') element.click(); }));
+  await act(async () => { vi.advanceTimersByTime(UNDO_MS + 100); });
+  expect(rpc.topicAct.mock.calls.map(([input]) => input)).toEqual([
+    { projectId: 'crumb', key: failure, action: { kind: 'state', state: 'dismissed', fixedIn: null } },
+    { projectId: 'ledger', key: failure, action: { kind: 'state', state: 'dismissed', fixedIn: null } },
+  ]);
 });

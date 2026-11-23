@@ -34,8 +34,20 @@ export type AccountItem =
   | { key: string; kind: 'machine'; projectId: string | null; machineId: string; label: string; state: string; error: string | null; workspaces: readonly { projectId: string; workspaceId: string }[]; stale: false }
   | { key: string; kind: 'incident'; projectId: string | null; workspaceId: string | null; incident: StorageIncidentView; count: number; paused: boolean; stale: boolean };
 
-/** An open Chatter issue topic of a project. */
-export interface IssueItem { key: string; projectId: string; topic: ChatterTopic }
+/** One open issue: a Chatter issue topic, or the topics of the same key open in several projects, one row. Each place is
+ * a project's topic with the workspace that posted in it last. `workspaces`: every workspace that posted, newest first
+ * (a GitSpace runtime-failure post's author id is its workspace). Posts and repeats are summed. */
+export interface IssueItem {
+  key: string;
+  topicKey: string;
+  display: string;
+  places: readonly { projectId: string; topic: ChatterTopic; workspaceId: string | null }[];
+  workspaces: readonly string[];
+  posts: number;
+  repeats: number;
+  gitspace: boolean;
+  marked: boolean;
+}
 
 export interface InboxSources {
   rows: readonly WorkspaceStatusRow[];
@@ -144,12 +156,26 @@ export function accountItems(sources: InboxSources, scope: Scope, now: number): 
   return [...incidents.filter(item => item.paused), ...machines, ...incidents.filter(item => !item.paused && !item.stale), ...incidents.filter(item => item.stale)];
 }
 
-/** The open issue topics of the projects in the scope, newest first. */
+/** The open issues of the projects in the scope, newest first: one per topic key, across projects. */
 export function issueItems(sources: InboxSources, scope: Scope): IssueItem[] {
   const live = liveProjects(sources);
-  return [...sources.topics].flatMap(([projectId, topics]) => live && !live.has(projectId) || !inScope(scope, projectId) ? []
-    : topics.filter(topic => topic.state === 'open').map(topic => ({ key: `issue:${projectId}:${topic.key}`, projectId, topic })))
-    .sort((left, right) => new Date(right.topic.lastAt).getTime() - new Date(left.topic.lastAt).getTime());
+  const byKey = new Map<string, { projectId: string; topic: ChatterTopic }[]>();
+  for (const [projectId, topics] of sources.topics) {
+    if (live && !live.has(projectId) || !inScope(scope, projectId)) continue;
+    for (const topic of topics) if (topic.state === 'open') byKey.set(topic.key, [...byKey.get(topic.key) ?? [], { projectId, topic }]);
+  }
+  const lastAt = (topic: ChatterTopic) => new Date(topic.lastAt).getTime();
+  return [...byKey].map(([topicKey, found]): IssueItem & { at: number } => {
+    const places = found.toSorted((left, right) => lastAt(right.topic) - lastAt(left.topic))
+      .map(({ projectId, topic }) => ({ projectId, topic, workspaceId: topic.participants.find(author => author.kind === 'workspace' || author.kind === 'gitspace')?.id ?? null }));
+    const workspaces = [...new Set(places.flatMap(place => place.topic.participants.flatMap(author => author.kind === 'workspace' || author.kind === 'gitspace' ? [author.id] : [])))];
+    const sum = (count: (topic: ChatterTopic) => number) => places.reduce((total, place) => total + count(place.topic), 0);
+    return {
+      key: `issue:${topicKey}`, topicKey, display: places[0]?.topic.display ?? topicKey, places, workspaces, posts: sum(topic => topic.posts), repeats: sum(topic => topic.repeats),
+      gitspace: places.some(place => place.topic.participants.some(author => author.kind === 'gitspace')), marked: places.some(place => place.topic.marked !== null),
+      at: places[0] ? lastAt(places[0].topic) : 0,
+    };
+  }).sort((left, right) => right.at - left.at);
 }
 
 /**
