@@ -18,7 +18,7 @@ export const GHOST_LIFETIME_MS = 10 * 60_000;
 /** The last stretch of a ghost's life, when the window fades and offers to keep it. */
 export const GHOST_WARN_MS = 60_000;
 /** Tool rounds one answer may use; at the cap it answers from what it read. */
-export const GHOST_MAX_ROUNDS = 6;
+export const GHOST_MAX_ROUNDS = 10;
 export const GHOST_QUESTION_MAX = 4_000;
 /** Ordinals per transcript entry: an event's ordinal is `entry * 1024 + n`, and a ghost cites entries. */
 export const GHOST_ENTRY_ORDINALS = 1024;

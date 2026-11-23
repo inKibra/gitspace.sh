@@ -279,19 +279,45 @@ describe('a ghost of one session', () => {
     expect(week.map(row => row.day)).toEqual(['2026-11-20', '2026-11-20']);
   });
 
-  test('stops reading at the round cap and answers from what it has', async () => {
+  test('stops reading at the round cap and answers from what it has, with the tools still declared so the history stays valid', async () => {
     const { identity } = await fixture();
     transcripts();
-    const { model, contexts } = scripted([context => context.tools?.length
-      ? reply([call(`search-${crypto.randomUUID()}`, 'history_search', { query: 'bucket' })], 'toolUse')
-      : reply([{ type: 'text', text: 'From what I read: the archive bucket [#2].' }], 'stop')]);
+    const { model, contexts } = scripted([context => context.messages.at(-1)?.role === 'user' && String(context.messages.at(-1)?.content).includes('used all')
+      ? reply([{ type: 'text', text: 'From what I read: the archive bucket [#2].' }], 'stop')
+      : reply([call(`search-${crypto.randomUUID()}`, 'history_search', { query: 'bucket' })], 'toolUse')]);
     const { answer } = await ghost(identity, model);
 
     const answered = await answer('Read everything.');
     expect(answered).toMatchObject({ rounds: GHOST_MAX_ROUNDS, truncated: true });
     expect(contexts).toHaveLength(GHOST_MAX_ROUNDS + 1);
-    expect(contexts.at(-1)!.tools).toEqual([]);
+    // Bedrock refuses toolUse/toolResult blocks without a toolConfig, so the last request still declares the tools.
+    expect(contexts.at(-1)!.tools?.length).toBeGreaterThan(0);
     expect(contexts.at(-1)!.messages.at(-1)).toMatchObject({ role: 'user', content: expect.stringContaining(`used all ${GHOST_MAX_ROUNDS} rounds`) });
+  });
+
+  test('a model that keeps reading past the cap gets refused reads, one more request, and a history a follow-up can send', async () => {
+    const { identity } = await fixture();
+    transcripts();
+    let past = 0;
+    const { model, contexts } = scripted([context => {
+      if (context.messages.some(message => message.role === 'user' && String(message.content).includes('used all'))) {
+        past++;
+        return past <= 2 ? reply([call(`late-${past}`, 'history_search', { query: 'more' })], 'toolUse') : reply([{ type: 'text', text: 'The archive bucket [#2].' }], 'stop');
+      }
+      return reply([call(`search-${crypto.randomUUID()}`, 'history_search', { query: 'bucket' })], 'toolUse');
+    }]);
+    const { answer } = await ghost(identity, model);
+
+    await answer('Read everything.');
+    expect(contexts).toHaveLength(GHOST_MAX_ROUNDS + 2);
+    const refusals = contexts.at(-1)!.messages.filter(message => message.role === 'toolResult' && message.isError);
+    expect(refusals.map(message => message.toolCallId)).toEqual(['late-1']);
+    // Every tool call in the history has its result, so the next question is a valid request.
+    expect(await answer('And then?')).toMatchObject({ type: 'answer' });
+    const sent = contexts.at(-1)!.messages;
+    const called = sent.flatMap(message => message.role === 'assistant' ? message.content.flatMap(part => part.type === 'toolCall' ? [part.id] : []) : []);
+    const answeredIds = new Set(sent.flatMap(message => message.role === 'toolResult' ? [message.toolCallId] : []));
+    expect(called.filter(id => !answeredIds.has(id))).toEqual([]);
   });
 
   test('records each answer\'s token counts in the account\'s usage, and no text', async () => {
