@@ -1,6 +1,6 @@
 import type { WorkspaceStatusColor } from '@gitspace/protocol-workspace';
 import { Tooltip, badgeColors } from '@gitspace/ui';
-import { ArrowNarrowDown, ArrowNarrowUp, Check, CornerDownRight, XClose } from '@untitledui/icons';
+import { ArrowNarrowDown, ArrowNarrowUp, Check, ChevronRight, CornerDownRight, XClose } from '@untitledui/icons';
 import type { CSSProperties, ReactNode } from 'react';
 import { PHASE_LABEL, PHASES, STATUS_COLOR, StatusDot, type WorkspaceView } from '../GitSpaceShell.js';
 import type { LinkedPullRequest } from './project-graph.js';
@@ -101,12 +101,18 @@ export function HeadTag() {
   return <span title="Head: leads its stack and merges first" className="ml-1 shrink-0 rounded-[5px] px-1 text-[10px] font-medium leading-[14px]" style={{ color: ACCENT, background: `color-mix(in oklab, ${ACCENT} 12%, transparent)` }}>head</span>;
 }
 
-/** A group heading inside a project: its label, its count and a rule. */
-export function GroupHeading({ children, count, tone }: { children: ReactNode; count: number; tone?: string }) {
-  return <div className="flex items-center gap-1.5 px-2 pb-0.5 pt-2.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+/** A group heading inside a project: its label, its count and a rule. With `fold`, the heading is a button that folds
+ * its group away and back (a chevron says which), its count still showing while folded. */
+export function GroupHeading({ children, count, tone, fold }: { children: ReactNode; count: number; tone?: string; fold?: { open: boolean; onToggle(): void } }) {
+  const parts = <>
+    {fold ? <ChevronRight width={12} height={12} strokeWidth={2} aria-hidden className={`-ml-0.5 shrink-0 transition-[rotate] duration-80 ${fold.open ? 'rotate-90' : ''}`} /> : null}
     {tone ? <span className="size-1.5 rounded-full" style={{ background: tone }} /> : null}
     <span>{children}</span>
     <span className="tabular-nums text-muted-foreground/70">{count}</span>
     <span className="h-px flex-1 bg-border" />
-  </div>;
+  </>;
+  const className = 'flex w-full items-center gap-1.5 px-2 pb-0.5 pt-2.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground';
+  return fold ? <button type="button" aria-expanded={fold.open} data-group-heading="" onClick={fold.onToggle}
+    className={`${className} rounded-md text-left outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-[#6B97FF]/50`}>{parts}</button>
+    : <div className={className}>{parts}</div>;
 }

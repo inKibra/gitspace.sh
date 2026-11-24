@@ -332,3 +332,53 @@ it('orders Waiting and Running by their latest change and Needs you by what has 
   const listed = [...container.querySelectorAll<HTMLElement>('[data-workspace]')].map((row) => row.dataset.workspace);
   expect(listed).toEqual(['asked-early', 'asked-late', 'its-member', 'new-run', 'old-run', 'new-wait', 'mid-wait', 'old-wait', 'never-reported']);
 });
+
+it('folds State and Phase groups in the list and on the board alike, each grouping remembered apart, across a reload', async () => {
+  window.localStorage.setItem('gitspace.sidebar.groupBy', 'state');
+  await show('/');
+  const heading = (label: string): HTMLButtonElement => {
+    const found = [...container.querySelectorAll<HTMLButtonElement>('[data-group-heading]')].find((candidate) => candidate.textContent?.startsWith(label));
+    if (!found) throw new Error(`No heading ${label}`);
+    return found;
+  };
+  const listed = (id: string): boolean => container.querySelector(`[data-workspace="${id}"]`) !== null;
+  expect(heading('Waiting').getAttribute('aria-expanded')).toBe('true');
+  await act(() => heading('Waiting').click());
+  expect(heading('Waiting').getAttribute('aria-expanded')).toBe('false');
+  expect(heading('Waiting').textContent).toContain('2');
+  expect(listed('menu-cache') || listed('allergen-labels')).toBe(false);
+  expect(listed('slot-holds')).toBe(true);
+
+  // A reload keeps it folded.
+  await act(() => root.unmount());
+  root = createRoot(container);
+  await show('/');
+  expect(heading('Waiting').getAttribute('aria-expanded')).toBe('false');
+  expect(listed('menu-cache')).toBe(false);
+
+  // Phase's groups are folded on their own.
+  await act(() => button('Phase').click());
+  expect(listed('menu-cache')).toBe(true);
+  await act(() => heading('Review').click());
+  expect(listed('menu-cache')).toBe(false);
+  await act(() => button('State').click());
+  expect(heading('Waiting').getAttribute('aria-expanded')).toBe('false');
+  expect(heading('Needs you').getAttribute('aria-expanded')).toBe('true');
+
+  // The board folds the same column into a strip, which opens on a click, for the list too.
+  await key('b');
+  expect(column('waiting').dataset.folded).toBe('');
+  expect(cards('waiting')).toEqual([]);
+  expect(column('waiting').querySelector('button')?.getAttribute('aria-label')).toBe('Waiting, 2');
+  // A workspace newly waiting shows in the folded strip's count.
+  shownProjects = [...PROJECTS.slice(0, 1), project('ledger', 'Ledger', [{ id: 'invoice-pdf', phase: 'code', color: 'blue' }, { id: 'bank-feed', phase: 'code', color: 'orange' }])];
+  await act(() => root.render(<Frame />));
+  expect(column('waiting').querySelector('button')?.getAttribute('aria-label')).toBe('Waiting, 3');
+  expect(column('waiting').dataset.folded).toBe('');
+  await act(() => column('waiting').querySelector('button')?.click());
+  expect(column('waiting').dataset.folded).toBeUndefined();
+  expect(cards('waiting')).toEqual(['menu-cache', 'allergen-labels', 'invoice-pdf']);
+  await key('b');
+  expect(heading('Waiting').getAttribute('aria-expanded')).toBe('true');
+  expect(listed('menu-cache')).toBe(true);
+});

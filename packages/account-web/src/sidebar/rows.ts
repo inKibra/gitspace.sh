@@ -97,17 +97,17 @@ export function phaseGroups(order: 'list' | 'board', items: readonly RowItem[]):
   return items.some((item) => item.phase === null) ? [...groups, { key: 'unknown', label: 'Phase unknown', tone: undefined, phase: null, holds: (item: RowItem) => item.phase === null, order: null }] : groups;
 }
 
-/** What a project lists: a group heading, or a row (faded when it is only there to keep its stack whole). `key` names
- * the entry a landing preview follows. */
-export type Entry = { kind: 'heading'; key: string; label: string; tone: string | undefined; count: number } | { kind: 'row'; key: string; item: RowItem; stacked: boolean; dimmed: boolean };
+/** What a project lists: a group heading (`group`: its group's key; `collapsed`: its rows hidden), or a row (faded when
+ * it is only there to keep its stack whole). `key` names the entry a landing preview follows. */
+export type Entry = { kind: 'heading'; key: string; group: string; label: string; tone: string | undefined; count: number; collapsed: boolean } | { kind: 'row'; key: string; item: RowItem; stacked: boolean; dimmed: boolean };
 
 /**
  * A project's rows under a filter and a grouping. Every grouping draws stacks whole, as the tree draws them: a stack shows
  * while any of it matches, the rest faded. State and Phase put each stack under its head's group; a heading counts the
  * project's workspaces whose own state or phase is the heading's and that pass the filter, wherever their stack is drawn,
- * so it agrees with the filter tabs.
+ * so it agrees with the filter tabs. A group in `collapsed` lists its heading, with its count, and none of its rows.
  */
-export function listEntries(items: readonly RowItem[], filter: SidebarFilter, groupBy: SidebarGroupBy): Entry[] {
+export function listEntries(items: readonly RowItem[], filter: SidebarFilter, groupBy: SidebarGroupBy, collapsed: ReadonlySet<string>): Entry[] {
   const shown = runsOf(items).filter((run) => run.some(({ item }) => matches(item, filter)));
   const rows = (run: Run) => run.map(({ item, stacked }): Entry => ({ kind: 'row', key: item.id, item, stacked, dimmed: !matches(item, filter) }));
   if (groupBy === 'project') return shown.flatMap(rows);
@@ -116,6 +116,25 @@ export function listEntries(items: readonly RowItem[], filter: SidebarFilter, gr
     const held = ordered(shown.filter((run) => run[0] && group.holds(run[0].item)), group);
     if (!held.length) return [];
     const count = items.filter((item) => group.holds(item) && matches(item, filter)).length;
-    return [{ kind: 'heading', key: `heading-${group.key}`, label: group.label, tone: group.tone, count }, ...held.flatMap(rows)];
+    const folded = collapsed.has(group.key);
+    return [{ kind: 'heading', key: `heading-${group.key}`, group: group.key, label: group.label, tone: group.tone, count, collapsed: folded }, ...folded ? [] : held.flatMap(rows)];
   });
+}
+
+/** The groups folded away, per grouping: State's and Phase's are kept apart. Project grouping folds projects instead. */
+export type CollapsedGroups = Readonly<Record<'state' | 'phase', readonly string[]>>;
+
+const COLLAPSED_GROUPS_KEY = 'gitspace.sidebar.collapsedGroups';
+
+/** The groups this browser folded away; missing, malformed or unreadable storage folds none. */
+export function readCollapsedGroups(): CollapsedGroups {
+  if (typeof window === 'undefined') return { state: [], phase: [] };
+  let parsed: unknown = null;
+  try { parsed = JSON.parse(window.localStorage.getItem(COLLAPSED_GROUPS_KEY) ?? 'null'); } catch { /* private mode or malformed */ }
+  const keys = (value: unknown): readonly string[] => Array.isArray(value) ? value.filter((key: unknown): key is string => typeof key === 'string') : [];
+  return parsed !== null && typeof parsed === 'object' ? { state: keys(Reflect.get(parsed, 'state')), phase: keys(Reflect.get(parsed, 'phase')) } : { state: [], phase: [] };
+}
+
+export function storeCollapsedGroups(groups: CollapsedGroups): void {
+  try { window.localStorage.setItem(COLLAPSED_GROUPS_KEY, JSON.stringify(groups)); } catch { /* private mode */ }
 }

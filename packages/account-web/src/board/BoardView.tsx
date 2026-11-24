@@ -58,9 +58,10 @@ export function BoardHeader({ workspaces, projects, reflowing, graph, onGraph, o
  * The board under its heading: the filters on one line, the Today strip (folded while a workspace is open beside it),
  * and the columns, or the account's workspace graph. While a drag only previews the board (`preview`), the strip waits.
  */
-export function BoardBody({ filters, projects, narrowed, machines, groupBy, filter, selectedId, preview, graph, onOpen, onMove, onNewWorkspace, onSetRelations }: {
+export function BoardBody({ filters, projects, narrowed, machines, groupBy, filter, selectedId, preview, graph, collapsed, onToggleGroup, onOpen, onMove, onNewWorkspace, onSetRelations }: {
   filters: ReactNode; projects: readonly TodayProject[]; narrowed: boolean; machines: { online: number; total: number } | null; groupBy: SidebarGroupBy; filter: SidebarFilter;
-  selectedId: string | null; preview: boolean; graph: boolean; onOpen(item: RowItem): void; onMove: ((item: RowItem, phase: WorkspaceView['phase']) => void) | null; onNewWorkspace?: (projectId: string) => void;
+  selectedId: string | null; preview: boolean; graph: boolean; collapsed: ReadonlySet<string>; onToggleGroup(group: string): void;
+  onOpen(item: RowItem): void; onMove: ((item: RowItem, phase: WorkspaceView['phase']) => void) | null; onNewWorkspace?: (projectId: string) => void;
   onSetRelations: ((item: RowItem, relations: WorkspaceView['relations']) => void) | null;
 }) {
   const items = projects.flatMap((project) => project.items);
@@ -74,6 +75,6 @@ export function BoardBody({ filters, projects, narrowed, machines, groupBy, filt
           id: item.id, projectId: project.id, projectName: project.name, name: item.name, branch: item.branch, phase: item.phase, relations: relationsOf(item),
           closedAt: null, holder: item.summary?.holder ?? { kind: 'unknown' }, status: item.summary?.status, freshness: item.summary?.freshness, creation: item.summary?.creation,
         })))} />
-    </div> : <BoardColumns projects={projects} groupBy={groupBy} filter={filter} selectedId={selectedId} onOpen={onOpen} onMove={onMove} onNewWorkspace={onNewWorkspace} />}
+    </div> : <BoardColumns projects={projects} groupBy={groupBy} filter={filter} selectedId={selectedId} collapsed={collapsed} onToggleGroup={onToggleGroup} onOpen={onOpen} onMove={onMove} onNewWorkspace={onNewWorkspace} />}
   </div>;
 }

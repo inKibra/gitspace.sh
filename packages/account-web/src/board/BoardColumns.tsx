@@ -1,5 +1,5 @@
 import { badgeColors, ScrollArea, Tooltip } from '@gitspace/ui';
-import { CheckDone01, GitBranch01, Plus } from '@untitledui/icons';
+import { CheckDone01, ChevronRight, GitBranch01, Plus } from '@untitledui/icons';
 import { useContext, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import { StripVolume } from '../chatter/ChatterVolume.js';
 import { PHASE_LABEL, PHASES, StatusDot, workspaceStatusColor, workspaceStatusLabel, WorkspaceStatusDot, type WorkspaceView } from '../GitSpaceShell.js';
@@ -124,9 +124,9 @@ function columnAt(x: number, y: number): string | null {
 }
 
 /** The Needs you column's head: what the Inbox counts in the projects shown, and what it lists. */
-function InboxHeading({ tone, scope }: { tone: string | undefined; scope: ReadonlySet<string> }) {
+function InboxHeading({ tone, scope, fold }: { tone: string | undefined; scope: ReadonlySet<string>; fold?: { open: boolean; onToggle(): void } }) {
   return <>
-    <GroupHeading tone={tone} count={useInboxCount(scope)}>Needs you · Inbox</GroupHeading>
+    <GroupHeading tone={tone} count={useInboxCount(scope)} fold={fold}>Needs you · Inbox</GroupHeading>
     <p className="px-2 pb-1 text-[11px] text-muted-foreground">Counts what blocks an agent or is broken · issues and mentions are listed, not counted</p>
   </>;
 }
@@ -137,8 +137,8 @@ function InboxHeading({ tone, scope }: { tone: string | undefined; scope: Readon
  * workspace's card holds its rows. In Phase a card is dragged to another column to move its phase (`onMove`, which
  * applies the phase rule).
  */
-export function BoardColumns({ projects, groupBy, filter, selectedId, onOpen, onMove, onNewWorkspace }: {
-  projects: readonly BoardProject[]; groupBy: SidebarGroupBy; filter: SidebarFilter; selectedId: string | null;
+export function BoardColumns({ projects, groupBy, filter, selectedId, collapsed, onToggleGroup, onOpen, onMove, onNewWorkspace }: {
+  projects: readonly BoardProject[]; groupBy: SidebarGroupBy; filter: SidebarFilter; selectedId: string | null; collapsed: ReadonlySet<string>; onToggleGroup(group: string): void;
   onOpen(item: RowItem): void; onMove: ((item: RowItem, phase: WorkspaceView['phase']) => void) | null; onNewWorkspace?: (projectId: string) => void;
 }) {
   const [drag, setDrag] = useState<CardDrag | null>(null);
@@ -178,10 +178,22 @@ export function BoardColumns({ projects, groupBy, filter, selectedId, onOpen, on
       const inbox = inboxed && groupBy === 'state' && group.key === 'needs-you';
       const waiting = !inboxed ? null : groupBy === 'state' && (group.key === 'needs-you' || group.key === 'failed') ? 'rows' : 'line';
       const over = drag !== null && drag.over === group.key && group.phase !== null && group.phase !== drag.item.phase;
+      const fold = groupBy === 'project' ? undefined : { open: !collapsed.has(group.key), onToggle: () => onToggleGroup(group.key) };
+      // A folded column is a narrow strip: its colour, count and name, opening on a click; the others take its room.
+      if (fold && !fold.open) return <section key={group.key} data-column={group.key} aria-label={group.label} data-folded=""
+        className={`flex min-h-0 w-10 shrink-0 flex-col rounded-2xl transition-colors duration-150 ${over ? 'bg-[#6B97FF]/8 shadow-[inset_0_0_0_1.5px_rgba(107,151,255,0.55)]' : 'bg-foreground/[0.03]'}`}>
+        <button type="button" aria-expanded={false} aria-label={`${group.label}, ${count}`} onClick={fold.onToggle}
+          className="flex flex-1 flex-col items-center gap-2 rounded-2xl py-3 text-[11px] font-medium uppercase tracking-wide text-muted-foreground outline-none hover:bg-hover hover:text-foreground focus-visible:ring-2 focus-visible:ring-[#6B97FF]/50">
+          <ChevronRight width={12} height={12} strokeWidth={2} aria-hidden className="shrink-0" />
+          {group.tone ? <span aria-hidden className="size-1.5 shrink-0 rounded-full" style={{ background: group.tone }} /> : null}
+          <span className="tabular-nums text-muted-foreground/70">{count}</span>
+          <span className="rotate-180 whitespace-nowrap [writing-mode:vertical-rl]">{group.label}</span>
+        </button>
+      </section>;
       return <section key={group.key} data-column={group.key} aria-label={group.label}
         className={`flex min-h-0 min-w-0 flex-col rounded-2xl transition-colors duration-150 ${inbox ? 'min-w-[380px] flex-[1.7]' : 'min-w-[260px] flex-1'} ${over ? 'bg-[#6B97FF]/8 shadow-[inset_0_0_0_1.5px_rgba(107,151,255,0.55)]' : ''}`}>
         <div className="flex items-center gap-1 px-1">
-          <div className="min-w-0 flex-1">{inbox ? <InboxHeading tone={group.tone} scope={scope} /> : <GroupHeading tone={group.tone} count={count}>{group.label}</GroupHeading>}</div>
+          <div className="min-w-0 flex-1">{inbox ? <InboxHeading tone={group.tone} scope={scope} fold={fold} /> : <GroupHeading tone={group.tone} count={count} fold={fold}>{group.label}</GroupHeading>}</div>
           {groupBy === 'project' && onNewWorkspace ? <Tooltip content="New workspace" side="top"><button type="button" aria-label={`New workspace in ${group.label}`} onClick={() => onNewWorkspace(group.key)} className="mt-2 flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-hover hover:text-foreground"><Plus width={14} height={14} strokeWidth={1.5} /></button></Tooltip> : null}
         </div>
         <ScrollArea className="min-h-0 flex-1" viewportClassName="h-full">

@@ -49,7 +49,7 @@ import { stackPosition } from './sidebar/StackChain.js';
 import { phaseRefusal, pickRefusal, type PickKind } from './sidebar/stack-rules.js';
 import { StackToasts, useStackToast } from './sidebar/stack-toast.js';
 import { FilterBar } from './sidebar/FilterBar.js';
-import { GROUP_BYS, listEntries, matches, relationsOf, rowItem, runsOf, STATE_COLOR, type RowItem, type SidebarFilter, type SidebarGroupBy } from './sidebar/rows.js';
+import { GROUP_BYS, listEntries, matches, readCollapsedGroups, relationsOf, rowItem, runsOf, STATE_COLOR, storeCollapsedGroups, type RowItem, type SidebarFilter, type SidebarGroupBy } from './sidebar/rows.js';
 import { BoardBody, BoardHeader, BoardRailButton, InboxBoardRailButton, useViewportWidth } from './board/BoardView.js';
 import { InboxSourcesContext } from './inbox/index.js';
 import { BOARD_SNAP, CLOSE_BESIDE_SLOP, SidebarEdge } from './board/Edge.js';
@@ -386,9 +386,9 @@ function restoredText(name: string, restack: StackRestack): string {
 
 /** Where stacking `source` onto `onto` (or `top`, the top level) would put it: after which entry and at which level,
  * read from the list the change would draw under the same filter and grouping; null when it is already there. */
-function landing(items: readonly RowItem[], source: RowItem, onto: string, filter: SidebarFilter, groupBy: SidebarGroupBy): { after: string | null; stacked: boolean } | null {
+function landing(items: readonly RowItem[], source: RowItem, onto: string, filter: SidebarFilter, groupBy: SidebarGroupBy, collapsed: ReadonlySet<string>): { after: string | null; stacked: boolean } | null {
   if ((source.stackedOn ?? 'top') === onto) return null;
-  const preview = listEntries(items.map((item) => item.id === source.id ? { ...item, stackedOn: onto === 'top' ? null : onto } : item), filter, groupBy);
+  const preview = listEntries(items.map((item) => item.id === source.id ? { ...item, stackedOn: onto === 'top' ? null : onto } : item), filter, groupBy, collapsed);
   const index = preview.findIndex((entry) => entry.key === source.id);
   const at = preview[index];
   return at?.kind === 'row' ? { after: preview[index - 1]?.key ?? null, stacked: at.stacked } : null;
@@ -524,6 +524,9 @@ interface ProjectRowsProps extends Pick<AppSidebarProps, 'selected' | 'deploymen
   onCollapse(projectId: string, collapsed: boolean): void;
   filter: SidebarFilter;
   groupBy: SidebarGroupBy;
+  /** The grouping's groups folded away, and how one folds or opens. */
+  collapsedGroups: ReadonlySet<string>;
+  onToggleGroup(group: string): void;
   hovered: string | null;
   onHover(id: string | null): void;
   picker: Picker;
@@ -531,7 +534,7 @@ interface ProjectRowsProps extends Pick<AppSidebarProps, 'selected' | 'deploymen
   move: MovePhase | null;
 }
 
-function ProjectRows({ project, archived: projectArchived, collapsed, onCollapse, selected, deployment, onSelectProject, onSelectWorkspace, onReleaseMachines, releasePendingSpaceId, onArchive, onRestore, onDelete, onRename, onNewWorkspace, onOpenProjectSettings, onOpenProjectAutomations, onAskGhost, filter, groupBy, hovered, onHover, picker, edit, move }: ProjectRowsProps) {
+function ProjectRows({ project, archived: projectArchived, collapsed, onCollapse, selected, deployment, onSelectProject, onSelectWorkspace, onReleaseMachines, releasePendingSpaceId, onArchive, onRestore, onDelete, onRename, onNewWorkspace, onOpenProjectSettings, onOpenProjectAutomations, onAskGhost, filter, groupBy, collapsedGroups, onToggleGroup, hovered, onHover, picker, edit, move }: ProjectRowsProps) {
   const { base, workspaces, graph } = project;
   const [showArchived, setShowArchived] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
@@ -613,8 +616,8 @@ function ProjectRows({ project, archived: projectArchived, collapsed, onCollapse
         <SpaceMenu space={item.workspace} kind="workspace" summary={summary} deployment={deployment} onReleaseMachines={onReleaseMachines} releasePendingSpaceId={releasePendingSpaceId} onArchive={onArchive} onRestore={onRestore} onDelete={onDelete} onRename={startRename} phase={phase} stack={stack} />
       </>} />;
   };
-  const entries = listEntries(items, filter, groupBy);
-  const spot = stacking && source && picker.hover ? landing(items, source, picker.hover, filter, groupBy) : null;
+  const entries = listEntries(items, filter, groupBy, collapsedGroups);
+  const spot = stacking && source && picker.hover ? landing(items, source, picker.hover, filter, groupBy, collapsedGroups) : null;
   const ghost = spot && source ? <Ghost key={`ghost-${picker.hover}`} source={source} parent={byId.get(picker.hover ?? '')} carried={stackBelow(items, source.id).length} stacked={spot.stacked} /> : null;
   return <SidebarMenuItem>
     <SpaceSummaryContext.Provider value={baseSummary}>
@@ -640,7 +643,7 @@ function ProjectRows({ project, archived: projectArchived, collapsed, onCollapse
       <li aria-hidden className="mx-2 mb-1 mt-0.5 h-px list-none bg-foreground/15" />
       <AnimatePresence initial={false}>{spot?.after === null ? ghost : null}</AnimatePresence>
       {entries.map((entry) => <Fragment key={entry.key}>
-        {entry.kind === 'heading' ? <li className="list-none"><GroupHeading tone={entry.tone} count={entry.count}>{entry.label}</GroupHeading></li> : row(entry.item, entry.stacked, entry.dimmed, false)}
+        {entry.kind === 'heading' ? <li className="list-none"><GroupHeading tone={entry.tone} count={entry.count} fold={{ open: !entry.collapsed, onToggle: () => onToggleGroup(entry.group) }}>{entry.label}</GroupHeading></li> : row(entry.item, entry.stacked, entry.dimmed, false)}
         <AnimatePresence initial={false}>{spot?.after === entry.key ? ghost : null}</AnimatePresence>
       </Fragment>)}
       {items.length && !items.some((item) => matches(item, filter)) ? <li className="list-none px-2 py-1 text-[11px] text-muted-foreground">No workspaces match this filter</li> : null}
@@ -721,6 +724,7 @@ export function AppSidebar(props: AppSidebarProps) {
 function SidebarBody({ view, onView, selected, selectedSummary, projects, onSelectProject, onSelectWorkspace, onReleaseMachines, releasePendingSpaceId = null, onArchive, onRestore, onDelete, onRename, onNewWorkspace, onNewProject, onOpenSettings, onOpenProjectSettings, onOpenProjectAutomations, onAskGhost, failedAutomationRuns = 0, user, deployment, onSetRelations, onSetPhase, machineCount, proposedAutomations }: AppSidebarProps) {
   const userName = user?.name || 'Your account';
   const [collapsedProjects, setCollapsedProjects] = useState(readCollapsedProjects);
+  const [collapsedGroups, setCollapsedGroups] = useState(readCollapsedGroups);
   const [filter, setFilter] = useState<SidebarFilter>('all');
   const [storedGroupBy, setStoredGroupBy] = useState(readGroupBy);
   const [storedPicked, setStoredPicked] = useState(readPicked);
@@ -903,7 +907,16 @@ function SidebarBody({ view, onView, selected, selectedSummary, projects, onSele
     if (why) toast.refused(new Error(why), 'Change phase');
     else move(item, phase);
   } : null;
-  const rowProps = { selected, deployment, onSelectProject, onSelectWorkspace, onReleaseMachines, releasePendingSpaceId, onArchive: archive, onRestore, onDelete, onRename, onNewWorkspace, onOpenProjectSettings, onOpenProjectAutomations, onAskGhost, filter, groupBy, hovered, onHover: setHovered, picker, edit, move };
+  // State's and Phase's folded groups, shared by the list's headings and the board's columns.
+  const foldedGroups: ReadonlySet<string> = new Set(groupBy === 'project' ? [] : collapsedGroups[groupBy]);
+  const toggleGroup = (group: string): void => {
+    if (groupBy === 'project') return;
+    const folded = collapsedGroups[groupBy];
+    const next = { ...collapsedGroups, [groupBy]: folded.includes(group) ? folded.filter((key) => key !== group) : [...folded, group] };
+    setCollapsedGroups(next);
+    storeCollapsedGroups(next);
+  };
+  const rowProps = { selected, deployment, onSelectProject, onSelectWorkspace, onReleaseMachines, releasePendingSpaceId, onArchive: archive, onRestore, onDelete, onRename, onNewWorkspace, onOpenProjectSettings, onOpenProjectAutomations, onAskGhost, filter, groupBy, collapsedGroups: foldedGroups, onToggleGroup: toggleGroup, hovered, onHover: setHovered, picker, edit, move };
   return <Sidebar ref={scroller} variant="inset" rail={false}>
     <SidebarEdge onReflow={setReflowing} onRelease={release} />
     <SidebarHeader>
@@ -934,6 +947,7 @@ function SidebarBody({ view, onView, selected, selectedSummary, projects, onSele
         failedOperations: (project.operations ?? []).filter((operation) => operation.state === 'failed' && !operation.dismissedAt).length, proposals: proposedAutomations?.[project.id] ?? 0,
       }))}
       onOpen={(item) => { if (board) openBeside(item.workspace.projectId, item.id); else onSelectWorkspace(item.workspace); }}
+      collapsed={foldedGroups} onToggleGroup={toggleGroup}
       onMove={boardMove} onNewWorkspace={onNewWorkspace} onSetRelations={edit ? (item, after) => edit(item, after, `${item.name}'s relations changed`) : null} />
       : <>
         <SidebarContent>
