@@ -28,7 +28,7 @@ function dispatchFixture(tenant: string, route: 'tenant' | 'service' | 'applicat
       get() { return { async fetch() { return upstream; } }; },
     } as unknown as DispatchNamespace,
   };
-  const hostname = route === 'tenant' ? `${tenant}-test.invalid` : route === 'application' ? `${tenant}.gitspace.sh` : `web--space-a--${tenant}-srv-test.invalid`;
+  const hostname = route === 'tenant' ? `${tenant}.relay.test` : route === 'application' ? `${tenant}.account.test` : `web--space-a--${tenant}-srv.relay.test`;
   const request: Request = new Request(`https://${hostname}/health`, upgrade ? { headers: { upgrade: 'websocket' } } : undefined);
   return { bindings, request, pair };
 }
@@ -36,14 +36,14 @@ function dispatchFixture(tenant: string, route: 'tenant' | 'service' | 'applicat
 afterEach(() => vi.restoreAllMocks());
 
 describe('reserved platform hostnames', () => {
-  it.each(['www.gitspace.sh'])('sends %s to the platform site instead of dispatching a tenant', async (hostname) => {
+  it.each(['www.account.test'])('sends %s to the platform site instead of dispatching a tenant', async (hostname) => {
     const bindings: Env = {
       ...env,
       DISPATCHER: { get() { throw new Error('A reserved platform hostname must not dispatch a tenant'); } } as unknown as DispatchNamespace,
     };
     const response = await worker.fetch(new Request(`https://${hostname}/pricing?ref=nav`), bindings, createExecutionContext());
     expect(response.status).toBe(308);
-    expect(response.headers.get('location')).toBe('https://gitspace.sh/pricing?ref=nav');
+    expect(response.headers.get('location')).toBe('https://account.test/pricing?ref=nav');
   });
 
   it('still dispatches an account hostname that is not reserved', async () => {
@@ -51,6 +51,13 @@ describe('reserved platform hostnames', () => {
     const response = await worker.fetch(fixture.request, fixture.bindings, createExecutionContext());
     expect(response.status).toBe(201);
     expect(await response.text()).toBe('tenant response');
+  });
+
+  it.each(['alice.gitspace.sh', 'alice.gssh.dev', 'web--space-a--alice-srv.gssh.dev', 'alice.account.test.example'])('an install at other domains does not dispatch %s', async (hostname) => {
+    const fixture = dispatchFixture('alice', 'application', false);
+    const response = await worker.fetch(new Request(`https://${hostname}/health`), fixture.bindings, createExecutionContext());
+    expect(response.status).toBe(404);
+    expect(await response.json()).toMatchObject({ error: { code: 'TENANT_NOT_FOUND' } });
   });
 });
 
@@ -180,7 +187,7 @@ describe('dispatch without billing authorization', () => {
       DISPATCHER: { get() { return { async fetch() { throw new Error(message); } }; } } as unknown as DispatchNamespace,
     };
     const ctx = createExecutionContext();
-    const response = await worker.fetch(new Request(`https://${tenant}-test.invalid/health`, upgrade ? { headers: { upgrade: 'websocket' } } : undefined), bindings, ctx);
+    const response = await worker.fetch(new Request(`https://${tenant}.relay.test/health`, upgrade ? { headers: { upgrade: 'websocket' } } : undefined), bindings, ctx);
     expect(response.status).toBe(status);
     expect(await response.json()).toMatchObject({ error: { code } });
     await waitOnExecutionContext(ctx);

@@ -1,3 +1,4 @@
+import { loadInstallDomains } from './install-domains.js';
 import { IconProvider, ShapeProvider, SizeProvider, TooltipProvider, untitledIcons } from '@gitspace/ui';
 import { MotionConfig } from 'framer-motion';
 import { StrictMode } from 'react';
@@ -11,7 +12,8 @@ const root = document.getElementById('root');
 if (!root) throw new Error('GitSpace operator root element is missing');
 
 restoreAppearance();
-createRoot(root).render(
+// The install's domains come from the Worker that served this page (the site's handles and links name them).
+void loadInstallDomains(window.location.origin).then(() => createRoot(root).render(
   <StrictMode>
     <MotionConfig reducedMotion="user">
       <ShapeProvider defaultShape="rounded">
@@ -25,4 +27,4 @@ createRoot(root).render(
       </ShapeProvider>
     </MotionConfig>
   </StrictMode>,
-);
+));

@@ -1,3 +1,4 @@
+import { installDomains } from './install-domains.js';
 import { useState } from 'react';
 import { Button, Card, CardContent, CardDescription, CardHeader, CardTitle, InputField, InputGroup } from '@gitspace/ui';
 import { accountHandleFromUrl } from './browser-enrollment.js';
@@ -40,7 +41,7 @@ export function AccountConnectPage({ error, onRecover, onEnroll, onPasskeySignIn
   return <main className={`${STANDALONE_PAGE} items-center p-6 pb-[max(1.5rem,env(safe-area-inset-bottom))]`}>
     <div className="my-auto flex w-full max-w-lg flex-col gap-6">
       <header className="flex flex-col gap-2">
-        <p className="text-caption font-medium text-muted-foreground">{inferredHandle ? `${inferredHandle}.gitspace.sh` : 'GitSpace account'}</p>
+        <p className="text-caption font-medium text-muted-foreground">{inferredHandle ? `${inferredHandle}.${installDomains().account}` : 'GitSpace account'}</p>
         <h1 className="text-title font-semibold [text-wrap:balance]">Connect this browser{inferredHandle ? ` to ${inferredHandle}` : ''}</h1>
         <p className="text-caption text-muted-foreground [text-wrap:pretty]">{passkeys ? 'Sign in with a passkey you enrolled, use' : 'Use'} your saved recovery key here, or open a single-use link from Account → Connections → Browsers in a connected browser.</p>
       </header>

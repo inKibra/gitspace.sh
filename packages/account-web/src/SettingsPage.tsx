@@ -1,3 +1,4 @@
+import { installDomains } from './install-domains.js';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { AvailableModel, ComposioSetupRpcView, DeploymentStatusView, DeviceCapability, DeviceView, RuntimeSettingValue, UserSettings } from '@gitspace/protocol';
 import { BUILT_IN_MODEL_ROLES, DEFAULT_IMAGES_SELECTOR, DEFAULT_INFERENCE_PROFILE_ID, MIN_CONTEXT_LIMIT, MODEL_ROLE_LABELS, SEARCH_MODEL_PROVIDERS, SERVICE_OFF, contextLimitsSchema, inferenceSettingSection, parseModelRoleSelector } from '@gitspace/protocol/inference';
@@ -182,9 +183,9 @@ function ProfileSettings({ settings, onChange }: Pick<SettingsPageProps, 'settin
   const update = (field: keyof UserSettings['profile'], value: string | null) => onChange(replace(settings, 'profile', { ...settings.profile, [field]: value }));
   return <Group title="Identity"><SettingRows>
     <SettingRow title="Display name" description="Shown on your machines and shared work."><TextField label="Display name" value={settings.profile.displayName} placeholder="Your name" onChange={(value) => update('displayName', value)} /></SettingRow>
-    <SettingRow title="GitSpace handle" description={settings.profile.handle ? 'Your permanent GitSpace account namespace.' : 'Globally reserves your permanent gitspace.sh namespace.'}>
+    <SettingRow title="GitSpace handle" description={settings.profile.handle ? 'Your permanent GitSpace account namespace.' : `Globally reserves your permanent ${installDomains().account} namespace.`}>
       <TextField label="GitSpace handle" value={settings.profile.handle ?? ''} placeholder="handle" disabled={settings.profile.handle !== null} onChange={(value) => update('handle', value.toLowerCase().replace(/[^a-z0-9-]/g, '') || null)} />
-      <span className="text-caption text-muted-foreground">.gitspace.sh</span>
+      <span className="text-caption text-muted-foreground">.{installDomains().account}</span>
     </SettingRow>
     <SettingRow title="Appearance" description="Light, dark, or follow the system. Applies on every machine.">{subtleTabs(['system', 'light', 'dark'], settings.defaults.appearance, (value) => onChange(replace(settings, 'defaults', { ...settings.defaults, appearance: value as UserSettings['defaults']['appearance'] })), 'appearance')}</SettingRow>
     <SettingRow title="Account storage" description="Settings are canonical in GitSpace Cloud."><Badge color="green"><span className="tabular-nums">Revision {settings.revision}</span></Badge></SettingRow>
@@ -1035,8 +1036,8 @@ export function MachineSettings({ settings, onChange, machines, onUpdateMachine,
 }
 function HostnameSettings({ settings }: Pick<SettingsPageProps, 'settings'>) {
   return <Group title="Account hostname">{settings.profile.handle
-    ? <SettingRows><Card size="compact"><CardMedia icon={ICONS.globe} /><CardHeader><CardTitle>{settings.profile.handle}.gitspace.sh</CardTitle><CardDescription>Reserved by your cloud account</CardDescription></CardHeader><CardFooter><Badge color="green">Reserved</Badge></CardFooter></Card></SettingRows>
-    : <EmptyState icon={icon(Globe02, 20)} title="No hostname reserved" description="Choose a handle in Profile to reserve its gitspace.sh namespace." />}</Group>;
+    ? <SettingRows><Card size="compact"><CardMedia icon={ICONS.globe} /><CardHeader><CardTitle>{settings.profile.handle}.{installDomains().account}</CardTitle><CardDescription>Reserved by your cloud account</CardDescription></CardHeader><CardFooter><Badge color="green">Reserved</Badge></CardFooter></Card></SettingRows>
+    : <EmptyState icon={icon(Globe02, 20)} title="No hostname reserved" description={`Choose a handle in Profile to reserve its ${installDomains().account} namespace.`} />}</Group>;
 }
 
 /** `sha ?? 'stable'` plus the running generation, as one running-row badge. */

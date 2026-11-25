@@ -76,7 +76,10 @@
     }
   ],
   "vars": {
-    "TENANT_HOST_SUFFIX": ".gssh.dev",
+    // The install's domains (@gitspace/protocol-environment/domains): accounts at <handle>.ACCOUNT_DOMAIN, relays at
+    // <handle>.SERVICE_DOMAIN. The routes above, COMPUTE_SANDBOX_HOSTNAME, PLATFORM_URL and WATCHDOG_EMAIL_FROM follow them.
+    "ACCOUNT_DOMAIN": "gitspace.sh",
+    "SERVICE_DOMAIN": "gssh.dev",
     "DEFAULT_CPU_MS": 500,
     "DEFAULT_SUBREQUESTS": 10000,
     "ADMIN_PUBLIC_KEY": "vOSduG2Ge02PoTK0oGKKFODyStGjBO46mv9TQXdRmLA=",

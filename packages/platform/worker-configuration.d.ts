@@ -10,7 +10,8 @@ interface Env {
   CREDITS: DurableObjectNamespace<import('./src/index').CreditLedgerDO>;
   DEPLOYMENTS: DurableObjectNamespace<import('./src/index').TenantDeploymentsDO>;
   TENANT_CONTROL: DurableObjectNamespace<import('./src/index').TenantControlDO>;
-  TENANT_HOST_SUFFIX: string;
+  ACCOUNT_DOMAIN: string;
+  SERVICE_DOMAIN: string;
   PLATFORM_URL: string;
   PLATFORM_SERVICE_NAME: string;
   PUBLIC_ASSETS_SERVICE: string;

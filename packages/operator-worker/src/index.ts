@@ -1,3 +1,4 @@
+import { accountUrl as accountUrlOf, DOMAINS_PATH, domainsFromSettings, relayUrl, siteUrl } from '@gitspace/protocol-environment/domains';
 import { credentialProtocolBase64, SIGNED_REQUEST_MAX_AGE_MS } from '@gitspace/protocol/credential-vault';
 import { verifyRelayAuthorization } from '@gitspace/protocol/relay';
 import { SIGNED_REQUEST_EXPIRED_CODE, SIGNED_REQUEST_EXPIRED_MESSAGE } from '@gitspace/protocol/server-clock';
@@ -65,6 +66,8 @@ const operatorWorker = {
  async fetch(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   if (url.pathname === '/health' || url.pathname === '/healthz') return Response.json({ status: 'ok' });
+  // The install's domains, for the browser app this Worker serves on the site and the API host.
+  if (url.pathname === DOMAINS_PATH && request.method === 'GET') return Response.json(domainsFromSettings(env), { headers: { 'cache-control': 'public, max-age=300' } });
   if (url.pathname.startsWith('/v1/operator/')) {
       const identity = await operatorIdentity(request, env);
       if (!identity) {
@@ -177,7 +180,7 @@ const operatorWorker = {
             status: 'ok',
             value: {
               ...created,
-              signupUrl: `https://gitspace.sh/?invite=${encodeURIComponent(created.token)}#start`,
+              signupUrl: `${siteUrl(domainsFromSettings(env))}/?invite=${encodeURIComponent(created.token)}#start`,
             },
           }, { status: 201, headers: { 'cache-control': 'no-store' } });
         } catch (error) {
@@ -214,11 +217,12 @@ const operatorWorker = {
       const platform = await fetch(new URL('/__platform/bootstrap/' + handle, env.PLATFORM_URL), { method: 'POST', headers: { authorization: 'Bearer ' + env.PLATFORM_BOOTSTRAP_TOKEN, 'content-type': 'application/json' }, body: JSON.stringify({ rootPublicKey: payload.rootPublicKey }) });
       const deployment = await platform.json() as { deployment?: { sha: string }; error?: { message: string } };
       if (!platform.ok) throw new Error(deployment.error?.message ?? 'Provider bootstrap failed');
-      const accountUrl = 'https://' + handle + '.gitspace.sh';
+      const domains = domainsFromSettings(env);
+      const accountUrl = accountUrlOf(domains, handle);
       if (reservation && !(await invites.consume({ ...reservation, handle })).consumed) throw new Error('Invitation consumption failed');
       reservation = undefined;
       await accounts.markActive({ userId, release: deployment.deployment?.sha ?? null });
-      return Response.json({ status: 'ok', value: { userId, handle, relayUrl: `https://${handle}.gssh.dev`, accountUrl, apiUrl: accountUrl } }, { headers: { 'cache-control': 'private, no-store' } });
+      return Response.json({ status: 'ok', value: { userId, handle, relayUrl: relayUrl(domains, handle), accountUrl, apiUrl: accountUrl } }, { headers: { 'cache-control': 'private, no-store' } });
     } catch (error) {
       if (reservation) await inviteRegistry(env).release(reservation);
       if (accountId) await accountRegistry(env).markFailed({ userId: accountId, message: error instanceof Error ? error.message : 'Bootstrap failed' });
@@ -239,7 +243,7 @@ const operatorWorker = {
     if (account.status !== 'active') return Response.json(publicError('ACCOUNT_UNAVAILABLE', 'Account is unavailable'), { status: 403 });
     const platform = await operatorPlatformRequest(env, account.handle);
     if (platform.control.status !== 'active') return Response.json(publicError('ACCOUNT_UNAVAILABLE', 'Account is blocked'), { status: 403 });
-    return Response.json({ status: 'ok', value: { userId, handle: account.handle, relayUrl: 'https://' + account.handle + '.gssh.dev', accountUrl: 'https://' + account.handle + '.gitspace.sh', apiUrl: 'https://' + account.handle + '.gitspace.sh' } });
+    return Response.json({ status: 'ok', value: { userId, handle: account.handle, relayUrl: relayUrl(domainsFromSettings(env), account.handle), accountUrl: accountUrlOf(domainsFromSettings(env), account.handle), apiUrl: accountUrlOf(domainsFromSettings(env), account.handle) } });
   }
   if (request.method === 'GET' || request.method === 'HEAD') return env.ASSETS.fetch(request);
   return new Response('Not found', { status: 404 });

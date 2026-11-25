@@ -1,3 +1,5 @@
+import { accountUrl as accountUrlOf, apiUrl, handleOfAccountHostname, siteUrl } from '@gitspace/protocol-environment/domains';
+import { installDomains } from './install-domains.js';
 import { createRelayAuthorization, type DeviceView } from '@gitspace/protocol';
 import { BROWSER_GRANT_CAPABILITIES, deviceInvitePayload, deviceProtocolBase64, decodeDeviceInviteToken, encodeDeviceInviteToken, signDeviceInvite, STEP_UP_HEADER, type DeviceInvite, type SignedDeviceInvite } from '@gitspace/protocol/device-grant';
 import { accountClock, createDeviceSignedFetch, DeviceEnrollmentError, enrollDevice, type BrowserDevice } from './device.js';
@@ -19,8 +21,8 @@ export interface BrowserInvitationStatus {
 export interface BrowserInvitation extends BrowserInvitationStatus { link: string }
 
 export function accountHandleFromUrl(url: URL): string | null {
-  const match = /^([a-z0-9-]+)\.gitspace\.sh$/u.exec(url.hostname);
-  return match && HANDLE.test(match[1]!) && !RESERVED_HOSTS[match[1]!] ? match[1]! : null;
+  const handle = handleOfAccountHostname(installDomains(), url.hostname);
+  return handle !== null && HANDLE.test(handle) && !RESERVED_HOSTS[handle] ? handle : null;
 }
 
 function isLoopback(url: URL): boolean {
@@ -36,7 +38,7 @@ function assertSecureUrl(url: URL): void {
 function assertEnrollmentOrigin(enrollUrl: URL, pageUrl: URL): void {
   assertSecureUrl(pageUrl);
   assertSecureUrl(enrollUrl);
-  if (enrollUrl.origin !== pageUrl.origin && enrollUrl.origin !== 'https://api.gitspace.sh' && enrollUrl.origin !== 'https://gitspace.sh') {
+  if (enrollUrl.origin !== pageUrl.origin && enrollUrl.origin !== apiUrl(installDomains()) && enrollUrl.origin !== siteUrl(installDomains())) {
     throw new DeviceEnrollmentError('UNSAFE_ORIGIN', 'This enrollment link points to a different deployment. Open a link from your account.');
   }
 }
@@ -64,7 +66,7 @@ const signedFetch = createDeviceSignedFetch(currentDevice, deviceRejected);
 async function requestInvitation(action: 'create' | 'status' | 'cancel', payload: { invite: SignedDeviceInvite } | { inviteId: string }, signal?: AbortSignal, stepUp?: string | null): Promise<BrowserInvitationStatus> {
   const device = await currentDevice();
   if (!device) throw new DeviceEnrollmentError('NOT_ENROLLED', 'Reconnect this browser before creating an enrollment link.');
-  // A browser enrolled through the platform stores https://gitspace.sh as its enrollUrl; only the account host serves these routes.
+  // A browser enrolled through the platform stores the install's site (https://gitspace.sh) as its enrollUrl; only the account host serves these routes.
   const pageUrl = new URL(window.location.href);
   const response = await signedFetch(new URL(`/v1/devices/browser-invitations/${action}`, accountHandleFromUrl(pageUrl) ? pageUrl.origin : device.enrollUrl), {
     method: 'POST', headers: { 'content-type': 'application/json', ...(stepUp ? { [STEP_UP_HEADER]: stepUp } : {}) }, body: JSON.stringify({ userId: device.userId, ...payload }), signal,
@@ -121,7 +123,7 @@ export async function recoverAccountBrowser(handleInput: string, recoveryInput: 
   try {
     assertSecureUrl(pageUrl);
     const inferred = accountHandleFromUrl(pageUrl);
-    if (!inferred && !isLoopback(pageUrl) && pageUrl.origin !== 'https://gitspace.sh' && pageUrl.origin !== 'https://api.gitspace.sh') throw new DeviceEnrollmentError('UNSAFE_ORIGIN', 'Open your account at https://your-handle.gitspace.sh to use a recovery key.');
+    if (!inferred && !isLoopback(pageUrl) && pageUrl.origin !== siteUrl(installDomains()) && pageUrl.origin !== apiUrl(installDomains())) throw new DeviceEnrollmentError('UNSAFE_ORIGIN', `Open your account at ${accountUrlOf(installDomains(), 'your-handle')} to use a recovery key.`);
     const handle = handleInput.trim().toLowerCase();
     if (!HANDLE.test(handle)) throw new DeviceEnrollmentError('INVALID_HANDLE', 'Use 1 to 30 lowercase letters, numbers, or hyphens for your account handle.');
     if (inferred && handle !== inferred) throw new DeviceEnrollmentError('ACCOUNT_MISMATCH', 'The recovery handle must match this account hostname.');
@@ -140,7 +142,7 @@ export async function recoverAccountBrowser(handleInput: string, recoveryInput: 
     if (!response.ok) throw new DeviceEnrollmentError('RECOVERY_FAILED', `Account recovery failed (HTTP ${response.status}).`);
     const accountUrl = new URL(result.value.accountUrl);
     assertSecureUrl(accountUrl);
-    if (result.value.userId !== userId || result.value.handle !== handle || accountUrl.origin !== `https://${handle}.gitspace.sh` || (inferred && accountUrl.origin !== pageUrl.origin)) {
+    if (result.value.userId !== userId || result.value.handle !== handle || accountUrl.origin !== accountUrlOf(installDomains(), handle) || (inferred && accountUrl.origin !== pageUrl.origin)) {
       throw new DeviceEnrollmentError('ACCOUNT_MISMATCH', 'The recovery key does not match this account.');
     }
     assertEnrollmentOrigin(new URL(result.value.apiUrl), pageUrl);

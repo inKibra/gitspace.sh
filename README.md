@@ -229,6 +229,10 @@ It runs Pi/workerd SQLite with a deterministic provider and a private local exec
 
 The normal `runtime-workspace-do` test command runs this smoke. `protocol-runtime` checks wire contracts and branded IDs. `runtime-core` checks actual TTSR discard-and-continue behavior, cold recovery, deferred cancellation, and the distinction between missing evidence and a proven launch fence. `runtime-machine` checks queued cancellation, unknown-effect fencing, runner cleanup, and journaled AST proposals. Multi-file AST apply is recoverable, not atomic.
 
+### Install domains
+
+GitSpace answers on two domains: the **account domain** (`ACCOUNT_DOMAIN`, default `gitspace.sh`) for each account at `<handle>.<domain>`, the site at the apex, `api.<domain>` and `sandboxes.<domain>`; and the **service domain** (`SERVICE_DOMAIN`, default `gssh.dev`) for each account's relay at `<handle>.<domain>`, `platform.<domain>` and hosted services at `<name>--<tenant>-srv.<domain>`. An install at other domains (an on-prem install) sets both as vars of the platform (`packages/platform/wrangler.jsonc`) and the operator Worker (`packages/operator-worker/wrangler.jsonc`), writes their routes for its zones, and sets `COMPUTE_SANDBOX_HOSTNAME`, `PLATFORM_URL`, `WATCHDOG_EMAIL_FROM` and the sandbox Worker's `SANDBOX_HOSTNAME` to match. The platform passes both to each account Worker (the `account-domain` and `service-domain` resource sources); unset, they are GitSpace's own, so production is unchanged. Every host check and handed-out URL is made by `@gitspace/protocol-environment/domains`, and the browser apps learn the domains at runtime from `GET /v1/domains` on the Worker that served them, so one build serves any install.
+
 ### Opt-in live Artifacts check
 
 The owner ran this check in the `gitspace-live-check` scratch namespace in the InKibra Corp account. Binding `readCommit`, `readTree`, `readFile`, `readBlob`, and `info` worked. Snapshot publication preserved the source HEAD, index, and branch, used the expected parent, and exposed the new ref through Git `ls-remote`. Artifacts' LFS batch endpoint returned 404; Artifacts has no LFS payload store.

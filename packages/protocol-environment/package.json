@@ -6,7 +6,8 @@
   "exports": {
     ".": "./src/index.ts",
     "./browser-origin": "./src/browser-origin.ts",
-    "./browser-site-level": "./src/browser-site-level.ts"
+    "./browser-site-level": "./src/browser-site-level.ts",
+    "./domains": "./src/domains.ts"
   },
   "scripts": {
     "typecheck": "tsgo --noEmit -p tsconfig.json && tsgo --noEmit -p tsconfig.test.json",

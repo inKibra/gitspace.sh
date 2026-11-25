@@ -12,7 +12,7 @@ describe('AccountRegistryDO', () => {
     expect(await registry.get(userId)).toMatchObject({ userId, handle: 'registry-test', status: 'provisioning', createdAt });
 
     await registry.markActive({ userId, release: 'stable' });
-    expect(await registry.get(userId)).toMatchObject({ status: 'active', tenantHostname: 'registry-test.gssh.dev', tenantRelease: 'stable' });
+    expect(await registry.get(userId)).toMatchObject({ status: 'active', tenantHostname: 'registry-test.relay.test', tenantRelease: 'stable' });
 
     await registry.setStatus({ userId, status: 'quarantined', reason: 'abuse review', actor: 'operator@example.com', action: 'quarantine' });
     await registry.setStatus({ userId, status: 'active', reason: null, actor: 'operator@example.com', action: 'restore' });

@@ -1,3 +1,4 @@
+import { domainsFromSettings, relayHostname } from '@gitspace/protocol-environment/domains';
 import { BudgetedDurableObject } from './storage-quarantine.js';
 
 export type OperatorAccountStatus = 'provisioning' | 'active' | 'quarantined' | 'suspended' | 'failed';
@@ -97,7 +98,7 @@ export class AccountRegistryDO extends BudgetedDurableObject {
       INSERT INTO accounts (user_id, handle, status, reason, created_at, updated_at, tenant_hostname, tenant_release, tenant_provisioned_at, last_error)
       VALUES (?, ?, 'provisioning', NULL, ?, ?, ?, NULL, NULL, NULL)
       ON CONFLICT(user_id) DO UPDATE SET status = CASE WHEN accounts.status = 'failed' THEN 'provisioning' ELSE accounts.status END, updated_at = excluded.updated_at
-    `, input.userId, input.handle, createdAt, now, `${input.handle}.gssh.dev`);
+    `, input.userId, input.handle, createdAt, now, relayHostname(domainsFromSettings(this.env), input.handle));
     return this.require(input.userId);
   }
 

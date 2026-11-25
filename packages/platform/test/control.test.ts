@@ -33,7 +33,7 @@ describe('operator tenant controls', () => {
     expect(suspended.status).toBe(200);
     expect(await suspended.json()).toMatchObject({ control: { status: 'suspended', reason: 'operator hold' } });
 
-    const blocked = await worker.fetch(new Request(`https://${tenant}-test.invalid/health`), env, createExecutionContext());
+    const blocked = await worker.fetch(new Request(`https://${tenant}.relay.test/health`), env, createExecutionContext());
     expect(blocked.status).toBe(423);
     expect(await blocked.json()).toMatchObject({ error: { code: 'TENANT_SUSPENDED' } });
 

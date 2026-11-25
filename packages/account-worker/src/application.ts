@@ -1,3 +1,4 @@
+import { accountHostname, accountUrl, domainsFromSettings, handleOfAccountHostname, hostedServiceSuffix, relayUrl as relayUrlOf } from '@gitspace/protocol-environment/domains';
 import { setBedrockProviderModule } from '@earendil-works/pi-ai/api/bedrock-converse-stream.lazy';
 import { bedrockProviderModule } from '@earendil-works/pi-ai/bedrock-provider';
 import { runtimeMachineControl } from './account-runtime-control.js';
@@ -1516,7 +1517,7 @@ export class CredentialVaultDO extends BudgetedDurableObject {
     const settings = await (this.env.USER_SETTINGS as DurableObjectNamespace<UserSettingsDO>).getByName(config.user_id).get(machine.machineId);
     const handle = settings.profile.handle;
     if (!handle) return publicError('ACCOUNT_UNPROVISIONED', 'Account tenant is not provisioned');
-    const relayUrl = `https://${handle}.gssh.dev`;
+    const relayUrl = relayUrlOf(domainsFromSettings(this.env), handle);
     if (row.state === 'approved') await (this.env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(config.user_id).putMachine({
       id: machine.machineId, label: machine.label, state: 'offline', rpcEndpoint: `${relayUrl}/tunnel/${encodeURIComponent(machine.machineId)}/rpc`,
       kind: 'physical', provider: 'physical', notes: '', desiredState: 'online', lifecycleRevision: signed.grant.generation, operationId: null, error: null,
@@ -1529,7 +1530,7 @@ export class CredentialVaultDO extends BudgetedDurableObject {
     if (latest.state !== 'approved' && latest.state !== 'enrolled') return publicError('PAIRING_UNAVAILABLE', 'Pairing was cancelled; start a new pairing from the browser');
     this.ctx.storage.sql.exec("UPDATE machine_pairings SET state = 'enrolled' WHERE pairing_id = ? AND state = 'approved'", pairingId);
     return { status: 'ok', value: {
-      state: 'enrolled', userId: config.user_id, handle, accountUrl: `https://${handle}.gitspace.sh`, relayUrl,
+      state: 'enrolled', userId: config.user_id, handle, accountUrl: accountUrl(domainsFromSettings(this.env), handle), relayUrl,
       apiUrl: input.apiUrl, rootPublicKey: config.root_public_key, machineId: machine.machineId, grant: signed,
     } };
   }
@@ -3065,15 +3066,15 @@ async function bundledFrontendResponse(request: Request, env: Env, pathname: str
   return new Response('Account asset canonicalization did not resolve', { status: 502 });
 }
 
-function accountHandleForHostname(hostname: string): string | null {
-  const match = /^([a-z0-9](?:[a-z0-9-]{0,28}[a-z0-9])?)\.gitspace\.sh$/u.exec(hostname.toLowerCase());
-  return match && match[1] !== 'api' && match[1] !== 'www' ? match[1]! : null;
+function accountHandleForHostname(env: Pick<Env, 'ACCOUNT_DOMAIN' | 'SERVICE_DOMAIN'>, hostname: string): string | null {
+  const handle = handleOfAccountHostname(domainsFromSettings(env), hostname);
+  return handle !== null && /^[a-z0-9](?:[a-z0-9-]{0,28}[a-z0-9])?$/u.test(handle) && handle !== 'api' && handle !== 'www' ? handle : null;
 }
 
 /** Serves the frontend of the account's selected release, else its default's: from account storage, or for a published
  * release from the channel through the edge cache. An account with neither gets the bundled frontend. */
 async function releaseFrontendResponse(request: Request, env: Env, pathname: string): Promise<Response | null> {
-  const handle = accountHandleForHostname(new URL(request.url).hostname);
+  const handle = accountHandleForHostname(env, new URL(request.url).hostname);
   if (!handle) return null;
   const account = await accountState(env).getByHandle(handle);
   if (!account) return new Response('Account not found', { status: 404 });
@@ -3757,7 +3758,7 @@ export async function provisionManagedSandbox(env: Env, userId: string, controlU
       GITSPACE_RELAY_URL: env.RELAY_URL,
       GITSPACE_MACHINE_GRANT: JSON.stringify(machineGrant),
       GITSPACE_CONTROL_TOKEN: credentialProtocolBase64.encode(crypto.getRandomValues(new Uint8Array(32))),
-      GITSPACE_SERVICE_DOMAIN: 'gssh.dev',
+      GITSPACE_SERVICE_DOMAIN: domainsFromSettings(env).service,
       GITSPACE_SERVICE_NAMESPACE: accountSettings.profile.handle,
       GITSPACE_MANAGED_SPACE_ROOT: '/workspace/spaces',
       GITSPACE_MIGRATIONS_FOLDER: '/opt/gitspace/drizzle',
@@ -3817,7 +3818,7 @@ async function routeAccountRpc(request: Request, env: Env): Promise<RoutedAccoun
   const settings = await (env.USER_SETTINGS as DurableObjectNamespace<UserSettingsDO>).getByName(userId).get('account-router');
   const handle = settings.profile.handle;
   const hostname = new URL(request.url).hostname.toLowerCase();
-  if (!handle || hostname !== `${handle}.gitspace.sh`) {
+  if (!handle || hostname !== accountHostname(domainsFromSettings(env), handle)) {
     return { response: Response.json(publicError('ACCOUNT_HOST_MISMATCH', 'Request does not belong to this account hostname'), { status: 403 }) };
   }
   const route = await handleAccountCloudRpc(request, env, userId);
@@ -3901,7 +3902,7 @@ const worker = {
         const account = await activeAccount(env, env.ACCOUNT_ID);
         const denied = accountAccessResponse(account);
         if (denied) return denied;
-        if (account.status !== 'ok' || url.hostname !== `${account.value.handle}.gitspace.sh`) {
+        if (account.status !== 'ok' || url.hostname !== accountHostname(domainsFromSettings(env), account.value.handle)) {
           return Response.json(publicError('ACCOUNT_HOST_MISMATCH', 'MCP setup belongs to the current account hostname'), { status: 403, headers });
         }
         const result = await credentialVault(env, env.ACCOUNT_ID).mcpAccessRequest({
@@ -3935,7 +3936,7 @@ const worker = {
           const denied = accountAccessResponse(account)!;
           return new Response(denied.body, { status: denied.status, headers: { ...Object.fromEntries(denied.headers), ...cors } });
         }
-        const handle = accountHandleForHostname(url.hostname);
+        const handle = accountHandleForHostname(env, url.hostname);
         if (handle && handle !== account.value.handle) return Response.json(publicError('ACCOUNT_HOST_MISMATCH', 'Request does not belong to this account hostname'), { status: 403, headers: cors });
         const result = await credentialVault(env, parsed.userId).browserInvitationRequest({
           operation: browserInvitationRoute[1]!, header: request.headers.get(RPC_DEVICE_HEADER), stepUp: request.headers.get(STEP_UP_HEADER), target: `${url.pathname}${url.search}`, body,
@@ -3956,7 +3957,7 @@ const worker = {
         if (body.byteLength > REQUEST_MAX_BYTES) throw new Error('Passkey request is too large');
         const account = await activeAccount(env, env.ACCOUNT_ID);
         if (account.status === 'error') return accountAccessResponse(account)!;
-        const handle = accountHandleForHostname(url.hostname);
+        const handle = accountHandleForHostname(env, url.hostname);
         if (handle && handle !== account.value.handle) return Response.json(publicError('ACCOUNT_HOST_MISMATCH', 'Request does not belong to this account hostname'), { status: 403, headers });
         // A fresh stub per attempt: one that saw an error can stay broken.
         const vault = () => credentialVault(env, env.ACCOUNT_ID);
@@ -4079,7 +4080,7 @@ const worker = {
       if (!account || account.handle !== body.handle.trim().toLowerCase()) {
         return Response.json(publicError('ACCOUNT_NOT_FOUND', 'No account matches this recovery key and handle'), { status: 404 });
       }
-      const handle = accountHandleForHostname(url.hostname);
+      const handle = accountHandleForHostname(env, url.hostname);
       if (handle && handle !== account.handle) {
         return Response.json(publicError('ACCOUNT_HOST_MISMATCH', 'Request does not belong to this account hostname'), { status: 403 });
       }
@@ -4148,7 +4149,7 @@ const worker = {
         }
         const accountSettings = await (env.USER_SETTINGS as DurableObjectNamespace<UserSettingsDO>).getByName(body.userId).get(signedGrant.grant.machineId);
         if (!accountSettings.profile.handle) return Response.json(publicError('ACCOUNT_UNPROVISIONED', 'Account tenant is not provisioned'), { status: 409 });
-        const relayUrl = `https://${accountSettings.profile.handle}.gssh.dev`;
+        const relayUrl = relayUrlOf(domainsFromSettings(env), accountSettings.profile.handle);
         const machine = await (env.FLEET_CATALOG as DurableObjectNamespace<FleetCatalogDO>).getByName(body.userId).putMachine({
           id: signedGrant.grant.machineId,
           label: body.label.slice(0, 160),
@@ -4285,7 +4286,7 @@ const worker = {
           const denied = accountAccessResponse(account)!;
           return new Response(denied.body, { status: denied.status, headers: { ...cors, 'content-type': 'application/json' } });
         }
-        const handle = accountHandleForHostname(url.hostname);
+        const handle = accountHandleForHostname(env, url.hostname);
         if (handle && handle !== account.value.handle) return Response.json(publicError('ACCOUNT_HOST_MISMATCH', 'Request does not belong to this account hostname'), { status: 403, headers: cors });
         const result = await credentialVault(env, invite.invite.userId).enrollDevice({ invite, binding });
         return Response.json(result, { status: result.status === 'ok' ? 200 : 400, headers: cors });
@@ -4649,7 +4650,7 @@ const worker = {
             case 'project.routes.pin': {
               const input = hostedServiceRouteSchema.omit({ updatedAt: true }).parse(body.payload.route);
               const ingress = new URL(input.ingress);
-              if (input.machineId !== body.machineId || !input.hostname.endsWith(`--${env.TENANT_ID}-srv.gssh.dev`) || ingress.protocol !== 'http:' || ingress.hostname !== '127.0.0.1' || Number(ingress.port) !== input.port || ingress.pathname !== '/' || ingress.search || ingress.username || ingress.password) throw new Error('Invalid tenant service route');
+              if (input.machineId !== body.machineId || !input.hostname.endsWith(hostedServiceSuffix(domainsFromSettings(env), env.TENANT_ID)) || ingress.protocol !== 'http:' || ingress.hostname !== '127.0.0.1' || Number(ingress.port) !== input.port || ingress.pathname !== '/' || ingress.search || ingress.username || ingress.password) throw new Error('Invalid tenant service route');
               const workspace = (await authority.listWorkspaces()).find(item => item.id === input.workspaceId);
               if (!workspace) throw new Error('Service workspace does not belong to this project');
               const machineLabel = (await env.FLEET_CATALOG.getByName(body.userId).getMachine(body.machineId))?.label ?? body.machineId;
@@ -4698,7 +4699,7 @@ const worker = {
               const named = new Set(input.registrations.map(item => `${item.service} ${item.port}`));
               const hostnames = input.registrations.map(item => item.hostname);
               if (registrations.length !== input.registrations.length || named.size !== registrations.length || named.size !== declared.size) throw new Error('Signed callers register each declared service port once');
-              if (new Set(hostnames).size !== hostnames.length || hostnames.some(hostname => hostedServiceUrlKind(hostname) !== 'workspace' || !hostname.endsWith(`--${env.TENANT_ID}-srv.gssh.dev`))) throw new Error('Signed callers are registered on distinct workspace URLs');
+              if (new Set(hostnames).size !== hostnames.length || hostnames.some(hostname => hostedServiceUrlKind(hostname) !== 'workspace' || !hostname.endsWith(hostedServiceSuffix(domainsFromSettings(env), env.TENANT_ID)))) throw new Error('Signed callers are registered on distinct workspace URLs');
               const mirrored = await authority.addHostedIngress(input.workspaceId, hostnames);
               const registeredAt = new Date().toISOString();
               await Promise.all(registrations.map(item => env.HOSTED_ROUTES.getByName(item.hostname).registerIngress(body.userId, input.workspaceId, item.routes, item.credentials ?? null, registeredAt)));

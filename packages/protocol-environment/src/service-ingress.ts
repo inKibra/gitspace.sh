@@ -1,3 +1,4 @@
+import { DEFAULT_DOMAINS, isInstallHostname, type GitSpaceDomains } from './domains.js';
 import { z } from 'zod';
 import { EnvironmentError } from './errors.js';
 
@@ -115,14 +116,18 @@ export function parseServiceIngressContent(content: string): ServiceIngressGroup
   return parsed.data;
 }
 
-/** An OIDC issuer or its keys: HTTPS on a public DNS name, never an IP literal, localhost, or a GitSpace host. */
-export function ingressUrlAllowed(value: string): boolean {
+/**
+ * An OIDC issuer or its keys: HTTPS on a public DNS name, never an IP literal, localhost, or a GitSpace host: GitSpace's
+ * own domains always, and an install's (`domains`) too.
+ */
+export function ingressUrlAllowed(value: string, domains: GitSpaceDomains = DEFAULT_DOMAINS): boolean {
   let url: URL;
   try { url = new URL(value); } catch { return false; }
   const host = url.hostname.toLowerCase().replace(/\.$/u, '');
   if (url.protocol !== 'https:' || url.username || url.password || url.hash || !host.includes('.')) return false;
   if (host.startsWith('[') || /^\d+(?:\.\d+){3}$/u.test(host)) return false;
-  return !['localhost', 'gssh.dev', 'gitspace.sh'].some((reserved) => host === reserved || host.endsWith(`.${reserved}`));
+  if (host === 'localhost' || host.endsWith('.localhost')) return false;
+  return !isInstallHostname(DEFAULT_DOMAINS, host) && !isInstallHostname(domains, host);
 }
 
 const base64urlSchema = z.string().min(1).max(1_024).regex(/^[A-Za-z0-9_-]+$/u);
@@ -136,7 +141,7 @@ export const IngressJwkSchema = z.discriminatedUnion('kty', [
 export const IngressJwksSchema = z.object({ keys: z.array(IngressJwkSchema).min(1).max(16) }).strict();
 export type IngressJwks = z.infer<typeof IngressJwksSchema>;
 
-const oidcIssuerSchema = z.string().max(2_048).refine(ingressUrlAllowed, { message: 'An OIDC issuer is an https URL on a public DNS name' });
+const oidcIssuerSchema = z.string().max(2_048).refine((value) => ingressUrlAllowed(value), { message: 'An OIDC issuer is an https URL on a public DNS name' });
 const jwtIssuerSchema = z.string().min(1).max(2_048);
 /** `sub` patterns; `*` matches any run of characters. */
 const subjectsSchema = z.array(z.string().min(1).max(256)).min(1).max(32);

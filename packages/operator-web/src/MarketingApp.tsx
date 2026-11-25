@@ -1,3 +1,4 @@
+import { installDomains } from './install-domains.js';
 import { Badge, Button, Card, CardContent } from '@gitspace/ui';
 import { createRelayAuthorization, createServerClock, encodeDeviceInviteToken, sendSigned, signDeviceInvite } from '@gitspace/protocol';
 import { credentialProtocolBase64 } from '@gitspace/protocol/credential-vault';
@@ -8,7 +9,7 @@ import { useEffect, useRef, useState } from 'react';
 import { MarketingFooter, MarketingNav } from './MarketingChrome.js';
 import { AskSection, CapabilityMatrix, ChainSection, OmpSection, PricingSection, SelfModificationSection, WorkspaceProductsSection } from './MarketingTour.js';
 
-const installCommand = 'curl -fsSL https://gitspace.sh/install | sh';
+const installCommand = () => `curl -fsSL https://${installDomains().account}/install | sh`;
 /** Root proofs carry a timestamp the platform checks against its own clock. */
 const platformClock = createServerClock();
 
@@ -54,7 +55,7 @@ export function MarketingApp() {
     return () => window.clearTimeout(timeout);
   }, [installCopied]);
   const copyInstall = async (): Promise<void> => {
-    await navigator.clipboard.writeText(installCommand);
+    await navigator.clipboard.writeText(installCommand());
     setInstallCopied(true);
   };
   const prepareAccount = (): void => {
@@ -342,7 +343,7 @@ export function MarketingApp() {
       {created
         ? <Card className="mx-auto mt-10 max-w-2xl bg-surface-2 shadow-surface-3"><CardContent className="p-6 lg:p-8">
           <Badge color="green">Account ready</Badge>
-          <h3 className="mt-5 text-title font-semibold">{created.handle}.gitspace.sh</h3>
+          <h3 className="mt-5 text-title font-semibold">{created.handle}.{installDomains().account}</h3>
           <p className="mt-2 text-pretty text-body text-muted-foreground">Keep your saved recovery key safe. GitSpace cannot restore it for you. The private root key has been cleared from this page.</p>
           <p className="mt-4 text-pretty text-body text-muted-foreground">{created.enrollmentUrl ? 'Open GitSpace within five minutes to connect this browser. You can set up your account and create a cloud machine without installing the client.' : 'The browser connection link has expired. Use your saved recovery key to get a new one.'}</p>
           <div className="mt-6 flex flex-wrap gap-3">
@@ -357,7 +358,7 @@ export function MarketingApp() {
           <label className="flex min-h-12 items-center rounded-lg bg-surface-2 px-4 shadow-surface-2 focus-within:ring-2 focus-within:ring-[color:var(--focus-ring)]">
             <span className="sr-only">Account handle</span>
             <input value={handle} disabled={identity !== null || creating} onChange={(event) => setHandle(event.target.value.toLowerCase().replace(/[^a-z0-9-]/gu, ''))} maxLength={30} className="min-w-0 flex-1 bg-transparent text-body outline-none" placeholder="your-handle" autoComplete="username" />
-            <span className="text-caption text-muted-foreground">.gitspace.sh</span>
+            <span className="text-caption text-muted-foreground">.{installDomains().account}</span>
           </label>
           {identity ? <>
             <div className="space-y-4 rounded-lg bg-surface-2 p-4 shadow-surface-2">
@@ -392,7 +393,7 @@ export function MarketingApp() {
       <div className="mx-auto mt-12 max-w-2xl">
         <p className="mb-3 text-caption text-muted-foreground">Optional: install the client to connect a computer. You can create cloud machines from GitSpace without it.</p>
         <div className="flex min-h-14 items-center gap-3 rounded-lg bg-surface-2 py-2 pl-5 pr-2 shadow-surface-2">
-          <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap font-mono text-body"><span className="text-muted-foreground">$ </span>{installCommand}</code>
+          <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap font-mono text-body"><span className="text-muted-foreground">$ </span>{installCommand()}</code>
           <Button variant="secondary" size="compact" onClick={() => void copyInstall()} leadingIcon={installCopied ? CheckCircle : Copy01} aria-live="polite">{installCopied ? 'Copied' : 'Copy'}</Button>
         </div>
       </div>
