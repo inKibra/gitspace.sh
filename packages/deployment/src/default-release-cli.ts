@@ -34,7 +34,8 @@ function bucketNativeMirror(client: S3Client, bucket: string): NativeMirror {
 
 export function defaultReleaseStorage(bucket: string): DefaultReleaseStorage & { close(): void } {
   const client = releaseStorageClient(3);
-  const signal = AbortSignal.timeout(10 * 60_000);
+  // Each request has its own minute; the whole publication gets half an hour, since storage reads from CI can be slow.
+  const signal = AbortSignal.timeout(30 * 60_000);
   return {
     async get(Key) {
       const deadline = AbortSignal.any([signal, AbortSignal.timeout(60_000)]);
