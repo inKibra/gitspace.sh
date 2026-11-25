@@ -176,6 +176,10 @@ it('answers its machines and the platform with a published release\'s files from
   const portable = `channel/${portableFileKey(`defaults/releases/${release.commit}/${PORTABLE_MANIFEST_FILE}`, 'cli/gitspace.js')}`;
   const read = await worker.fetch(new Request(`https://auth.test/v1/data/${portable}`, { headers: { 'x-gitspace-control': signed('data.get', portable) } }), runtime);
   expect([read.status, await read.text()]).toEqual([200, 'cli/gitspace.js of v1.0.0']);
+  // `gitspace machine setup` names every release's files `releases/<sha>/…`, a published release's too.
+  const named = portableFileKey(`releases/${release.commit}/${PORTABLE_MANIFEST_FILE}`, 'cli/gitspace.js');
+  const viaRelease = await worker.fetch(new Request(`https://auth.test/v1/data/${named}`, { headers: { 'x-gitspace-control': signed('data.get', named) } }), runtime);
+  expect([viaRelease.status, await viaRelease.text()]).toEqual([200, 'cli/gitspace.js of v1.0.0']);
   const missing = `channel/defaults/releases/${release.commit}/missing`;
   expect((await worker.fetch(new Request(`https://auth.test/v1/data/${missing}`, { headers: { 'x-gitspace-control': signed('data.get', missing) } }), runtime)).status).toBe(404);
   const write = await worker.fetch(new Request(`https://auth.test/v1/data/${portable}`, { method: 'PUT', headers: { 'content-length': '1', 'x-gitspace-control': signed('data.put', portable) }, body: 'x' }), runtime);

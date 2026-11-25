@@ -6,6 +6,7 @@ import { storedVaultCredentialSchema } from '@gitspace/provider-auth';
 import { z } from 'zod';
 import { rpcErrors } from '@gitspace/protocol/rpc-contract';
 import { storageMigrationStatusInputSchema } from '@gitspace/protocol/storage-migration';
+import { PORTABLE_MANIFEST_FILE } from '@gitspace/protocol/machine-release';
 import { MachineDiscardRequired, machineDiscardConfirmationSchema, type MachineDiscardConfirmation, type MachineDiscardScope } from '@gitspace/protocol/machine-discard';
 import { GITSPACE_SOURCE_PROJECT_ROLE, hostedServiceRouteSchema, hostedServiceUrlKind } from '@gitspace/protocol/project-authority';
 import { FiledIssueListInputSchema, FiledIssueResolveInputSchema } from '@gitspace/protocol-runtime/workspace-controls';
@@ -3456,7 +3457,14 @@ async function releaseDataObjectResponse(request: Request, env: Env, signed: Sig
   if (operation !== 'data.head' && operation !== 'data.get') return dataError(400, 'OBJECT_NAMESPACE_REFUSED', 'Release objects are written whole');
   if (diagnostics) diagnostics.stage = operation === 'data.head' ? 'r2.head' : 'r2.get';
   const object = operation === 'data.head' ? await env.DATA.head(objectKey) : await env.DATA.get(objectKey);
-  if (!object) return new Response(null, { status: 404 });
+  if (!object) {
+    // Machines name every release's files `releases/<sha>/…`; a published release's are in the channel.
+    const named = /^releases\/([^/]+)\/(.+)$/u.exec(keyFromPath);
+    if (!named) return new Response(null, { status: 404 });
+    const portableKey = await env.TENANT_RELEASES.getByName(env.ACCOUNT_ID).publishedPortableKey(named[1]!);
+    if (!portableKey?.endsWith(`/${PORTABLE_MANIFEST_FILE}`)) return new Response(null, { status: 404 });
+    return publishedDataObjectResponse(env, signed, `${portableKey.slice(0, -PORTABLE_MANIFEST_FILE.length)}${named[2]}`);
+  }
   // An object stored with its hash is served only under that hash.
   const expectedHash = signed.payload.hash;
   const recordedHash = object.customMetadata?.sha256;

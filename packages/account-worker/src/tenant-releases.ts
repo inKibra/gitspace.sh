@@ -568,6 +568,12 @@ export class TenantReleasesDO extends BudgetedDurableObject {
     );
   }
 
+  /** The portable manifest key of a release held by reference to the channel, or null for one in account storage. */
+  publishedPortableKey(sha: string): string | null {
+    const record = this.findRelease(sha);
+    return record?.source?.kind === 'release' ? record.artifacts.portable?.key ?? null : null;
+  }
+
   /**
    * A release staged by a launcher that predates capability stamps (every first cutover deploy) is
    * certified once this Worker runs as that release: its sha fingerprints the complete source tree,
