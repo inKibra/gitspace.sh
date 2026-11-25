@@ -62,8 +62,12 @@ export function createRuntimeInstructionLoader(options: { code: ArtifactsCodeSto
           continue;
         }
         const front = /^---\r?\n([\s\S]*?)\r?\n---/u.exec(content);
-        const metadata: unknown = front ? parseYaml(front[1]!) : {};
-        const description = metadata && typeof metadata === 'object' && 'description' in metadata && typeof metadata.description === 'string' ? metadata.description : '';
+        // One skill's malformed front matter costs only its description: thrown, it took every instruction with it.
+        let metadata: unknown = {};
+        let unreadable: string | null = null;
+        try { metadata = front ? parseYaml(front[1]!) : {}; } catch (error) { unreadable = error instanceof Error ? error.message.split('\n')[0]! : String(error); }
+        const description = unreadable !== null ? `(no description: its front matter is not valid YAML: ${unreadable})`
+          : metadata && typeof metadata === 'object' && 'description' in metadata && typeof metadata.description === 'string' ? metadata.description : '';
         result.push({ name: skillPath === path ? path.split('/').at(-2)! : entry.name, path: skillPath, description });
       }
     }

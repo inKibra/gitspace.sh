@@ -64,13 +64,13 @@ describe('committed project rules', () => {
 
 describe('committed project skills', () => {
   /** inkibra core's layout: skills live in `skills/`, and `.agents/skills` links to them. */
-  function symlinkedSkills() {
+  function symlinkedSkills(remotion = '---\ndescription: Remotion rules\n---\nRender carefully.') {
     const code: ArtifactsCodeStore = Object.create(ArtifactsCodeStore.prototype);
     const identity = { name: 'Fixture', email: 'fixture@example.invalid' };
     const files: Record<string, string> = {
       'skills/frontend/SKILL.md': '---\nname: frontend\ndescription: Frontend conventions\n---\nUse the design system.',
       'skills/frontend/references/tokens.md': 'Spacing tokens',
-      '.agents/skills/remotion/SKILL.md': '---\ndescription: Remotion rules\n---\nRender carefully.',
+      '.agents/skills/remotion/SKILL.md': remotion,
     };
     const links: Record<string, string> = { 'link-frontend': '../../skills/frontend\n', 'link-docs': '../../docs', 'link-escape': '../../../outside' };
     const trees: Record<string, ArtifactsTreeEntry[]> = {
@@ -101,6 +101,15 @@ describe('committed project skills', () => {
     expect(await loader.read('skill://frontend')).toContain('Use the design system.');
     expect(await loader.read('skill://frontend/references/tokens.md')).toBe('Spacing tokens');
     await expect(loader.read('skill://escape')).rejects.toThrow('Skill not found');
+  });
+
+  it('lists every skill, the unreadable one without a description, when one skill\'s front matter is not valid YAML', async () => {
+    // An unquoted description holding ": " is a nested mapping YAML refuses.
+    const loader = symlinkedSkills('---\nname: remotion\ndescription: Remotion as a proof engine: render carefully\n---\nRender carefully.');
+    const instructions = await loader.loadInstructions();
+    expect(instructions).toContain('- frontend: Frontend conventions');
+    expect(instructions).toContain('- remotion: (no description: its front matter is not valid YAML');
+    expect(await loader.read('skill://remotion')).toContain('Render carefully.');
   });
 });
 

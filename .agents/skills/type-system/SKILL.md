@@ -1,6 +1,6 @@
 ---
 name: type-system
-description: Treat TypeScript as a proof engine: preserve connected owner contracts, inference, brands, unions, constraints, validation and typed failures. Use for ALL TypeScript work in GitSpace, especially type errors, assertions, predicates, generics, zod schemas, result-rpc contracts, better-result errors, SDK adapters and type tests.
+description: "Treat TypeScript as a proof engine: preserve connected owner contracts, inference, brands, unions, constraints, validation and typed failures. Use for ALL TypeScript work in GitSpace, especially type errors, assertions, predicates, generics, zod schemas, result-rpc contracts, better-result errors, SDK adapters and type tests."
 ---
 
 # Type system
