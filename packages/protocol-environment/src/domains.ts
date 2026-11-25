@@ -23,19 +23,51 @@ export type GitSpaceDomains = z.infer<typeof GitSpaceDomainsSchema>;
 
 export const DEFAULT_DOMAINS: GitSpaceDomains = { account: DEFAULT_ACCOUNT_DOMAIN, service: DEFAULT_SERVICE_DOMAIN };
 
-/** Where a browser app learns the install's domains from the Worker that served it (`GitSpaceDomainsSchema`). */
+/** Where a tool reads an install's domains from its account or operator Worker (`GitSpaceDomainsSchema`). */
 export const DOMAINS_PATH = '/v1/domains';
 
-/** A browser app's question to the Worker that served it: the install's domains, or why it has none. */
-export async function fetchInstallDomains(origin: string, fetcher: typeof fetch = fetch): Promise<{ ok: true; domains: GitSpaceDomains } | { ok: false; reason: string }> {
-  try {
-    const response = await fetcher(new URL(DOMAINS_PATH, origin), { cache: 'no-store', redirect: 'error' });
-    if (!response.ok) return { ok: false, reason: `${DOMAINS_PATH} answered ${response.status}` };
-    const parsed = GitSpaceDomainsSchema.safeParse(await response.json());
-    return parsed.success ? { ok: true, domains: parsed.data } : { ok: false, reason: `${DOMAINS_PATH} answered no domains` };
-  } catch (error) {
-    return { ok: false, reason: `${DOMAINS_PATH} is unavailable: ${error instanceof Error ? error.message : String(error)}` };
-  }
+/**
+ * The `<meta name>` a Worker puts the install's domains in when it serves a browser app's page, so the app reads them
+ * at startup without a request (`withDomainsMeta`, `domainsFromMeta`).
+ */
+export const DOMAINS_META_NAME = 'gitspace-domains';
+
+/** `html` with `domains` in its head: a served page the app reads them from. */
+export function withDomainsMeta(served: string, domains: GitSpaceDomains): string {
+  // A page that already names domains (served on by another Worker) names this one's instead.
+  const html = served.replace(new RegExp(`<meta name="${DOMAINS_META_NAME}" content="[^"]*">`, 'gu'), '');
+  const head = /<head(?:\s[^>]*)?>/iu.exec(html);
+  if (!head) throw new EnvironmentError('InvalidConfiguration', 'The page has no <head> to name the install\'s domains in');
+  const at = head.index + head[0].length;
+  const content = JSON.stringify(domains).replace(/&/gu, '&amp;').replace(/"/gu, '&quot;').replace(/</gu, '&lt;').replace(/>/gu, '&gt;');
+  return `${html.slice(0, at)}<meta name="${DOMAINS_META_NAME}" content="${content}">${html.slice(at)}`;
+}
+
+/**
+ * A Worker's response for a browser app's page, naming `domains` in its head; any other response (not HTML, or HTML
+ * with no head, which no app page is) as it is.
+ */
+export async function withDomainsPage(response: Response, domains: GitSpaceDomains): Promise<Response> {
+  if (!response.headers.get('content-type')?.includes('text/html') || response.body === null) return response;
+  const page = await response.text();
+  if (!/<head(?:\s[^>]*)?>/iu.test(page)) return new Response(page, { status: response.status, statusText: response.statusText, headers: response.headers });
+  const headers = new Headers(response.headers);
+  headers.delete('content-length');
+  // The page differs from the stored file by the domains it names.
+  const etag = response.headers.get('etag');
+  if (etag) headers.set('etag', `W/"${etag.replace(/^W\//u, '').replaceAll('"', '')}-${domains.account}-${domains.service}"`);
+  return new Response(withDomainsMeta(page, domains), { status: response.status, statusText: response.statusText, headers });
+}
+
+/** The domains a served page names (the `content` of its `<meta name="gitspace-domains">`). A page without them is a
+ * serving error, never GitSpace's own by default. */
+export function domainsFromMeta(content: string | null): GitSpaceDomains {
+  if (content === null) throw new EnvironmentError('InvalidConfiguration', `The page does not name its install's domains (<meta name="${DOMAINS_META_NAME}">)`);
+  let value: unknown;
+  try { value = JSON.parse(content); } catch { value = null; }
+  const parsed = GitSpaceDomainsSchema.safeParse(value);
+  if (!parsed.success) throw new EnvironmentError('InvalidConfiguration', `The page names no valid install domains (<meta name="${DOMAINS_META_NAME}">)`, { detail: parsed.error.message });
+  return parsed.data;
 }
 
 /** What an install's configuration says: each domain, unset or empty for the default. */
@@ -70,11 +102,9 @@ export const relayUrl = (domains: GitSpaceDomains, handle: string): string => `h
 /** What every hostname of a tenant's hosted services ends with: `<name>--<tenant>-srv.<service>`. */
 export const hostedServiceSuffix = (domains: GitSpaceDomains, tenantId: string): string => `--${tenantId}-srv.${domains.service}`;
 
-const escaped = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
-
 /** The handle of an account hostname (`<handle>.<account>`), or null for any other host. */
 export function handleOfAccountHostname(domains: GitSpaceDomains, hostname: string): string | null {
-  const match = new RegExp(`^([a-z0-9-]+)\\.${escaped(domains.account)}$`, 'u').exec(hostname.toLowerCase());
+  const match = new RegExp(`^([a-z0-9-]+)\\.${domains.account.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}$`, 'u').exec(hostname.toLowerCase());
   return match?.[1] ?? null;
 }
 

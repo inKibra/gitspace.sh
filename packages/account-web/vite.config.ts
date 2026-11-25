@@ -1,9 +1,11 @@
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
-import { defineConfig } from 'vite';
+import { defineConfig } from 'vitest/config';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
+// (By path: the config loader bundles it, where Node could not load the package's TypeScript.)
+import { domainsFromSettings, withDomainsMeta } from '../protocol-environment/src/domains';
 
 // The public default branch can lag the running beta. Seed the source branch
 // used to publish this frontend, not an unrelated checkout of the product.
@@ -24,11 +26,18 @@ export default defineConfig({
   },
   resolve: { alias: { '@': resolve(fileURLToPath(new URL('.', import.meta.url)), '../ui/src/fluid-vendor') } },
   plugins: [react(), tailwindcss(), {
+    // In production the Worker that serves the page names the install's domains in it; the dev server does it here,
+    // from ACCOUNT_DOMAIN and SERVICE_DOMAIN (GitSpace's own when unset).
+    name: 'gitspace-install-domains',
+    apply: 'serve',
+    transformIndexHtml: (html: string) => withDomainsMeta(html, domainsFromSettings(process.env)),
+  }, {
     name: 'gitspace-source-metadata',
     generateBundle() {
       this.emitFile({ type: 'asset', fileName: 'gitspace-source.json', source: JSON.stringify({ release: sourceCommit, branch: sourceBranch, commit: sourceCommit }) });
     },
   }],
+  test: { setupFiles: ['./src/test-setup.ts'] },
   server: {
     host: '127.0.0.1',
     port: 4510,

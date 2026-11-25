@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import {
-  accountUrl, apiUrl, DEFAULT_DOMAINS, domainsFromSettings, EnvironmentError, handleOfAccountHostname, hostedServiceSuffix,
+  accountUrl, domainsFromMeta, withDomainsMeta, withDomainsPage, apiUrl, DEFAULT_DOMAINS, domainsFromSettings, EnvironmentError, handleOfAccountHostname, hostedServiceSuffix,
   ingressUrlAllowed, isInstallHostname, platformUrl, relayUrl, sandboxesHostname, serviceDomainOfRelayUrl, siteUrl,
 } from '../src/index.js';
 
@@ -59,5 +59,30 @@ describe('install domains', () => {
     expect(serviceDomainOfRelayUrl('https://brad.relay.acme.example/', 'brad')).toBe('relay.acme.example');
     expect(serviceDomainOfRelayUrl('https://other.gssh.dev', 'brad')).toBeNull();
     expect(serviceDomainOfRelayUrl('not a url', 'brad')).toBeNull();
+  });
+
+  test('a served page names the domains, and an app reads them; a page without them is an error', () => {
+    const page = withDomainsMeta('<!doctype html><html><head><title>x</title></head><body></body></html>', onPrem);
+    expect(page).toContain('<head><meta name="gitspace-domains" content="{&quot;account&quot;:&quot;git.acme.example&quot;');
+    const content = /content="([^"]*)"/u.exec(page)![1]!.replace(/&quot;/gu, '"');
+    expect(domainsFromMeta(content)).toEqual(onPrem);
+    expect(() => domainsFromMeta(null)).toThrow(EnvironmentError);
+    expect(() => domainsFromMeta('{"account":"gitspace.sh"}')).toThrow(EnvironmentError);
+    expect(() => withDomainsMeta('<p>no head</p>', onPrem)).toThrow(EnvironmentError);
+    // Served on by another Worker: one page, one set of domains (the last Worker's).
+    const again = withDomainsMeta(withDomainsMeta('<html><head></head></html>', DEFAULT_DOMAINS), onPrem);
+    expect(again.match(/gitspace-domains/gu)).toHaveLength(1);
+    expect(again).toContain('git.acme.example');
+  });
+
+  test('a Worker names them in an app page it serves, and leaves any other response alone', async () => {
+    const html = (body: string) => new Response(body, { headers: { 'content-type': 'text/html; charset=utf-8', etag: '"e1"', 'content-length': String(body.length) } });
+    const page = await withDomainsPage(html('<html><head></head><body></body></html>'), onPrem);
+    expect(await page.text()).toContain('<head><meta name="gitspace-domains"');
+    expect(page.headers.get('etag')).toBe('W/"e1-git.acme.example-relay.acme.example"');
+    expect(page.headers.get('content-length')).toBeNull();
+    expect(await (await withDomainsPage(html('released index'), onPrem)).text()).toBe('released index');
+    const script = new Response('let x = 1;', { headers: { 'content-type': 'text/javascript' } });
+    expect(await withDomainsPage(script, onPrem)).toBe(script);
   });
 });

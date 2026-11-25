@@ -11,9 +11,6 @@
     "ACCESS_AUD": "test-access-audience",
     "OPERATOR_EMAIL": "operator@example.com",
     "PLATFORM_URL": "https://platform.test",
-    // Not GitSpace's own domains: the URLs this Worker hands out follow the install's.
-    "ACCOUNT_DOMAIN": "account.test",
-    "SERVICE_DOMAIN": "relay.test",
     "PLATFORM_BOOTSTRAP_TOKEN": "test-platform-bootstrap-token"
   },
   "durable_objects": {

@@ -67,8 +67,7 @@ describe('operator invitation admission', () => {
     const created = await createInvite(`invite-${crypto.randomUUID()}`);
     expect(created.value.token).toMatch(/^gsi_[A-Za-z0-9_-]{43}$/u);
     expect(created.value.signupUrl).toContain(encodeURIComponent(created.value.token));
-    // The install's site (wrangler.test.jsonc), not GitSpace's own.
-    expect(created.value.signupUrl.startsWith('https://account.test/?invite=')).toBe(true);
+    expect(created.value.signupUrl.startsWith('https://gitspace.sh/?invite=')).toBe(true);
 
     const listed = await SELF.fetch('https://gitspace.sh/v1/operator/invites', { headers: await operatorHeaders() });
     expect(listed.status).toBe(200);

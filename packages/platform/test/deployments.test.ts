@@ -424,11 +424,11 @@ describe('POST /__platform/tenants/:tenant/deploy', () => {
         { type: 'service', name: 'STATIC_FILES', service: 'public-assets-test' },
         { type: 'service', name: 'RELEASES_READ', service: 'release-channel-test' },
         { type: 'images', name: 'IMAGES' },
-        // The install's domains (wrangler.test.jsonc), not GitSpace's own.
-        { type: 'plain_text', name: 'APP_URL', text: 'https://bravo.account.test' },
-        { type: 'plain_text', name: 'TRANSPORT_URL', text: 'https://bravo.relay.test' },
-        { type: 'plain_text', name: 'ACCOUNT_DOMAIN', text: 'account.test' },
-        { type: 'plain_text', name: 'SERVICE_DOMAIN', text: 'relay.test' },
+        // GitSpace's own domains, as production's platform passes them (install-domains.test.ts: another install's).
+        { type: 'plain_text', name: 'APP_URL', text: 'https://bravo.gitspace.sh' },
+        { type: 'plain_text', name: 'TRANSPORT_URL', text: 'https://bravo.gssh.dev' },
+        { type: 'plain_text', name: 'ACCOUNT_DOMAIN', text: 'gitspace.sh' },
+        { type: 'plain_text', name: 'SERVICE_DOMAIN', text: 'gssh.dev' },
       ]),
       migrations: { old_tag: 'v8', new_tag: 'v10', steps: [{ new_sqlite_classes: ['Classv9'] }, { new_sqlite_classes: ['Classv10'] }] },
     });

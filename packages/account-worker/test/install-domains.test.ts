@@ -52,6 +52,17 @@ describe('an install at its own domains', () => {
     expect(await defaults.json()).toEqual({ account: 'gitspace.sh', service: 'gssh.dev' });
   });
 
+  it('names its domains in the browser app\'s pages it serves, so the app needs no request for them', async () => {
+    const page = '<!doctype html><html><head><title>GitSpace</title></head><body><div id="root"></div></body></html>';
+    const assets = { fetch: async () => new Response(page, { headers: { 'content-type': 'text/html; charset=utf-8', etag: '"abc"' } }) } as unknown as Fetcher;
+    const served = await worker.fetch(new Request(`https://www.git.acme.example/settings`), { ...onPrem, ASSETS: assets });
+    const html = await served.text();
+    expect(html).toContain('<head><meta name="gitspace-domains" content="{&quot;account&quot;:&quot;git.acme.example&quot;,&quot;service&quot;:&quot;relay.acme.example&quot;}">');
+    expect(served.headers.get('etag')).toBe('W/"abc-git.acme.example-relay.acme.example"');
+    const defaults = await (await worker.fetch(new Request(`https://www.gitspace.sh/settings`), { ...env, ASSETS: assets })).text();
+    expect(defaults).toContain('content="{&quot;account&quot;:&quot;gitspace.sh&quot;,&quot;service&quot;:&quot;gssh.dev&quot;}"');
+  });
+
   it('knows its hosted services by its service domain', () => {
     const service = `web--space-a--${env.TENANT_ID}-srv`;
     expect(isHostedServiceHostname(onPrem, `${service}.relay.acme.example`)).toBe(true);

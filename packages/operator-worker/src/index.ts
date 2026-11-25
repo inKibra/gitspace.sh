@@ -1,4 +1,4 @@
-import { accountUrl as accountUrlOf, DOMAINS_PATH, domainsFromSettings, relayUrl, siteUrl } from '@gitspace/protocol-environment/domains';
+import { accountUrl as accountUrlOf, DOMAINS_PATH, domainsFromSettings, relayUrl, siteUrl, withDomainsPage } from '@gitspace/protocol-environment/domains';
 import { credentialProtocolBase64, SIGNED_REQUEST_MAX_AGE_MS } from '@gitspace/protocol/credential-vault';
 import { verifyRelayAuthorization } from '@gitspace/protocol/relay';
 import { SIGNED_REQUEST_EXPIRED_CODE, SIGNED_REQUEST_EXPIRED_MESSAGE } from '@gitspace/protocol/server-clock';
@@ -245,7 +245,10 @@ const operatorWorker = {
     if (platform.control.status !== 'active') return Response.json(publicError('ACCOUNT_UNAVAILABLE', 'Account is blocked'), { status: 403 });
     return Response.json({ status: 'ok', value: { userId, handle: account.handle, relayUrl: relayUrl(domainsFromSettings(env), account.handle), accountUrl: accountUrlOf(domainsFromSettings(env), account.handle), apiUrl: accountUrlOf(domainsFromSettings(env), account.handle) } });
   }
-  if (request.method === 'GET' || request.method === 'HEAD') return env.ASSETS.fetch(request);
+  if (request.method === 'GET' || request.method === 'HEAD') {
+    // A page of a browser app names the install's domains, which the app reads at startup.
+    return withDomainsPage(await env.ASSETS.fetch(request), domainsFromSettings(env));
+  }
   return new Response('Not found', { status: 404 });
  }
 } satisfies ExportedHandler<Env>;

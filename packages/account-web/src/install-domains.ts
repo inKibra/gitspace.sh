@@ -1,24 +1,18 @@
-import { DEFAULT_DOMAINS, fetchInstallDomains, type GitSpaceDomains } from '@gitspace/protocol-environment/domains';
+import { DOMAINS_META_NAME, domainsFromMeta, type GitSpaceDomains } from '@gitspace/protocol-environment/domains';
 
 /**
- * The install's domains, learned at startup from the Worker that served this app (`GET /v1/domains`), so one build
- * serves any install. Until then, and from a server that does not answer, GitSpace's own.
+ * The install's domains, named by the Worker that served this page (`<meta name="gitspace-domains">`, which it puts
+ * in every page it serves), read once at startup without a request. A page without them is a serving error: it throws,
+ * and the app shows it, rather than assuming GitSpace's own domains.
  */
-let current: GitSpaceDomains = DEFAULT_DOMAINS;
+let current: GitSpaceDomains | undefined;
 
 export function installDomains(): GitSpaceDomains {
+  current ??= domainsFromMeta(typeof document === 'undefined' ? null : document.querySelector<HTMLMetaElement>(`meta[name="${DOMAINS_META_NAME}"]`)?.content ?? null);
   return current;
 }
 
-/** Learns the domains from `origin`'s Worker. A failure keeps GitSpace's own and says so. */
-export async function loadInstallDomains(origin: string, fetcher: typeof fetch = fetch): Promise<GitSpaceDomains> {
-  const answered = await fetchInstallDomains(origin, fetcher);
-  if (answered.ok) current = answered.domains;
-  else console.warn(`GitSpace: ${answered.reason}; using ${current.account} and ${current.service}`);
-  return current;
-}
-
-/** For tests: the domains as if the server had answered them. */
-export function setInstallDomains(domains: GitSpaceDomains): void {
+/** For tests: the domains as if the served page had named them (undefined: read the page again). */
+export function setInstallDomains(domains: GitSpaceDomains | undefined): void {
   current = domains;
 }

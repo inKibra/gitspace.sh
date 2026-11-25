@@ -1,4 +1,4 @@
-import { accountHostname, accountUrl, domainsFromSettings, handleOfAccountHostname, hostedServiceSuffix, relayUrl as relayUrlOf } from '@gitspace/protocol-environment/domains';
+import { accountHostname, accountUrl, domainsFromSettings, handleOfAccountHostname, hostedServiceSuffix, relayUrl as relayUrlOf, withDomainsPage } from '@gitspace/protocol-environment/domains';
 import { setBedrockProviderModule } from '@earendil-works/pi-ai/api/bedrock-converse-stream.lazy';
 import { bedrockProviderModule } from '@earendil-works/pi-ai/bedrock-provider';
 import { runtimeMachineControl } from './account-runtime-control.js';
@@ -4802,10 +4802,10 @@ const worker = {
       && !url.pathname.startsWith('/v1/') && !url.pathname.startsWith('/omp/') && !url.pathname.startsWith('/__dev/')
       && !request.headers.has('x-gitspace-control')) {
       const served = await releaseFrontendResponse(request, env, url.pathname);
-      if (served) return served;
+      if (served) return withDomainsPage(served, domainsFromSettings(env));
     }
     if ((request.method === 'GET' || request.method === 'HEAD') && !url.pathname.startsWith('/v1/') && !url.pathname.startsWith('/omp/') && env.ASSETS) {
-      return env.ASSETS.fetch(request);
+      return withDomainsPage(await env.ASSETS.fetch(request), domainsFromSettings(env));
     }
     const match = /^\/v1\/users\/([^/]+)\/credentials\/([^/]+)\/access$/u.exec(url.pathname);
     if (!match || request.method !== 'POST') return new Response('Not found', { status: 404 });

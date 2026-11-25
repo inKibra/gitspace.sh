@@ -1,4 +1,4 @@
-import { loadInstallDomains } from './install-domains.js';
+import { installDomains } from './install-domains.js';
 import { IconProvider, ShapeProvider, SizeProvider, TooltipProvider, untitledIcons } from '@gitspace/ui';
 import { MotionConfig } from 'framer-motion';
 import { StrictMode } from 'react';
@@ -21,8 +21,15 @@ if (!root) throw new Error('GitSpace root element is missing');
 restoreAppearance();
 const releaseViewport = observeAppViewport();
 import.meta.hot?.dispose(releaseViewport);
-// The install's domains come from the Worker that served this page before anything checks a hostname.
-void loadInstallDomains(window.location.origin).then(() => createRoot(root).render(
+// The install's domains, named by the Worker that served this page: read before anything checks a hostname, and
+// shown, not assumed, when the page does not name them.
+try {
+  installDomains();
+} catch (error) {
+  root.textContent = error instanceof Error ? error.message : String(error);
+  throw error;
+}
+createRoot(root).render(
   <StrictMode>
     <MotionConfig reducedMotion="user">
       <ShapeProvider defaultShape="rounded">
@@ -37,4 +44,4 @@ void loadInstallDomains(window.location.origin).then(() => createRoot(root).rend
       </ShapeProvider>
     </MotionConfig>
   </StrictMode>,
-));
+);

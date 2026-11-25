@@ -53,9 +53,6 @@
     }
   ],
   "vars": {
-    // Not GitSpace's own domains: the platform's host checks and URLs follow the install's.
-    "ACCOUNT_DOMAIN": "account.test",
-    "SERVICE_DOMAIN": "relay.test",
     "DEFAULT_CPU_MS": 500,
     "DEFAULT_SUBREQUESTS": 20,
     "ADMIN_PUBLIC_KEY": "test",

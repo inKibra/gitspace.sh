@@ -70,9 +70,9 @@ describe('account recovery', () => {
       value: {
         userId: key.userId,
         handle: 'settled',
-        relayUrl: 'https://settled.relay.test',
-        accountUrl: 'https://settled.account.test',
-        apiUrl: 'https://settled.account.test',
+        relayUrl: 'https://settled.gssh.dev',
+        accountUrl: 'https://settled.gitspace.sh',
+        apiUrl: 'https://settled.gitspace.sh',
       },
     });
   });

@@ -10,8 +10,9 @@ interface Env {
   CREDITS: DurableObjectNamespace<import('./src/index').CreditLedgerDO>;
   DEPLOYMENTS: DurableObjectNamespace<import('./src/index').TenantDeploymentsDO>;
   TENANT_CONTROL: DurableObjectNamespace<import('./src/index').TenantControlDO>;
-  ACCOUNT_DOMAIN: string;
-  SERVICE_DOMAIN: string;
+  /** The install's domains (`@gitspace/protocol-environment/domains`); unset, GitSpace's own. */
+  ACCOUNT_DOMAIN?: string;
+  SERVICE_DOMAIN?: string;
   PLATFORM_URL: string;
   PLATFORM_SERVICE_NAME: string;
   PUBLIC_ASSETS_SERVICE: string;
