@@ -214,10 +214,12 @@ function requiredEnvironment(name: string): string {
   return value;
 }
 
-/** Shared authenticated R2 transport for immutable release publishers. */
-export function releaseStorageClient(): S3Client {
+/** Shared authenticated R2 transport for immutable release publishers. The SDK can't resend a request whose body was a
+ * stream it already read, so the distribution publisher (file streams) retries itself with one attempt each; callers
+ * sending only in-memory bodies pass more attempts and get the SDK's retries of 5xx, throttling and dropped connections. */
+export function releaseStorageClient(maxAttempts = 1): S3Client {
   return new S3Client({
-    region: 'auto', forcePathStyle: true, maxAttempts: 1,
+    region: 'auto', forcePathStyle: true, maxAttempts,
     endpoint: `https://${requiredEnvironment('CLOUDFLARE_ACCOUNT_ID')}.r2.cloudflarestorage.com`,
     credentials: { accessKeyId: requiredEnvironment('R2_ACCESS_KEY_ID'), secretAccessKey: requiredEnvironment('R2_SECRET_ACCESS_KEY') },
     requestChecksumCalculation: 'WHEN_REQUIRED', responseChecksumValidation: 'WHEN_REQUIRED',
@@ -248,28 +250,43 @@ export async function publishDistribution(directory: string, activate: boolean, 
     operation: string, key: string, bytes: number | null,
     run: (deadline: AbortSignal) => Promise<T>, operationSignal = signal,
   ): Promise<T> {
-    const started = performance.now();
-    const deadline = AbortSignal.any([operationSignal, AbortSignal.timeout(60_000)]);
-    const report = (outcome: string) => console.log(JSON.stringify({
-      event: 'distribution_publish', platform: manifest.platform, operation, key, bytes,
-      elapsedMs: Math.round(performance.now() - started), outcome,
-    }));
-    report('start');
-    const heartbeat = setInterval(() => report('pending'), 10_000);
-    try {
-      const result = await run(deadline);
-      report('success');
-      return result;
-    } catch (error) {
-      report(deadline.aborted ? 'aborted' : 'failure');
-      const metadata = error instanceof S3ServiceException ? error.$metadata : undefined;
-      const detail = deadline.aborted ? 'deadline exceeded or cancelled'
-        : error instanceof S3ServiceException ? `${error.name}; HTTP ${metadata?.httpStatusCode ?? 'unknown'}; request ${metadata?.requestId ?? 'unknown'}`
-          : error instanceof Error ? `${error.name}: ${error.message}` : 'UnknownError';
-      // Do not print signed requests, credentials, or unfiltered S3 error bodies.
-      throw new Error(`Distribution ${operation} ${key}: ${detail}`);
-    } finally {
-      clearInterval(heartbeat);
+    // R2 reads from a CI runner have taken over a minute for 22 MB, so each attempt gets time in proportion to its
+    // size (256 KB/s on top of a minute). A timed-out attempt, a 5xx, a 429 or a dropped connection is tried again:
+    // every operation here is idempotent (objects are named by content; an immutable put that already landed answers 412).
+    const attemptMs = 60_000 + Math.ceil((bytes ?? 0) / 256);
+    for (let attempt = 1; ; attempt++) {
+      const started = performance.now();
+      const attemptDeadline = AbortSignal.timeout(attemptMs);
+      const deadline = AbortSignal.any([operationSignal, attemptDeadline]);
+      const report = (outcome: string) => console.log(JSON.stringify({
+        event: 'distribution_publish', platform: manifest.platform, operation, key, bytes, attempt,
+        elapsedMs: Math.round(performance.now() - started), outcome,
+      }));
+      report('start');
+      const heartbeat = setInterval(() => report('pending'), 10_000);
+      try {
+        const result = await run(deadline);
+        report('success');
+        return result;
+      } catch (error) {
+        const status = error instanceof S3ServiceException ? error.$metadata.httpStatusCode : undefined;
+        const dropped = error instanceof Error && 'code' in error && typeof error.code === 'string' && /^(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|EAI_AGAIN)$/u.test(error.code);
+        const transient = attemptDeadline.aborted || (status !== undefined && (status >= 500 || status === 429)) || dropped;
+        if (transient && !operationSignal.aborted && attempt < 3) {
+          report('retrying');
+          await Bun.sleep(1000 * 4 ** (attempt - 1));
+          continue;
+        }
+        report(deadline.aborted ? 'aborted' : 'failure');
+        const metadata = error instanceof S3ServiceException ? error.$metadata : undefined;
+        const detail = deadline.aborted ? 'deadline exceeded or cancelled'
+          : error instanceof S3ServiceException ? `${error.name}; HTTP ${metadata?.httpStatusCode ?? 'unknown'}; request ${metadata?.requestId ?? 'unknown'}`
+            : error instanceof Error ? `${error.name}: ${error.message}` : 'UnknownError';
+        // Do not print signed requests, credentials, or unfiltered S3 error bodies.
+        throw new Error(`Distribution ${operation} ${key}: ${detail}`);
+      } finally {
+        clearInterval(heartbeat);
+      }
     }
   }
   async function remoteDigest(Key: string, expectedSize: number): Promise<Digest | null> {

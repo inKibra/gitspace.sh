@@ -1,7 +1,9 @@
 # Package the authenticated machine tree using the sandbox's glibc and Bun ABI.
 FROM ubuntu:22.04 AS builder
 COPY --from=oven/bun:1.4.0 /usr/local/bin/bun /usr/local/bin/bun
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git git-lfs binutils unzip && rm -rf /var/lib/apt/lists/*
+# Ubuntu's mirrors refuse index reads while they sync ("Mirror sync in progress?"): update is tried again after a pause.
+RUN for attempt in 1 2 3; do apt-get -o Acquire::Retries=3 update && break; [ "$attempt" = 3 ] && exit 1; sleep 20; done \
+  && apt-get install -y --no-install-recommends ca-certificates git git-lfs binutils unzip && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY package.json bun.lock ./
 COPY packages ./packages
@@ -12,7 +14,8 @@ RUN GITSPACE_RUNTIME_LAYER_COUNT=16 bun packages/sandbox-worker/scripts/build-ru
 FROM docker.io/cloudflare/sandbox:0.12.9
 USER root
 # Git LFS is set up the standard way on every machine: installed, and its filter configured for all users.
-RUN apt-get update && apt-get install -y --no-install-recommends openssh-client binutils git-lfs && rm -rf /var/lib/apt/lists/* && git lfs install --system
+RUN for attempt in 1 2 3; do apt-get -o Acquire::Retries=3 update && break; [ "$attempt" = 3 ] && exit 1; sleep 20; done \
+  && apt-get install -y --no-install-recommends openssh-client binutils git-lfs && rm -rf /var/lib/apt/lists/* && git lfs install --system
 # Each file exists in exactly one layer. Large native libraries get their own
 # layer; the remaining files are packed into 128 MiB groups at build time.
 COPY --from=builder /runtime-layers/00/ /opt/gitspace/
