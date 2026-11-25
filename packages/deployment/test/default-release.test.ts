@@ -23,10 +23,10 @@ function storage() {
   };
   return { api, objects, fail(key: string) { failKey = key; } };
 }
-async function build(commit = sha, imageCommit = commit, embeddedCommit = commit) {
+async function build(commit = sha, imageCommit = commit, embeddedCommit = commit, workerSource = new Bun.Transpiler({ define: { GITSPACE_WORKER_SHA: JSON.stringify(embeddedCommit) } }).transformSync('const WORKER_VERSION = typeof GITSPACE_WORKER_SHA === "string" ? GITSPACE_WORKER_SHA : "channel"; export default { fetch() { return new Response(WORKER_VERSION); } };')) {
   return buildDefaultRelease(commit, {
     verifyCommit: async () => commit,
-    worker: async () => ({ commit, version: commit, modules: [{ name: 'worker.mjs', type: 'esm', content: bytes(new Bun.Transpiler({ define: { GITSPACE_WORKER_SHA: JSON.stringify(embeddedCommit) } }).transformSync('const WORKER_VERSION = typeof GITSPACE_WORKER_SHA === "string" ? GITSPACE_WORKER_SHA : "channel"; export default { fetch() { return new Response(WORKER_VERSION); } };')) }], metadata: { mainModule: 'worker.mjs', compatibilityDate: '2026-01-01', compatibilityFlags: [], durableObjects: [], resources: [], migrations: [] } }),
+    worker: async () => ({ commit, version: commit, modules: [{ name: 'worker.mjs', type: 'esm', content: bytes(workerSource) }], metadata: { mainModule: 'worker.mjs', compatibilityDate: '2026-01-01', compatibilityFlags: [], durableObjects: [], resources: [], migrations: [] } }),
     frontend: async () => ({ commit, files: [{ path: 'index.html', bytes: bytes(`ui:${commit}`), contentType: 'text/html' }] }),
     image: async () => ({ commit: imageCommit, image: `registry.example.com/gitspace@sha256:${'c'.repeat(64)}`, provenance: bytes(JSON.stringify({ commit: imageCommit, image: `registry.example.com/gitspace@sha256:${'c'.repeat(64)}` })) }),
   });
@@ -44,6 +44,11 @@ describe('coherent default account releases', () => {
     await rollbackDefaultRelease(f.api);
     expect(await loadDefaultRelease(f.api)).toEqual(first.manifest);
     expect(f.objects.has(workerModule(sha))).toBe(true);
+  });
+  test('reads the embedded Worker version from a joined declaration list', async () => {
+    const joined = (commit: string) => `var WORKER_VERSION = ${JSON.stringify(commit)}, StorageSchema, INSPECT_ROWS = 20;\nvar WORKER_VERSION2 = ${JSON.stringify(commit)};\nexport default {};`;
+    expect((await build(sha, sha, sha, joined(sha))).manifest.commit).toBe(sha);
+    await expect(build(sha, sha, sha, joined(nextSha))).rejects.toThrow('Worker');
   });
   test('rejects cross-commit image provenance before writing anything', async () => {
     await expect(build(sha, nextSha)).rejects.toThrow('commit');

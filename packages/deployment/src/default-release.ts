@@ -27,9 +27,10 @@ export async function buildDefaultRelease(commit: string, builders: DefaultRelea
   const main = worker.modules.find(module => module.name === worker.metadata.mainModule);
   if (!main) throw new Error('Worker release has no declared main module');
   // Bun's non-minified Worker build folds GITSPACE_WORKER_SHA into these
-  // declarations, including renamed copies from other bundled modules.
+  // declarations, including renamed copies from other bundled modules, and may
+  // join one into a declaration list (`var WORKER_VERSION = "…", Other = 8;`).
   const source = new TextDecoder('utf-8', { fatal: true }).decode(main.content);
-  const versions = [...source.matchAll(/^(?:var|const|let) WORKER_VERSION(?:\d+)? = ([^\n]+);$/gmu)];
+  const versions = [...source.matchAll(/\bWORKER_VERSION\d* = ([^,;\n]+)/gu)];
   if (versions.length === 0 || versions.some(match => match[1] !== JSON.stringify(commit))) throw new Error('Worker embedded version commit mismatch');
   const frontend = await builders.frontend();
   const image = await builders.image();
