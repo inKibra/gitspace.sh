@@ -172,16 +172,25 @@ it('answers its machines and the platform with a published release\'s files from
   const { runtime } = channel([release]);
   upstream();
   await worker.fetch(new Request(`${origin}/`), { ...runtime, DEFAULT_ACCOUNT_RELEASE: release.pin });
-  const signed = (operation: 'data.get' | 'data.head' | 'data.put', key: string) => btoa(JSON.stringify(createSignedControlRequest({ userId, machineId: 'machine-a', operation, payload: operation === 'data.put' ? { key, hash: `sha256:${'0'.repeat(64)}`, size: 1 } : { key }, signingPrivateKey: machineSigningPrivateKey }))).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
+  const signed = (operation: 'data.get' | 'data.head' | 'data.put', key: string, hash?: string) => btoa(JSON.stringify(createSignedControlRequest({ userId, machineId: 'machine-a', operation, payload: operation === 'data.put' ? { key, hash: `sha256:${'0'.repeat(64)}`, size: 1 } : { key, ...(hash ? { hash } : {}) }, signingPrivateKey: machineSigningPrivateKey }))).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
+  const cli = encoder.encode('cli/gitspace.js of v1.0.0');
+  const cliHash = `sha256:${await hex(cli)}`;
+  // What the machine client (`CloudSpaceAuthority.download`) accepts: the named digest and the size in the headers,
+  // then bytes matching both.
+  const machineRead = async (key: string, hash: string) => {
+    const response = await worker.fetch(new Request(`https://auth.test/v1/data/${key}`, { headers: { 'x-gitspace-control': signed('data.get', key, hash) } }), runtime);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    return { status: response.status, hash: response.headers.get('x-gitspace-sha256'), size: response.headers.get('content-length'), bytesHash: `sha256:${await hex(bytes)}` };
+  };
   const portable = `channel/${portableFileKey(`defaults/releases/${release.commit}/${PORTABLE_MANIFEST_FILE}`, 'cli/gitspace.js')}`;
-  const read = await worker.fetch(new Request(`https://auth.test/v1/data/${portable}`, { headers: { 'x-gitspace-control': signed('data.get', portable) } }), runtime);
-  expect([read.status, await read.text()]).toEqual([200, 'cli/gitspace.js of v1.0.0']);
+  expect(await machineRead(portable, cliHash)).toEqual({ status: 200, hash: cliHash, size: String(cli.byteLength), bytesHash: cliHash });
   // `gitspace machine setup` names every release's files `releases/<sha>/…`, a published release's too.
   const named = portableFileKey(`releases/${release.commit}/${PORTABLE_MANIFEST_FILE}`, 'cli/gitspace.js');
-  const viaRelease = await worker.fetch(new Request(`https://auth.test/v1/data/${named}`, { headers: { 'x-gitspace-control': signed('data.get', named) } }), runtime);
-  expect([viaRelease.status, await viaRelease.text()]).toEqual([200, 'cli/gitspace.js of v1.0.0']);
+  expect(await machineRead(named, cliHash)).toEqual({ status: 200, hash: cliHash, size: String(cli.byteLength), bytesHash: cliHash });
+  // A read that names no digest is refused: nothing could check what the channel answers.
+  expect((await worker.fetch(new Request(`https://auth.test/v1/data/${portable}`, { headers: { 'x-gitspace-control': signed('data.get', portable) } }), runtime)).status).toBe(400);
   const missing = `channel/defaults/releases/${release.commit}/missing`;
-  expect((await worker.fetch(new Request(`https://auth.test/v1/data/${missing}`, { headers: { 'x-gitspace-control': signed('data.get', missing) } }), runtime)).status).toBe(404);
+  expect((await machineRead(missing, cliHash)).status).toBe(404);
   const write = await worker.fetch(new Request(`https://auth.test/v1/data/${portable}`, { method: 'PUT', headers: { 'content-length': '1', 'x-gitspace-control': signed('data.put', portable) }, body: 'x' }), runtime);
   expect(write.status).toBe(400);
 

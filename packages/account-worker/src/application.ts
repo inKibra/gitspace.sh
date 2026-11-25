@@ -3405,12 +3405,15 @@ async function tenantDataObjectResponse(request: Request, env: Env, signed: Sign
 }
 
 /** A published release's files, which machines read through the account: from the channel (`channel.ts`), each checked
- * by the machine against the digest its release names. */
+ * by the machine against the digest its release names. The channel keeps no digest beside a file, so a read names that
+ * digest and the answer carries it; the machine verifies the bytes against it as they arrive. */
 async function publishedDataObjectResponse(env: Env, signed: SignedControlRequest, keyFromPath: string): Promise<Response> {
   if (signed.operation !== 'data.get' && signed.operation !== 'data.head') return dataError(400, 'OBJECT_NAMESPACE_REFUSED', 'Published release files are read only');
+  const hash = signed.payload.hash;
+  if (typeof hash !== 'string' || !/^sha256:[a-f0-9]{64}$/u.test(hash)) return dataError(400, 'INVALID_OBJECT_METADATA', 'A published release file is read by the SHA-256 its release names');
   const file = await releaseFile(env, env.ACCOUNT_ID, keyFromPath, signed.operation === 'data.head' ? 'HEAD' : 'GET');
   if (!file) return new Response(null, { status: 404 });
-  const headers = new Headers({ 'cache-control': 'private, no-store', 'content-type': 'application/octet-stream', etag: file.etag });
+  const headers = new Headers({ 'cache-control': 'private, no-store', 'content-type': 'application/octet-stream', etag: file.etag, 'x-gitspace-sha256': hash });
   if (file.size !== null) headers.set('content-length', String(file.size));
   return new Response(file.body, { headers });
 }
