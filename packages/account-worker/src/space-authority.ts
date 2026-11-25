@@ -549,7 +549,8 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
       const tip = committed ? await code.resolveRef(source, `refs/heads/${branch}`) : null;
       if (!committed || tip === null || await baseCheckoutHolds(code, repositories, committed, tip)) return this.env.USER_PROJECTS.getByName(this.env.ACCOUNT_ID).put(project);
     } else if (project.revision !== expectedRevision) throw new Error(`Project revision conflict: expected ${expectedRevision}, actual ${project.revision}`);
-    if (project.lifecycle !== 'active') throw new Error('Project must be active to change its base branch');
+    // Cloud-only (the GitSpace project before any machine opens it) is as live as active: its base workspace is in the cloud.
+    if (project.lifecycle !== 'active' && project.lifecycle !== 'cloud-only') throw new Error(`Project must be active to change its base branch; it is ${project.lifecycle}`);
     authorizeWorkspaceRuntime(await this.metadata(identity), identity, false);
     const runtime = await this.loadRuntime(identity);
     const snapshot = await runtime.snapshot();

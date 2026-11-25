@@ -1035,6 +1035,22 @@ describe('cloud workspace lifecycle with no machines', () => {
     expect(notices.mock.calls.at(-1)?.[1]).toBe("Base branch main already holds origin's 2222222.");
   });
 
+  it('moves a cloud-only project\'s base checkout on Update base, as the GitSpace project is before any machine opens it', async () => {
+    const { userId, client, project, artifacts, authority, run } = await cloudProject('Cloud-only base', 'https://github.com/acme/app.git');
+    await authority.setProjectLifecycle((await authority.getProject())!.revision, 'cloud-only');
+    const identity = RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId: project.id });
+    const space = env.SPACE_AUTHORITY.getByName(`${userId}:${project.id}`);
+    await space.runtimeRepositoryCheckpoint(identity);
+    cloudHistory({ [commit('1')]: [], [commit('2')]: [commit('1')] });
+    vi.spyOn(ArtifactsCodeStore.prototype, 'fetchOriginBranch').mockImplementation(async (projectId, _url, branch) => {
+      artifacts.refs.set(`project-${projectId} refs/gitspace/origin/heads/${branch}`, commit('2'));
+      return commit('2');
+    });
+    vi.spyOn(SpaceAuthorityDO.prototype, 'runtimeProjectNotice').mockResolvedValue(undefined);
+    expect(await run(client.project.updateBase({ projectId: project.id }))).toMatchObject({ state: 'succeeded' });
+    expect(await space.runtimeRepositoryCheckpoint(identity)).toMatchObject({ branch: 'main', headCommit: commit('2'), worktreeCommit: commit('2') });
+  });
+
   it('moves the base checkout while a machine is attached to it; the machine follows like any cloud change', async () => {
     const { userId, client, project, artifacts, run } = await cloudProject('Attached base', 'https://github.com/acme/app.git');
     const identity = RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId: project.id });

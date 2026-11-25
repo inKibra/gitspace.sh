@@ -1382,7 +1382,7 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
   setBaseBranch(expectedRevision: number, baseBranch: string, sourceCommit: string): CloudProjectSummary {
     return this.commit('project', null, () => {
       const current = this.requireProject();
-      if (current.lifecycle !== 'active') throw new Error(`Project must be active to change its base branch; it is ${current.lifecycle}`);
+      if (current.lifecycle !== 'active' && current.lifecycle !== 'cloud-only') throw new Error(`Project must be active to change its base branch; it is ${current.lifecycle}`);
       if (current.revision !== expectedRevision) throw new Error(`Project revision conflict: expected ${expectedRevision}, actual ${current.revision}`);
       if (!baseBranch || baseBranch.startsWith('-') || /[\u0000-\u001f\u007f]/u.test(baseBranch)) throw new Error('Invalid base branch');
       if (!/^[0-9a-f]{40}$/u.test(sourceCommit)) throw new Error('Invalid base branch commit');
