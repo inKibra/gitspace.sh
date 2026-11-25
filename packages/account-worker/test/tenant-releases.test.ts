@@ -254,6 +254,19 @@ describe('tenant releases', () => {
     expect(await releases.installRelease()).toMatchObject({ sha: 'trial-two' });
   });
 
+  it('the release an account was created from shows applied once it becomes the default; another adopted release stays pending', async () => {
+    const statusAfterAdopting = async (sha: string) => {
+      const { userId } = await tenant();
+      const releases = env.TENANT_RELEASES.getByName(userId);
+      await releases.stage(canonicalInput(sha), 'machine-a');
+      await releases.adoptDefault(sha);
+      return deploymentStatusSchema.parse(await releases.status(userId, { sha: null, version: null, startupTimeMs: null })).releases.find(release => release.sha === sha)?.status;
+    };
+    // vitest.config.ts stamps this Worker as `test-inference-worker`.
+    expect(await statusAfterAdopting('test-inference-worker')).toMatchObject({ worker: 'applied', frontend: 'applied' });
+    expect(await statusAfterAdopting('not-this-worker')).toMatchObject({ worker: 'pending', frontend: 'pending' });
+  });
+
   it('a launch left running is ended by its building machine restarting, and only by that', async () => {
     const { userId, control } = await tenant();
     const releases = env.TENANT_RELEASES.getByName(userId);

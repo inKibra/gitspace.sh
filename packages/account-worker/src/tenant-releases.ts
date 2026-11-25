@@ -165,10 +165,17 @@ export class TenantReleasesDO extends BudgetedDurableObject {
     return this.ctx.storage.sql.exec<{ sha: string }>('SELECT sha FROM default_release WHERE id = 1').toArray()[0]?.sha ?? null;
   }
 
-  /** An account with no default yet takes `sha`, the published release it was created from; one with a default keeps it. */
+  /** An account with no default yet takes `sha`, the published release it was created from; one with a default keeps it.
+   * The platform created this Worker from that release, and as the default it serves the frontend, so both are applied. */
   adoptDefault(sha: string): void {
     if (this.defaultRelease() !== null) return;
-    if (!this.findRelease(sha)) throw new ReleaseNotFoundError(sha);
+    const record = this.findRelease(sha);
+    if (!record) throw new ReleaseNotFoundError(sha);
+    if (sha === WORKER_VERSION && (record.status.worker === 'pending' || record.status.frontend === 'pending')) {
+      record.status.worker = 'applied';
+      record.status.frontend = 'applied';
+      this.saveRecord(record);
+    }
     this.ctx.storage.sql.exec('INSERT INTO default_release(id, sha) VALUES (1, ?) ON CONFLICT(id) DO NOTHING', sha);
     this.ctx.waitUntil(notifyMachines(this.env, 'all', ['release']));
   }
