@@ -25,7 +25,7 @@ import type { ChatterAuthor, ChatterPost } from '@gitspace/protocol/chatter-cont
 
 const unsupported = async (): Promise<never> => { throw new Error('Unexpected external operation'); };
 
-async function ownerFixture(ctx: DurableObjectState, identity = RuntimeIdentitySchema.parse({ projectId: 'owner-project', workspaceId: 'owner-workspace' }), decide: (input: { args: JsonValue }) => Promise<ProfileDecision> = unsupported) {
+async function ownerFixture(ctx: DurableObjectState, identity = RuntimeIdentitySchema.parse({ projectId: 'owner-project', workspaceId: 'owner-workspace' }), decide: (input: { args: JsonValue }) => Promise<ProfileDecision> = unsupported, loadInstructions: () => Promise<string> = async () => '') {
     const files = new Map([['hello.txt', 'cloud original\n'], ['src/a.ts', 'one\n'], ['src/nested/b.md', 'two\n'], ['other/c.ts', 'three\n']]);
     const trees = new Map<string, ArtifactsTreeEntry[]>();
     const blobs = new Map<string, Blob>();
@@ -60,7 +60,7 @@ async function ownerFixture(ctx: DurableObjectState, identity = RuntimeIdentityS
     };
     let runtime: WorkspaceRuntime | undefined;
     const attachRequests: string[] = [];
-    const services = createRuntimeServices({ ctx, env, identity, images: { store: async image => image, load: async image => image }, runtime: () => { if (!runtime) throw new Error('Runtime not initialized'); return runtime; }, schedule: async () => {}, model: unsupported, generateImage: unsupported, webSearch: unsupported, decide, judge: unsupported, profileId: async () => 'conversation-profile', instructionLoader: { read: unsupported, loadInstructions: async () => '' }, async requestAttachment(machineId) {
+    const services = createRuntimeServices({ ctx, env, identity, images: { store: async image => image, load: async image => image }, runtime: () => { if (!runtime) throw new Error('Runtime not initialized'); return runtime; }, schedule: async () => {}, model: unsupported, generateImage: unsupported, webSearch: unsupported, decide, judge: unsupported, profileId: async () => 'conversation-profile', instructionLoader: { read: unsupported, loadInstructions }, async requestAttachment(machineId) {
       if (!runtime) throw new Error('Runtime not initialized');
       attachRequests.push(machineId);
       return runtime.attachments.requestCache({ ...identity, machineId, checkout: { kind: 'shared', branch: 'main' }, capabilities: [...executorCapabilities] }, true);
@@ -196,6 +196,28 @@ test('every agent carries the gitspace-ui brief and lists the skill, never the w
             expect(disabled).not.toContain('skill://gitspace-ui');
           }
         } finally { await skills.update({ id: 'gitspace-ui', expectedRevision: off.revision, enabled: true, scope: before.scope, exceptions: before.exceptions, assignments: before.assignments }); }
+      } finally { await runtime.harness.close(BACKGROUND_CONTEXT); }
+    });
+  }
+});
+
+test('an agent whose repository instructions cannot be read still gets the block brief and skills, and is told what is missing', async () => {
+  const projectId = `ui-${crypto.randomUUID()}`, workspaceId = `ui-space-${crypto.randomUUID()}`;
+  const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`);
+  await authority.bootstrap({ id: projectId, name: 'Bakery', repositoryReference: null, baseBranch: 'main', createdBy: 'user' });
+  await authority.putWorkspace({ id: workspaceId, projectId, kind: 'worktree', name: 'Menu', branch: 'menu', phase: 'code', sourceKind: 'base', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
+  for (const id of [workspaceId, projectId]) {
+    await runInDurableObject(env.SPACE_AUTHORITY.getByName(`ui-unreadable:${crypto.randomUUID()}`), async (_instance, ctx) => {
+      const unreadable = async (): Promise<string> => { throw new Error('Repository not found: project-bakery'); };
+      const { runtime, root, instructions } = await ownerFixture(ctx, RuntimeIdentitySchema.parse({ projectId, workspaceId: id }), unsupported, unreadable);
+      const child = String(await runtime.harness.commit(async tx => (await tx.createConversation({ ownership: { kind: 'ownerless' } })).id, BACKGROUND_CONTEXT));
+      try {
+        for (const conversation of [String(root.id), child]) {
+          const carried = await instructions(conversation, BACKGROUND_CONTEXT);
+          expect(carried).toContain(UI_BLOCK_BRIEF);
+          expect(carried).toContain('read skill://gitspace-ui');
+          expect(carried).toContain('could not be read: Repository not found: project-bakery');
+        }
       } finally { await runtime.harness.close(BACKGROUND_CONTEXT); }
     });
   }
