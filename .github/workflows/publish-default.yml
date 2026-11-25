@@ -188,4 +188,4 @@ jobs:
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then exit 0; fi
           prerelease=()
           if [[ "$TAG" == *-* ]]; then prerelease=(--prerelease); fi
-          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "GitSpace $TAG" --generate-notes "${prerelease[@]}"
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$COMMIT" --title "GitSpace $TAG" --generate-notes "${prerelease[@]}"
