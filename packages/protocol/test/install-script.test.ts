@@ -35,11 +35,12 @@ const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const step of cleanup.splice(0)) await step(); });
 
 /** Pipes the installer served for `/distribution/v1` of a local origin to `sh -s -- …args`, as `curl … | sh` does.
- * `served` replaces what the account answers for one path. */
-async function install(args: string[], served: Record<string, Uint8Array<ArrayBuffer>> = {}) {
+ * `served` replaces what the account answers for one path; `env` adds to the installer's environment; `home` reuses
+ * an earlier install's home. */
+async function install(args: string[], options: { served?: Record<string, Uint8Array<ArrayBuffer>>; env?: Record<string, string>; home?: string } = {}) {
   const requested: string[] = [];
   const metadata = `${INSTALL_METADATA_MARKER}\nr1\n${'c'.repeat(64)}\nbun ${sha256(archive)} ${archive.byteLength} ${sha256(bun)} ${bun.byteLength} ${member}\ncli ${sha256(client)} ${client.byteLength}\n`;
-  const files: Record<string, Uint8Array<ArrayBuffer>> = { [`/distribution/v1/natives/${sha256(archive)}`]: archive, '/distribution/v1/releases/r1/cli/gitspace.js': client, ...served };
+  const files: Record<string, Uint8Array<ArrayBuffer>> = { [`/distribution/v1/natives/${sha256(archive)}`]: archive, '/distribution/v1/releases/r1/cli/gitspace.js': client, ...options.served };
   const server = Bun.serve({
     hostname: '127.0.0.1', port: 0,
     fetch(request) {
@@ -50,17 +51,17 @@ async function install(args: string[], served: Record<string, Uint8Array<ArrayBu
       return file ? new Response(file) : new Response('Not found', { status: 404 });
     },
   });
-  const home = await mkdtemp(join(tmpdir(), 'gitspace-install-script-'));
+  const home = options.home ?? await mkdtemp(join(tmpdir(), 'gitspace-install-script-'));
   cleanup.push(async () => { server.stop(true); await rm(home, { recursive: true, force: true }); });
   const record = join(home, 'record');
   const child = Bun.spawn(['sh', '-s', '--', ...args], {
     stdin: new Blob([installScript(`http://127.0.0.1:${server.port}/distribution/v1`)]),
-    env: { PATH: process.env.PATH ?? '', HOME: home, GITSPACE_TEST_RECORD: record },
+    env: { PATH: process.env.PATH ?? '', HOME: home, SHELL: '/bin/sh', GITSPACE_TEST_RECORD: record, ...options.env },
     stdout: 'pipe', stderr: 'pipe',
   });
   const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
   return {
-    exitCode, stderr, requested, launcher: join(home, '.local/bin/gitspace'),
+    exitCode, stderr, requested, home, launcher: join(home, '.local/bin/gitspace'),
     bun: join(home, `.local/share/gitspace/bun/${sha256(bun)}/bun`), client: join(home, '.local/share/gitspace/releases/r1/gitspace.js'),
     setup: existsSync(record) ? await readFile(record, 'utf8') : null,
   };
@@ -85,12 +86,12 @@ it('installs without pairing when no token is given', async () => {
 });
 
 it('installs nothing and pairs nothing when Bun or the client is not what the account pinned', async () => {
-  const tampered = await install(['--pair', 'gsp_token'], { [`/distribution/v1/natives/${sha256(archive)}`]: zip(member, encoder.encode('#!/bin/sh\nexit 0\n')) });
+  const tampered = await install(['--pair', 'gsp_token'], { served: { [`/distribution/v1/natives/${sha256(archive)}`]: zip(member, encoder.encode('#!/bin/sh\nexit 0\n')) } });
   expect(tampered.exitCode).not.toBe(0);
   expect(tampered.stderr).toContain('The Bun archive failed SHA256 verification');
   expect(existsSync(tampered.launcher)).toBe(false);
   expect(tampered.setup).toBeNull();
-  const client = await install(['--pair', 'gsp_token'], { '/distribution/v1/releases/r1/cli/gitspace.js': encoder.encode('console.log("other");\n') });
+  const client = await install(['--pair', 'gsp_token'], { served: { '/distribution/v1/releases/r1/cli/gitspace.js': encoder.encode('console.log("other");\n') } });
   expect(client.exitCode).not.toBe(0);
   expect(client.stderr).toContain('The client failed SHA256 verification');
   expect(existsSync(client.launcher)).toBe(false);
@@ -100,4 +101,40 @@ it('refuses a label without a pairing token before downloading anything', async 
   const result = await install(['--label', 'Desk']);
   expect(result.exitCode).not.toBe(0);
   expect(result.requested).toEqual([]);
+});
+
+/** Whether `gitspace` resolves in a new shell session that reads `profile`. */
+async function resolvesAfterSourcing(home: string, profile: string) {
+  const child = Bun.spawn(['sh', '-c', `. '${profile}' && command -v gitspace`], { env: { PATH: '/usr/bin:/bin', HOME: home }, stdout: 'pipe' });
+  return (await child.exited) === 0 ? (await new Response(child.stdout).text()).trim() : null;
+}
+
+it('puts the launcher on PATH for new zsh sessions once, however often it runs', async () => {
+  const first = await install([], { env: { SHELL: '/bin/zsh' } });
+  expect(first.exitCode).toBe(0);
+  const zshrc = join(first.home, '.zshrc');
+  expect(await resolvesAfterSourcing(first.home, zshrc)).toBe(first.launcher);
+  const written = await readFile(zshrc, 'utf8');
+  expect((await install([], { env: { SHELL: '/bin/zsh' }, home: first.home })).exitCode).toBe(0);
+  expect(await readFile(zshrc, 'utf8')).toBe(written);
+});
+
+it('keeps a bash startup file\'s other settings, appending after them', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'gitspace-install-script-'));
+  const profile = join(home, process.platform === 'darwin' ? '.bash_profile' : '.bashrc');
+  await Bun.write(profile, 'export EDITOR=vi\n');
+  const result = await install([], { env: { SHELL: '/bin/bash' }, home });
+  expect(result.exitCode).toBe(0);
+  expect(await readFile(profile, 'utf8')).toStartWith('export EDITOR=vi\n');
+  expect(await resolvesAfterSourcing(home, profile)).toBe(result.launcher);
+});
+
+it('changes no startup file when asked not to, or when the launcher is already on PATH', async () => {
+  const declined = await install([], { env: { SHELL: '/bin/zsh', GITSPACE_NO_MODIFY_PATH: '1' } });
+  expect(declined.exitCode).toBe(0);
+  expect(existsSync(join(declined.home, '.zshrc'))).toBe(false);
+  const home = await mkdtemp(join(tmpdir(), 'gitspace-install-script-'));
+  const onPath = await install([], { env: { SHELL: '/bin/zsh', PATH: `${join(home, '.local/bin')}:${process.env.PATH ?? ''}` }, home });
+  expect(onPath.exitCode).toBe(0);
+  expect(existsSync(join(home, '.zshrc'))).toBe(false);
 });

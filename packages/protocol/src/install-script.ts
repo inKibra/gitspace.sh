@@ -36,8 +36,10 @@ export function parseInstallMetadata(text: string): InstallMetadata {
  * the platform's pinned Bun (its upstream archive's SHA-256 and size, and the executable's inside it) and the release's
  * client (`cli/gitspace.js`); each download is checked against them before anything is replaced. It installs Bun under
  * `~/.local/share/gitspace/bun/<sha256>/`, the client under `~/.local/share/gitspace/releases/<release>/`, and
- * `~/.local/bin/gitspace` running that client on that Bun. `sh -s -- --pair <token> [--label <label>]` then links the
- * computer with `gitspace machine setup`, which builds the machine runtime from the same release.
+ * `~/.local/bin/gitspace` running that client on that Bun. When that directory is not on PATH it adds it to the login
+ * shell's startup file (`.zshrc`, `.bash_profile` on macOS or `.bashrc`, fish's `conf.d`, else `.profile`) once, unless
+ * GITSPACE_NO_MODIFY_PATH is set. `sh -s -- --pair <token> [--label <label>]` then links the computer with
+ * `gitspace machine setup`, which builds the machine runtime from the same release.
  */
 export function installScript(distributionUrl: string): string {
   return `#!/bin/sh
@@ -158,7 +160,30 @@ mv -f "\${staging}/gitspace" "\${install_dir}/gitspace"
 printf 'Installed GitSpace %s (%s) at %s/gitspace\\n' "$release" "$platform" "$install_dir"
 case ":\${PATH}:" in
   *":\${install_dir}:"*) ;;
-  *) printf 'Add %s to PATH to run gitspace.\\n' "$install_dir" ;;
+  *)
+    if [ -n "\${GITSPACE_NO_MODIFY_PATH:-}" ]; then
+      printf 'Add %s to PATH to run gitspace.\\n' "$install_dir"
+    else
+      # Under HOME the line names $HOME, so a startup file shared between computers stays correct.
+      path_dir=$install_dir
+      case "$install_dir" in "$HOME"/*) path_dir='$HOME'"\${install_dir#"$HOME"}" ;; esac
+      case "\${SHELL:-}" in
+        */zsh) profile="\${ZDOTDIR:-$HOME}/.zshrc" ;;
+        */bash) if [ "$os" = darwin ]; then profile="$HOME/.bash_profile"; else profile="$HOME/.bashrc"; fi ;;
+        */fish) profile="\${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d/gitspace.fish" ;;
+        *) profile="$HOME/.profile" ;;
+      esac
+      case "$profile" in
+        *.fish) line="fish_add_path \\"$path_dir\\"" ;;
+        *) line="export PATH=\\"$path_dir:\\$PATH\\"" ;;
+      esac
+      if [ ! -f "$profile" ] || ! grep -qxF "$line" "$profile"; then
+        mkdir -p "\${profile%/*}"
+        printf '\\n# Added by the GitSpace installer\\n%s\\n' "$line" >> "$profile"
+      fi
+      printf 'New terminals find gitspace through %s. In this one, run: export PATH="%s:$PATH"\\n' "$profile" "$install_dir"
+    fi
+    ;;
 esac
 if [ -z "$pair" ]; then
   printf 'Machine pairing is optional; run the pairing command shown in your account (Settings, Machines, Add a computer).\\n'
