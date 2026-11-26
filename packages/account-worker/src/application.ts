@@ -3471,7 +3471,8 @@ async function releaseDataObjectResponse(request: Request, env: Env, signed: Sig
     if (named[2] === 'frontend.manifest.json') {
       const { manifest } = await publishedRelease(env, { pin: published.pin });
       const body = JSON.stringify({ files: manifest.frontend.files.map(file => ({ path: file.path, hash: `sha256:${file.sha256}`, size: file.size })) });
-      const headers = new Headers({ 'cache-control': 'private, no-store', 'content-type': 'application/json', 'content-length': String(new TextEncoder().encode(body).byteLength), 'x-gitspace-sha256': `sha256:${await sha256Hex(body)}` });
+      // As every release file: a compressed answer (Cloudflare compresses JSON) loses the length the machine checks.
+      const headers = new Headers({ 'cache-control': 'private, no-store', 'content-type': 'application/octet-stream', 'content-length': String(new TextEncoder().encode(body).byteLength), 'x-gitspace-sha256': `sha256:${await sha256Hex(body)}` });
       return new Response(operation === 'data.head' ? null : body, { headers });
     }
     if (!published.portableKey?.endsWith(`/${PORTABLE_MANIFEST_FILE}`)) return new Response(null, { status: 404 });
