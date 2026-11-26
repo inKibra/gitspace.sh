@@ -26,6 +26,9 @@ const REPOSITORY_READS = 16;
  * error occurred.", and one such failure otherwise failed the whole publication on every retry. Each read is tried
  * this many times, waiting 250 ms, 0.5 s, 1 s and 2 s between tries, before its error stands. */
 const READ_ATTEMPTS = 5;
+/** Creates of a machine seed target tried while a refused import still holds its name, waiting 0.5 s, 1 s, 2 s and 4 s
+ * between tries. */
+const SEED_CREATE_ATTEMPTS = 5;
 type RepositoryReads = Pick<ArtifactsRepo, 'readTree' | 'readBlob' | 'readCommit' | 'info' | 'createToken' | 'revokeToken'>;
 /** One Artifacts read, tried up to READ_ATTEMPTS times; the error that stands names the call and the object, since the
  * provider's own message names neither. */
@@ -395,18 +398,28 @@ export class ArtifactsCodeStore {
     if (await this.find(name)) return this.info(name);
     // An unresolved gitspace-source branch is recorded as 'HEAD', never a branch name.
     const description = `GitSpace machine-seeded project ${projectId} (${branch})${refusal === null ? '' : `: ${refusal}`}`;
-    const created = await this.binding.create(name, { ...(branch === 'HEAD' ? {} : { setDefaultBranch: branch }), readOnly: false, description })
-      .catch((error: unknown) => {
-        // A concurrent seed or cloud import created it first; it is not ours to initialize.
-        if (ArtifactsAlreadyExistsSchema.safeParse(error).success) return null;
-        throw error;
-      });
-    if (created === null) return this.info(name);
-    const repo = await this.binding.get(name);
-    try {
-      await repo.revokeToken(created.token);
-      return await repo.info();
-    } finally { await disposeArtifactsRepository(repo); }
+    for (let attempt = 1; ; attempt++) {
+      const created = await this.binding.create(name, { ...(branch === 'HEAD' ? {} : { setDefaultBranch: branch }), readOnly: false, description })
+        .catch((error: unknown) => {
+          if (ArtifactsAlreadyExistsSchema.safeParse(error).success) return null;
+          throw error;
+        });
+      if (created !== null) {
+        const repo = await this.binding.get(name);
+        try {
+          await repo.revokeToken(created.token);
+          return await repo.info();
+        } finally { await disposeArtifactsRepository(repo); }
+      }
+      // A concurrent seed or cloud import created it first; it is not ours to initialize.
+      if (await this.find(name)) return this.info(name);
+      // An import Artifacts just refused still holds the name: create answers ALREADY_EXISTS while the repository is
+      // neither listed nor readable, for under 2 s (measured 2026-11-26). Every refused import is followed by this call.
+      if (attempt >= SEED_CREATE_ATTEMPTS) throw new Error(`Artifacts still holds ${name} after a refused import; try again shortly`);
+      const { promise, resolve } = Promise.withResolvers<void>();
+      setTimeout(resolve, 500 * 2 ** (attempt - 1));
+      await promise;
+    }
   }
 
   /** Seed a migrated base's canonical source from its committed HEAD, never its index/worktree.
