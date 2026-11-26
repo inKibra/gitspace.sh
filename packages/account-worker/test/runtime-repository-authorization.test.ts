@@ -9,6 +9,7 @@ import { GitHubAppDO } from '../src/github-app.js';
 import { runtimeMachineControl } from '../src/account-runtime-control.js';
 import { SpaceAuthorityDO } from '../src/space-authority.js';
 import { tenantRootPrivateKey } from './setup.js';
+import { importedProjectRepository } from '../src/cloud-workspace-lifecycle.js';
 
 const projectId = 'repository-project';
 const workspaceId = 'repository-workspace';
@@ -171,6 +172,25 @@ describe('signed repository credential authority', () => {
       await expect(request('assigned', { workspaceId, generation: 0 })).rejects.toThrow('Repository lease requires current checkout ownership');
       await expect(request('unassigned', { repository: `workspace-${workspaceId}` })).rejects.toThrow('Repository lease requires current checkout ownership');
     });
+  });
+
+  it('stops showing a refused import once a machine copied the repository in', async () => {
+    const f = await fixture(['storage.access'], 'https://github.com/acme-labs/widgets.git', false);
+    const project = (await f.project.getProject())!;
+    const imported = vi.spyOn(ArtifactsCodeStore.prototype, 'projectImported').mockResolvedValue(false);
+    const importing = vi.spyOn(ArtifactsCodeStore.prototype, 'importProject').mockRejectedValue(new Error('This repository is private'));
+    await expect(importedProjectRepository(env, project)).rejects.toThrow('This repository is private');
+    expect((await f.project.visibleOperations()).filter(operation => operation.kind === 'project.import').map(operation => operation.state)).toEqual(['failed']);
+    // A machine copied the base branch in: the next lease queues an import that completes from the copy.
+    imported.mockResolvedValue(true);
+    importing.mockResolvedValue(repository);
+    await importedProjectRepository(env, project);
+    await vi.waitFor(async () => {
+      expect((await f.project.visibleOperations()).filter(operation => operation.kind === 'project.import').map(operation => operation.state)).toEqual(['succeeded']);
+    }, { timeout: 10_000 });
+    // With nothing failed left, a lease adds no operation.
+    await importedProjectRepository(env, project);
+    expect((await f.project.visibleOperations()).filter(operation => operation.kind === 'project.import')).toHaveLength(1);
   });
 });
 
