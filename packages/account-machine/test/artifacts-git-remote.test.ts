@@ -504,6 +504,32 @@ done
   expect(git(f.remote, 'for-each-ref', 'refs/gitspace/staging/')).toBe('');
 });
 
+it('sends a single commit too large for one push as its blobs first, then the commit, leaving no staging ref', async () => {
+  const f = fixture();
+  // A repository's base-branch tip copied in as one commit: 134.1 MiB in one push against Artifacts' 64 MiB.
+  for (let index = 0; index < 10; index++) writeFileSync(join(f.root, `file-${index}`), `content ${index}`);
+  git(f.root, 'add', ...Array.from({ length: 10 }, (_, index) => `file-${index}`)); git(f.root, 'commit', '-qm', 'tip');
+  const tip = git(f.root, 'rev-parse', 'HEAD');
+  // This remote takes at most 3 blobs a push, counted in the pack it received, and says so the way Artifacts does.
+  git(f.remote, 'config', 'receive.unpackLimit', '1');
+  const log = join(f.root, 'received');
+  const hook = join(f.remote, 'hooks/pre-receive');
+  writeFileSync(hook, `#!/bin/sh
+count=$(for index in "$GIT_QUARANTINE_PATH"/pack/*.idx; do [ -f "$index" ] && git verify-pack -v "$index"; done | grep -c ' blob ')
+echo "$count" >> '${log}'
+if [ "$count" -gt 3 ]; then echo "unpack artifacts_git_receive_pack_request_too_large: push carries $count blobs, limit is 3" >&2; exit 1; fi
+`);
+  chmodSync(hook, 0o755);
+  await f.publishBranch(tip);
+  expect(git(f.remote, 'rev-parse', 'refs/heads/main')).toBe(tip);
+  expect(git(f.remote, 'ls-tree', '-r', '--name-only', 'refs/heads/main').split('\n')).toHaveLength(10);
+  expect(git(f.remote, 'for-each-ref', 'refs/gitspace/staging/')).toBe('');
+  // The whole commit and then all 10 blobs were refused, halves until 3 fit, and the commit itself carried none.
+  const received = readFileSync(log, 'utf8').trim().split('\n').map(Number);
+  expect(received.at(-1)).toBe(0);
+  expect(received.filter(count => count > 0 && count <= 3).reduce((sum, count) => sum + count, 0)).toBe(10);
+});
+
 it('sends history below the remote\'s unadvertised shallow boundary when a push merging it is refused', async () => {
   const f = fixture();
   // The boundary discovery fetches from a scratch repository, which needs the remote's address rewrite too.

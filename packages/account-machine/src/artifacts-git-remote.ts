@@ -130,7 +130,7 @@ async function pushToArtifacts(input: ArtifactsPush): Promise<void> {
   try { await pushPack(input); }
   catch (error) {
     if (!(error instanceof ArtifactsGitError) || artifactsPushRefusal(error.message) !== 'too-large') throw error;
-    await pushInSteps(input, error);
+    await pushInSteps(input);
   }
 }
 
@@ -157,10 +157,10 @@ async function pushPack(input: ArtifactsPush): Promise<void> {
  * every parent's history included (a merge brings the merged branch's), go in steps, each carrying fewer commits after a
  * further refusal (`smallerArtifactsPush`), and then the ref itself moves, sending little more. A step reaches the
  * remote through staging refs at its commits that no other commit of the step descends from; every staging ref stays
- * until the ref has moved, so each push sends only what earlier ones did not. The whole history stays linked. A single
- * commit too large for one push is refused.
+ * until the ref has moved, so each push sends only what earlier ones did not. The whole history stays linked. A step of
+ * one commit still too large sends that commit's blobs ahead of it (`pushBlobsInParts`).
  */
-async function pushInSteps(input: ArtifactsPush, refused: ArtifactsGitError): Promise<void> {
+async function pushInSteps(input: ArtifactsPush): Promise<void> {
   const source = input.refspec.slice(input.refspec.startsWith('+') ? 1 : 0, input.refspec.lastIndexOf(':'));
   const commit = (await git(input.repositoryPath, ['rev-parse', '--verify', `${source}^{commit}`])).trim();
   const held = (await git(input.repositoryPath, ['ls-remote', input.remote], input.auth)).split('\n')
@@ -168,11 +168,15 @@ async function pushInSteps(input: ArtifactsPush, refused: ArtifactsGitError): Pr
   // Each line: a commit, then its parents.
   const commits = (await git(input.repositoryPath, ['rev-list', '--topo-order', '--reverse', '--parents', '--ignore-missing', commit, ...(held.length ? ['--not', ...held] : [])], input.shallow))
     .split('\n').filter(Boolean).map(line => line.split(' '));
-  let size = smallerArtifactsPush(commits.length);
-  if (size === null) throw refused;
+  let size = smallerArtifactsPush(commits.length) ?? 1;
   const staging = `refs/gitspace/staging/${crypto.randomUUID()}`;
   const refs: string[] = [];
+  // Commits whose blobs went ahead of them: a push of one refused again after that stands.
+  const parted = new Set<string>();
   try {
+    // A lone commit was just refused whole.
+    const [lone] = commits;
+    if (commits.length === 1 && lone) { await pushBlobsInParts(input, lone, staging, refs); parted.add(lone[0]!); }
     for (let sent = 0; sent < commits.length;) {
       const step = commits.slice(sent, sent + size);
       const parents = new Set(step.flatMap(([, ...of]) => of));
@@ -186,14 +190,63 @@ async function pushInSteps(input: ArtifactsPush, refused: ArtifactsGitError): Pr
       } catch (error) {
         if (!(error instanceof ArtifactsGitError) || artifactsPushRefusal(error.message) !== 'too-large') throw error;
         const smaller = smallerArtifactsPush(size);
-        if (smaller === null) throw error;
-        size = smaller;
+        if (smaller !== null) { size = smaller; continue; }
+        const [single] = step;
+        if (!single || parted.has(single[0]!)) throw error;
+        await pushBlobsInParts(input, single, staging, refs);
+        parted.add(single[0]!);
       }
     }
     await pushPack(input);
   } finally {
-    // Staging refs hold only history the pushed ref holds too; one left behind changes nothing.
+    // Staging refs hold only objects the pushed ref holds too; one left behind changes nothing.
     if (refs.length) await git(input.repositoryPath, [...PUSH, input.remote, ...refs.map(ref => `:${ref}`)], input.auth).catch(() => undefined);
+  }
+}
+
+/** Raw blob bytes one staging part of a commit carries at most, well under Artifacts' 64 MiB per push. */
+const PART_BYTES = 32 * 1024 * 1024;
+
+/**
+ * The blobs `commit` adds over its `parents`, pushed ahead of it to staging refs in parts: each part a parentless
+ * commit whose flat tree names its blobs by id, PART_BYTES of them at most and halved after a refusal. The commit's own
+ * push then sends its trees and little more: a push with a shallow boundary (git's `pack-objects --shallow`) counts
+ * every staged tree as held, which an ordinary push does not. A single blob Artifacts refuses stays refused. A 134.1
+ * MiB base-branch tip of one commit (2026-11-26) could not be pushed otherwise.
+ */
+async function pushBlobsInParts(input: ArtifactsPush, [commit, ...parents]: string[], staging: string, refs: string[]): Promise<void> {
+  const repository = input.repositoryPath;
+  const added = new Set((await git(repository, ['rev-list', '--objects', '--no-object-names', '--ignore-missing', commit!, ...(parents.length ? ['--not', ...parents] : [])], input.shallow)).split('\n'));
+  const blobs = new Map<string, number>();
+  // `<mode> <type> <oid> <size>\t<path>`
+  for (const entry of (await git(repository, ['ls-tree', '-r', '-l', '-z', '--full-tree', commit!], input.shallow)).split('\0')) {
+    const [, type, oid, size] = entry.slice(0, entry.indexOf('\t')).split(/\s+/u);
+    if (type === 'blob' && oid && added.has(oid)) blobs.set(oid, Number(size));
+  }
+  const parts: string[][] = [];
+  let bytes = PART_BYTES;
+  for (const [oid, size] of blobs) {
+    if (bytes + size > PART_BYTES) { parts.push([]); bytes = 0; }
+    parts.at(-1)!.push(oid);
+    bytes += size;
+  }
+  const author = { GIT_AUTHOR_NAME: 'GitSpace', GIT_AUTHOR_EMAIL: 'staging@gitspace.invalid', GIT_COMMITTER_NAME: 'GitSpace', GIT_COMMITTER_EMAIL: 'staging@gitspace.invalid' };
+  for (let part = parts.shift(); part; part = parts.shift()) {
+    const mktree = Bun.spawn(['git', 'mktree', '-z'], {
+      cwd: repository, env: { ...Bun.env, ...input.shallow }, stdout: 'pipe', stderr: 'pipe',
+      stdin: new Blob([part.map(oid => `100644 blob ${oid}\t${oid}\0`).join('')]),
+    });
+    const [exitCode, tree, stderr] = await Promise.all([mktree.exited, new Response(mktree.stdout).text(), new Response(mktree.stderr).text()]);
+    if (exitCode !== 0) throw new ArtifactsGitError('mktree', stderr.trim() || `exited with ${exitCode}`);
+    const staged = await git(repository, ['commit-tree', tree.trim(), '-m', 'GitSpace staging'], { ...input.shallow, ...author });
+    const ref = `${staging}/${refs.length}`;
+    try {
+      await pushPack({ ...input, refspec: `${staged}:${ref}`, force: true });
+      refs.push(ref);
+    } catch (error) {
+      if (!(error instanceof ArtifactsGitError) || artifactsPushRefusal(error.message) !== 'too-large' || part.length === 1) throw error;
+      parts.unshift(part.slice(0, part.length / 2), part.slice(part.length / 2));
+    }
   }
 }
 
