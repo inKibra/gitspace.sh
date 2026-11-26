@@ -1,3 +1,4 @@
+import { accountUrl, domainsFromSettings, relayUrl, type GitSpaceDomains } from '@gitspace/protocol-environment/domains';
 import {
   WORKER_MANIFEST_FILE,
   WORKER_STARTUP_LIMIT_MS,
@@ -105,7 +106,7 @@ export function scriptUploadMetadata(
   metadata: WorkerReleaseMetadata,
   migrations: MigrationUpload | null,
   tags: string[],
-  tenant: { id: string; accountId: string; rootPublicKey: string; blobBucket: string; platformUrl: string; platformService: string; token: string; publicAssetsService: string; releaseChannelService: string },
+  tenant: { id: string; accountId: string; rootPublicKey: string; blobBucket: string; platformUrl: string; platformService: string; token: string; publicAssetsService: string; releaseChannelService: string; domains: GitSpaceDomains },
 ): ScriptUploadMetadata {
   const bindings: ScriptUploadMetadata['bindings'] = metadata.durableObjects.map(binding => ({ type: 'durable_object_namespace', name: binding.name, class_name: binding.className }));
   const names = new Set(bindings.map(binding => binding.name));
@@ -130,8 +131,10 @@ export function scriptUploadMetadata(
       case 'account-id': value = tenant.accountId; break;
       case 'root-public-key': value = tenant.rootPublicKey; break;
       case 'platform-url': value = tenant.platformUrl; break;
-      case 'application-url': value = 'https://' + tenant.id + '.gitspace.sh'; break;
-      case 'transport-url': value = 'https://' + tenant.id + '.gssh.dev'; break;
+      case 'application-url': value = accountUrl(tenant.domains, tenant.id); break;
+      case 'transport-url': value = relayUrl(tenant.domains, tenant.id); break;
+      case 'account-domain': value = tenant.domains.account; break;
+      case 'service-domain': value = tenant.domains.service; break;
       case 'literal': if (resource.value === undefined) throw new Error('Literal binding value is required'); value = resource.value; break;
       // A source from a release built by newer code than this deployer: bound by nothing here, so the release is
       // deployed without it rather than refused.
@@ -442,6 +445,7 @@ async function swap(env: Env, tenant: string, records: DeploymentRecords, state:
     blobBucket: tenantConfig.blobBucket,
     publicAssetsService: env.PUBLIC_ASSETS_SERVICE,
     releaseChannelService: env.RELEASE_CHANNEL_SERVICE,
+    domains: domainsFromSettings(env),
   });
   const uploaded = await uploadScript(env, tenant, candidate.sha, candidate.workerKey, uploadMetadata);
   if (uploaded.status === 'error') return uploaded;
@@ -462,7 +466,7 @@ async function swap(env: Env, tenant: string, records: DeploymentRecords, state:
       fallback.metadata,
       fallbackDelta,
       [tenant, fallback.sha],
-      { id: tenant, accountId, token, platformUrl: env.PLATFORM_URL, platformService: env.PLATFORM_SERVICE_NAME, rootPublicKey: tenantConfig.rootPublicKey, blobBucket: tenantConfig.blobBucket, publicAssetsService: env.PUBLIC_ASSETS_SERVICE, releaseChannelService: env.RELEASE_CHANNEL_SERVICE },
+      { id: tenant, accountId, token, platformUrl: env.PLATFORM_URL, platformService: env.PLATFORM_SERVICE_NAME, rootPublicKey: tenantConfig.rootPublicKey, blobBucket: tenantConfig.blobBucket, publicAssetsService: env.PUBLIC_ASSETS_SERVICE, releaseChannelService: env.RELEASE_CHANNEL_SERVICE, domains: domainsFromSettings(env) },
     ));
     if (fallbackUploaded.status === 'error') {
       console.error(JSON.stringify({ event: 'deploy-revert-rejected', tenant, sha: candidate.sha, message: fallbackUploaded.error.message }));
@@ -568,7 +572,7 @@ export async function deployTenantWorker(env: Env, tenant: string, request: Plat
   const tenantWorker = env.DISPATCHER.get(`${env.DISPATCH_NAMESPACE}-tenant-${tenant}`);
   const token = await env.DEPLOYMENTS.getByName(tenant).providerToken();
   const read: ObjectReader = async key => {
-    const response = await tenantWorker.fetch(new Request(`https://${tenant}.gitspace.sh/__platform/objects/${key.split('/').map(encodeURIComponent).join('/')}`, { headers: { authorization: `Bearer ${token}` } }));
+    const response = await tenantWorker.fetch(new Request(`${accountUrl(domainsFromSettings(env), tenant)}/__platform/objects/${key.split('/').map(encodeURIComponent).join('/')}`, { headers: { authorization: `Bearer ${token}` } }));
     if (response.ok && response.body) return response.body;
     await response.body?.cancel();
     return null;

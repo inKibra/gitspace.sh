@@ -1,3 +1,4 @@
+import { accountUrl, domainsFromSettings, handleOfAccountHostname, relayUrl, siteUrl, type GitSpaceDomains } from '@gitspace/protocol-environment/domains';
 import { credentialProtocolBase64 } from '@gitspace/protocol/credential-vault';
 import { verifyRelayAuthorization } from '@gitspace/protocol/relay';
 import { PlatformStorageActionSchema, platformObjectStorage } from './storage-quarantine.js';
@@ -42,17 +43,17 @@ function tenantFromHostname(hostname: string, suffix: string): TenantDispatchTar
 }
 
 /**
- * `*.gitspace.sh` labels that reach this Worker through the zone's wildcard route but are not tenants: `www` goes to the
- * site at the apex. (`api.gitspace.sh` has its own route and custom domain on the auth Worker, so it never arrives here.)
+ * Labels of the account domain that reach this Worker through the zone's wildcard route but are not tenants: `www` goes
+ * to the site at the apex. (`api.<account domain>` has its own route and custom domain on the auth Worker, so it never
+ * arrives here.)
  */
-const PLATFORM_RESERVED_GITSPACE_LABELS = new Set(['www']);
-const GITSPACE_ZONE_HOSTNAME = /^([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\.(gitspace\.sh)$/u;
+const PLATFORM_RESERVED_ACCOUNT_LABELS = new Set(['www']);
 
 /** Sends a reserved platform hostname to the platform's own site for the zone; null for a tenant hostname. */
-function canonicalPlatformRedirect(url: URL): Response | null {
-  const match = GITSPACE_ZONE_HOSTNAME.exec(url.hostname.toLowerCase());
-  if (!match || !PLATFORM_RESERVED_GITSPACE_LABELS.has(match[1]!)) return null;
-  return Response.redirect(new URL(`${url.pathname}${url.search}`, `https://${match[2]!}`).toString(), 308);
+function canonicalPlatformRedirect(url: URL, domains: GitSpaceDomains): Response | null {
+  const label = handleOfAccountHostname(domains, url.hostname);
+  if (label === null || !PLATFORM_RESERVED_ACCOUNT_LABELS.has(label)) return null;
+  return Response.redirect(new URL(`${url.pathname}${url.search}`, siteUrl(domains)).toString(), 308);
 }
 
 function platformError(status: number, code: string, message: string): Response {
@@ -115,7 +116,8 @@ async function handleTenantBootstrap(request: Request, env: Env, tenant: string)
     const current = await deployments.getState();
     const deployed: DeployResult = current.active ? { status: 'ok', value: { sha: current.active.sha, healthy: current.active.healthy, revertedTo: null, appliedMigrationTag: current.appliedMigrationTag, startupTimeMs: current.active.startupTimeMs } } : await deployments.deploy(tenant, { kind: 'bootstrap' }, null);
     if (deployed.status === 'error') return platformError(deployed.error.status, deployed.error.code, deployed.error.message);
-    return Response.json({ tenant, relayUrl: 'https://' + tenant + env.TENANT_HOST_SUFFIX, accountUrl: 'https://' + tenant + '.gitspace.sh', deployment: deployed.value });
+    const domains = domainsFromSettings(env);
+    return Response.json({ tenant, relayUrl: relayUrl(domains, tenant), accountUrl: accountUrl(domains, tenant), deployment: deployed.value });
   } catch (error) { return platformError(409, 'TENANT_PROVISIONING_FAILED', error instanceof Error ? error.message : 'Tenant provisioning failed'); }
 }
 
@@ -473,10 +475,11 @@ export default {
     const operatorTenantMatch = OPERATOR_TENANT_PATH.exec(url.pathname);
     if (operatorTenantMatch) return handleOperatorTenant(request, env, operatorTenantMatch[1]!);
 
-    const canonical = canonicalPlatformRedirect(url);
+    const domains = domainsFromSettings(env);
+    const canonical = canonicalPlatformRedirect(url, domains);
     if (canonical) return canonical;
 
-    const target = tenantFromHostname(url.hostname, env.TENANT_HOST_SUFFIX) ?? tenantFromHostname(url.hostname, '.gitspace.sh');
+    const target = tenantFromHostname(url.hostname, `.${domains.service}`) ?? tenantFromHostname(url.hostname, `.${domains.account}`);
     if (!target) return platformError(404, 'TENANT_NOT_FOUND', 'Tenant hostname is not registered');
     const tenant = target.tenant;
     try {

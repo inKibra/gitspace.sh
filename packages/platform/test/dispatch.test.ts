@@ -28,7 +28,7 @@ function dispatchFixture(tenant: string, route: 'tenant' | 'service' | 'applicat
       get() { return { async fetch() { return upstream; } }; },
     } as unknown as DispatchNamespace,
   };
-  const hostname = route === 'tenant' ? `${tenant}-test.invalid` : route === 'application' ? `${tenant}.gitspace.sh` : `web--space-a--${tenant}-srv-test.invalid`;
+  const hostname = route === 'tenant' ? `${tenant}.gssh.dev` : route === 'application' ? `${tenant}.gitspace.sh` : `web--space-a--${tenant}-srv.gssh.dev`;
   const request: Request = new Request(`https://${hostname}/health`, upgrade ? { headers: { upgrade: 'websocket' } } : undefined);
   return { bindings, request, pair };
 }
@@ -180,7 +180,7 @@ describe('dispatch without billing authorization', () => {
       DISPATCHER: { get() { return { async fetch() { throw new Error(message); } }; } } as unknown as DispatchNamespace,
     };
     const ctx = createExecutionContext();
-    const response = await worker.fetch(new Request(`https://${tenant}-test.invalid/health`, upgrade ? { headers: { upgrade: 'websocket' } } : undefined), bindings, ctx);
+    const response = await worker.fetch(new Request(`https://${tenant}.gssh.dev/health`, upgrade ? { headers: { upgrade: 'websocket' } } : undefined), bindings, ctx);
     expect(response.status).toBe(status);
     expect(await response.json()).toMatchObject({ error: { code } });
     await waitOnExecutionContext(ctx);

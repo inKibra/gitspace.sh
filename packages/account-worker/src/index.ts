@@ -1,3 +1,4 @@
+import { accountUrl, DOMAINS_PATH, domainsFromSettings } from '@gitspace/protocol-environment/domains';
 import { accountStatus } from './account-access.js';
 import { DEVICE_AUTHORITY_UNAVAILABLE, DEVICE_AUTHORITY_UNAVAILABLE_MESSAGE, deviceAuthority, withDeviceAuthority } from './device-authority.js';
 import { runtimeFailureReporter } from './runtime-failures.js';
@@ -996,7 +997,7 @@ export class UserRelayDO extends BudgetedDurableObject {
   }
 
   private tunnelCors(response: Response, origin: string | null): Response {
-    const allowedOrigin = `https://${this.env.RELAY_NAME}.gitspace.sh`;
+    const allowedOrigin = accountUrl(domainsFromSettings(this.env), this.env.RELAY_NAME);
     if (origin === allowedOrigin) {
       response.headers.set('access-control-allow-origin', allowedOrigin);
       response.headers.append('vary', 'origin');
@@ -1339,6 +1340,10 @@ export default {
       if (applicationAuthorization) headers.set('authorization', applicationAuthorization);
       return fetchInternalService(env, { kind: 'device', accountId: env.ACCOUNT_ID, deviceId: machineId }, new Request(targetUrl, { method: request.method, headers, body: request.body, signal: request.signal }));
     }
+    // The install's domains, for the browser app this Worker serves (public: they are in every URL it hands out).
+    if (url.pathname === DOMAINS_PATH && request.method === 'GET') {
+      return Response.json(domainsFromSettings(env), { headers: { 'cache-control': 'public, max-age=300' } });
+    }
     if (url.pathname === '/health' || url.pathname === '/healthz') {
       return Response.json(
         { status: 'ok', protocolVersion: RELAY_PROTOCOL_VERSION },
@@ -1351,7 +1356,7 @@ export default {
     const tunnel = tunnelTarget(url);
     if (tunnel && request.method === 'OPTIONS') {
       const origin = request.headers.get('origin');
-      const allowedOrigin = `https://${env.RELAY_NAME}.gitspace.sh`;
+      const allowedOrigin = accountUrl(domainsFromSettings(env), env.RELAY_NAME);
       if (origin !== allowedOrigin) return jsonError(403, 'ORIGIN_REJECTED', 'Tunnel origin is not allowed');
       return new Response(null, {
         status: 204,

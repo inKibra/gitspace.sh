@@ -1,3 +1,4 @@
+import { accountUrl, domainsFromSettings } from '@gitspace/protocol-environment/domains';
 import { z } from 'zod';
 import { durableObjectNamespaces, queryAccount, type DurableObjectNamespaceEntry } from './usage-report.js';
 import { platformObjectStorage } from './storage-quarantine.js';
@@ -157,7 +158,7 @@ export async function runStorageWatchdog(env: Env, scheduledTime: number): Promi
       if (input.action === 'alert' || input.action === 'healthy') return null;
       return platformObjectStorage(env, { objectId, action: input.action, ...(input.action === 'quarantine' ? { reason: input.reason } : {}) });
     }
-    const response = await env.DISPATCHER.get(`${tenantPrefix}${who.tenant}`).fetch(new Request(`https://${who.tenant}.gitspace.sh/__platform/storage`, {
+    const response = await env.DISPATCHER.get(`${tenantPrefix}${who.tenant}`).fetch(new Request(`${accountUrl(domainsFromSettings(env), who.tenant)}/__platform/storage`, {
       method: 'POST',
       headers: { authorization: `Bearer ${await env.DEPLOYMENTS.getByName(who.tenant).providerToken()}`, 'content-type': 'application/json' },
       body: JSON.stringify({ objectId, className: who.className, ...input }),

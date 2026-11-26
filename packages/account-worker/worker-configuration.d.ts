@@ -34,6 +34,9 @@ interface Env {
   RELAY_NAME: string;
   ACCOUNT_URL: string;
   RELAY_URL: string;
+  /** The install's domains (`@gitspace/protocol-environment/domains`); unset on an install at GitSpace's own. */
+  ACCOUNT_DOMAIN?: string;
+  SERVICE_DOMAIN?: string;
   PLATFORM_URL: string;
   DEFAULT_ACCOUNT_RELEASE?: string;
   /** GitSpace's published releases, read only (`channel.ts`, `packages/release-channel`). */

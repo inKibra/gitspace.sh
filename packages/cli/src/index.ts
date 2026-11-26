@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { DEFAULT_SERVICE_DOMAIN, serviceDomainOfRelayUrl } from '@gitspace/protocol-environment/domains';
 import { chmod, mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { closeSync, existsSync, openSync, statSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
@@ -176,7 +177,8 @@ async function startMachine(): Promise<void> {
       GITSPACE_USER_ID: config.userId,
       GITSPACE_RELAY_URL: config.relayUrl,
       GITSPACE_PUBLIC_RPC_URL: `${config.relayUrl}/tunnel/${encodeURIComponent(config.machine.id)}/rpc`,
-      GITSPACE_SERVICE_DOMAIN: 'gssh.dev',
+      // The install's service domain, which the account's relay URL names (`<handle>.<service domain>`).
+      GITSPACE_SERVICE_DOMAIN: serviceDomainOfRelayUrl(config.relayUrl, config.handle) ?? DEFAULT_SERVICE_DOMAIN,
       GITSPACE_SERVICE_NAMESPACE: config.handle,
       // Retired broker credentials must not leak into tool-machine processes.
       OMP_AUTH_BROKER_URL: undefined,

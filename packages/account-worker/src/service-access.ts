@@ -1,15 +1,16 @@
+import { domainsFromSettings, hostedServiceSuffix } from '@gitspace/protocol-environment/domains';
 import { SERVICE_ASSERTION_HEADER, ServiceCallerSchema, stripGitSpaceCredentials, type ServiceCaller } from '@gitspace/protocol/service-access';
 import type { HostedRouteTarget } from './hosted-route-registry.js';
 import { forwardTunnelRequest, INTERNAL_SIGNED_TARGET, INTERNAL_SERVICE_SESSION } from './relay-request.js';
 import { ServiceSessionSchema, sameServiceCaller, type ServiceSession } from './service-sessions.js';
 
-export function isHostedServiceHostname(env: Pick<Env, 'TENANT_ID'>, hostname: string): boolean {
-  return hostname.endsWith(`--${env.TENANT_ID}-srv.gssh.dev`);
+export function isHostedServiceHostname(env: Pick<Env, 'TENANT_ID' | 'SERVICE_DOMAIN'>, hostname: string): boolean {
+  return hostname.endsWith(hostedServiceSuffix(domainsFromSettings(env), env.TENANT_ID));
 }
 
 /** A CDP `Fetch` URL pattern covering every hosted service URL. Its wildcards also match paths, so it only narrows. */
-export function hostedServiceUrlPattern(env: Pick<Env, 'TENANT_ID'>): string {
-  return `*://*--${env.TENANT_ID}-srv.gssh.dev/*`;
+export function hostedServiceUrlPattern(env: Pick<Env, 'TENANT_ID' | 'SERVICE_DOMAIN'>): string {
+  return `*://*${hostedServiceSuffix(domainsFromSettings(env), env.TENANT_ID)}/*`;
 }
 
 /** Whether `hostname` is a hosted service of `workspace` with a live route: the services its cloud browser may reach.

@@ -125,6 +125,10 @@ function metadata(migrationTags: string[]): WorkerReleaseMetadata {
       { name: 'STATIC_FILES', source: 'public-assets' },
       { name: 'RELEASES_READ', source: 'release-channel' },
       { name: 'IMAGES', source: 'images' },
+      { name: 'APP_URL', source: 'application-url' },
+      { name: 'TRANSPORT_URL', source: 'transport-url' },
+      { name: 'ACCOUNT_DOMAIN', source: 'account-domain' },
+      { name: 'SERVICE_DOMAIN', source: 'service-domain' },
       // Named by a release built by newer code than this deployer.
       { name: 'FROM_A_NEWER_RELEASE', source: 'source-from-a-newer-release' },
     ],
@@ -420,6 +424,11 @@ describe('POST /__platform/tenants/:tenant/deploy', () => {
         { type: 'service', name: 'STATIC_FILES', service: 'public-assets-test' },
         { type: 'service', name: 'RELEASES_READ', service: 'release-channel-test' },
         { type: 'images', name: 'IMAGES' },
+        // GitSpace's own domains, as production's platform passes them (install-domains.test.ts: another install's).
+        { type: 'plain_text', name: 'APP_URL', text: 'https://bravo.gitspace.sh' },
+        { type: 'plain_text', name: 'TRANSPORT_URL', text: 'https://bravo.gssh.dev' },
+        { type: 'plain_text', name: 'ACCOUNT_DOMAIN', text: 'gitspace.sh' },
+        { type: 'plain_text', name: 'SERVICE_DOMAIN', text: 'gssh.dev' },
       ]),
       migrations: { old_tag: 'v8', new_tag: 'v10', steps: [{ new_sqlite_classes: ['Classv9'] }, { new_sqlite_classes: ['Classv10'] }] },
     });

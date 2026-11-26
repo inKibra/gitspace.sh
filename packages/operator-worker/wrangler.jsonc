@@ -10,6 +10,9 @@
   ],
   "vars": {
     "PLATFORM_URL": "https://platform.gssh.dev",
+    // The install's domains (@gitspace/protocol-environment/domains); the routes below and PLATFORM_URL follow them.
+    "ACCOUNT_DOMAIN": "gitspace.sh",
+    "SERVICE_DOMAIN": "gssh.dev",
     "ACCESS_TEAM_DOMAIN": "https://inkibra.cloudflareaccess.com",
     "ACCESS_AUD": "b2e78441a0b1f9493647248fd9ae282982fdaff69fb118ff21a1ed1095679ec0",
     "OPERATOR_EMAIL": "bradleat@inkibra.com"

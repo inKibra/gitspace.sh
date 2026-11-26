@@ -1,3 +1,4 @@
+import { domainsFromSettings, type GitSpaceDomains } from '@gitspace/protocol-environment/domains';
 import { timingSafeEqual } from 'node:crypto';
 import { waitUntil } from 'cloudflare:workers';
 import { createLocalJWKSet, createRemoteJWKSet, customFetch, decodeJwt, errors, jwtVerify, type JWTVerifyGetKey } from 'jose';
@@ -55,14 +56,14 @@ async function fetchDocument(url: string, signal: AbortSignal): Promise<unknown>
   return JSON.parse(text + decoder.decode());
 }
 
-async function issuerKeys(issuer: string): Promise<JWTVerifyGetKey> {
+async function issuerKeys(issuer: string, domains: GitSpaceDomains): Promise<JWTVerifyGetKey> {
   const cached = issuers.get(issuer);
   if (cached && Date.now() - cached.discoveredAt < ISSUER_CACHE_MS) return cached.keys;
   let discovery: z.infer<typeof DiscoverySchema>;
   try {
     discovery = DiscoverySchema.parse(await fetchDocument(`${issuer.replace(/\/$/u, '')}/.well-known/openid-configuration`, AbortSignal.timeout(FETCH_TIMEOUT_MS)));
   } catch { throw new IngressRejected('discovery_failed'); }
-  if (discovery.issuer !== issuer || !ingressUrlAllowed(discovery.jwks_uri)) throw new IngressRejected('discovery_failed');
+  if (discovery.issuer !== issuer || !ingressUrlAllowed(discovery.jwks_uri, domains)) throw new IngressRejected('discovery_failed');
   const keys = cached?.jwksUri === discovery.jwks_uri ? cached.keys : createRemoteJWKSet(new URL(discovery.jwks_uri), {
     timeoutDuration: FETCH_TIMEOUT_MS, cooldownDuration: KEYS_COOLDOWN_MS, cacheMaxAge: ISSUER_CACHE_MS,
     // A provider's key set may carry certificates and keys for other uses; the token's `alg`, `kid` and `use` pick one.
@@ -75,14 +76,14 @@ async function issuerKeys(issuer: string): Promise<JWTVerifyGetKey> {
 }
 
 /** Null when the credential admits the token, else why it does not. */
-async function rejection(credential: StoredIngressCredential, token: string, request: Request, url: URL, registry: DurableObjectStub<HostedRouteRegistryDO>): Promise<string | null> {
+async function rejection(credential: StoredIngressCredential, token: string, request: Request, url: URL, registry: DurableObjectStub<HostedRouteRegistryDO>, domains: GitSpaceDomains): Promise<string | null> {
   if (credential.kind === 'bearer') {
     const encoder = new TextEncoder();
     const digest = [...new Uint8Array(await crypto.subtle.digest('SHA-256', encoder.encode(token)))].map(byte => byte.toString(16).padStart(2, '0')).join('');
     return credential.hashes.some(hash => timingSafeEqual(encoder.encode(digest), encoder.encode(hash))) ? null : 'bearer_mismatch';
   }
   try {
-    const keys: JWTVerifyGetKey = credential.kind === 'oidc' ? async (header, input) => (await issuerKeys(credential.issuer))(header, input) : createLocalJWKSet(credential.keys);
+    const keys: JWTVerifyGetKey = credential.kind === 'oidc' ? async (header, input) => (await issuerKeys(credential.issuer, domains))(header, input) : createLocalJWKSet(credential.keys);
     const { payload } = await jwtVerify(token, keys, {
       issuer: credential.issuer, audience: `https://${url.hostname}`, clockTolerance: CLOCK_TOLERANCE_S,
       // A service token lives up to 8 hours and is good while its `jti` is listed; other callers' tokens are minutes old.
@@ -120,7 +121,7 @@ export async function serveIngress(env: Env, request: Request, ingress: HostedIn
   let admitted: StoredIngressCredential | undefined;
   if (token) for (const credential of [...signed, ...ingress.credentials.filter(credential => credential.kind === 'bearer')]) {
     // A service token, or a credential that forwards the app's own `Authorization`, is taken only from `GitSpace-Ingress`.
-    const failure = header === 'authorization' && (credential.kind === 'managed' || (credential.kind !== 'bearer' && credential.forwardAuthorization)) ? 'ingress_header_required' : await rejection(credential, token, request, url, registry);
+    const failure = header === 'authorization' && (credential.kind === 'managed' || (credential.kind !== 'bearer' && credential.forwardAuthorization)) ? 'ingress_header_required' : await rejection(credential, token, request, url, registry, domainsFromSettings(env));
     if (failure === null) {
       admitted = credential;
       break;
