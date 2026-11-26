@@ -70,6 +70,11 @@ the anchor for whose resources a turn uses.
   roles that allow it take over or assign holders.
 - **Non-holders** comment and write **notes**. A holder can send a note on to the agent; its writer is credited
   (Co-authored-by on commits that follow from it).
+- **Clearing notes:** the writer edits or deletes their note until a holder sends it (deleting leaves no trace). A
+  holder **sends** it (it becomes a prompt: "note from Jules, sent by Maya") or **dismisses** it (the writer sees
+  "Dismissed by Maya"). A Lead or Owner may delete any note, recorded in the audit log. Sent and dismissed notes stay
+  under **Past notes** in the panel. Notes don't expire: they survive phase moves and handle changes (a new holder
+  inherits them) and close when the workspace is archived. No "Clear all".
 - **The agent's questions go to the holders.** In a free workspace they go to the project roles that may assign holders.
 - **Phase moves and approvals** are checked against the project role of whoever approves them or started the turn.
   Otherwise the agent proposes and a holder whose role allows it accepts.
@@ -81,11 +86,12 @@ Resources exist at two scopes. Account resources are enabled per project; user r
 
 | Resource | Account (team) | User (mine) |
 |---|---|---|
-| Inference providers | Team keys and subscriptions | The person's own (e.g. a Claude subscription) |
-| MCP connections | Team connections, e.g. Jira with a service-account token | The person's own sign-ins, e.g. their Slack |
-| Browsers | Team browsers | The person's Chrome |
+| Inference providers | Team API keys and cloud accounts (never a Claude subscription: those are personal) | The person's own (a Claude or ChatGPT subscription, their own keys) |
+| MCP connections | Team connections, e.g. Jira with a service-account token, the Slack app | The person's own sign-ins, e.g. their Slack |
+| Browsers | The cloud browser, team Chromes | The person's Chrome |
 | Machines | Team machines | The person's machines |
-| Skills, secrets | Team | The person's own |
+| Skills | Team | The person's own |
+| Secrets | Team and project | (none: a personal secret is a connection or a step-up credential) |
 
 - **Machines of any kind at either scope:** a container machine, a cloud VM (e.g. a team fleet of EC2 instances paired
   through the installer), or a physical computer.
@@ -100,6 +106,42 @@ Resources exist at two scopes. Account resources are enabled per project; user r
   headers and API tokens. When both levels connect the same service, the user's connection wins while they hold.
 - **The team's Slack bot** is an account resource: installed once by an Admin from a generated app manifest, it posts
   updates to project channels and answers `@GitSpace`. People's own Slack MCP connections are separate, user level.
+
+### Where each scope is configured
+
+Scope comes first. Each item lives in exactly one scope, and no list mixes scopes.
+
+- **Pages that hold both scopes stay top-level**, with a switch at the top: **Team | Mine | someone ▾**. These are
+  Inference, Plugins (connections, Composio and browsers), Skills and Machines.
+  - **Inference, Team:** profiles (models per role, settings, which providers may pay, whether holders' own credentials
+    may pay), the team's providers, usage by person and bot.
+  - **Inference, Mine:** your providers, the projects where they can pay (their profiles allow it), your usage.
+  - **Plugins, Mine:** each says where it applies ("used while you hold the handle in Crumb and Ledger").
+  - Members see the Team view read-only, with the blocking role named.
+- **Settings holds the pages with one scope**, in two labelled groups:
+  - **the team:** people, invites and allowed domains, roles, bots, projects, domains, source and releases, the GitHub
+    App, the audit log;
+  - **you:** profile, git identity, voice, defaults, passkeys and devices, MCP clients, bots you sponsor.
+- **Project settings** stay inside the project: members and project roles; its inference profile and whether holders'
+  own credentials may pay; which team plugins are on, whether holders' own plugins are allowed, and plugins the
+  repository declares in `.gitspace/bundle.json`; secrets and values; workspace credentials per phase; environment;
+  automations.
+- **The team owns, the project enables, you bring your own.** The one merged view is the workspace's environment
+  popover, where every line is badged Team, Project or the person's name.
+
+### Viewing someone else's scope
+
+Owners and Admins can pick any person or bot in the scope switch; a sponsor can pick their own bots.
+
+- **They see** what is connected (providers, connections, machines, browsers, MCP clients, devices), its status, last
+  use, the projects that use it, and usage and cost. A banner reads "Viewing Rina's plugins · as Admin · revoke only".
+- **They can revoke:** disconnect a connection, sign out a provider, unpair a machine or browser, revoke an MCP client
+  or a device, drop a step-up credential. Each revoke is in the audit log and the person is told ("Theo disconnected
+  your Slack"). This is how offboarding and "revoke active sessions" work.
+- **They never** see secret values or tokens, use the person's resources, connect anything in their name, or edit their
+  profile. Viewing is not logged.
+- **A sponsor** sees and edits their own bot's scope fully.
+- **Project Leads** have no access to people's scopes; they see the effect in their project's environment popover.
 
 ## 7. Credential kinds
 
@@ -126,8 +168,8 @@ GitSpace's `/mcp` (OAuth, scoped consent, several connections) acts as the accou
 A **bot** is a principal a person creates and **sponsors**. It replaces today's account integrations (a token that
 acts as the whole account): clean cutover, one concept.
 
-- **Same permission model as people:** an account role (Member at most; never Owner, Admin only if an Owner grants it),
-  project memberships and project roles. Refusals name the bot's role.
+- **Same permission model as people:** account role Member (never Owner; whether a bot can ever be Admin is open,
+  section 12), project memberships and project roles. Refusals name the bot's role.
 - **Acts only over MCP**, with its own credential (shown once, revocable).
 - **Attribution:** "Release bot (sponsored by Theo)" on turns, phase moves, comments and commits; the audit log filters
   by bot and by sponsor.
@@ -147,10 +189,27 @@ The audit log lists every account and project action with its principal; Owners 
 
 ## 11. Build order
 
-1. **Principals and the identity split.** The account-as-user assumption is widespread: 19 direct
-   `userId === env.ACCOUNT_ID` checks, and the account's `USER_PROJECTS`, `USER_SETTINGS`, `USER_SKILLS`,
-   `USER_STORAGE` and `USER_MCP_CONNECTIONS` objects, reached by the account id in over 100 places. Principals (person,
-   bot, system) and per-user state come first, alone, proven on a live account before anything visible ships.
+1. **Principals and the identity split.** Today a request names the account (`userId`, always `ACCOUNT_ID`) and a
+   device; the device id stands in for the person in Chatter authors, journal and inspector actors, lifecycle
+   approvals, comments and drafts, and per-person settings (git author, defaults) are account-wide. About 29
+   `userId !== ACCOUNT_ID` and 12 `registry.userId` / `config.user_id` checks are real tenancy checks and stay. Step 1:
+   - **Principals live in `CredentialVaultDO`**, which already owns the device registry every request checks:
+     `principals(principal_id, kind person|bot|system, display_name, …)` and a sparse `device_principal(device_id,
+     principal_id)`. Both go into the cached registry snapshot, so a verified device carries `principalId` with no
+     extra call.
+   - **The first Owner's principal id is the account id.** Every existing `USER_*` object, device, MCP connection
+     (`USER_MCP_CONNECTIONS` already keys rows by `principal_id`) and Composio link keeps working with no data moved; a
+     device with no mapping row is the owner.
+   - **No signed shape changes.** `DeviceInvite`, `ApiKey`, `SignedControlRequest` and machine grants keep `userId` as
+     the account id; the principal is resolved server-side. The RPC caller gains `principalId`.
+   - **Two helpers** replace direct lookups: per-person objects (`USER_SETTINGS`, `USER_MCP_CONNECTIONS`, later
+     `USER_SKILLS`) by principal, team objects (`USER_PROJECTS`, `USER_STORAGE`, project secrets, the rest) by account.
+     For the owner both resolve to today's names, so old and new code share every object during a deploy.
+   - **New attribution records principals**; readers accept old device-id values and fall back when a name can't be
+     resolved.
+   - **Risk:** `UserSettings.profile.handle` doubles as the account's hostname handle (`routeAccountRpc` refuses any
+     other host). It moves to account state with one release that writes both and reads the new place first.
+   - Each part ships on its own and is proven on a live account, with old and new code running side by side.
 2. **Users, invites (allowed domains), account roles, project memberships and roles, visibility.**
 3. **Attribution and the audit log.**
 4. **The handle:** holders, requests, take-over and assign, notes, questions to holders, approvals by role.
@@ -172,3 +231,11 @@ The audit log lists every account and project action with its principal; Owners 
 9. Two holders connect the same service: *the turn starter's connection wins.*
 10. A removed person's pending invites: *cancelled.* Bots they sponsor: *suspended until reassigned* (section 9).
 11. Today's account Secrets: *become API-token credentials in a later migration.*
+12. Who creates bots? *Owners and Admins.*
+13. Can a bot ever be Admin? *No: Member, fixed.*
+14. Who gets a handle request for a workspace a bot holds? *Its sponsor.*
+15. Who accepts a bot's proposal when only a bot holds the handle? *Any project member whose role allows it.*
+16. The role an Admin gets on Join project: *chosen on joining, default Lead; Admins always manage members.*
+17. Can a project's Lead remove or change the role of an Admin, or a bot someone else sponsors? *Bots yes, Admins no.*
+18. Does creating a bot or its credential need a passkey, as account integrations do? *Yes.*
+19. Are team and project credentials phase-scoped workspace credentials? *Yes.*
