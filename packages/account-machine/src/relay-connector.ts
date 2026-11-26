@@ -81,13 +81,16 @@ export class MachineRelayConnector {
   private readonly forwarding = new Map<string, { controller: AbortController; path: string }>();
   private readonly serviceSockets = new Map<string, WebSocket>();
   /** Notices not yet delivered, one per topic and workspace. */
-  private readonly notices = new Map<string, { topic: RelayNoticeTopic; workspaceId: string | undefined }>();
+  private readonly notices = new Map<string, { topic: RelayNoticeTopic; workspaceId: string | undefined; projectId: string | undefined }>();
   private readonly deliver = coalesced(async () => {
     const pending = [...this.notices.values()];
     this.notices.clear();
-    const byWorkspace = new Map<string | undefined, RelayNoticeTopic[]>();
-    for (const { topic, workspaceId } of pending) byWorkspace.set(workspaceId, [...byWorkspace.get(workspaceId) ?? [], topic]);
-    const batch = [...byWorkspace].map(([workspaceId, topics]): RelayNotice => ({ topics, ...(workspaceId === undefined ? {} : { workspaceId }) }));
+    const byWorkspace = new Map<string | undefined, { topics: RelayNoticeTopic[]; projectId: string | undefined }>();
+    for (const { topic, workspaceId, projectId } of pending) {
+      const entry = byWorkspace.get(workspaceId);
+      byWorkspace.set(workspaceId, { topics: [...entry?.topics ?? [], topic], projectId: projectId ?? entry?.projectId });
+    }
+    const batch = [...byWorkspace].map(([workspaceId, { topics, projectId }]): RelayNotice => ({ topics, ...(workspaceId === undefined ? {} : { workspaceId }), ...(projectId === undefined ? {} : { projectId }) }));
     if (batch.length) await this.options.onNotice?.(batch);
   });
 
@@ -213,7 +216,10 @@ export class MachineRelayConnector {
 
   /** Queues one notice per topic and workspace; one already pending absorbs a repeat. */
   private notice(notice: RelayNotice): void {
-    for (const topic of notice.topics) this.notices.set(`${topic}\n${notice.workspaceId ?? ''}`, { topic, workspaceId: notice.workspaceId });
+    for (const topic of notice.topics) {
+      const key = `${topic}\n${notice.workspaceId ?? ''}`;
+      this.notices.set(key, { topic, workspaceId: notice.workspaceId, projectId: notice.projectId ?? this.notices.get(key)?.projectId });
+    }
     void this.deliver().catch((error: unknown) => this.options.onError?.(error));
   }
 

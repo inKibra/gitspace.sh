@@ -13,9 +13,10 @@ import {
   credentialProtocolBase64,
   signCredentialAuthorityGrant,
 } from '@gitspace/protocol';
-import { RuntimeAttachInputSchema, RuntimeIdentitySchema } from '@gitspace/protocol-runtime';
+import { RuntimeAttachInputSchema, RuntimeIdentitySchema, RuntimeMachineIdSchema } from '@gitspace/protocol-runtime';
 import { ArtifactsCodeStore, AttachmentStore } from '@gitspace/runtime-workspace-do';
 import worker, { SpaceAuthorityDO, UserRelayDO } from '../src/index.js';
+import { machineAssignments } from '../src/account-runtime-control.js';
 
 const rootKey = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
 const machineKey = Uint8Array.from({ length: 32 }, (_, index) => 100 + index);
@@ -267,8 +268,12 @@ describe('relay notices', () => {
 describe('relay live notices', () => {
   it('forwards only notices for the sending machine\'s own resources, and reports one nobody watched', async () => {
     const socket = await connect();
+    // Live-notice replies only: the account also announces releases to every connected machine.
     const messages: unknown[] = [];
-    socket.addEventListener('message', event => { messages.push(JSON.parse(String(event.data))); });
+    socket.addEventListener('message', event => {
+      const message: unknown = JSON.parse(String(event.data));
+      if (message !== null && typeof message === 'object' && 'type' in message && message.type !== 'notice') messages.push(message);
+    });
     socket.send(JSON.stringify({ version: 1, type: 'live.notice', workspace: 'presence-a', resource: 'terminals:presence-a:other-machine:', cursor: 3 }));
     socket.send(JSON.stringify({ version: 1, type: 'live.notice', workspace: 'presence-a', resource: `terminals:presence-a:${machineId}:`, cursor: 4 }));
     await eventually(async () => messages.length > 0);
@@ -301,6 +306,20 @@ describe('machine-wide assignments', () => {
     }), env);
     expect(response.status).toBe(200);
     expect(reads.mock.calls.map(([input]) => input)).toEqual([{ ...recorded, machineId }]);
+  });
+
+  it('report a workspace that misses its deadline unavailable, and list the others', async () => {
+    await attachedWorkspace('stuck-a');
+    await attachedWorkspace('answering-b');
+    const listed = { grant: { attachment: { workspaceId: 'answering-b' } } };
+    // Workspace objects as the fan-out reaches them: one answers, one never does, as one busy indexing held the read
+    // for minutes.
+    const objects: Record<string, { runtimeAssignments(): Promise<{ assignments: unknown[] }> }> = {
+      [`${env.ACCOUNT_ID}:stuck-a`]: { runtimeAssignments: () => Promise.withResolvers<never>().promise },
+      [`${env.ACCOUNT_ID}:answering-b`]: { runtimeAssignments: async () => ({ assignments: [listed] }) },
+    };
+    const routed = { ...env, SPACE_AUTHORITY: new Proxy(env.SPACE_AUTHORITY, { get: (target, key) => key === 'getByName' ? (name: string) => objects[name] : Reflect.get(target, key) }) };
+    await expect(machineAssignments(routed, env.ACCOUNT_ID, RuntimeMachineIdSchema.parse(machineId), 200)).resolves.toEqual({ assignments: [listed], unavailable: ['stuck-a'] });
   });
 });
 

@@ -53,10 +53,16 @@ const PERMANENT_SYNC_FAILURES = [/\bunmerged\b/u, /ref HEAD is not a symbolic re
 /** How long a released checkout that stayed (its workspace still active, or work in it unsent) goes before the machine
  * asks about it again. */
 const RETIRE_RECHECK_MS = 60 * 60_000;
+/** How long an assignments read may take: the machine's, and one workspace's. Inside the machine-wide read the cloud
+ * gives each workspace 15 s and reports one that misses it unavailable. */
+const ASSIGNMENTS_READ_DEADLINES = { machine: 45_000, workspace: 20_000 };
 
-/** Nothing here polls the cloud: `sync` reads the machine's assignments (startup, every relay connection, every
- * `assignments` notice) and `refreshWorkspace` reads one workspace's cloud version (every `workspace.snapshot` notice). */
-export type MachineExecutorRuntime = { executor: MachineExecutor; journal: ExecutorJournal; sync(workspaceId?: string): Promise<void>; refreshWorkspace(workspaceId: string): Promise<void>; drainWorkspace(workspaceId: string): Promise<void>; useWorkspace(workspaceId: string): Promise<void>; close(): Promise<void> };
+/** One workspace, named as the cloud addresses it. */
+export type WorkspaceIdentity = { projectId: string; workspaceId: string };
+/** Nothing here polls the cloud: `sync` reads the machine's assignments (startup, every relay connection, retries of
+ * failed attaches) or, given a workspace, that workspace's (each `assignments` notice naming it, each use of it), and
+ * `refreshWorkspace` reads one workspace's cloud version (every `workspace.snapshot` notice). */
+export type MachineExecutorRuntime = { executor: MachineExecutor; journal: ExecutorJournal; sync(workspace?: WorkspaceIdentity): Promise<void>; refreshWorkspace(workspaceId: string): Promise<void>; drainWorkspace(workspaceId: string): Promise<void>; useWorkspace(workspaceId: string): Promise<void>; close(): Promise<void> };
 export async function createMachineExecutor(options: {
   environmentRoot: string; machineId: string; cloud: CloudRuntimeClient;
   managedSpaceRoot?: string;
@@ -72,6 +78,8 @@ export async function createMachineExecutor(options: {
   artifactFsBinary?: string;
   checkpointClock?: GitWorktreeClock;
   checkpointEvents?: GitWorktreeEvents;
+  /** Overrides `ASSIGNMENTS_READ_DEADLINES`. */
+  assignmentsReadDeadlines?: typeof ASSIGNMENTS_READ_DEADLINES;
 }): Promise<MachineExecutorRuntime> {
   const directory = join(options.environmentRoot, 'executor');
   await mkdir(directory, { recursive: true, mode: 0o700 });
@@ -79,6 +87,14 @@ export async function createMachineExecutor(options: {
   const journal = new ExecutorJournal(join(directory, 'attempts.sqlite'));
   const credentialHelper = await createArtifactsCredentialHelper(join(directory, 'credentials'), options.cloud);
   const stopping = new AbortController();
+  const deadlines = options.assignmentsReadDeadlines ?? ASSIGNMENTS_READ_DEADLINES;
+  /** The machine's assignments, or one workspace's; a read past its deadline fails naming what it read. */
+  const readAssignments = (workspace: WorkspaceIdentity | null) => {
+    const ms = workspace ? deadlines.workspace : deadlines.machine;
+    const what = workspace ? `the assignments of workspace ${workspace.workspaceId}` : 'the machine\'s assignments';
+    return options.cloud.call('runtime.assignments', { machineId: options.machineId, ...(workspace ? { workspace } : {}) }, RuntimeAssignmentsResultSchema,
+      AbortSignal.any([stopping.signal, timeoutSignal(ms, `Reading ${what} timed out after ${ms / 1000} s`)]));
+  };
   const snapshots = new Database(join(directory, 'snapshots.sqlite'));
   snapshots.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS snapshots (attachment TEXT PRIMARY KEY, revision INTEGER NOT NULL, pending TEXT, committed TEXT)');
   snapshots.exec('DROP TABLE IF EXISTS snapshot_rejections; DROP TABLE IF EXISTS attachment_failures');
@@ -340,9 +356,7 @@ export async function createMachineExecutor(options: {
         for (const local of journal.attachments()) {
           const { attachment } = local;
           if (attachment.workspaceId !== workspaceId || attachment.state !== 'ready' || !committedOf(keyOf(attachment))) continue;
-          const result = await options.cloud.call('runtime.assignments', {
-            machineId: options.machineId, workspace: { projectId: attachment.projectId, workspaceId },
-          }, RuntimeAssignmentsResultSchema, stopping.signal);
+          const result = await readAssignments({ projectId: attachment.projectId, workspaceId });
           const assignment = result.assignments.find(item => item.grant.attachment.attachmentId === attachment.attachmentId && item.grant.attachment.generation === attachment.generation);
           const latest = journal.attachment(attachment.attachmentId);
           if (assignment?.grant.attachment.state === 'ready' && latest?.attachment.generation === attachment.generation && latest.attachment.state === 'ready') await keepSyncing(latest, assignment.checkpoint);
@@ -807,30 +821,65 @@ export async function createMachineExecutor(options: {
     })();
     return lane.idle;
   };
-  /** One machine-wide read in flight; notices during it cost exactly one more read, which sees what they announced. */
-  const readAssignments = coalesced(async () => {
-    const { assignments, unavailable } = await options.cloud.call('runtime.assignments', { machineId: options.machineId }, RuntimeAssignmentsResultSchema, stopping.signal);
-    // The machine-wide list omits detached attachments; a local one missing from it was released by the cloud,
-    // unless its workspace could not be read.
+  /** When each workspace's assignments last failed to read and why, until a read of them succeeds. */
+  const readFailures = new Map<string, { at: string; message: string }>();
+  const readFailed = (workspaceIds: Iterable<string>, reason: string) => {
+    const at = new Date().toISOString();
+    for (const workspaceId of workspaceIds) readFailures.set(workspaceId, { at, message: reason });
+  };
+  /** Queues what a read returned. A local attachment in `scope` that the read omits (it lists no detached ones) was
+   * released by the cloud, unless its workspace could not be read. */
+  const queueRead = (assignments: RuntimeAssignment[], unavailable: readonly string[], scope: (local: LocalAttachment) => boolean) => {
     const listed = new Set(assignments.map(item => item.grant.attachment.attachmentId));
     const unread = new Set(unavailable);
     const vanished = journal.attachments()
-      .filter(local => !listed.has(local.attachment.attachmentId) && local.attachment.state !== 'detached' && !unread.has(local.attachment.workspaceId))
+      .filter(local => scope(local) && !listed.has(local.attachment.attachmentId) && local.attachment.state !== 'detached' && !unread.has(local.attachment.workspaceId))
       .map(local => RuntimeAssignmentSchema.parse({ grant: { attachment: { ...local.attachment, state: 'detached' }, executionSecret: local.executionSecret }, source: null }));
-    return [...assignments, ...vanished].map(assignment => ({ workspaceId: String(assignment.grant.attachment.workspaceId), idle: enqueue(assignment) }));
+    return [...assignments, ...vanished].map(assignment => enqueue(assignment));
+  };
+  /** One machine-wide read in flight; notices during it cost exactly one more read, which sees what they announced. */
+  const readMachine = coalesced(async () => {
+    const held = new Set(journal.attachments().filter(local => local.attachment.state !== 'detached').map(local => local.attachment.workspaceId));
+    const result = await readAssignments(null).catch((error: unknown) => {
+      if (!stopping.signal.aborted) readFailed(held, message(error));
+      throw error;
+    });
+    // Every workspace was read but those the cloud reports unavailable.
+    readFailures.clear();
+    readFailed(result.unavailable, 'the cloud could not read this workspace within the machine-wide read');
+    return queueRead(result.assignments, result.unavailable, () => true);
   });
+  /** One read per workspace in flight, coalesced like the machine-wide one. It releases only that workspace's checkouts. */
+  const workspaceReads = new Map<string, () => Promise<Array<Promise<void>>>>();
+  const readWorkspace = (workspace: WorkspaceIdentity) => {
+    let read = workspaceReads.get(workspace.workspaceId);
+    if (!read) {
+      read = coalesced(async () => {
+        const { assignments } = await readAssignments(workspace).catch((error: unknown) => {
+          if (!stopping.signal.aborted) readFailed([workspace.workspaceId], message(error));
+          throw error;
+        });
+        readFailures.delete(workspace.workspaceId);
+        return queueRead(assignments, [], local => local.attachment.workspaceId === workspace.workspaceId);
+      });
+      workspaceReads.set(workspace.workspaceId, read);
+    }
+    return read();
+  };
   let reading: Promise<unknown> = Promise.resolve();
-  /** Dispatches every assignment; a workspace operation awaits only that workspace's lanes. */
-  const sync = async (workspaceId?: string): Promise<void> => {
-    const read = readAssignments();
-    reading = read;
-    const work = await read;
-    await Promise.all(work.filter(item => workspaceId === undefined || item.workspaceId === workspaceId).map(item => item.idle));
+  const workspaceReading = new Map<string, Promise<unknown>>();
+  /** Reads the machine's assignments, or one workspace's, and waits for the work they queued. */
+  const sync = async (workspace?: WorkspaceIdentity): Promise<void> => {
+    const read = workspace ? readWorkspace(workspace) : readMachine();
+    if (workspace) workspaceReading.set(workspace.workspaceId, read);
+    else reading = read;
+    await Promise.all(await read);
     void retireCheckouts().catch(error => console.error('[runtime-retire]', message(error)));
   };
-  /** Waits for in-flight work on one workspace's checkout, never for another workspace's long setup. */
+  /** Waits for this workspace's read in flight and the work on its checkouts, never for another workspace's read or
+   * long setup. */
   const settled = async (workspaceId: string) => {
-    await reading.catch(() => undefined);
+    await workspaceReading.get(workspaceId)?.catch(() => undefined);
     const roots = new Set(journal.attachments().filter(item => item.attachment.workspaceId === workspaceId).map(item => item.rootPath));
     await Promise.all([...roots].map(root => lanes.get(root)?.idle));
   };
@@ -842,14 +891,26 @@ export async function createMachineExecutor(options: {
       const local = journal.attachments().find(item => item.attachment.workspaceId === workspaceId && item.attachment.state !== 'detached');
       if (!local) throw new Error('This machine is not attached to the workspace');
       if (local.attachment.state !== 'ready') {
-        await options.cloud.call('runtime.attachment.cache.request', { projectId: local.attachment.projectId, workspaceId, machineId: options.machineId }, RuntimeJsonSchema, stopping.signal);
-        await sync(workspaceId);
+        const workspace = { projectId: local.attachment.projectId, workspaceId };
+        await options.cloud.call('runtime.attachment.cache.request', { ...workspace, machineId: options.machineId }, RuntimeJsonSchema,
+          AbortSignal.any([stopping.signal, timeoutSignal(deadlines.workspace, `Requesting the checkout of workspace ${workspaceId} timed out after ${deadlines.workspace / 1000} s`)]));
+        // A failed read is recorded and named below.
+        await sync(workspace).catch(() => undefined);
       }
       const ready = journal.attachment(local.attachment.attachmentId);
-      if (!ready || ready.attachment.state !== 'ready') throw new Error(`The workspace checkout on this machine is not ready${ready?.attachment.failure ? `: ${ready.attachment.failure.message}` : ''}`);
+      if (!ready || ready.attachment.state !== 'ready') {
+        const read = readFailures.get(workspaceId);
+        const reasons = [
+          ...(ready?.attachment.failure ? [ready.attachment.failure.message] : []),
+          ...(read ? [`the machine's assignments read for this workspace failed at ${read.at}: ${read.message}; the next use of the workspace reads them again`] : []),
+        ];
+        throw new Error(`The workspace checkout on this machine is not ready${reasons.length ? `: ${reasons.join('; ')}` : ''}`);
+      }
       await syncNow(ready, () => reconcile(ready));
     },
     drainWorkspace: async workspaceId => {
+      // A machine-wide read in flight may still hand over this workspace's attachment; it lands before the detach.
+      await reading.catch(() => undefined);
       await settled(workspaceId);
       for (const local of journal.attachments()) {
         const attachment = local.attachment;
@@ -871,7 +932,7 @@ export async function createMachineExecutor(options: {
         // capture is journaled), so it gets a bounded wait: a large LFS download in an attach must not hold this
         // generation past its replacement's deadline.
         await Promise.race([
-          Promise.allSettled([reading, ...reports, ...[...lanes.values()].map(lane => lane.idle), ...reconciling.values(), ...[...captures.values()].map(capture => capture.settle())]),
+          Promise.allSettled([reading, ...workspaceReading.values(), ...reports, ...[...lanes.values()].map(lane => lane.idle), ...reconciling.values(), ...[...captures.values()].map(capture => capture.settle())]),
           Bun.sleep(CLOSE_GRACE_MS),
         ]);
         await browser.close();

@@ -192,7 +192,7 @@ export async function createAccountWorkspaceRuntime(
     turnChanged: (requestId, turn) => { watch.turnChanged(requestId, turn); automationTurns.turnChanged(requestId, turn); },
     personPrompted: watch.personPrompted,
     snapshotChanged: machineIds => {
-      waitUntil('machine snapshot notice', notifyMachines(env, machineIds, ['workspace.snapshot'], identity.workspaceId));
+      waitUntil('machine snapshot notice', notifyMachines(env, machineIds, ['workspace.snapshot'], identity));
       // The environment is derived from the workspace's files: derive it when they change, not when it is read.
       waitUntil('environment derivation', environment.currentLifecycleState(identity).catch((error: unknown) => console.error('Environment was not derived', { workspaceId: identity.workspaceId, error })));
     },

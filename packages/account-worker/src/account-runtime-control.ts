@@ -61,6 +61,10 @@ async function checkoutOrigin(env: Env, userId: string, machine: string, operati
 
 /** A runtime request this slow points at a cold or stuck workspace object; faster ones are not logged. */
 const SLOW_RUNTIME_REQUEST_MS = 30_000;
+/** How long the machine-wide assignments read waits for one workspace before reporting it unavailable, well inside the
+ * 45 s the machine gives the whole read: one stuck workspace object must not hold every other workspace's
+ * assignments. */
+const WORKSPACE_ASSIGNMENTS_DEADLINE_MS = 15_000;
 
 /** Runs one machine-control or browser runtime request, logging it only when it took SLOW_RUNTIME_REQUEST_MS or more.
  * `failed` tells a request that answered with an error value (the browser procedures' results) from a success. */
@@ -88,6 +92,28 @@ export function runtimeMachineControl(env: Env, request: SignedControlRequest): 
   return observeRuntimeRequest('machine', request.operation, workspace, () => dispatchMachineControl(env, request));
 }
 
+/** The machine-wide assignments: only the workspaces the fleet index holds for this machine, read in parallel. One
+ * that fails or misses `deadlineMs` is reported unavailable, so the machine keeps its attachments there instead of
+ * releasing them as omitted. */
+export async function machineAssignments(env: Env, userId: string, machine: z.output<typeof RuntimeMachineIdSchema>, deadlineMs = WORKSPACE_ASSIGNMENTS_DEADLINE_MS) {
+  const workspaces = await env.FLEET_CATALOG.getByName(userId).machineWorkspaces(machine);
+  const results = await Promise.all(workspaces.map(async workspace => {
+    const missed = Promise.withResolvers<never>();
+    const timer = setTimeout(() => missed.reject(new Error(`The workspace did not answer within ${deadlineMs / 1000} s`)), deadlineMs);
+    try {
+      const read = env.SPACE_AUTHORITY.getByName(`${userId}:${workspace.workspaceId}`).runtimeAssignments({ ...workspace, machineId: machine });
+      return { workspace, assignments: (await Promise.race([read, missed.promise])).assignments };
+    } catch (error) {
+      console.error(JSON.stringify({ event: 'runtime_assignments_space_failed', projectId: workspace.projectId, workspaceId: workspace.workspaceId, message: error instanceof Error ? error.message : String(error) }));
+      return { workspace, assignments: null };
+    } finally { clearTimeout(timer); }
+  }));
+  return {
+    assignments: results.flatMap(result => result.assignments ?? []),
+    unavailable: results.flatMap(result => result.assignments ? [] : [result.workspace.workspaceId]),
+  };
+}
+
 async function dispatchMachineControl(env: Env, request: SignedControlRequest): Promise<unknown> {
   const { operation, payload, userId, machineId } = request;
   const machine = RuntimeMachineIdSchema.parse(machineId);
@@ -99,21 +125,7 @@ async function dispatchMachineControl(env: Env, request: SignedControlRequest): 
       const access = await requireWorkspaceAccess(env, userId, input.workspace, false);
       return access.authority.runtimeAssignments({ ...input.workspace, ...input });
     }
-    // Only the workspaces the fleet index holds for this machine, read in parallel. One that fails is reported
-    // unavailable, so the machine keeps its attachments there instead of releasing them as omitted.
-    const workspaces = await env.FLEET_CATALOG.getByName(userId).machineWorkspaces(machine);
-    const results = await Promise.all(workspaces.map(async workspace => {
-      try {
-        return { workspace, assignments: (await env.SPACE_AUTHORITY.getByName(`${userId}:${workspace.workspaceId}`).runtimeAssignments({ ...workspace, machineId: machine })).assignments };
-      } catch (error) {
-        console.error(JSON.stringify({ event: 'runtime_assignments_space_failed', projectId: workspace.projectId, workspaceId: workspace.workspaceId, message: error instanceof Error ? error.message : String(error) }));
-        return { workspace, assignments: null };
-      }
-    }));
-    return {
-      assignments: results.flatMap(result => result.assignments ?? []),
-      unavailable: results.flatMap(result => result.assignments ? [] : [result.workspace.workspaceId]),
-    };
+    return machineAssignments(env, userId, machine);
   }
   if (operation === 'runtime.checkouts.retired') {
     const input = RuntimeRetiredCheckoutsInputSchema.parse(payload);

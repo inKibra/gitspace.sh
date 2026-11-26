@@ -386,10 +386,10 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
   }
 
   /** Detached machines leave the fleet's machine index and are told to fetch their assignments. */
-  private async releaseMachines(workspaceId: string, machineIds: readonly string[]): Promise<void> {
+  private async releaseMachines(workspace: { projectId: string; workspaceId: string }, machineIds: readonly string[]): Promise<void> {
     const fleet = this.env.FLEET_CATALOG.getByName(this.env.ACCOUNT_ID);
-    for (const machineId of machineIds) await fleet.detachMachineWorkspace(machineId, workspaceId);
-    await notifyMachines(this.env, machineIds, ['assignments'], workspaceId);
+    for (const machineId of machineIds) await fleet.detachMachineWorkspace(machineId, workspace.workspaceId);
+    await notifyMachines(this.env, machineIds, ['assignments'], workspace);
   }
 
   private async getRuntime(raw: unknown): Promise<WorkspaceRuntime> {
@@ -638,7 +638,7 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
       detached.push(attachment.machineId);
     }
     runtime.publish();
-    await this.releaseMachines(identity.workspaceId, detached);
+    await this.releaseMachines(identity, detached);
   }
 
   /** Ends this workspace's Chrome groups. A relay that cannot be reached leaves the tabs in their group; the
@@ -780,7 +780,7 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     writeWorkspaceMetadata(this.ctx.storage, tombstone);
     this.cloudRuntime = null;
     this.cloudRuntimePublished = false;
-    await notifyMachines(this.env, attached, ['assignments'], tombstone.workspaceId);
+    await notifyMachines(this.env, attached, ['assignments'], tombstone);
   }
 
   /** The worktree a lifecycle change acts on, current with the project definition the caller read: a workspace whose
@@ -829,7 +829,7 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
       archived: this.writeArchived(this.adoptWorktree(definition), definition.name),
       machineIds: this.attachmentRows().filter(attachment => attachment.state !== 'detached').map(attachment => attachment.machineId),
     }));
-    await this.releaseMachines(archived.workspaceId, machineIds);
+    await this.releaseMachines(archived, machineIds);
     return this.recordLifecycle(archived, 'archived', work => this.unguardedStorage(work));
   }
 
@@ -1209,7 +1209,7 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     const platform = (await this.env.TENANT_RELEASES.getByName(this.env.ACCOUNT_ID).machinePlatforms())[input.machineId] ?? null;
     const result = await runtime.attachments.requestCache({ ...input, checkout: { kind: 'shared', branch: workspace.branch }, capabilities: machineCapabilities(platform) }, connected);
     runtime.publish();
-    await notifyMachines(this.env, [input.machineId], ['assignments'], input.workspaceId);
+    await notifyMachines(this.env, [input.machineId], ['assignments'], input);
     return result;
   }
 
@@ -1217,7 +1217,7 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
   async runtimeAttachmentDetachRequest(raw: unknown) {
     const input = RuntimeAttachmentDetachRequestInputSchema.parse(raw);
     const result = await this.runtimeDetach(input);
-    await notifyMachines(this.env, [input.machineId], ['assignments'], input.workspaceId);
+    await notifyMachines(this.env, [input.machineId], ['assignments'], input);
     return result;
   }
 

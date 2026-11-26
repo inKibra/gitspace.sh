@@ -307,9 +307,10 @@ describe('MachineRelayConnector notices', () => {
     first.open();
     await settle();
     expect(batches).toEqual([[{ topics: [...RELAY_NOTICE_TOPICS] }]]);
-    // Delivery is in flight: repeats of one topic and workspace collapse into the single next delivery.
+    // Delivery is in flight: repeats of one topic and workspace collapse into the single next delivery, which keeps the
+    // workspace's project even when a repeat (from an earlier cloud) does not name it.
     for (const notice of [
-      { topics: ['assignments'], workspaceId: 'workspace-a' },
+      { topics: ['assignments'], workspaceId: 'workspace-a', projectId: 'project-a' },
       { topics: ['workspace.snapshot', 'assignments'], workspaceId: 'workspace-a' },
       { topics: ['release'] },
       { topics: ['release'] },
@@ -320,6 +321,7 @@ describe('MachineRelayConnector notices', () => {
     await settle();
     expect(batches).toHaveLength(2);
     expect(keys(batches[1]!)).toEqual(['assignments:workspace-a', 'release:*', 'workspace.snapshot:workspace-a']);
+    expect(batches[1]!.find((notice) => notice.workspaceId === 'workspace-a')?.projectId).toBe('project-a');
     deliveries[1]!.resolve();
     await settle();
     first.dispatchEvent(new Event('error'));

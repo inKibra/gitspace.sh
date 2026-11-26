@@ -32,7 +32,7 @@ import { machineToolEnvironment, prepareMachineNativeRuntime } from '../../deplo
 import { pinnedGitLfs, pinnedRipgrep } from '../../deployment/src/native-build.js';
 import { CloudRuntimeClient } from './cloud-runtime-client.js';
 import { z } from 'zod';
-import { createMachineExecutor, type MachineExecutorRuntime } from './runtime-executor.js';
+import { createMachineExecutor, type MachineExecutorRuntime, type WorkspaceIdentity } from './runtime-executor.js';
 import { machineOperationalTools } from './runtime-operations.js';
 import { driveTransferOperation } from './drive-transfer.js';
 import { machineImageStore } from './machine-images.js';
@@ -230,18 +230,19 @@ export async function startMachineRuntime() {
   });
   // A read a notice asked for that fails is asked for again with backoff until it succeeds; a healthy machine reads only
   // when notified.
-  const noticeRetries = createNoticeRetries(topic => receiveMachineNotices([{ topics: [topic] }], noticeTargets));
-  const settled = async (topic: RelayNoticeTopic, read: Promise<void>) => { await read; noticeRetries.settled(topic); };
+  const noticeRetries = createNoticeRetries((topic, workspace) => receiveMachineNotices([{ topics: [topic], ...workspace }], noticeTargets));
+  const settled = async (topic: RelayNoticeTopic, read: Promise<void>, workspace: WorkspaceIdentity | null = null) => { await read; noticeRetries.settled(topic, workspace); };
   const noticeTargets: MachineNoticeTargets = {
-    assignments: () => settled('assignments', (async () => { await executorRuntime?.sync(); })()),
+    projectOf: workspaceId => executorRuntime?.journal.attachments().find(local => local.attachment.workspaceId === workspaceId)?.attachment.projectId ?? null,
+    assignments: workspace => settled('assignments', (async () => { await executorRuntime?.sync(workspace ?? undefined); })(), workspace),
     snapshot: async (workspaceId) => { await executorRuntime?.refreshWorkspace(workspaceId); },
     release: () => settled('release', releases.nudge()),
     devices: () => devices.invalidate(),
     settings: () => settled('settings', settings.refresh()),
     environment: (workspaceId) => { void environments.environmentChanged(workspaceId).catch((error: unknown) => noticeTargets.failed('environment', error)); },
-    failed: (topic, error) => {
-      console.error('[gitspace-notice]', topic, error);
-      noticeRetries.failed(topic);
+    failed: (topic, error, workspace = null) => {
+      console.error('[gitspace-notice]', topic, workspace?.workspaceId ?? null, error);
+      noticeRetries.failed(topic, workspace);
     },
   };
   // A launch this machine was building in an earlier process has no builder now: report this process's start so the

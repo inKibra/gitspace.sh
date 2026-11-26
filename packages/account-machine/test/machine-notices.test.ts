@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { RELAY_NOTICE_TOPICS, type ControlOperation, type DeploymentStatus, type RelayNotice, type RelayNoticeTopic } from '@gitspace/protocol';
-import { CloudRuntimeClient } from '../src/cloud-runtime-client.js';
+import { CloudControlError, CloudRuntimeClient } from '../src/cloud-runtime-client.js';
 import { ArtifactsGitRemote } from '../src/artifacts-git-remote.js';
 import { createMachineExecutor, type MachineExecutorRuntime } from '../src/runtime-executor.js';
 import { createNoticeRetries, receiveMachineNotices, type MachineNoticeTargets } from '../src/machine-notices.js';
@@ -64,6 +64,7 @@ async function countedExecutor() {
 
 function targets(overrides: Partial<MachineNoticeTargets>): MachineNoticeTargets {
   return {
+    projectOf: () => null,
     assignments: async () => {}, snapshot: async () => {}, release: async () => {}, devices: () => {}, settings: async () => {}, environment: () => {},
     failed: (topic, error) => { throw new Error(`${topic}: ${String(error)}`); },
     ...overrides,
@@ -79,11 +80,12 @@ test('assignments are read at startup and on notices only: a notice costs one re
   expect(intervals).toEqual([]);
   reads[0]!.resolve();
   await settle();
-  const deliver = (notices: RelayNotice[]) => receiveMachineNotices(notices, targets({ assignments: () => runtime.sync(), snapshot: () => runtime.refreshWorkspace('unused') }));
+  const deliver = (notices: RelayNotice[]) => receiveMachineNotices(notices, targets({ assignments: workspace => runtime.sync(workspace ?? undefined), snapshot: () => runtime.refreshWorkspace('unused') }));
   // Every topic at once (the reconnect catch-up): one machine-wide read also covers every workspace snapshot.
   deliver([{ topics: [...RELAY_NOTICE_TOPICS] }, { topics: ['workspace.snapshot'], workspaceId: 'workspace-a' }]);
   await settle();
   expect(reads).toHaveLength(2);
+  // Notices naming workspaces whose project the machine cannot tell read the machine's assignments.
   for (let index = 0; index < 5; index++) deliver([{ topics: ['assignments'], workspaceId: `workspace-${index}` }]);
   await settle();
   expect(reads).toHaveLength(2);
@@ -166,4 +168,50 @@ test('a read that keeps failing has one retry waiting at a time, however many no
   next();
   expect(reads.at(-1)).toBe('assignments');
   expect(timers).toHaveLength(7);
+});
+
+test('a burst of assignments notices naming workspaces reads each of those workspaces, never the machine\'s', async () => {
+  const reads: Array<string | null> = [];
+  const notices: RelayNotice[] = [];
+  // Ten from a cloud that names the project; two from an earlier cloud that does not, for workspaces the machine holds.
+  for (let index = 0; index < 10; index++) notices.push({ topics: ['assignments'], workspaceId: `workspace-${index}`, projectId: 'project' });
+  notices.push({ topics: ['assignments', 'workspace.snapshot'], workspaceId: 'held-a' }, { topics: ['assignments'], workspaceId: 'held-b' });
+  for (const notice of notices) {
+    receiveMachineNotices([notice], targets({
+      projectOf: workspaceId => workspaceId.startsWith('held-') ? 'project' : null,
+      assignments: async workspace => { reads.push(workspace ? `${workspace.projectId}/${workspace.workspaceId}` : null); },
+      snapshot: async workspaceId => { reads.push(`snapshot ${workspaceId}`); },
+    }));
+  }
+  await settle();
+  expect(reads).toEqual(notices.map(notice => `project/${notice.workspaceId}`));
+});
+
+test('a workspace read that fails is retried for that workspace alone; one the cloud refuses reads the machine\'s', async () => {
+  const timers: Array<{ run: () => void; delayMs: number }> = [];
+  const reads: Array<string | null> = [];
+  const failing = new Map<string, Error>([
+    ['workspace-a', new Error('Reading the assignments of workspace workspace-a timed out after 20 s')],
+    ['workspace-d', new CloudControlError('Runtime project is unavailable', null)],
+  ]);
+  const noticeTargets = targets({
+    assignments: async workspace => {
+      reads.push(workspace?.workspaceId ?? null);
+      const failure = workspace && failing.get(workspace.workspaceId);
+      if (failure) { failing.delete(workspace.workspaceId); throw failure; }
+    },
+    failed: (topic, _error, workspace) => retries.failed(topic, workspace),
+  });
+  const retries = createNoticeRetries((topic, workspace) => receiveMachineNotices([{ topics: [topic], ...workspace }], noticeTargets), (run, delayMs) => { timers.push({ run, delayMs }); });
+  receiveMachineNotices(['workspace-a', 'workspace-b', 'workspace-c'].map(workspaceId => ({ topics: ['assignments'], workspaceId, projectId: 'project' })), noticeTargets);
+  await settle();
+  expect(reads).toEqual(['workspace-a', 'workspace-b', 'workspace-c']);
+  expect(timers.map(timer => timer.delayMs)).toEqual([2_000]);
+  timers[0]!.run();
+  await settle();
+  expect(reads.slice(3)).toEqual(['workspace-a']);
+  receiveMachineNotices([{ topics: ['assignments'], workspaceId: 'workspace-d', projectId: 'project' }], noticeTargets);
+  await settle();
+  expect(reads.slice(4)).toEqual(['workspace-d', null]);
+  expect(timers).toHaveLength(1);
 });

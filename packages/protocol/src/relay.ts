@@ -43,6 +43,8 @@ export type RelayNoticeTopic = z.infer<typeof relayNoticeTopicSchema>;
 export const relayNoticeSchema = z.object({
   topics: z.array(relayNoticeTopicSchema).min(1).max(RELAY_NOTICE_TOPICS.length),
   workspaceId: z.string().min(1).max(256).optional(),
+  /** The workspace's project, so a machine can read the assignments of a workspace it holds no checkout of yet. */
+  projectId: z.string().min(1).max(256).optional(),
 });
 export type RelayNotice = z.infer<typeof relayNoticeSchema>;
 const relayNoticeMessageSchema = relayNoticeSchema.extend({ version: z.literal(RELAY_PROTOCOL_VERSION), type: z.literal('notice') });
