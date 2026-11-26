@@ -7,9 +7,7 @@
         "bun",
         "gh"
       ],
-      "secrets": [
-        "EXAMPLE_API_TOKEN"
-      ],
+      "secrets": [],
       "values": [
         "DEVELOPER_NAME"
       ],
