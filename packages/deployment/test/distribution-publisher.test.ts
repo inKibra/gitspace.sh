@@ -169,6 +169,18 @@ test('rejects mismatched retained objects rather than overwriting or publishing 
   expect(f.mutations).toEqual([]);
 });
 
+test('tries a read the store refused with a 5xx again, and publishes', async () => {
+  const f = await fixture();
+  const refused = new Set<string>();
+  f.state.intercept = (request, key) => {
+    if (request.method !== 'GET' || refused.has(key)) return undefined;
+    refused.add(key);
+    return new Response('<Error><Code>ServiceUnavailable</Code></Error>', { status: 503 });
+  };
+  await publishDistribution(f.directory, false, { client: f.client, bucket: 'fixture' });
+  expect(f.objects.get(`${f.prefix}manifest.json`)).toEqual(f.manifestBytes);
+}, 15_000);
+
 test('publishes the verified native follower graph before making the distribution visible', async () => {
   const f = await fixture();
   const commit = 'a'.repeat(40);

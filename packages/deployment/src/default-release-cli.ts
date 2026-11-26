@@ -33,8 +33,9 @@ function bucketNativeMirror(client: S3Client, bucket: string): NativeMirror {
 }
 
 export function defaultReleaseStorage(bucket: string): DefaultReleaseStorage & { close(): void } {
-  const client = releaseStorageClient();
-  const signal = AbortSignal.timeout(10 * 60_000);
+  const client = releaseStorageClient(3);
+  // Each request has its own minute; the whole publication gets half an hour, since storage reads from CI can be slow.
+  const signal = AbortSignal.timeout(30 * 60_000);
   return {
     async get(Key) {
       const deadline = AbortSignal.any([signal, AbortSignal.timeout(60_000)]);
@@ -156,7 +157,7 @@ export async function runDefaultRelease(args: string[]): Promise<void> {
       const portable = built.manifest.portable && built.objects.get(built.manifest.portable.key);
       if (!portable) throw new Error('The default release has no portable release');
       // Natives are mirrored before the default naming them is published.
-      const client = releaseStorageClient();
+      const client = releaseStorageClient(3);
       try {
         const copied = await mirrorNatives(portableManifestSchema.parse(JSON.parse(new TextDecoder().decode(portable))).natives, bucketNativeMirror(client, bucket), fetch);
         console.log(JSON.stringify({ nativesMirrored: copied }));

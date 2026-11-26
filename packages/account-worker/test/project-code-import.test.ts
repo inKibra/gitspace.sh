@@ -17,8 +17,10 @@ function artifactsError(code: string, numericCode: number, message: string) {
   return Object.assign(new Error(message), { name: 'ArtifactsError', code, numericCode });
 }
 
-/** An Artifacts namespace whose repositories resolve only the refs listed in `refs` ('HEAD' is the default branch). */
-function namespace(options: { repositories?: string[]; refs?: string[]; importError?: Error; createError?: Error } = {}) {
+/** An Artifacts namespace whose repositories resolve only the refs listed in `refs` ('HEAD' is the default branch).
+ * `createErrors` are thrown by successive creates, in order; with `concurrentCreate` another request created the
+ * repository the first of them refused. */
+function namespace(options: { repositories?: string[]; refs?: string[]; importError?: Error; createErrors?: Error[]; concurrentCreate?: boolean } = {}) {
   /** Each repository's description, as `create` set it. */
   const repositories = new Map<string, string | null>((options.repositories ?? []).map(name => [name, null]));
   const refs = new Set(options.refs);
@@ -43,7 +45,11 @@ function namespace(options: { repositories?: string[]; refs?: string[]; importEr
     },
     create: async (name, opts) => {
       calls.push(`create ${name} ${JSON.stringify(opts)}`);
-      if (options.createError) throw options.createError;
+      const error = options.createErrors?.shift();
+      if (error) {
+        if (options.concurrentCreate) repositories.set(name, null);
+        throw error;
+      }
       repositories.set(name, opts?.description ?? null);
       return created;
     },
@@ -137,9 +143,18 @@ describe('project import classification', () => {
   });
 
   it('adopts a seed target another request created concurrently', async () => {
-    const artifacts = namespace({ createError: artifactsError('ALREADY_EXISTS', 10001, 'Repository already exists') });
+    const artifacts = namespace({ createErrors: [artifactsError('ALREADY_EXISTS', 10201, 'repo already exists: project-imported')], concurrentCreate: true });
     await expect(artifacts.code.ensureMachineSeedTarget(projectId, 'trunk')).resolves.toEqual(info);
     expect(artifacts.calls).toHaveLength(1);
+  });
+
+  it('waits out the name a refused import still holds, then leaves the copy target for a machine', async () => {
+    // Artifacts answers ALREADY_EXISTS to creates right after refusing an import, though nothing is listed or readable.
+    const held = artifactsError('ALREADY_EXISTS', 10201, 'repo already exists: project-imported');
+    const artifacts = namespace({ importError: artifactsError('REMOTE_AUTH_REQUIRED', 10106, 'requires authentication (HTTP 401)'), createErrors: [held, held] });
+    await expect(artifacts.code.importProject(projectId, origin, null)).rejects.toMatchObject({ _tag: 'ProjectImportRequiresMachineError', reason: 'private' });
+    expect(await artifacts.code.awaitsMachineSeed(projectId, 'main')).toBe(true);
+    expect(artifacts.calls.filter(call => call.startsWith('create '))).toHaveLength(3);
   });
 
   it('imports a covered repository over authenticated smart HTTP, never through the native import', async () => {

@@ -524,7 +524,8 @@ interface ProjectRowsProps extends Pick<AppSidebarProps, 'selected' | 'deploymen
   onCollapse(projectId: string, collapsed: boolean): void;
   filter: SidebarFilter;
   groupBy: SidebarGroupBy;
-  /** The grouping's groups folded away, and how one folds or opens. */
+  /** The grouping's folded groups: the board's columns by group, each project's headings as `<projectId>/<group>`;
+   * and how one folds or opens. */
   collapsedGroups: ReadonlySet<string>;
   onToggleGroup(group: string): void;
   hovered: string | null;
@@ -616,8 +617,10 @@ function ProjectRows({ project, archived: projectArchived, collapsed, onCollapse
         <SpaceMenu space={item.workspace} kind="workspace" summary={summary} deployment={deployment} onReleaseMachines={onReleaseMachines} releasePendingSpaceId={releasePendingSpaceId} onArchive={onArchive} onRestore={onRestore} onDelete={onDelete} onRename={startRename} phase={phase} stack={stack} />
       </>} />;
   };
-  const entries = listEntries(items, filter, groupBy, collapsedGroups);
-  const spot = stacking && source && picker.hover ? landing(items, source, picker.hover, filter, groupBy, collapsedGroups) : null;
+  // A heading folds in its own project only: the same group in another project stays as it is.
+  const projectFolded = new Set([...collapsedGroups].flatMap((key) => key.startsWith(`${project.id}/`) ? [key.slice(project.id.length + 1)] : []));
+  const entries = listEntries(items, filter, groupBy, projectFolded);
+  const spot = stacking && source && picker.hover ? landing(items, source, picker.hover, filter, groupBy, projectFolded) : null;
   const ghost = spot && source ? <Ghost key={`ghost-${picker.hover}`} source={source} parent={byId.get(picker.hover ?? '')} carried={stackBelow(items, source.id).length} stacked={spot.stacked} /> : null;
   return <SidebarMenuItem>
     <SpaceSummaryContext.Provider value={baseSummary}>
@@ -643,7 +646,7 @@ function ProjectRows({ project, archived: projectArchived, collapsed, onCollapse
       <li aria-hidden className="mx-2 mb-1 mt-0.5 h-px list-none bg-foreground/15" />
       <AnimatePresence initial={false}>{spot?.after === null ? ghost : null}</AnimatePresence>
       {entries.map((entry) => <Fragment key={entry.key}>
-        {entry.kind === 'heading' ? <li className="list-none"><GroupHeading tone={entry.tone} count={entry.count} fold={{ open: !entry.collapsed, onToggle: () => onToggleGroup(entry.group) }}>{entry.label}</GroupHeading></li> : row(entry.item, entry.stacked, entry.dimmed, false)}
+        {entry.kind === 'heading' ? <li className="list-none"><GroupHeading tone={entry.tone} count={entry.count} fold={{ open: !entry.collapsed, onToggle: () => onToggleGroup(`${project.id}/${entry.group}`) }}>{entry.label}</GroupHeading></li> : row(entry.item, entry.stacked, entry.dimmed, false)}
         <AnimatePresence initial={false}>{spot?.after === entry.key ? ghost : null}</AnimatePresence>
       </Fragment>)}
       {items.length && !items.some((item) => matches(item, filter)) ? <li className="list-none px-2 py-1 text-[11px] text-muted-foreground">No workspaces match this filter</li> : null}
@@ -907,7 +910,7 @@ function SidebarBody({ view, onView, selected, selectedSummary, projects, onSele
     if (why) toast.refused(new Error(why), 'Change phase');
     else move(item, phase);
   } : null;
-  // State's and Phase's folded groups, shared by the list's headings and the board's columns.
+  // State's and Phase's folded groups: the board's columns by group, the list's headings by project and group.
   const foldedGroups: ReadonlySet<string> = new Set(groupBy === 'project' ? [] : collapsedGroups[groupBy]);
   const toggleGroup = (group: string): void => {
     if (groupBy === 'project') return;

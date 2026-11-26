@@ -1,6 +1,7 @@
 import { beforeAll, expect, it, vi } from 'vitest';
 import { env } from 'cloudflare:test';
 import { HttpResponse, http } from 'msw';
+import { z } from 'zod';
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import { createSignedControlRequest, credentialProtocolBase64, signCredentialAuthorityGrant } from '@gitspace/protocol';
 import { deploymentStatusSchema, platformDeployRequestSchema, WORKER_MANIFEST_FILE, type ReleaseArtifact, type ReleaseSource, type WorkerReleaseMetadata } from '@gitspace/protocol/deployment';
@@ -8,6 +9,7 @@ import { NATIVE_UPSTREAMS, PORTABLE_ENTRYPOINTS, PORTABLE_MANIFEST_FILE, portabl
 import { CHANNEL_CATALOG } from '@gitspace/protocol/release-channel';
 import worker from '../src/index.js';
 import { launchPublishedRelease } from '../src/application.js';
+import { publishedFrontendTreeHash } from '../src/channel.js';
 import { network } from './network.js';
 import { tenantRootPrivateKey } from './setup.js';
 import { BudgetedDurableObject } from '../src/storage-quarantine.js';
@@ -187,6 +189,18 @@ it('answers its machines and the platform with a published release\'s files from
   // `gitspace machine setup` names every release's files `releases/<sha>/…`, a published release's too.
   const named = portableFileKey(`releases/${release.commit}/${PORTABLE_MANIFEST_FILE}`, 'cli/gitspace.js');
   expect(await machineRead(named, cliHash)).toEqual({ status: 200, hash: cliHash, size: String(cli.byteLength), bytesHash: cliHash });
+  // A machine reads `releases/<sha>/frontend.manifest.json` unnamed by digest before it takes any release; a published
+  // release has none of its own, so the answer lists the files its pinned manifest names, each by its digest.
+  const frontendManifest = `releases/${release.commit}/frontend.manifest.json`;
+  const listed = await worker.fetch(new Request(`https://auth.test/v1/data/${frontendManifest}`, { headers: { 'x-gitspace-control': signed('data.get', frontendManifest) } }), runtime);
+  const listedBytes = new Uint8Array(await listed.arrayBuffer());
+  expect({ status: listed.status, hash: listed.headers.get('x-gitspace-sha256'), size: listed.headers.get('content-length') })
+    .toEqual({ status: 200, hash: `sha256:${await hex(listedBytes)}`, size: String(listedBytes.byteLength) });
+  const { files } = z.object({ files: z.array(z.object({ path: z.string(), hash: z.string() })) }).parse(JSON.parse(new TextDecoder().decode(listedBytes)));
+  expect(files.length).toBeGreaterThan(0);
+  const [first] = files;
+  const frontendFile = `channel/defaults/releases/${release.commit}/frontend/${first!.path}`;
+  expect((await machineRead(frontendFile, first!.hash)).status).toBe(200);
   // A read that names no digest is refused: nothing could check what the channel answers.
   expect((await worker.fetch(new Request(`https://auth.test/v1/data/${portable}`, { headers: { 'x-gitspace-control': signed('data.get', portable) } }), runtime)).status).toBe(400);
   const missing = `channel/defaults/releases/${release.commit}/missing`;
@@ -256,4 +270,20 @@ it('launches a published commit the account already built as the release it hold
   expect(deploys).toEqual([expect.objectContaining({ manifestKey: `users/${userId}/${own(WORKER_MANIFEST_FILE).key}` })]);
   expect(finished.releases.find(record => record.sha === release.commit)).toMatchObject({ source, label: 'develop @ aaaaaaaaaaaa' });
   expect(downloads).toEqual([]);
+});
+
+it('names a published frontend by the tree hash a machine computes over the files it writes', async () => {
+  // `hashArtifactPath` over this tree on disk (index.html, assets/a.js, assets/B.css, Z.txt) gives this hash: directory
+  // entries in localeCompare order (assets, index.html, Z.txt; a.js, B.css), never byte order.
+  const tree = { 'index.html': 'html', 'assets/a.js': 'js', 'assets/B.css': 'css', 'Z.txt': 'zed' };
+  const files = await Promise.all(Object.entries(tree).map(async ([path, text]) => ({ key: `defaults/releases/x/frontend/${path}`, sha256: await hex(encoder.encode(text)), size: text.length, path, contentType: 'text/plain' })));
+  const releaseChannel = {
+    async fetch(input, init) {
+      const path = decodeURIComponent(new URL(new Request(input, init).url).pathname.slice('/defaults/releases/x/frontend/'.length));
+      const text = Object.entries(tree).find(([name]) => name === path)?.[1];
+      return text === undefined ? new Response(null, { status: 404 }) : new Response(text);
+    },
+    connect: (address, options) => env.RELEASE_CHANNEL.connect(address, options),
+  } satisfies Fetcher;
+  expect(await publishedFrontendTreeHash({ ...env, RELEASE_CHANNEL: releaseChannel }, files)).toBe('sha256:8b7057a8fb01d26f6d8e135d16a562f92337c9172dcbfe267dd8e97dd5573b3b');
 });

@@ -68,7 +68,8 @@ export async function seedProjectRepository(input: SeedProjectRepositoryInput): 
   const directory = await mkdtemp(join(input.scratchRoot, 'seed-'));
   try {
     const repositoryPath = join(directory, 'repository');
-    await runGit(['clone', '--single-branch', ...(input.baseBranch === null ? [] : ['--branch', input.baseBranch]), '--', repositoryUrl, repositoryPath], undefined, input.gitEnvironment);
+    // publishRef sends the tip alone (its commit is the push's shallow boundary), so only the tip is cloned.
+    await runGit(['clone', '--depth', '1', '--single-branch', ...(input.baseBranch === null ? [] : ['--branch', input.baseBranch]), '--', repositoryUrl, repositoryPath], undefined, input.gitEnvironment);
     const baseBranch = input.baseBranch ?? await runGit(['symbolic-ref', '--quiet', '--short', 'HEAD'], repositoryPath, {});
     const { headCommit } = await readGitCheckpointHead(repositoryPath);
     if (headCommit === null) return { baseBranch, commit: null };

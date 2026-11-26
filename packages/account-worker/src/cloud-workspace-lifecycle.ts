@@ -663,19 +663,31 @@ async function runProjectImport({ env, authority, operation }: QueuedRun): Promi
 
 /** A project repository that holds its origin's history, imported first when it does not. The first import runs as a
  * project operation, so it shows where operations show and one import serves every workspace that opens meanwhile;
- * its failure is thrown here, and the next call imports again. */
+ * its failure is thrown here, and the next call imports again. A repository a machine copied in after a refused
+ * import gets an import that completes from that copy, so the refusal stops showing (a later import supersedes it). */
 export async function importedProjectRepository(env: Env, project: CloudProjectSummary): Promise<void> {
   const code = new ArtifactsCodeStore(env.ARTIFACTS);
   if (project.repositoryReference === null) { await ensureProjectCodeRepository(env, code, project); return; }
-  if (await code.projectImported(project.id, project.baseBranch)) return;
+  const imported = await code.projectImported(project.id, project.baseBranch);
   const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${project.id}`);
-  const running = (await authority.visibleOperations()).find(operation => operation.kind === 'project.import' && (operation.state === 'queued' || operation.state === 'running'));
+  const imports = (await authority.visibleOperations()).filter(operation => operation.kind === 'project.import');
+  if (imported && !imports.some(operation => operation.state === 'failed')) return;
+  const running = imports.find(operation => operation.state === 'queued' || operation.state === 'running');
   // Queued beside any other change: the project's alarm runs its operations one at a time.
   const operation = running ?? await authority.queueOperation({
     projectId: project.id, workspaceId: null, kind: 'project.import', steps: labelled([`Import ${project.baseBranch === 'HEAD' ? 'the default branch' : project.baseBranch} from the origin`]),
     summary: project.repositoryReference, request: {}, createdBy: 'account',
   });
-  await completedOperation(env, operation);
+  if (!imported) await completedOperation(env, operation);
+}
+
+/** A project a machine copied in after its import was refused: an import completing from that copy supersedes the
+ * refusal. Nothing happens to a project whose repository still waits for its copy. */
+export async function settleCopiedProject(env: Env, projectId: string): Promise<void> {
+  const project = await env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`).getProject();
+  if (!project || project.repositoryReference === null) return;
+  if (!await new ArtifactsCodeStore(env.ARTIFACTS).projectImported(project.id, project.baseBranch)) return;
+  await importedProjectRepository(env, project);
 }
 
 /** Queues a failed operation again with the request it was given; its own checks run again first. */

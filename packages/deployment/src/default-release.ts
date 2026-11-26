@@ -64,6 +64,14 @@ export async function buildDefaultRelease(commit: string, builders: DefaultRelea
   objects.set(`${prefix}manifest.json`, new TextEncoder().encode(JSON.stringify(manifest)));
   return { manifest, objects };
 }
+/** Runs `publish` over `objects` eight at a time. One by one, three storage round trips per object passed ten minutes
+ * for a release (rc.51). */
+async function eightAtATime(objects: readonly DefaultObject[], publish: (object: DefaultObject) => Promise<void>): Promise<void> {
+  let next = 0;
+  await Promise.all(Array.from({ length: 8 }, async () => {
+    while (next < objects.length) await publish(objects[next++]!);
+  }));
+}
 async function verifyRelease(reader: DefaultReleaseReader, reference: DefaultObject): Promise<DefaultRelease> {
   const manifest = await readDefaultManifest(reader, reference);
   await verifyDefaultReleaseContents(reader, manifest);
@@ -80,14 +88,17 @@ export async function publishDefaultRelease(build: DefaultReleaseBuild, storage:
   const pointer = before ? defaultPointerSchema.parse(JSON.parse(new TextDecoder().decode(before.bytes))) : null;
   if (pointer) await verifyRelease(storage, pointer.current);
   const portableObjects = manifest.portable ? await verifyDefaultPortable(local, manifest.portable, 'manifests') : [];
-  for (const object of [...await verifyDefaultWorker(local, manifest.worker, 'manifests'), ...manifest.frontend.files, manifest.image.provenance, ...portableObjects, reference]) {
+  const publish = async (object: DefaultObject) => {
     const bytes = await verifyDefaultObject(local, object);
     if (!await storage.get(object.key)) {
       try { await storage.put(object.key, bytes, null); }
       catch (error) { if (!await storage.get(object.key)) throw error; }
     }
     await verifyDefaultObject(storage, object);
-  }
+  };
+  // The manifest goes last, so it names only objects already in place.
+  await eightAtATime([...await verifyDefaultWorker(local, manifest.worker, 'manifests'), ...manifest.frontend.files, manifest.image.provenance, ...portableObjects], publish);
+  await publish(reference);
   if (pointer?.current.sha256 === reference.sha256 && pointer.current.key === reference.key) return;
   await storage.put(DEFAULT_ACCOUNT_POINTER, new TextEncoder().encode(JSON.stringify({ schemaVersion: 1, current: reference, previous: pointer?.current ?? null })), before?.etag ?? null);
 }
@@ -112,14 +123,17 @@ export async function publishToChannel(source: DefaultReleaseReader, channel: De
   const reference = defaultObject(manifestKey, manifestObject.bytes);
   const manifest = await readDefaultManifest(source, reference);
   const portable = manifest.portable ? await verifyDefaultPortable(source, manifest.portable, 'manifests') : [];
-  for (const object of [...await verifyDefaultWorker(source, manifest.worker, 'manifests'), ...manifest.frontend.files, manifest.image.provenance, ...portable, reference]) {
+  const copy = async (object: DefaultObject) => {
     if (!await channel.get(object.key)) {
       const bytes = await verifyDefaultObject(source, object);
       try { await channel.put(object.key, bytes, null); }
       catch (error) { if (!await channel.get(object.key)) throw error; }
     }
     await verifyDefaultObject(channel, object);
-  }
+  };
+  // The manifest goes last, so the channel lists only releases whose objects are all in place.
+  await eightAtATime([...await verifyDefaultWorker(source, manifest.worker, 'manifests'), ...manifest.frontend.files, manifest.image.provenance, ...portable], copy);
+  await copy(reference);
   const pin = defaultReleasePin(reference);
   const before = await channel.get(CHANNEL_CATALOG);
   const catalog = channelCatalogSchema.parse(before ? JSON.parse(new TextDecoder().decode(before.bytes)) : { schemaVersion: 1, releases: [] });

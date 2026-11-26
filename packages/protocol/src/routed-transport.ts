@@ -80,10 +80,11 @@ export function createRoutedTransport(options: RoutedTransportOptions): ClientTr
   // reports skew (the "GitSpace was updated" prompt). A reply this page cannot read still fails to decode.
   const contract = contractDigest(gitspaceContract);
   const targets = new Map<string, ClientTransport>();
-  const queue = (key: string): ClientTransport => {
+  const queue = (key: string, long: boolean): ClientTransport => {
     let transport = targets.get(key);
     if (!transport) {
-      const machine = batch();
+      // A machine copying a project's repository in clones and publishes it in one call, outlasting a batch's budget.
+      const machine = long ? fetchTransport({ url: options.homeUrl, fetch, timeoutMs: 300_000 }) : batch();
       const stream = machine.stream;
       transport = {
         request: async (envelope, requestOptions) => {
@@ -118,7 +119,8 @@ export function createRoutedTransport(options: RoutedTransportOptions): ClientTr
     if (accountRpcAuthority(path) === 'cloud') return account;
     const target = rpcCallTarget(path, input);
     if (!target) return home;
-    return queue(target.kind === 'terminal' ? `terminal:${target.spaceId}:${target.machineId}` : `machine:${target.machineId}`);
+    if (target.kind === 'terminal') return queue(`terminal:${target.spaceId}:${target.machineId}`, false);
+    return path === 'project.seed' ? queue(`machine-long:${target.machineId}`, true) : queue(`machine:${target.machineId}`, false);
   };
 
   return {

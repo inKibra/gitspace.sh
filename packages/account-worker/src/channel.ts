@@ -47,8 +47,41 @@ export async function publishedRelease(env: Env, reference: { tag: string } | { 
   return { manifest: await loadPinnedDefaultRelease(channelReader(env), pin), source: { kind: 'release', tag, pin } };
 }
 
-/** The release record of a published release: every file a channel key, the worker with the metadata it was built with. */
-export function publishedStageInput(manifest: DefaultRelease, source: Extract<ReleaseSource, { kind: 'release' }>): StageReleaseInput {
+/**
+ * The hash a machine computes over the frontend tree it writes from a release (`hashArtifactPath`): for each file, its
+ * path in the tree, a NUL, its bytes and a NUL, every directory's entries in `localeCompare` order of their names. A
+ * published release names no such hash, so its record's frontend artifact carries this one; the pin's hash there made
+ * every machine refuse the tree it wrote (2026-11-26).
+ */
+export async function publishedFrontendTreeHash(env: Env, files: DefaultRelease['frontend']['files']): Promise<`sha256:${string}`> {
+  const ordered = [...files].sort((left, right) => {
+    const a = left.path.split('/');
+    const b = right.path.split('/');
+    for (let index = 0; index < Math.min(a.length, b.length); index++) {
+      if (a[index] !== b[index]) return a[index]!.localeCompare(b[index]!);
+    }
+    return a.length - b.length;
+  });
+  const contents: Uint8Array[] = [];
+  for (let start = 0; start < ordered.length; start += 8) {
+    contents.push(...await Promise.all(ordered.slice(start, start + 8).map(async (file) => {
+      const response = await channelObject(env, file.key);
+      if (!response) throw new Error(`The GitSpace channel has no frontend file ${file.key}`);
+      return response.bytes();
+    })));
+  }
+  const encoder = new TextEncoder();
+  const parts = ordered.flatMap((file, index) => [encoder.encode(file.path), new Uint8Array([0]), contents[index]!, new Uint8Array([0])]);
+  const joined = new Uint8Array(parts.reduce((total, part) => total + part.byteLength, 0));
+  let offset = 0;
+  for (const part of parts) { joined.set(part, offset); offset += part.byteLength; }
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', joined));
+  return `sha256:${[...digest].map(byte => byte.toString(16).padStart(2, '0')).join('')}`;
+}
+
+/** The release record of a published release: every file a channel key, the worker with the metadata it was built with,
+ * the frontend under the tree hash a machine computes (`publishedFrontendTreeHash`). */
+export function publishedStageInput(manifest: DefaultRelease, source: Extract<ReleaseSource, { kind: 'release' }>, frontendTree: `sha256:${string}`): StageReleaseInput {
   if (!('manifest' in manifest.worker)) throw new Error(`Published release ${manifest.commit} predates module releases; publish it again`);
   if (!manifest.portable) throw new Error(`Published release ${manifest.commit} has no portable machine release`);
   const prefix = `defaults/releases/${manifest.commit}/`;
@@ -63,7 +96,7 @@ export function publishedStageInput(manifest: DefaultRelease, source: Extract<Re
       worker: artifact(manifest.worker.manifest),
       machine: null,
       // The frontend tree is served by path under its prefix; the pin's manifest lists and pins each file.
-      frontend: { key: `${CHANNEL_PREFIX}${prefix}frontend`, hash: `sha256:${source.pin.slice(41)}`, size: manifest.frontend.files.reduce((bytes, file) => bytes + file.size, 0) },
+      frontend: { key: `${CHANNEL_PREFIX}${prefix}frontend`, hash: frontendTree, size: manifest.frontend.files.reduce((bytes, file) => bytes + file.size, 0) },
       portable: artifact(manifest.portable),
     },
   };

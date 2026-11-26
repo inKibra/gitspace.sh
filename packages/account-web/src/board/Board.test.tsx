@@ -333,52 +333,45 @@ it('orders Waiting and Running by their latest change and Needs you by what has 
   expect(listed).toEqual(['asked-early', 'asked-late', 'its-member', 'new-run', 'old-run', 'new-wait', 'mid-wait', 'old-wait', 'never-reported']);
 });
 
-it('folds State and Phase groups in the list and on the board alike, each grouping remembered apart, across a reload', async () => {
+it('folds a State or Phase heading in its own project only, each grouping remembered apart, across a reload; the board\'s columns fold on their own', async () => {
   window.localStorage.setItem('gitspace.sidebar.groupBy', 'state');
   await show('/');
-  const heading = (label: string): HTMLButtonElement => {
-    const found = [...container.querySelectorAll<HTMLButtonElement>('[data-group-heading]')].find((candidate) => candidate.textContent?.startsWith(label));
-    if (!found) throw new Error(`No heading ${label}`);
-    return found;
+  // Crumb's headings come first, then Ledger's.
+  const heading = (label: string, project: 'crumb' | 'ledger'): HTMLButtonElement => {
+    const found = [...container.querySelectorAll<HTMLButtonElement>('[data-group-heading]')].filter((candidate) => candidate.textContent?.startsWith(label));
+    const one = found[project === 'crumb' ? 0 : 1];
+    if (!one) throw new Error(`No heading ${label} in ${project}`);
+    return one;
   };
   const listed = (id: string): boolean => container.querySelector(`[data-workspace="${id}"]`) !== null;
-  expect(heading('Waiting').getAttribute('aria-expanded')).toBe('true');
-  await act(() => heading('Waiting').click());
-  expect(heading('Waiting').getAttribute('aria-expanded')).toBe('false');
-  expect(heading('Waiting').textContent).toContain('2');
-  expect(listed('menu-cache') || listed('allergen-labels')).toBe(false);
-  expect(listed('slot-holds')).toBe(true);
+  await act(() => heading('Needs you', 'crumb').click());
+  expect(heading('Needs you', 'crumb').getAttribute('aria-expanded')).toBe('false');
+  expect(heading('Needs you', 'crumb').textContent).toContain('2');
+  expect(listed('slot-holds') || listed('loyalty-stamps')).toBe(false);
+  // Ledger's Needs you is its own: still open.
+  expect(heading('Needs you', 'ledger').getAttribute('aria-expanded')).toBe('true');
+  expect(listed('bank-feed')).toBe(true);
 
   // A reload keeps it folded.
   await act(() => root.unmount());
   root = createRoot(container);
   await show('/');
-  expect(heading('Waiting').getAttribute('aria-expanded')).toBe('false');
-  expect(listed('menu-cache')).toBe(false);
+  expect(heading('Needs you', 'crumb').getAttribute('aria-expanded')).toBe('false');
+  expect(heading('Needs you', 'ledger').getAttribute('aria-expanded')).toBe('true');
 
   // Phase's groups are folded on their own.
   await act(() => button('Phase').click());
   expect(listed('menu-cache')).toBe(true);
-  await act(() => heading('Review').click());
+  await act(() => heading('Review', 'crumb').click());
   expect(listed('menu-cache')).toBe(false);
   await act(() => button('State').click());
-  expect(heading('Waiting').getAttribute('aria-expanded')).toBe('false');
-  expect(heading('Needs you').getAttribute('aria-expanded')).toBe('true');
+  expect(heading('Needs you', 'crumb').getAttribute('aria-expanded')).toBe('false');
+  expect(heading('Waiting', 'crumb').getAttribute('aria-expanded')).toBe('true');
 
-  // The board folds the same column into a strip, which opens on a click, for the list too.
+  // The board's columns span every project and fold apart from the list's headings.
   await key('b');
-  expect(column('waiting').dataset.folded).toBe('');
-  expect(cards('waiting')).toEqual([]);
-  expect(column('waiting').querySelector('button')?.getAttribute('aria-label')).toBe('Waiting, 2');
-  // A workspace newly waiting shows in the folded strip's count.
-  shownProjects = [...PROJECTS.slice(0, 1), project('ledger', 'Ledger', [{ id: 'invoice-pdf', phase: 'code', color: 'blue' }, { id: 'bank-feed', phase: 'code', color: 'orange' }])];
-  await act(() => root.render(<Frame />));
-  expect(column('waiting').querySelector('button')?.getAttribute('aria-label')).toBe('Waiting, 3');
-  expect(column('waiting').dataset.folded).toBe('');
-  await act(() => column('waiting').querySelector('button')?.click());
-  expect(column('waiting').dataset.folded).toBeUndefined();
-  expect(cards('waiting')).toEqual(['menu-cache', 'allergen-labels', 'invoice-pdf']);
+  expect(column('needs-you').dataset.folded).toBeUndefined();
+  expect(cards('needs-you')).toEqual(expect.arrayContaining(['slot-holds', 'bank-feed']));
   await key('b');
-  expect(heading('Waiting').getAttribute('aria-expanded')).toBe('true');
-  expect(listed('menu-cache')).toBe(true);
+  expect(heading('Needs you', 'crumb').getAttribute('aria-expanded')).toBe('false');
 });
