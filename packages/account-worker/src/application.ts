@@ -142,7 +142,7 @@ import { AccountStateDO } from './account-state.js';
 import { tenantPlatformJson, tenantProvider, tenantWorkerVersion } from './tenant-platform.js';
 import { accountDistributionResponse } from './distribution.js';
 import { admitPortableRelease } from './portable-release.js';
-import { CHANNEL_PREFIX, publishedRelease, publishedStageInput, releaseFile } from './channel.js';
+import { CHANNEL_PREFIX, publishedFrontendTreeHash, publishedRelease, publishedStageInput, releaseFile } from './channel.js';
 import { acrossRelease, deployReleaseWorker, ReleaseUpdatingError, restartObjectsForRelease } from './release-worker.js';
 import { refreshProjectRemote } from './project-remote.js';
 import { forwardTunnelRequest, tunnelTarget } from './relay-request.js';
@@ -2954,12 +2954,16 @@ export async function ensureDefaultRelease(env: Env, userId: string): Promise<vo
 }
 
 /** A published release in the account, by reference: its natives mirrored, its files left in the channel. A commit the
- * account already holds a release of is that release. */
+ * account already holds a release of is that release; one held under its pin's hash for the frontend (staged before the
+ * frontend tree hash) is staged again with it, keeping its status. */
 async function holdPublishedRelease(env: Env, userId: string, reference: { tag: string } | { pin: string }): Promise<string> {
   const releases = tenantReleases(env, userId);
   const { manifest, source } = await publishedRelease(env, reference);
-  if (await releases.hasRelease(manifest.commit)) return manifest.commit;
-  const input = publishedStageInput(manifest, source);
+  if (await releases.hasRelease(manifest.commit)) {
+    const held = await releases.publishedRelease(manifest.commit);
+    if (held === null || held.frontendHash !== `sha256:${source.pin.slice(41)}`) return manifest.commit;
+  }
+  const input = publishedStageInput(manifest, source, await publishedFrontendTreeHash(env, manifest.frontend.files));
   if (input.artifacts.portable) await admitPortableRelease(env, userId, input.sha, input.artifacts.portable);
   await releases.stage(input, ACCOUNT_LAUNCHER);
   return input.sha;

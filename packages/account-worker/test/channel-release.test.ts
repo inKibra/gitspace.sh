@@ -9,6 +9,7 @@ import { NATIVE_UPSTREAMS, PORTABLE_ENTRYPOINTS, PORTABLE_MANIFEST_FILE, portabl
 import { CHANNEL_CATALOG } from '@gitspace/protocol/release-channel';
 import worker from '../src/index.js';
 import { launchPublishedRelease } from '../src/application.js';
+import { publishedFrontendTreeHash } from '../src/channel.js';
 import { network } from './network.js';
 import { tenantRootPrivateKey } from './setup.js';
 import { BudgetedDurableObject } from '../src/storage-quarantine.js';
@@ -269,4 +270,20 @@ it('launches a published commit the account already built as the release it hold
   expect(deploys).toEqual([expect.objectContaining({ manifestKey: `users/${userId}/${own(WORKER_MANIFEST_FILE).key}` })]);
   expect(finished.releases.find(record => record.sha === release.commit)).toMatchObject({ source, label: 'develop @ aaaaaaaaaaaa' });
   expect(downloads).toEqual([]);
+});
+
+it('names a published frontend by the tree hash a machine computes over the files it writes', async () => {
+  // `hashArtifactPath` over this tree on disk (index.html, assets/a.js, assets/B.css, Z.txt) gives this hash: directory
+  // entries in localeCompare order (assets, index.html, Z.txt; a.js, B.css), never byte order.
+  const tree = { 'index.html': 'html', 'assets/a.js': 'js', 'assets/B.css': 'css', 'Z.txt': 'zed' };
+  const files = await Promise.all(Object.entries(tree).map(async ([path, text]) => ({ key: `defaults/releases/x/frontend/${path}`, sha256: await hex(encoder.encode(text)), size: text.length, path, contentType: 'text/plain' })));
+  const releaseChannel = {
+    async fetch(input, init) {
+      const path = decodeURIComponent(new URL(new Request(input, init).url).pathname.slice('/defaults/releases/x/frontend/'.length));
+      const text = Object.entries(tree).find(([name]) => name === path)?.[1];
+      return text === undefined ? new Response(null, { status: 404 }) : new Response(text);
+    },
+    connect: (address, options) => env.RELEASE_CHANNEL.connect(address, options),
+  } satisfies Fetcher;
+  expect(await publishedFrontendTreeHash({ ...env, RELEASE_CHANNEL: releaseChannel }, files)).toBe('sha256:8b7057a8fb01d26f6d8e135d16a562f92337c9172dcbfe267dd8e97dd5573b3b');
 });

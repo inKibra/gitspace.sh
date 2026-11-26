@@ -568,10 +568,11 @@ export class TenantReleasesDO extends BudgetedDurableObject {
     );
   }
 
-  /** A release held by reference to the channel: its pin and portable manifest key; null for one in account storage. */
-  publishedRelease(sha: string): { pin: string; portableKey: string | null } | null {
+  /** A release held by reference to the channel: its pin, portable manifest key and frontend tree hash; null for one in
+   * account storage. */
+  publishedRelease(sha: string): { pin: string; portableKey: string | null; frontendHash: string | null } | null {
     const record = this.findRelease(sha);
-    return record?.source?.kind === 'release' ? { pin: record.source.pin, portableKey: record.artifacts.portable?.key ?? null } : null;
+    return record?.source?.kind === 'release' ? { pin: record.source.pin, portableKey: record.artifacts.portable?.key ?? null, frontendHash: record.artifacts.frontend?.hash ?? null } : null;
   }
 
   /**
