@@ -28,6 +28,7 @@ import type { FleetCatalogDO } from './fleet-catalog.js';
 import type { CredentialVaultDO } from './application.js';
 import { GITSPACE_SOURCE_REPOSITORY } from '@gitspace/protocol/project-authority';
 import { notifyMachines } from './machine-notices.js';
+import { publishedFrontendTreeHash, publishedRelease } from './channel.js';
 import { deployReleaseWorker, restartObjectsForRelease } from './release-worker.js';
 import type { WorkerSwap } from './tenant-platform.js';
 import { BudgetedDurableObject, WORKER_VERSION } from './storage-quarantine.js';
@@ -154,10 +155,15 @@ export class TenantReleasesDO extends BudgetedDurableObject {
         id INTEGER PRIMARY KEY CHECK (id = 1),
         sha TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS announced_version (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        version TEXT NOT NULL
+      );
       DROP TABLE IF EXISTS latest_revert;
     `);
     migrateReleaseSources(ctx.storage);
     this.certifyOwnLaunch(WORKER_VERSION ?? null);
+    this.announceVersion(WORKER_VERSION ?? null);
   }
 
   /** The release the GitSpace project runs; a target with no selection, and every new computer, follows it. */
@@ -238,6 +244,35 @@ export class TenantReleasesDO extends BudgetedDurableObject {
     if (record.status.worker === 'pending') { record.status.worker = 'applied'; record.error = null; this.saveRecord(record); }
     this.promoteDefault(record);
     this.finishLaunch(record, launch.targets);
+  }
+
+  /**
+   * The first start of each version tells machines about the releases they follow, from the code that now serves them:
+   * a notice from the launching code reached machines before this code answered, and each read the old answers once and
+   * waited (2026-11-26). A published release that older code staged names its frontend by the pin's hash, which no
+   * machine computes; it is corrected first (`publishedFrontendTreeHash`).
+   */
+  private announceVersion(version: string | null): void {
+    if (version === null) return;
+    if (this.ctx.storage.sql.exec<{ version: string }>('SELECT version FROM announced_version WHERE id = 1').toArray()[0]?.version === version) return;
+    this.ctx.waitUntil((async () => {
+      const desired = this.desired();
+      for (const sha of new Set([desired.machine, desired.frontend])) if (sha !== null) await this.correctPublishedFrontend(sha);
+      await notifyMachines(this.env, 'all', ['release']);
+      this.ctx.storage.sql.exec('INSERT INTO announced_version(id, version) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET version = excluded.version', version);
+    })().catch((error: unknown) => console.error(JSON.stringify({ event: 'release_announcement_failed', version, message: error instanceof Error ? error.message : String(error) }))));
+  }
+
+  /** A published release staged with its pin's hash for the frontend takes the tree hash machines compute. */
+  private async correctPublishedFrontend(sha: string): Promise<void> {
+    const record = this.findRelease(sha);
+    if (record?.source?.kind !== 'release' || record.artifacts.frontend?.hash !== `sha256:${record.source.pin.slice(41)}`) return;
+    const { manifest } = await publishedRelease(this.env, { pin: record.source.pin });
+    const hash = await publishedFrontendTreeHash(this.env, manifest.frontend.files);
+    const current = this.findRelease(sha);
+    if (!current?.artifacts.frontend) return;
+    current.artifacts.frontend = { ...current.artifacts.frontend, hash };
+    this.saveRecord(current);
   }
 
   /** The machine building the running launch started a new process, so nothing builds that launch any more. Coming
