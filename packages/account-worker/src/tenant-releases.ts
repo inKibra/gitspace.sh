@@ -250,7 +250,8 @@ export class TenantReleasesDO extends BudgetedDurableObject {
    * The first start of each version tells machines about the releases they follow, from the code that now serves them:
    * a notice from the launching code reached machines before this code answered, and each read the old answers once and
    * waited (2026-11-26). A published release that older code staged names its frontend by the pin's hash, which no
-   * machine computes; it is corrected first (`publishedFrontendTreeHash`).
+   * machine computes; it is corrected first (`publishedFrontendTreeHash`). The version counts as announced only once the
+   * relay took the notice; a failed one is tried again on the object's next start.
    */
   private announceVersion(version: string | null): void {
     if (version === null) return;
@@ -258,7 +259,7 @@ export class TenantReleasesDO extends BudgetedDurableObject {
     this.ctx.waitUntil((async () => {
       const desired = this.desired();
       for (const sha of new Set([desired.machine, desired.frontend])) if (sha !== null) await this.correctPublishedFrontend(sha);
-      await notifyMachines(this.env, 'all', ['release']);
+      await this.env.RELAY.getByName(this.env.RELAY_NAME).notifyMachines('all', { topics: ['release'] });
       this.ctx.storage.sql.exec('INSERT INTO announced_version(id, version) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET version = excluded.version', version);
     })().catch((error: unknown) => console.error(JSON.stringify({ event: 'release_announcement_failed', version, message: error instanceof Error ? error.message : String(error) }))));
   }
