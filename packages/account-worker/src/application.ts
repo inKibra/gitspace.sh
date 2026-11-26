@@ -85,7 +85,7 @@ import {
   type InferenceProfile, type InferenceState,
 } from '@gitspace/protocol/inference';
 import { HostedIngressRegistrationSchema, LifecycleMutationSchema, SERVICE_TOKEN_MAX_TTL_S, ServiceTokenRequestSchema, authorizeLifecycleMachineMutation, environmentFailure, executionHash, parseServiceIngressContent, type LifecycleState } from '@gitspace/protocol-environment';
-import { createManagedKey, ManagedKeySchema, mintServiceToken, signManagedToken, type ManagedKey, type SignedServiceToken } from './service-tokens.js';
+import { createManagedKey, ManagedKeySchema, mintServiceToken, sha256Hex, signManagedToken, type ManagedKey, type SignedServiceToken } from './service-tokens.js';
 import { LiveChanges } from './live-changes.js';
 import { sendSized, tenantNamespace, tenantStore, TenantObjectIntegrityError, verifying, type TenantNamespace } from './tenant-store.js';
 import { requireWorkspaceAccess } from './runtime-access.js';
@@ -3464,9 +3464,18 @@ async function releaseDataObjectResponse(request: Request, env: Env, signed: Sig
     // Machines name every release's files `releases/<sha>/…`; a published release's are in the channel.
     const named = /^releases\/([^/]+)\/(.+)$/u.exec(keyFromPath);
     if (!named) return new Response(null, { status: 404 });
-    const portableKey = await env.TENANT_RELEASES.getByName(env.ACCOUNT_ID).publishedPortableKey(named[1]!);
-    if (!portableKey?.endsWith(`/${PORTABLE_MANIFEST_FILE}`)) return new Response(null, { status: 404 });
-    return publishedDataObjectResponse(env, signed, `${portableKey.slice(0, -PORTABLE_MANIFEST_FILE.length)}${named[2]}`);
+    const published = await env.TENANT_RELEASES.getByName(env.ACCOUNT_ID).publishedRelease(named[1]!);
+    if (!published) return new Response(null, { status: 404 });
+    // A published release lists its frontend in its pinned manifest and has no frontend manifest file. A machine reads
+    // one unnamed by digest before it takes any release (`ReleaseFollower.launchFrontend`), so it is made from that list.
+    if (named[2] === 'frontend.manifest.json') {
+      const { manifest } = await publishedRelease(env, { pin: published.pin });
+      const body = JSON.stringify({ files: manifest.frontend.files.map(file => ({ path: file.path, hash: `sha256:${file.sha256}`, size: file.size })) });
+      const headers = new Headers({ 'cache-control': 'private, no-store', 'content-type': 'application/json', 'content-length': String(new TextEncoder().encode(body).byteLength), 'x-gitspace-sha256': `sha256:${await sha256Hex(body)}` });
+      return new Response(operation === 'data.head' ? null : body, { headers });
+    }
+    if (!published.portableKey?.endsWith(`/${PORTABLE_MANIFEST_FILE}`)) return new Response(null, { status: 404 });
+    return publishedDataObjectResponse(env, signed, `${published.portableKey.slice(0, -PORTABLE_MANIFEST_FILE.length)}${named[2]}`);
   }
   // An object stored with its hash is served only under that hash.
   const expectedHash = signed.payload.hash;

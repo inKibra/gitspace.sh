@@ -1,6 +1,7 @@
 import { beforeAll, expect, it, vi } from 'vitest';
 import { env } from 'cloudflare:test';
 import { HttpResponse, http } from 'msw';
+import { z } from 'zod';
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import { createSignedControlRequest, credentialProtocolBase64, signCredentialAuthorityGrant } from '@gitspace/protocol';
 import { deploymentStatusSchema, platformDeployRequestSchema, WORKER_MANIFEST_FILE, type ReleaseArtifact, type ReleaseSource, type WorkerReleaseMetadata } from '@gitspace/protocol/deployment';
@@ -187,6 +188,18 @@ it('answers its machines and the platform with a published release\'s files from
   // `gitspace machine setup` names every release's files `releases/<sha>/…`, a published release's too.
   const named = portableFileKey(`releases/${release.commit}/${PORTABLE_MANIFEST_FILE}`, 'cli/gitspace.js');
   expect(await machineRead(named, cliHash)).toEqual({ status: 200, hash: cliHash, size: String(cli.byteLength), bytesHash: cliHash });
+  // A machine reads `releases/<sha>/frontend.manifest.json` unnamed by digest before it takes any release; a published
+  // release has none of its own, so the answer lists the files its pinned manifest names, each by its digest.
+  const frontendManifest = `releases/${release.commit}/frontend.manifest.json`;
+  const listed = await worker.fetch(new Request(`https://auth.test/v1/data/${frontendManifest}`, { headers: { 'x-gitspace-control': signed('data.get', frontendManifest) } }), runtime);
+  const listedBytes = new Uint8Array(await listed.arrayBuffer());
+  expect({ status: listed.status, hash: listed.headers.get('x-gitspace-sha256'), size: listed.headers.get('content-length') })
+    .toEqual({ status: 200, hash: `sha256:${await hex(listedBytes)}`, size: String(listedBytes.byteLength) });
+  const { files } = z.object({ files: z.array(z.object({ path: z.string(), hash: z.string() })) }).parse(JSON.parse(new TextDecoder().decode(listedBytes)));
+  expect(files.length).toBeGreaterThan(0);
+  const [first] = files;
+  const frontendFile = `channel/defaults/releases/${release.commit}/frontend/${first!.path}`;
+  expect((await machineRead(frontendFile, first!.hash)).status).toBe(200);
   // A read that names no digest is refused: nothing could check what the channel answers.
   expect((await worker.fetch(new Request(`https://auth.test/v1/data/${portable}`, { headers: { 'x-gitspace-control': signed('data.get', portable) } }), runtime)).status).toBe(400);
   const missing = `channel/defaults/releases/${release.commit}/missing`;
