@@ -22,7 +22,7 @@ restoreAppearance();
 const releaseViewport = observeAppViewport();
 import.meta.hot?.dispose(releaseViewport);
 // The install's domains, named by the Worker that served this page: read before anything checks a hostname, and
-// shown, not assumed, when the page does not name them.
+// shown, not assumed, when the page names invalid ones.
 try {
   installDomains();
 } catch (error) {

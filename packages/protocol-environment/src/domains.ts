@@ -59,10 +59,12 @@ export async function withDomainsPage(response: Response, domains: GitSpaceDomai
   return new Response(withDomainsMeta(page, domains), { status: response.status, statusText: response.statusText, headers });
 }
 
-/** The domains a served page names (the `content` of its `<meta name="gitspace-domains">`). A page without them is a
- * serving error, never GitSpace's own by default. */
+/** The domains a served page names (the `content` of its `<meta name="gitspace-domains">`). A page without the tag was
+ * served by a Worker from before install domains, which only ever ran on GitSpace's own: a release applies its
+ * frontend and its Worker separately, so a new app can be served by such a Worker. A tag naming no valid domains is a
+ * serving error. */
 export function domainsFromMeta(content: string | null): GitSpaceDomains {
-  if (content === null) throw new EnvironmentError('InvalidConfiguration', `The page does not name its install's domains (<meta name="${DOMAINS_META_NAME}">)`);
+  if (content === null) return DEFAULT_DOMAINS;
   let value: unknown;
   try { value = JSON.parse(content); } catch { value = null; }
   const parsed = GitSpaceDomainsSchema.safeParse(value);

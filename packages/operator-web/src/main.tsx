@@ -13,7 +13,7 @@ if (!root) throw new Error('GitSpace operator root element is missing');
 
 restoreAppearance();
 // The install's domains, named by the Worker that served this page (the site's handles and links name them): shown,
-// not assumed, when the page does not name them.
+// not assumed, when the page names invalid ones.
 try {
   installDomains();
 } catch (error) {

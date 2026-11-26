@@ -18,10 +18,15 @@ describe('install domains in the browser app', () => {
     expect(accountHandleFromUrl(new URL('https://api.git.acme.example/'))).toBeNull();
   });
 
-  it('refuses to guess when the page does not name them', () => {
+  it('reads GitSpace\'s own from a page an older Worker served, and refuses a page naming invalid ones', () => {
+    // A release applies its frontend and Worker separately: this app can be served by a Worker that names none.
     document.documentElement.innerHTML = '<head></head><body></body>';
     setInstallDomains(undefined);
-    expect(() => installDomains()).toThrow('does not name its install');
+    expect(installDomains()).toEqual(DEFAULT_DOMAINS);
+    expect(accountHandleFromUrl(new URL('https://brad.gitspace.sh/'))).toBe('brad');
+    document.documentElement.innerHTML = '<head><meta name="gitspace-domains" content="{&quot;account&quot;:&quot;gitspace.sh&quot;}"></head><body></body>';
+    setInstallDomains(undefined);
+    expect(() => installDomains()).toThrow('names no valid install domains');
   });
 
   it('refuses an enrollment link of another install', () => {

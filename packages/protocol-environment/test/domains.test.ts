@@ -61,12 +61,12 @@ describe('install domains', () => {
     expect(serviceDomainOfRelayUrl('not a url', 'brad')).toBeNull();
   });
 
-  test('a served page names the domains, and an app reads them; a page without them is an error', () => {
+  test('a served page names the domains, and an app reads them; a page naming none is GitSpace\'s own, invalid ones an error', () => {
     const page = withDomainsMeta('<!doctype html><html><head><title>x</title></head><body></body></html>', onPrem);
     expect(page).toContain('<head><meta name="gitspace-domains" content="{&quot;account&quot;:&quot;git.acme.example&quot;');
     const content = /content="([^"]*)"/u.exec(page)![1]!.replace(/&quot;/gu, '"');
     expect(domainsFromMeta(content)).toEqual(onPrem);
-    expect(() => domainsFromMeta(null)).toThrow(EnvironmentError);
+    expect(domainsFromMeta(null)).toEqual(DEFAULT_DOMAINS);
     expect(() => domainsFromMeta('{"account":"gitspace.sh"}')).toThrow(EnvironmentError);
     expect(() => withDomainsMeta('<p>no head</p>', onPrem)).toThrow(EnvironmentError);
     // Served on by another Worker: one page, one set of domains (the last Worker's).
