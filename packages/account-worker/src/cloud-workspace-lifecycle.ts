@@ -681,6 +681,15 @@ export async function importedProjectRepository(env: Env, project: CloudProjectS
   if (!imported) await completedOperation(env, operation);
 }
 
+/** A project a machine copied in after its import was refused: an import completing from that copy supersedes the
+ * refusal. Nothing happens to a project whose repository still waits for its copy. */
+export async function settleCopiedProject(env: Env, projectId: string): Promise<void> {
+  const project = await env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`).getProject();
+  if (!project || project.repositoryReference === null) return;
+  if (!await new ArtifactsCodeStore(env.ARTIFACTS).projectImported(project.id, project.baseBranch)) return;
+  await importedProjectRepository(env, project);
+}
+
 /** Queues a failed operation again with the request it was given; its own checks run again first. */
 export async function retryCloudOperation(env: Env, userId: string, projectId: string, operationId: string): Promise<CloudProjectOperation> {
   const authority = await requireProject(env, userId, projectId);

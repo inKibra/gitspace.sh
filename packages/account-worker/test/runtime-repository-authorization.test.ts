@@ -9,7 +9,7 @@ import { GitHubAppDO } from '../src/github-app.js';
 import { runtimeMachineControl } from '../src/account-runtime-control.js';
 import { SpaceAuthorityDO } from '../src/space-authority.js';
 import { tenantRootPrivateKey } from './setup.js';
-import { importedProjectRepository } from '../src/cloud-workspace-lifecycle.js';
+import { importedProjectRepository, settleCopiedProject } from '../src/cloud-workspace-lifecycle.js';
 
 const projectId = 'repository-project';
 const workspaceId = 'repository-workspace';
@@ -191,6 +191,21 @@ describe('signed repository credential authority', () => {
     // With nothing failed left, a lease adds no operation.
     await importedProjectRepository(env, project);
     expect((await f.project.visibleOperations()).filter(operation => operation.kind === 'project.import')).toHaveLength(1);
+  });
+
+  it('settles a refused import from a copied project, and leaves one still waiting for its copy alone', async () => {
+    const f = await fixture(['storage.access'], 'https://github.com/acme-labs/widgets.git', false);
+    const imported = vi.spyOn(ArtifactsCodeStore.prototype, 'projectImported').mockResolvedValue(false);
+    const importing = vi.spyOn(ArtifactsCodeStore.prototype, 'importProject').mockRejectedValue(new Error('This repository is private'));
+    await expect(importedProjectRepository(env, (await f.project.getProject())!)).rejects.toThrow('This repository is private');
+    await settleCopiedProject(env, projectId);
+    expect((await f.project.visibleOperations()).filter(operation => operation.kind === 'project.import').map(operation => operation.state)).toEqual(['failed']);
+    imported.mockResolvedValue(true);
+    importing.mockResolvedValue(repository);
+    await settleCopiedProject(env, projectId);
+    await vi.waitFor(async () => {
+      expect((await f.project.visibleOperations()).filter(operation => operation.kind === 'project.import').map(operation => operation.state)).toEqual(['succeeded']);
+    }, { timeout: 10_000 });
   });
 });
 

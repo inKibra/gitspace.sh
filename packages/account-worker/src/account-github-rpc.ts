@@ -5,6 +5,7 @@ import {
 } from '@gitspace/protocol/rpc-contract';
 import { err, ok } from 'result-rpc';
 import { serverRpc } from 'result-rpc/server';
+import { settleCopiedProject } from './cloud-workspace-lifecycle.js';
 
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 
@@ -58,8 +59,14 @@ export function githubCloudProcedures(env: Env, requireAdministration: () => Pro
     catch (error) { return err(errors.OperationFailed({ operation: 'save your GitHub login', message: message(error) })); }
   });
   const projectAccess = server.implement(githubProjectAccessContract).handler(async ({ input, errors }) => {
-    try { return ok(await github.projectAccess(input.projectId)); }
-    catch (error) { return err(errors.OperationFailed({ operation: 'read project repository access', message: message(error) })); }
+    try {
+      const access = await github.projectAccess(input.projectId);
+      // A project the App cannot read is the one a machine copies in; once copied, its refused import stops showing.
+      if (access.state !== 'ready' && access.state !== 'awaits-copy' && !access.awaitsCopy) {
+        await settleCopiedProject(env, input.projectId).catch((error: unknown) => console.error(JSON.stringify({ event: 'settle-copied-project-failed', projectId: input.projectId, message: message(error) })));
+      }
+      return ok(access);
+    } catch (error) { return err(errors.OperationFailed({ operation: 'read project repository access', message: message(error) })); }
   });
   return {
     state, app: { start: startApp, rotateKey }, install: { start: startInstall }, request: { cancel: cancelRequest, record: recordRequest },
