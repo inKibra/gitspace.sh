@@ -9,6 +9,7 @@ import { glyph } from './glyph.js';
 import { StatusDot } from './GitSpaceShell.js';
 import { rpcClient } from './rpc-client.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
+import { updateProjectBase } from './project-origin.js';
 import { useAccountDirectorySnapshot } from './SynchronizationProvider.js';
 
 /** How long one that succeeded stays shown: as long as its project keeps it in the directory. */
@@ -62,7 +63,9 @@ function useSeconds(operation: CloudProjectOperation): number {
   return Math.max(0, Math.floor(((active ? now : Date.parse(operation.updatedAt)) - Date.parse(operation.createdAt)) / 1000));
 }
 
-/** Retry and Dismiss of a failed operation, with the reason either was refused. */
+/** Retry and Dismiss of a failed operation, with the reason either was refused. A failed Update base runs again as Update
+ * base itself does, through the bridge machine for an origin only that machine reads; the operation it queues hides the
+ * failure, as a retry's does. */
 function useOperationActions(operation: CloudProjectOperation) {
   const [pending, setPending] = useState<'retry' | 'dismiss' | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -70,9 +73,14 @@ function useOperationActions(operation: CloudProjectOperation) {
     if (pending) return;
     setPending(action); setError(null);
     const input = { projectId: operation.projectId, operationId: operation.id };
-    const result = action === 'retry' ? await rpcClient.project.operations.retry(input) : await rpcClient.project.operations.dismiss(input);
-    if (result.status === 'error') setError(rpcErrorMessage(result.error, action === 'retry' ? 'Retry' : 'Dismiss'));
-    setPending(null);
+    try {
+      if (action === 'retry' && operation.kind === 'project.updateBase') await updateProjectBase(operation.projectId);
+      else {
+        const result = action === 'retry' ? await rpcClient.project.operations.retry(input) : await rpcClient.project.operations.dismiss(input);
+        if (result.status === 'error') throw result.error;
+      }
+    } catch (failure) { setError(rpcErrorMessage(failure, action === 'retry' ? 'Retry' : 'Dismiss')); }
+    finally { setPending(null); }
   };
   return { pending, error, retry: () => void act('retry'), dismiss: () => void act('dismiss') };
 }

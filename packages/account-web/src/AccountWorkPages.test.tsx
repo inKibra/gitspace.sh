@@ -2,6 +2,7 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi, type Mock } from 'vitest';
+import type { CloudProjectOperation } from '@gitspace/protocol';
 import type { CloudWorkspaceDefinition } from '@gitspace/protocol/project-authority';
 import { AccountWorkPages, type AccountWorkPagesProps } from './AccountWorkPages.js';
 import { verticalSliceFixture } from './App.js';
@@ -9,8 +10,14 @@ import type { SidebarWorkspace } from './AppSidebar.js';
 import { CreateWorkspaceDialog, type ProjectLifecycleView } from './GitSpaceShell.js';
 import type { Directory } from './useAccountDirectory.js';
 import { Toasts } from './toasts.js';
-const rpc = vi.hoisted(() => ({ updateBase: vi.fn(), refresh: vi.fn(), checkInterval: vi.fn(async () => ({ status: 'ok', value: { interval: 'daily' } })) }));
-vi.mock('./rpc-client.js', () => ({ rpcClient: { project: { updateBase: rpc.updateBase, remote: { refresh: rpc.refresh, checkInterval: rpc.checkInterval } } } }));
+const rpc = vi.hoisted(() => ({
+  updateBase: vi.fn(), refresh: vi.fn(), checkInterval: vi.fn(async () => ({ status: 'ok', value: { interval: 'daily' } })),
+  projectAccess: vi.fn<() => Promise<unknown>>(async () => ({ status: 'ok', value: { state: 'ready' } })), seed: vi.fn(), branches: vi.fn(), retry: vi.fn(), dismiss: vi.fn(),
+}));
+vi.mock('./rpc-client.js', () => ({ rpcClient: {
+  github: { projectAccess: rpc.projectAccess },
+  project: { updateBase: rpc.updateBase, seed: rpc.seed, remote: { refresh: rpc.refresh, branches: rpc.branches, checkInterval: rpc.checkInterval }, operations: { retry: rpc.retry, dismiss: rpc.dismiss } },
+} }));
 
 const stamp = '2026-09-12T00:00:00.000Z';
 const projects: ProjectLifecycleView[] = [
@@ -145,4 +152,45 @@ it('changes a project base branch from Settings at its current revision, the Git
   expect(document.body.textContent).toContain('GitSpace releases arrive as merges; launching builds on a machine.');
   await act(() => [...document.body.querySelectorAll('button')].find((button) => button.textContent === 'Done')!.click());
   expect(onSettingsProjectChange).toHaveBeenCalledWith(null);
+});
+
+it('checks the origin, updates the base and retries a failed update in project Settings through the machine that alone reads the repository', async () => {
+  const head = 'c'.repeat(40);
+  const bridged: ProjectLifecycleView = { ...projects[0]!, repositoryReference: 'https://github.com/acme/vault.git', remote: { head, checkedAt: '2026-10-17T12:00:00.000Z', behind: true } };
+  const failed: CloudProjectOperation = { id: crypto.randomUUID(), projectId: 'alpha', workspaceId: null, kind: 'project.updateBase', state: 'failed', steps: [], error: 'Git discovery failed (401)', summary: 'main from origin', dismissedAt: null, restack: null, revision: 1, createdBy: 'account', createdAt: stamp, updatedAt: stamp };
+  const access = { state: 'needs-app', repository: 'acme/vault', organization: 'acme', appName: null, bridge: { machineId: 'laptop', label: 'Laptop', online: true }, awaitsCopy: false };
+  const copied = { baseBranch: 'main', previous: 'b'.repeat(40), commit: head };
+  rpc.projectAccess.mockResolvedValue({ status: 'ok', value: access });
+  rpc.branches.mockResolvedValue({ status: 'ok', value: [{ branch: 'main', commit: head }] });
+  rpc.refresh.mockResolvedValue({ status: 'ok', value: {} });
+  rpc.seed.mockResolvedValue({ status: 'ok', value: copied });
+  rpc.updateBase.mockResolvedValue({ status: 'ok', value: {} });
+  rpc.updateBase.mockClear();
+  rpc.refresh.mockClear();
+  await act(() => root.render(<Toasts><AccountWorkPages projects={[bridged, projects[1]!]} directory={directory} loading={false} onRefresh={vi.fn()} onOpenWorkspace={onOpenWorkspace} onOpenProject={onOpenProject} actions={{}} operations={[failed]} settingsProjectId="alpha" onSettingsProjectChange={vi.fn()} /></Toasts>));
+  const dialog = document.body.querySelector<HTMLElement>('[role="dialog"]')!;
+  const press = (label: string) => act(async () => { [...dialog.querySelectorAll('button')].find((button) => button.textContent === label)!.click(); });
+
+  await press('Check origin');
+  await vi.waitFor(() => expect(rpc.refresh).toHaveBeenCalledExactlyOnceWith({ projectId: 'alpha', branches: [{ branch: 'main', commit: head }] }));
+  expect(rpc.branches).toHaveBeenCalledExactlyOnceWith({ projectId: 'alpha', machineId: 'laptop' });
+
+  await press('Update base');
+  await vi.waitFor(() => expect(rpc.updateBase).toHaveBeenCalledExactlyOnceWith({ projectId: 'alpha', copied }));
+  expect(rpc.seed).toHaveBeenCalledExactlyOnceWith({ projectId: 'alpha', machineId: 'laptop' });
+
+  // The failed card's Retry is Update base again, through the machine, never a cloud retry without its copy.
+  await press('Retry');
+  await vi.waitFor(() => expect(rpc.updateBase).toHaveBeenCalledTimes(2));
+  expect(rpc.updateBase).toHaveBeenLastCalledWith({ projectId: 'alpha', copied });
+  expect(rpc.seed).toHaveBeenCalledTimes(2);
+  expect(rpc.retry).not.toHaveBeenCalled();
+
+  // With the machine offline, nothing is asked of it or the cloud, and the error names it.
+  rpc.projectAccess.mockResolvedValue({ status: 'ok', value: { ...access, bridge: { ...access.bridge, online: false } } });
+  await press('Check origin');
+  await vi.waitFor(() => expect(dialog.querySelector('[role="alert"]')?.textContent).toBe('Check origin reads acme/vault through Laptop, which is offline: bring Laptop online, then try again.'));
+  expect(rpc.branches).toHaveBeenCalledTimes(1);
+  expect(rpc.refresh).toHaveBeenCalledTimes(1);
+  rpc.projectAccess.mockResolvedValue({ status: 'ok', value: { state: 'ready' } });
 });

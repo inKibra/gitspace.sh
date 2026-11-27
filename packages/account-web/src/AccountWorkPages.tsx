@@ -14,7 +14,7 @@ import { useInference } from './InferenceContext.js';
 import { ProjectInferenceSelector } from './InferencePage.js';
 import { latestOperation, OperationCardActions, operationActive, OperationProgress, OperationStatusLine } from './OperationProgress.js';
 import { useToasts, type Toast } from './toasts.js';
-import { updateProjectBase } from './project-base-update.js';
+import { checkProjectOrigin, updateProjectBase } from './project-origin.js';
 
 export interface AccountWorkPagesProps {
   projects: readonly ProjectLifecycleView[];
@@ -372,7 +372,7 @@ function ProjectOriginCheckRow({ project }: { project: ProjectLifecycleView }) {
     return () => { current = false; };
   }, [project.id]);
   if (project.repositoryReference === null) return null;
-  return <SettingRow label="Check the origin" hint="Repositories your GitHub App is installed on report pushes at once; this check covers the rest."
+  return <SettingRow label="Check the origin" hint="Repositories your GitHub App is installed on report pushes at once; this check covers the rest. A private repository read only through one of your machines is checked when you open the project or press Check origin, never on this schedule."
     value={<div className="flex flex-col gap-1">
       <div className="w-44"><Select size="compact" value={checked ?? ''} disabled={checked === null} onValueChange={(value) => {
         const next = ORIGIN_CHECK_INTERVALS.find((candidate) => candidate === value);
@@ -402,13 +402,8 @@ function ProjectOrigin({ project, operations }: { project: ProjectLifecycleView;
   const run = async (action: 'update' | 'check') => {
     if (pendingRef.current) return;
     pendingRef.current = true; setPending(action); setError(null);
-    try {
-      if (action === 'update') await updateProjectBase(project.id);
-      else {
-        const result = await rpcClient.project.remote.refresh({ projectId: project.id });
-        if (result.status === 'error') throw result.error;
-      }
-    } catch (failure) { setError(rpcErrorMessage(failure, action === 'update' ? 'Update base' : 'Check origin')); }
+    try { await (action === 'update' ? updateProjectBase(project.id) : checkProjectOrigin(project.id)); }
+    catch (failure) { setError(rpcErrorMessage(failure, action === 'update' ? 'Update base' : 'Check origin')); }
     finally { pendingRef.current = false; setPending(null); }
   };
   return <div className="flex flex-col gap-2">

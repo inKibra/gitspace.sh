@@ -7,7 +7,7 @@ import { createBrowserClient, fetchTransport } from 'result-rpc/client';
 import { closeDaemonClients, daemonClientForProject } from '@gitspace/supervisor';
 import { WorkspaceHubTerminalCoordinator } from '../src/workspace-hub.js';
 import { createGitSpaceRpcHandler } from '../src/rpc-router.js';
-import { copyProjectThroughMachine } from '../src/project-lifecycle.js';
+import { copyProjectThroughMachine, readProjectOriginBranches } from '../src/project-lifecycle.js';
 
 function git(cwd: string, ...args: string[]): string {
   const result = Bun.spawnSync(['git', ...args], { cwd, env: { ...Bun.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } });
@@ -62,6 +62,7 @@ test('copies a project base branch from its origin into the project repository, 
             async advanceRef() { throw new Error('An empty project repository is never advanced'); },
           },
         }, projectId),
+        originBranches: async () => { throw new Error('Only copies are asked for here'); },
       },
     });
     const client = createBrowserClient({ contract: gitspaceContract, transport: fetchTransport({
@@ -74,6 +75,38 @@ test('copies a project base branch from its origin into the project repository, 
     // A repository with nothing in it has nothing to copy, and says so.
     expect(await client.project.seed({ projectId: 'blank', machineId: 'machine-a' })).toMatchObject({ status: 'error', error: { data: { message: 'https://github.com/acme-labs/blank.git has no commits for GitSpace to copy yet: push a first commit to it, then copy again' } } });
     expect(published).toHaveLength(1);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('reads every branch of a project origin with the machine git identity, only on the machine it was sent to', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'gitspace-project-branches-'));
+  try {
+    const origin = join(root, 'origin');
+    git(root, 'init', '-q', '-b', 'trunk', origin);
+    writeFileSync(join(origin, 'README.md'), 'widgets\n');
+    git(origin, 'add', '.');
+    git(origin, 'commit', '-qm', 'first');
+    const trunk = git(origin, 'rev-parse', 'HEAD');
+    git(origin, 'checkout', '-qb', 'feature/sparkle');
+    git(origin, 'commit', '-q', '--allow-empty', '-m', 'sparkle');
+    const feature = git(origin, 'rev-parse', 'HEAD');
+    git(origin, 'tag', 'v1');
+    const url = 'https://github.com/acme-labs/widgets.git';
+    const project = { project: async (id: string) => id === 'widgets' ? { repositoryReference: url, baseBranch: 'trunk' } : null, gitEnvironment: () => ({ GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: `url.file://${origin}.insteadOf`, GIT_CONFIG_VALUE_0: url }) };
+    const rpc = createGitSpaceRpcHandler({
+      machineId: 'machine-a', terminals: new WorkspaceHubTerminalCoordinator('machine-a', { path: () => null, projectId: () => null, list: () => [], use: async () => {} }),
+      projects: {
+        seed: async () => { throw new Error('Only origin reads are asked for here'); },
+        originBranches: projectId => readProjectOriginBranches(project, projectId),
+      },
+    });
+    const client = createBrowserClient({ contract: gitspaceContract, transport: fetchTransport({
+      url: 'https://machine.test/rpc', fetch: Object.assign(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => rpc.handler(new Request(input, init)), { preconnect: fetch.preconnect }),
+    }) });
+    expect(await client.project.remote.branches({ projectId: 'widgets', machineId: 'machine-b' })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('machine-b') } } });
+    const read = await client.project.remote.branches({ projectId: 'widgets', machineId: 'machine-a' });
+    if (read.status === 'error') throw read.error;
+    expect([...read.value].sort((a, b) => a.branch.localeCompare(b.branch))).toEqual([{ branch: 'feature/sparkle', commit: feature }, { branch: 'trunk', commit: trunk }]);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

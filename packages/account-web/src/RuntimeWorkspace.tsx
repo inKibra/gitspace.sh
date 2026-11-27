@@ -40,7 +40,7 @@ import { useEventRefresh, useProjectChanges } from './SynchronizationProvider.js
 import { RepositoryAccessCard, rememberGitHubInstall, useRepositoryBridgeToasts } from './GitHubAccess.js';
 import { useToasts } from './toasts.js';
 import { operationActive, OperationStatusLine } from './OperationProgress.js';
-import { updateProjectBase } from './project-base-update.js';
+import { updateProjectBase } from './project-origin.js';
 
 export interface RuntimeInspectorContext {
   snapshot: RuntimeSnapshot;

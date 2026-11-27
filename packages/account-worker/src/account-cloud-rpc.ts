@@ -300,7 +300,7 @@ function accountRouter(env: Env, userId: string, deviceId: string, origin: strin
   const refreshRemote = server.implement(refreshProjectRemoteContract).handler(async ({ input, errors }) => {
     try {
       if (!(await projectIndex.list()).some((project) => project.id === input.projectId)) return err(errors.ProjectNotFound({ projectId: input.projectId }));
-      await refreshProjectRemote(env, userId, input.projectId);
+      await refreshProjectRemote(env, userId, input.projectId, input.branches);
       return ok({});
     } catch (error) { return err(errors.OperationFailed({ operation: 'check the origin', message: message(error) })); }
   });

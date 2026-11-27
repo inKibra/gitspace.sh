@@ -1,5 +1,5 @@
 import {
-  gitspaceContract, deploymentLaunchContract, projectSeedContract, createWorkspaceTerminalContract,
+  gitspaceContract, deploymentLaunchContract, projectOriginBranchesContract, projectSeedContract, createWorkspaceTerminalContract,
   listWorkspaceTerminalsContract, readWorkspaceTerminalContract, sendWorkspaceTerminalContract,
   stopWorkspaceTerminalContract, terminalEventsContract, terminalLiveContract,
   type GitSpaceRpcContext,
@@ -19,8 +19,8 @@ export type GitSpaceRpcRouterOptions = {
   environments?: WorkspaceEnvironmentManager;
   deployment?: Pick<DeploymentLauncher, 'launch'>;
   /** Copies a project's base branch from its origin into the project's repository with this machine's git identity, or
-   * fast-forwards the copy there. */
-  projects?: { seed(projectId: string): Promise<ProjectCopy> };
+   * fast-forwards the copy there; and reads every branch of the origin with that identity. */
+  projects?: { seed(projectId: string): Promise<ProjectCopy>; originBranches(projectId: string): Promise<Array<{ branch: string; commit: string }>> };
   machineId: string;
   onInternalError?: (input: { incidentId: string; phase: string; cause: unknown; procedurePath?: string }) => void;
 };
@@ -50,6 +50,16 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
       return ok(await options.projects.seed(input.projectId));
     } catch (error) {
       return err(errors.OperationFailed({ operation: 'copy project repository', message: error instanceof Error ? error.message : 'Unable to copy the project repository' }));
+    }
+  });
+  const projectOriginBranches = server.implement(projectOriginBranchesContract).handler(async ({ input, errors }) => {
+    if (!options.projects) return err(errors.OperationFailed({ operation: 'read project origin', message: 'This machine cannot read project origins' }));
+    // The account forwards a read to the machine it names; no other machine reads the origin for it.
+    if (input.machineId !== options.machineId) return err(errors.OperationFailed({ operation: 'read project origin', message: `Origin read for machine ${input.machineId} reached machine ${options.machineId}` }));
+    try {
+      return ok(await options.projects.originBranches(input.projectId));
+    } catch (error) {
+      return err(errors.OperationFailed({ operation: 'read project origin', message: error instanceof Error ? error.message : 'Unable to read the project origin' }));
     }
   });
   /** The account forwards a terminal call to the machine it names; no other machine answers for it. */
@@ -134,7 +144,7 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
   });
   return server.router({
     deployment: { launch: deploymentLaunch },
-    project: { seed: projectSeed },
+    project: { seed: projectSeed, remote: { branches: projectOriginBranches } },
     terminals: { events: terminalEvents, live: terminalLive, list: listTerminals, create: createTerminal, read: readTerminal, send: sendTerminal, stop: stopTerminal },
   });
 }

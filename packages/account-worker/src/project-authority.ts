@@ -1,5 +1,6 @@
 import { Result } from 'better-result';
 import { cloudWorkspaceDefinitionSchema, DEVICE_SOCKET_PROTOCOL, GITSPACE_SOURCE_BRANCH, GITSPACE_SOURCE_PROJECT_ROLE, GITSPACE_SOURCE_REPOSITORY, hostedServicePointerSchema, hostedServiceUrlKind, isGitSpaceSourceRepository, normalizeRemoteRepositoryUrl, ORIGIN_CHECK_INTERVAL_MS, originCheckIntervalSchema, remoteBranchStateSchema, RPC_DEVICE_HEADER, socketProtocolProof, type GitSpaceSourceProvenance, type HostedServicePointer, type OriginCheckInterval, type RemoteBranchState } from '@gitspace/protocol';
+import { OriginNeedsMachineError } from './origin-access.js';
 import { readOriginHeads } from './project-remote.js';
 import { runQueuedOperation } from './cloud-workspace-lifecycle.js';
 import { AgentHealthStateSchema, SessionActivitySchema } from '@gitspace/protocol-agent';
@@ -1284,8 +1285,10 @@ export class ProjectAuthorityDO extends BudgetedDurableObject {
         const heads = await readOriginHeads(this.env, project, this.listWorkspaces());
         if (heads.length > 0) await this.recordRemoteHeads(heads);
       } catch (error) {
-        // Tried again at the next interval; the project keeps its last known origin state.
-        console.warn(JSON.stringify({ event: 'origin_check_failed', projectId: project.id, message: error instanceof Error ? error.message : String(error) }));
+        // Tried again at the next interval; the project keeps its last known origin state. An origin only a machine reads
+        // is not a failure: the cloud cannot call a machine, so only Check origin on the project page reads it.
+        if (error instanceof OriginNeedsMachineError) console.log(JSON.stringify({ event: 'origin_check_skipped', projectId: project.id, reason: error.message }));
+        else console.warn(JSON.stringify({ event: 'origin_check_failed', projectId: project.id, message: error instanceof Error ? error.message : String(error) }));
       }
     }
     await this.armAlarm(purgeAt);

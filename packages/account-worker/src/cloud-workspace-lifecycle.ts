@@ -7,7 +7,7 @@ import { stackOnRefusal, WorkspacePhaseSchema, type WorkspacePhase } from '@gits
 import { ArtifactsCodeStore, GitDiscoveryError, artifactsProjectRepository, artifactsWorkspaceRepository, isSupportedBranchName } from '@gitspace/runtime-workspace-do';
 import { ensureProjectCodeRepository } from './account-runtime-host.js';
 import { forwardPosition, type ForwardPosition } from './cloud-stack-status.js';
-import { originAccess, originReadCredentials } from './origin-access.js';
+import { originAccess, OriginNeedsMachineError, originReadCredentials } from './origin-access.js';
 import type { ProjectAuthorityDO } from './project-authority.js';
 import { refreshProjectRemote } from './project-remote.js';
 import type { SpaceAuthorityDO } from './space-authority.js';
@@ -606,7 +606,9 @@ async function runProjectUpdateBase({ env, userId, authority, operation, request
     moved = copied.previous !== copied.commit;
   } else {
     const access = await originAccess(env, reference);
-    head = await code.fetchOriginBranch(projectId, access.remote, branch, originReadCredentials(access));
+    head = await code.fetchOriginBranch(projectId, access.remote, branch, originReadCredentials(access)).catch((error: unknown) => {
+      throw error instanceof GitDiscoveryError && error.needsCredentials && access.kind === 'public' ? new OriginNeedsMachineError(reference) : error;
+    });
     const position: ForwardPosition = previous === null ? { kind: 'forward' } : await forwardPosition(code, [repository], previous, head);
     if (position.kind === 'diverged') {
       throw new Error(position.ahead === null

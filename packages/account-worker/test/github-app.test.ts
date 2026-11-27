@@ -620,6 +620,37 @@ describe('GitHub App', () => {
     expect(await alarm()).toBeNull();
   });
 
+  it('records the origin a machine read for a repository only it reads, and skips it on schedule rather than failing', async () => {
+    const vault = await project('Vault', 'https://github.com/acme/vault.git');
+    const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${vault.id}`);
+    const history = artifactsHistory();
+    const copied = history.commit([], `project-${vault.id}`);
+    history.ref(`project-${vault.id}`, 'refs/heads/main', copied);
+    const ahead = history.commit([copied]);
+    let reads = 0;
+    network.use(http.get('https://github.com/acme/vault.git/info/refs', () => { reads += 1; return new HttpResponse('Authentication required', { status: 401 }); }));
+    const logged = vi.spyOn(console, 'log');
+    const warned = vi.spyOn(console, 'warn');
+
+    // The scheduled check cannot call a machine: GitHub refusing the cloud is a skip with the reason, not a failure.
+    expect(await runDurableObjectAlarm(authority)).toBe(true);
+    expect(reads).toBe(1);
+    // Logged events about this project, as [logged, warned].
+    expect([logged, warned].map(spy => spy.mock.calls.flatMap(([line]) => typeof line === 'string' && line.includes(vault.id) ? [JSON.parse(line).event] : []))).toEqual([['origin_check_skipped'], []]);
+    expect((await authority.getProject())?.remote).toBeNull();
+
+    // Check origin from the cloud says who reads it.
+    await expect(refreshProjectRemote(env, env.ACCOUNT_ID, vault.id)).rejects.toThrow('only through a machine with the account SSH key');
+    // The branches a machine read are recorded without the cloud reading the origin; tracked ones it lacks are absent.
+    const gone = `space-${crypto.randomUUID()}`;
+    await authority.putWorkspace({ id: gone, projectId: vault.id, kind: 'worktree', name: 'Gone', branch: 'gone', phase: 'code', sourceKind: 'base', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
+    const before = reads;
+    await refreshProjectRemote(env, env.ACCOUNT_ID, vault.id, [{ branch: 'main', commit: ahead }, { branch: 'unrelated', commit: copied }]);
+    expect(reads).toBe(before);
+    expect((await authority.getProject())?.remote).toMatchObject({ head: ahead, behind: true });
+    expect((await authority.getWorkspace(gone))?.remote).toMatchObject({ head: null, behind: false });
+  });
+
   it('reuses an installation token per repository and access until shortly before it expires, and mints afresh after a delivery', async () => {
     const key = await rsaKey('pkcs1');
     await createApp(key);

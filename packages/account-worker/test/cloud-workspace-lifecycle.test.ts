@@ -1035,6 +1035,13 @@ describe('cloud workspace lifecycle with no machines', () => {
     expect(notices.mock.calls.at(-1)?.[1]).toBe("Base branch main already holds origin's 2222222.");
   });
 
+  it('says an origin the cloud cannot read is read only through a machine when Update base reads it from the cloud', async () => {
+    const { client, project, artifacts, run } = await cloudProject('Unread base', 'https://github.com/acme/private-app.git');
+    vi.spyOn(ArtifactsCodeStore.prototype, 'fetchOriginBranch').mockRejectedValue(new GitDiscoveryError(401));
+    expect(await run(client.project.updateBase({ projectId: project.id }))).toMatchObject({ state: 'failed', error: expect.stringContaining('only through a machine with the account SSH key: Check origin and Update base on the project page') });
+    expect(artifacts.refs.get(`project-${project.id} refs/heads/main`)).toBe(commit('1'));
+  });
+
   it('finishes Update base from the copy a machine moved for an origin only it reads, reading no origin', async () => {
     const { userId, client, project, artifacts, authority, run } = await cloudProject('Bridged base', 'https://github.com/acme/private-app.git');
     const identity = RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId: project.id });

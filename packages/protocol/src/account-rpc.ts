@@ -234,6 +234,7 @@ export const ACCOUNT_RPC_AUTHORITY = {
   'project.updateBase': 'cloud',
   'project.seed': 'machine',
   'project.remote.refresh': 'cloud',
+  'project.remote.branches': 'machine',
   'project.remote.checkInterval': 'cloud',
   'project.remote.setCheckInterval': 'cloud',
   'project.delete': 'cloud',

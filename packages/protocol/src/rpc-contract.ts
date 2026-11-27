@@ -718,13 +718,27 @@ export const setProjectOriginCheckContract = gitspaceRpc
   .output(wire.object({ interval: OriginCheckIntervalWireCodec }))
   .errors({ ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed })
   .mutation();
-/** Read the project's base branch and its workspaces' branches on the origin now, as a push webhook would report them. */
+/** One branch on a project's origin and the commit it names, as a machine read it (`project.remote.branches`). */
+const OriginBranchCodec = wire.object({ branch: wire.string, commit: wire.string });
+
+/** Read the project's base branch and its workspaces' branches on the origin now, as a push webhook would report them.
+ * With `branches`, a machine already read every branch of the origin (`project.remote.branches`, for an origin only that
+ * machine reads): the cloud reads no origin and records the project's branches from them, one missing as absent. */
 export const refreshProjectRemoteContract = gitspaceRpc
   .procedure()
-  .input(wire.object({ projectId: wire.string }))
+  .input(wire.object({ projectId: wire.string, branches: wire.optional(wire.array(OriginBranchCodec)) }))
   .output(wire.object({}))
   .errors({ ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed })
   .mutation();
+
+/** Read every branch of the project's origin through the named machine, with that machine's git identity (the account
+ * SSH key). The account forwards it to that machine only. */
+export const projectOriginBranchesContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ projectId: wire.string, machineId: wire.string }))
+  .output(wire.array(OriginBranchCodec))
+  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .query();
 
 /** A project's copy of its base branch as a machine left it (`project.seed`): the commit it held before (`previous`,
  * null when it had none) and the origin's tip it holds now (`commit`, equal to `previous` when it was already current). */
@@ -2919,7 +2933,7 @@ export const gitspaceContract = gitspaceRpc.contract({
     setRepository: setProjectRepositoryContract,
     updateBase: updateProjectBaseContract,
     seed: projectSeedContract,
-    remote: { refresh: refreshProjectRemoteContract, checkInterval: projectOriginCheckContract, setCheckInterval: setProjectOriginCheckContract },
+    remote: { refresh: refreshProjectRemoteContract, branches: projectOriginBranchesContract, checkInterval: projectOriginCheckContract, setCheckInterval: setProjectOriginCheckContract },
     delete: deleteProjectContract,
     operation: projectOperationContract,
     operations: { retry: retryProjectOperationContract, dismiss: dismissProjectOperationContract },

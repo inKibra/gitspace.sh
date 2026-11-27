@@ -40,7 +40,7 @@ import { createGitHubCredentialHelper } from './github-credential-helper.js';
 import { RuntimeSnapshotCommitInputSchema, RuntimeSnapshotCommitResultSchema } from '@gitspace/protocol-runtime';
 import type { LocalAttachment } from '@gitspace/runtime-machine';
 import { reconcileBrokers } from '@gitspace/supervisor';
-import { copyProjectThroughMachine } from './project-lifecycle.js';
+import { copyProjectThroughMachine, readProjectOriginBranches, type ProjectCopyOptions } from './project-lifecycle.js';
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name];
@@ -264,16 +264,18 @@ export async function startMachineRuntime() {
     blobs: checkpointBlobs,
     buildRoot: join(environmentRoot, 'builds'),
   });
+  const projectCopy: ProjectCopyOptions = {
+    project: id => authority.getProject(id), scratchRoot: environmentRoot,
+    gitEnvironment: repositoryUrl => gitIdentity.gitEnvironment(repositoryUrl), projectRepository: gitRemote,
+  };
   const rpc = createGitSpaceRpcHandler({
     machineId,
     terminals,
     environments,
     deployment: { launch: (input) => launcher.launch(input) },
     projects: {
-      seed: projectId => copyProjectThroughMachine({
-        project: id => authority.getProject(id), scratchRoot: environmentRoot,
-        gitEnvironment: repositoryUrl => gitIdentity.gitEnvironment(repositoryUrl), projectRepository: gitRemote,
-      }, projectId),
+      seed: projectId => copyProjectThroughMachine(projectCopy, projectId),
+      originBranches: projectId => readProjectOriginBranches(projectCopy, projectId),
     },
     onInternalError: ({ incidentId, phase, cause, procedurePath }) => {
       console.error('[gitspace-rpc]', { incidentId, phase, procedurePath, cause });

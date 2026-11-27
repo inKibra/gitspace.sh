@@ -707,6 +707,7 @@ export const reviewedAnnotations: Record<string, ToolAnnotation> = {
   "project.updateBase": { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   "project.seed": { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   "project.remote.refresh": { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  "project.remote.branches": { readOnlyHint: true, openWorldHint: true },
   "project.remote.checkInterval": { readOnlyHint: true, openWorldHint: false },
   "project.remote.setCheckInterval": { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   "project.delete": {

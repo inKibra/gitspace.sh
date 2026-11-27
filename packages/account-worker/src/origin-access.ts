@@ -29,3 +29,12 @@ export async function originAccess(env: Env, reference: string): Promise<OriginA
 export function originReadCredentials(access: OriginAccess): OriginCredentials {
   return access.kind === 'github-app' ? () => access.auth('read') : null;
 }
+
+/** The cloud cannot read this origin: a private repository no installation covers, or an SSH origin off GitHub. Only a
+ * machine with the account SSH key reads it. */
+export class OriginNeedsMachineError extends Error {
+  constructor(reference: string) {
+    super(`GitSpace reads ${reference} only through a machine with the account SSH key: Check origin and Update base on the project page go through the machine attached to its base workspace. Install the account's GitHub App on it to read it from the cloud.`);
+    this.name = 'OriginNeedsMachineError';
+  }
+}
