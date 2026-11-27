@@ -726,21 +726,29 @@ export const refreshProjectRemoteContract = gitspaceRpc
   .errors({ ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
-/** Bring the project's copy of its base branch, and its clean idle base workspace, up to the origin's base branch. */
+/** A project's copy of its base branch as a machine left it (`project.seed`): the commit it held before (`previous`,
+ * null when it had none) and the origin's tip it holds now (`commit`, equal to `previous` when it was already current). */
+const ProjectCopyCodec = wire.object({ baseBranch: wire.string, previous: wire.nullable(wire.string), commit: wire.string });
+
+/** Bring the project's copy of its base branch, and its clean idle base workspace, up to the origin's base branch. With
+ * `copied`, a machine already brought the copy to the origin's tip (`project.seed`, for an origin only that machine
+ * reads): the cloud reads no origin, records `copied.commit` as the origin's head and moves the base workspace. */
 export const updateProjectBaseContract = gitspaceRpc
   .procedure()
-  .input(wire.object({ projectId: wire.string }))
+  .input(wire.object({ projectId: wire.string, copied: wire.optional(ProjectCopyCodec) }))
   .output(ProjectOperationViewCodec)
   .errors({ ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
 /** Copy the project's base branch from its origin into the project's repository through the named machine, with that
- * machine's git identity (the account SSH key). The account forwards it to that machine only; the cloud accepts the
- * copy only while the project's repository waits, empty, for one (its import was refused). */
+ * machine's git identity (the account SSH key), or fast-forward the copy already there to the origin's tip (a copy at
+ * any other commit is refused). The account forwards it to that machine only; the cloud lets any of the account's
+ * machines write the project's repository while it waits, empty, for a copy (its import was refused), and otherwise only
+ * a machine attached to the project's base workspace. */
 export const projectSeedContract = gitspaceRpc
   .procedure()
   .input(wire.object({ projectId: wire.string, machineId: wire.string }))
-  .output(wire.object({ baseBranch: wire.string, commit: wire.string }))
+  .output(ProjectCopyCodec)
   .errors({ OperationFailed: rpcErrors.operationFailed })
   .mutation();
 

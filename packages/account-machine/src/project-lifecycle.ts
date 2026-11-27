@@ -4,6 +4,9 @@ import { normalizeRemoteRepositoryUrl } from '@gitspace/protocol';
 import { readGitCheckpointHead } from './git-checkpoint.js';
 import { ArtifactsRefDivergedError, type ArtifactsGitRemote } from './artifacts-git-remote.js';
 
+/** The origin refused a commit asked for by id: none of its refs reaches it. */
+class OriginCommitMissingError extends Error {}
+
 async function runGit(args: string[], cwd: string | undefined, environment: Record<string, string>): Promise<string> {
   const child = Bun.spawn(['git', ...args], {
     ...(cwd ? { cwd } : {}),
@@ -27,6 +30,7 @@ async function runGit(args: string[], cwd: string | undefined, environment: Reco
     new Response(child.stderr).text(),
   ]);
   if (exitCode !== 0) {
+    if (/not our ref|unadvertised object/iu.test(stderr)) throw new OriginCommitMissingError(`git ${args[0]} failed (exit ${exitCode}): the origin holds no such commit`);
     // Credential helpers and servers can echo secrets supplied through the environment.
     const detail = /Permission denied \(publickey\)/iu.test(stderr)
       ? 'SSH authentication failed. Add the public key from Settings → Git to a GitHub account that can access this repository.'
@@ -42,44 +46,62 @@ async function runGit(args: string[], cwd: string | undefined, environment: Reco
   return stdout.trim();
 }
 
+/** A project's copy of its base branch after a copy through a machine: the commit it held before (`previous`, null
+ * when it had none) and the origin's tip it holds now (`commit`, equal to `previous` when it was already current). */
+export type ProjectCopy = { baseBranch: string; previous: string | null; commit: string };
+
 export interface SeedProjectRepositoryInput {
   projectId: string;
   repositoryUrl: string;
   /** Null selects the remote's default branch. */
   baseBranch: string | null;
-  /** Parent for the temporary clone; it is removed afterwards. */
+  /** Parent for the temporary repository; it is removed afterwards. */
   scratchRoot: string;
   /** SSH environment for the account's shared git identity. */
   gitEnvironment: Record<string, string>;
-  projectRepository: Pick<ArtifactsGitRemote, 'publishRef'>;
+  projectRepository: Pick<ArtifactsGitRemote, 'readRef' | 'publishRef' | 'advanceRef'>;
 }
 
 /**
- * Clones a project repository over SSH with this machine's git identity and publishes its base
- * branch tip to `project-<projectId>`, so the cloud can fork workspaces from origins it cannot reach.
- * An empty remote has nothing to seed. Equal history is a no-op; an existing different branch is
- * kept with a warning.
+ * Brings `project-<projectId>`'s copy of a project's base branch to its origin's tip, read over SSH with this machine's
+ * git identity, so the cloud can fork workspaces from origins it cannot reach. A copy without the branch gets the tip
+ * alone; a copy at an ancestor of the tip is fast-forwarded, the origin and the push sending only the commits after
+ * it; a copy at the tip is left as it is. A copy at any other commit is refused: GitSpace only fast-forwards it. An
+ * origin with no branches has nothing to copy (`commit` null).
  */
-export async function seedProjectRepository(input: SeedProjectRepositoryInput): Promise<{ baseBranch: string; commit: string | null }> {
+export async function seedProjectRepository(input: SeedProjectRepositoryInput): Promise<ProjectCopy | { baseBranch: string; commit: null }> {
   const repositoryUrl = normalizeRemoteRepositoryUrl(input.repositoryUrl.trim());
-  if (await runGit(['ls-remote', '--', repositoryUrl], undefined, input.gitEnvironment) === '') {
-    return { baseBranch: input.baseBranch ?? 'main', commit: null };
-  }
+  // `ref: refs/heads/<branch>\tHEAD` names the default branch; `<commit>\t<ref>` lines name the branches.
+  const advertised = (await runGit(['ls-remote', '--symref', '--', repositoryUrl, 'HEAD', 'refs/heads/*'], undefined, input.gitEnvironment)).split('\n').map(line => line.split('\t'));
+  const branches = new Map(advertised.flatMap(([commit, name]): Array<[string, string]> => commit && name?.startsWith('refs/heads/') && /^[0-9a-f]{40}$/u.test(commit) ? [[name, commit]] : []));
+  if (branches.size === 0) return { baseBranch: input.baseBranch ?? 'main', commit: null };
+  const baseBranch = input.baseBranch ?? advertised.find(([target, name]) => name === 'HEAD' && target?.startsWith('ref: refs/heads/'))?.[0]?.slice('ref: refs/heads/'.length);
+  if (baseBranch === undefined) throw new Error(`${input.repositoryUrl} names no default branch: set the project's base branch`);
+  const ref = `refs/heads/${baseBranch}`;
+  const head = branches.get(ref);
+  if (head === undefined) throw new Error('The requested base branch was not found. Leave Base branch empty to detect the repository default.');
+  const binding = { projectId: input.projectId, repository: `project-${input.projectId}` };
   const directory = await mkdtemp(join(input.scratchRoot, 'seed-'));
   try {
     const repositoryPath = join(directory, 'repository');
-    // publishRef sends the tip alone (its commit is the push's shallow boundary), so only the tip is cloned.
-    await runGit(['clone', '--depth', '1', '--single-branch', ...(input.baseBranch === null ? [] : ['--branch', input.baseBranch]), '--', repositoryUrl, repositoryPath], undefined, input.gitEnvironment);
-    const baseBranch = input.baseBranch ?? await runGit(['symbolic-ref', '--quiet', '--short', 'HEAD'], repositoryPath, {});
-    const { headCommit } = await readGitCheckpointHead(repositoryPath);
-    if (headCommit === null) return { baseBranch, commit: null };
-    try {
-      await input.projectRepository.publishRef({ binding: { projectId: input.projectId, repository: `project-${input.projectId}` }, repositoryPath, ref: `refs/heads/${baseBranch}`, commit: headCommit });
-    } catch (error) {
-      if (!(error instanceof ArtifactsRefDivergedError)) throw error;
-      console.warn('[gitspace-project] project repository already holds other base history; keeping it', input.projectId, error.message);
+    await runGit(['init', '--quiet', repositoryPath], undefined, {});
+    const previous = await input.projectRepository.readRef({ binding, repositoryPath, ref });
+    if (previous === head) return { baseBranch, previous, commit: head };
+    if (previous === null) {
+      // publishRef sends the tip alone (its commit is the push's shallow boundary), so only the tip is fetched.
+      await runGit(['fetch', '--quiet', '--no-tags', '--depth', '1', '--', repositoryUrl, head], repositoryPath, input.gitEnvironment);
+      await input.projectRepository.publishRef({ binding, repositoryPath, ref, commit: head });
+      return { baseBranch, previous, commit: head };
     }
-    return { baseBranch, commit: headCommit };
+    const diverged = new Error(`The project's copy of ${baseBranch} is at ${previous.slice(0, 7)}, which origin's ${baseBranch} (${head.slice(0, 7)}) does not build on, so it was not moved: GitSpace only fast-forwards it.`);
+    // The copy's commit alone, then the tip: a fetch from a repository holding the copy's commit brings only the
+    // commits after it.
+    try { await runGit(['fetch', '--quiet', '--no-tags', '--depth', '1', '--', repositoryUrl, previous], repositoryPath, input.gitEnvironment); }
+    catch (error) { throw error instanceof OriginCommitMissingError ? diverged : error; }
+    await runGit(['fetch', '--quiet', '--no-tags', '--', repositoryUrl, head], repositoryPath, input.gitEnvironment);
+    try { await input.projectRepository.advanceRef({ binding, repositoryPath, ref, from: previous, commit: head }); }
+    catch (error) { throw error instanceof ArtifactsRefDivergedError ? diverged : error; }
+    return { baseBranch, previous, commit: head };
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -91,13 +113,14 @@ export interface ProjectCopyOptions {
   scratchRoot: string;
   /** How Git reaches an origin address with the account's shared git identity. */
   gitEnvironment(repositoryUrl: string): Record<string, string>;
-  projectRepository: Pick<ArtifactsGitRemote, 'publishRef'>;
+  projectRepository: Pick<ArtifactsGitRemote, 'readRef' | 'publishRef' | 'advanceRef'>;
 }
 
-/** Copies a project's base branch from its origin into `project-<projectId>` with this machine's git identity: the
- * project page's "Copy through <machine>" for a repository the cloud could not import itself. A repository with no
- * commits has nothing to copy and is an error naming it. */
-export async function copyProjectThroughMachine(options: ProjectCopyOptions, projectId: string): Promise<{ baseBranch: string; commit: string }> {
+/** Copies a project's base branch from its origin into `project-<projectId>` with this machine's git identity, or
+ * fast-forwards the copy already there: the project page's "Copy through <machine>" for a repository the cloud could
+ * not import itself, and Update base for one it cannot read. A repository with no commits has nothing to copy and is an
+ * error naming it. */
+export async function copyProjectThroughMachine(options: ProjectCopyOptions, projectId: string): Promise<ProjectCopy> {
   const project = await options.project(projectId);
   if (!project) throw new Error(`Project ${projectId} is not in this account`);
   if (project.repositoryReference === null) throw new Error('This project has no origin repository to copy');
@@ -107,5 +130,5 @@ export async function copyProjectThroughMachine(options: ProjectCopyOptions, pro
     scratchRoot: options.scratchRoot, gitEnvironment: options.gitEnvironment(repositoryUrl), projectRepository: options.projectRepository,
   });
   if (seeded.commit === null) throw new Error(`${project.repositoryReference} has no commits for GitSpace to copy yet: push a first commit to it, then copy again`);
-  return { baseBranch: seeded.baseBranch, commit: seeded.commit };
+  return seeded;
 }

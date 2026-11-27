@@ -557,25 +557,35 @@ export async function setCloudProjectRepository(env: Env, userId: string, projec
   return (await authority.getProject()) ?? updated;
 }
 
-/** Queues Update base after checking the project has an origin branch to read. */
-export async function updateCloudProjectBase(env: Env, userId: string, projectId: string): Promise<CloudProjectOperation> {
+const CommitIdSchema = z.string().regex(/^[0-9a-f]{40}$/u);
+/** The project's copy of its base branch as a machine left it after reading the origin itself (`project.seed`). */
+const MachineCopySchema = z.object({ baseBranch: z.string(), previous: CommitIdSchema.nullable(), commit: CommitIdSchema });
+const UpdateBaseRequestSchema = z.object({ copied: MachineCopySchema.optional() });
+
+/** Queues Update base after checking the project has an origin branch to read. `copied` is the copy a machine already
+ * brought to the origin's tip, for an origin only that machine reads: the operation then reads no origin. */
+export async function updateCloudProjectBase(env: Env, userId: string, projectId: string, copied?: z.infer<typeof MachineCopySchema>): Promise<CloudProjectOperation> {
   const authority = await requireProject(env, userId, projectId);
   const project = await requireActiveProject(authority, projectId);
   if (project.repositoryReference === null) throw new Error(`Project ${project.name} has no origin to update its base from`);
   if (!isSupportedBranchName(project.baseBranch)) throw new Error(`Base branch ${project.baseBranch} cannot be read from the origin by name`);
   return queueOperation(authority, {
     projectId, workspaceId: null, kind: 'project.updateBase',
-    steps: labelled(['Fast-forward the project base branch from origin', 'Move the clean base checkout']),
+    steps: labelled([copied === undefined ? 'Fast-forward the project base branch from origin' : 'Check the base branch a machine copied from origin', 'Move the clean base checkout']),
     summary: `${project.baseBranch} from origin`,
+    request: copied === undefined ? {} : { copied: MachineCopySchema.parse(copied) },
   });
 }
 
 /** Update base: the project's copy of its base branch moves to the origin's head only as a fast-forward (a copy with
  * commits the origin lacks is refused), then the clean idle base checkout follows through the base-branch change's
- * same-branch refresh. A busy or dirty base workspace is left for later: the copy stays updated, the operation fails
- * saying so, and running Update base again moves it. One project notice reports the outcome. */
-async function runProjectUpdateBase({ env, userId, authority, operation, advance }: QueuedRun): Promise<void> {
+ * same-branch refresh. A copy a machine already moved (`copied`) is only checked: the cloud reads no origin, and takes
+ * the tip the machine read as the origin's head. A busy or dirty base workspace is left for later: the copy stays
+ * updated, the operation fails saying so, and running Update base again moves it. One project notice reports the
+ * outcome. */
+async function runProjectUpdateBase({ env, userId, authority, operation, request, advance }: QueuedRun): Promise<void> {
   const { projectId } = operation;
+  const { copied } = UpdateBaseRequestSchema.parse(request ?? {});
   const project = await requireActiveProject(authority, projectId);
   const reference = project.repositoryReference;
   if (reference === null) throw new Error(`Project ${project.name} has no origin to update its base from`);
@@ -587,22 +597,32 @@ async function runProjectUpdateBase({ env, userId, authority, operation, advance
   const repository = artifactsProjectRepository(projectId);
   const ref = `refs/heads/${branch}`;
   const previous = await code.resolveRef(repository, ref);
-  const access = await originAccess(env, reference);
-  const head = await code.fetchOriginBranch(projectId, access.remote, branch, originReadCredentials(access));
-  const position: ForwardPosition = previous === null ? { kind: 'forward' } : await forwardPosition(code, [repository], previous, head);
-  if (position.kind === 'diverged') {
-    throw new Error(position.ahead === null
-      ? `GitSpace cannot tell whether origin's ${branch} (${head.slice(0, 7)}) fast-forwards the project's copy: its cloud history is incomplete, so it was not moved.`
-      : `The project's ${branch} has ${position.ahead} ${position.ahead === 1 ? 'commit' : 'commits'} that origin's ${branch} (${head.slice(0, 7)}) lacks, so it was not moved: GitSpace only fast-forwards it. Push those commits to origin, then update again.`);
+  let head: string;
+  let moved: boolean;
+  if (copied !== undefined) {
+    if (copied.baseBranch !== branch) throw new Error(`The machine copied ${copied.baseBranch} from origin, but the project's base branch is ${branch}: update again.`);
+    if (previous !== copied.commit) throw new Error(`The project's ${branch} is at ${previous === null ? 'no commit' : previous.slice(0, 7)}, not origin's ${copied.commit.slice(0, 7)} that the machine copied, so the base checkout was not moved: update again.`);
+    head = copied.commit;
+    moved = copied.previous !== copied.commit;
+  } else {
+    const access = await originAccess(env, reference);
+    head = await code.fetchOriginBranch(projectId, access.remote, branch, originReadCredentials(access));
+    const position: ForwardPosition = previous === null ? { kind: 'forward' } : await forwardPosition(code, [repository], previous, head);
+    if (position.kind === 'diverged') {
+      throw new Error(position.ahead === null
+        ? `GitSpace cannot tell whether origin's ${branch} (${head.slice(0, 7)}) fast-forwards the project's copy: its cloud history is incomplete, so it was not moved.`
+        : `The project's ${branch} has ${position.ahead} ${position.ahead === 1 ? 'commit' : 'commits'} that origin's ${branch} (${head.slice(0, 7)}) lacks, so it was not moved: GitSpace only fast-forwards it. Push those commits to origin, then update again.`);
+    }
+    if (position.kind === 'forward') await code.copyCommit(repository, repository, ref, head, previous);
+    moved = position.kind === 'forward';
   }
-  if (position.kind === 'forward') await code.copyCommit(repository, repository, ref, head, previous);
   await advance();
   let left: string | null = null;
   try { await space.runtimeSetBaseBranch(identity, project.revision, branch); }
   catch (error) { left = failureMessage(error); }
   // The origin head was read just now: record it, which recomputes what is behind it against the moved copy.
   await authority.recordRemoteHeads([{ branch, head }]);
-  const outcome = position.kind === 'forward' ? `Base branch ${branch} updated to ${head.slice(0, 7)} from origin.` : `Base branch ${branch} already holds origin's ${head.slice(0, 7)}.`;
+  const outcome = moved ? `Base branch ${branch} updated to ${head.slice(0, 7)} from origin.` : `Base branch ${branch} already holds origin's ${head.slice(0, 7)}.`;
   const text = left === null ? outcome : `${outcome} The base workspace was left for later: ${left}`;
   await space.runtimeProjectNotice(identity, text);
   if (left !== null) throw new Error(text);

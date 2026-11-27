@@ -94,7 +94,7 @@ export function workspaceLifecycleCloudProcedures(env: Env, userId: string) {
     }
   });
   const updateBase = server.implement(updateProjectBaseContract).handler(async ({ input, errors }) => {
-    try { return ok(operationView(await updateCloudProjectBase(env, userId, input.projectId))); }
+    try { return ok(operationView(await updateCloudProjectBase(env, userId, input.projectId, input.copied))); }
     catch (error) {
       if (error instanceof CloudLifecycleTargetMissing) return err(errors.ProjectNotFound({ projectId: input.projectId }));
       return err(errors.OperationFailed({ operation: 'update project base', message: message(error) }));

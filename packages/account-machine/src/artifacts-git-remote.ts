@@ -111,8 +111,9 @@ async function remoteShallowBoundaries(remote: string, auth: Record<string, stri
 }
 
 /** One push to Artifacts: `refspec` from the checkout at `repositoryPath`, with the lease's credentials (`auth`) and
- * the publication's shallow boundaries (`shallow`), as git environment. */
-type ArtifactsPush = { repositoryPath: string; remote: string; refspec: string; force: boolean; auth: Record<string, string>; shallow: Record<string, string> };
+ * the publication's shallow boundaries (`shallow`), as git environment. `update` says whether the push may move a ref
+ * the remote holds: only forward (`fast-forward`), to anything (`force`), or only while it still names `from`. */
+type ArtifactsPush = { repositoryPath: string; remote: string; refspec: string; update: 'fast-forward' | 'force' | { from: string }; auth: Record<string, string>; shallow: Record<string, string> };
 
 /**
  * Artifacts' receive-pack refuses some pushes that a differently built one passes (`artifactsPushRefusal`):
@@ -136,7 +137,9 @@ async function pushToArtifacts(input: ArtifactsPush): Promise<void> {
 }
 
 async function pushPack(input: ArtifactsPush): Promise<void> {
-  const target = [...(input.force ? ['--force'] : []), input.remote, input.refspec];
+  const ref = input.refspec.slice(input.refspec.lastIndexOf(':') + 1);
+  const update = input.update === 'fast-forward' ? [] : input.update === 'force' ? ['--force'] : [`--force-with-lease=${ref}:${input.update.from}`];
+  const target = [...update, input.remote, input.refspec];
   try { await git(input.repositoryPath, [...PUSH, ...target], { ...input.auth, ...input.shallow, GIT_LFS_SKIP_PUSH: '1' }); }
   catch (error) {
     if (!(error instanceof ArtifactsGitError) || artifactsPushRefusal(error.message) !== 'pack') throw error;
@@ -184,7 +187,7 @@ async function pushInSteps(input: ArtifactsPush): Promise<void> {
       try {
         for (const [tip] of step.filter(([oid]) => !parents.has(oid!))) {
           const ref = `${staging}/${refs.length}`;
-          await pushPack({ ...input, refspec: `${tip}:${ref}`, force: true });
+          await pushPack({ ...input, refspec: `${tip}:${ref}`, update: 'force' });
           refs.push(ref);
         }
         sent += step.length;
@@ -242,7 +245,7 @@ async function pushBlobsInParts(input: ArtifactsPush, [commit, ...parents]: stri
     const staged = await git(repository, ['commit-tree', tree.trim(), '-m', 'GitSpace staging'], { ...input.shallow, ...author });
     const ref = `${staging}/${refs.length}`;
     try {
-      await pushPack({ ...input, refspec: `${staged}:${ref}`, force: true });
+      await pushPack({ ...input, refspec: `${staged}:${ref}`, update: 'force' });
       refs.push(ref);
     } catch (error) {
       if (!(error instanceof ArtifactsGitError) || artifactsPushRefusal(error.message) !== 'too-large' || part.length === 1) throw error;
@@ -295,7 +298,7 @@ export class ArtifactsGitRemote {
     const own = boundary !== null && existsSync(ownFile) ? (await readFile(ownFile, 'utf8')).split('\n').filter(Boolean) : [];
     const advertised = own.length ? new Set((await git(input.repositoryPath, ['ls-remote', auth.remote], auth.environment)).split('\n').map(line => line.split('\t')[0])) : new Set<string>();
     await withShallowBoundary(boundary, own.filter(commit => advertised.has(commit)), async shallow => {
-      await this.transfer(input.binding, pushToArtifacts({ repositoryPath: input.repositoryPath, remote: auth.remote, refspec: `${commit}:${input.checkpointRef}`, force: true, auth: auth.environment, shallow }));
+      await this.transfer(input.binding, pushToArtifacts({ repositoryPath: input.repositoryPath, remote: auth.remote, refspec: `${commit}:${input.checkpointRef}`, update: 'force', auth: auth.environment, shallow }));
     });
   }
 
@@ -304,21 +307,55 @@ export class ArtifactsGitRemote {
    * moves an existing remote ref: equal is a no-op, any other commit is refused. */
   async publishRef(input: { binding: ArtifactsRepositoryBinding; repositoryPath: string; ref: string; commit: string }): Promise<void> {
     if (!/^[0-9a-f]{40}$/u.test(input.commit)) throw new ArtifactsGitError('ref', 'Invalid ref commit');
-    if (!/^refs\/(?:heads|tags)\/./u.test(input.ref) && !/^refs\/pull\/[1-9][0-9]*\/head$/u.test(input.ref)) throw new ArtifactsGitError('ref', `Unsupported ref ${input.ref}`);
-    await git(input.repositoryPath, ['check-ref-format', input.ref]);
+    await this.checkPublishedRef(input.repositoryPath, input.ref);
     await git(input.repositoryPath, ['cat-file', '-e', `${input.commit}^{commit}`]);
     await withShallowBoundary(input.commit, [], async shallow => {
       await checkCurrentLayers(input.repositoryPath, input.commit, null, shallow);
-      // Even read credentials may create the remote repository: check first.
-      const probe = await this.auth(input.binding, 'read');
-      const advertised = await this.transfer(input.binding, git(input.repositoryPath, ['ls-remote', '--refs', probe.remote, input.ref], probe.environment));
-      // ls-remote patterns match ref suffixes; only the exact ref counts.
-      const current = advertised.split('\n').map(line => line.split('\t')).find(([, name]) => name === input.ref)?.[0];
+      const current = await this.remoteRef(input);
       if (current === input.commit) return;
-      if (current !== undefined) throw new ArtifactsRefDivergedError(input.ref, current, input.commit);
+      if (current !== null) throw new ArtifactsRefDivergedError(input.ref, current, input.commit);
       const auth = await this.auth(input.binding, 'write');
-      await this.transfer(input.binding, pushToArtifacts({ repositoryPath: input.repositoryPath, remote: auth.remote, refspec: `${input.commit}:${input.ref}`, force: false, auth: auth.environment, shallow }));
+      await this.transfer(input.binding, pushToArtifacts({ repositoryPath: input.repositoryPath, remote: auth.remote, refspec: `${input.commit}:${input.ref}`, update: 'fast-forward', auth: auth.environment, shallow }));
     });
+  }
+
+  /** The commit a ref of the kinds `publishRef` publishes names on the remote, or null while the remote lacks it. */
+  async readRef(input: { binding: ArtifactsRepositoryBinding; repositoryPath: string; ref: string }): Promise<string | null> {
+    await this.checkPublishedRef(input.repositoryPath, input.ref);
+    return this.remoteRef(input);
+  }
+
+  /** Moves a ref of the kinds `publishRef` publishes from `from`, the commit the remote holds it at, to `commit`, a
+   * descendant of `from` in the checkout at `repositoryPath`. `from` is the push's shallow boundary, so the push sends
+   * only commits after it and the moved ref's history stays linked to it. The push moves the ref only while it still
+   * names `from`; a `commit` not descending from `from` is refused before any write. */
+  async advanceRef(input: { binding: ArtifactsRepositoryBinding; repositoryPath: string; ref: string; from: string; commit: string }): Promise<void> {
+    if (!/^[0-9a-f]{40}$/u.test(input.commit) || !/^[0-9a-f]{40}$/u.test(input.from)) throw new ArtifactsGitError('ref', 'Invalid ref commit');
+    await this.checkPublishedRef(input.repositoryPath, input.ref);
+    await git(input.repositoryPath, ['cat-file', '-e', `${input.commit}^{commit}`]);
+    // The checkout's own boundaries stay boundaries: their parents are not here to read.
+    const ownFile = await git(input.repositoryPath, ['rev-parse', '--path-format=absolute', '--git-path', 'shallow']);
+    const own = existsSync(ownFile) ? (await readFile(ownFile, 'utf8')).split('\n').filter(Boolean) : [];
+    await withShallowBoundary(input.from, own, async shallow => {
+      const ancestry = Bun.spawn(['git', 'merge-base', '--is-ancestor', input.from, input.commit], { cwd: input.repositoryPath, env: { ...Bun.env, ...shallow }, stdout: 'ignore', stderr: 'ignore' });
+      if (await ancestry.exited !== 0) throw new ArtifactsRefDivergedError(input.ref, input.from, input.commit);
+      await checkCurrentLayers(input.repositoryPath, input.commit, input.from, shallow);
+      const auth = await this.auth(input.binding, 'write');
+      await this.transfer(input.binding, pushToArtifacts({ repositoryPath: input.repositoryPath, remote: auth.remote, refspec: `${input.commit}:${input.ref}`, update: { from: input.from }, auth: auth.environment, shallow }));
+    });
+  }
+
+  private async checkPublishedRef(repositoryPath: string, ref: string): Promise<void> {
+    if (!/^refs\/(?:heads|tags)\/./u.test(ref) && !/^refs\/pull\/[1-9][0-9]*\/head$/u.test(ref)) throw new ArtifactsGitError('ref', `Unsupported ref ${ref}`);
+    await git(repositoryPath, ['check-ref-format', ref]);
+  }
+
+  /** Asks with read credentials first: even those may create the remote repository. */
+  private async remoteRef(input: { binding: ArtifactsRepositoryBinding; repositoryPath: string; ref: string }): Promise<string | null> {
+    const probe = await this.auth(input.binding, 'read');
+    const advertised = await this.transfer(input.binding, git(input.repositoryPath, ['ls-remote', '--refs', probe.remote, input.ref], probe.environment));
+    // ls-remote patterns match ref suffixes; only the exact ref counts.
+    return advertised.split('\n').map(line => line.split('\t')).find(([, name]) => name === input.ref)?.[0] ?? null;
   }
 
   /** With `commit`, `checkpointRef` is this checkout's anchor for a cloud ref that every cache of the

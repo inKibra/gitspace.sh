@@ -40,6 +40,7 @@ import { useEventRefresh, useProjectChanges } from './SynchronizationProvider.js
 import { RepositoryAccessCard, rememberGitHubInstall, useRepositoryBridgeToasts } from './GitHubAccess.js';
 import { useToasts } from './toasts.js';
 import { operationActive, OperationStatusLine } from './OperationProgress.js';
+import { updateProjectBase } from './project-base-update.js';
 
 export interface RuntimeInspectorContext {
   snapshot: RuntimeSnapshot;
@@ -341,10 +342,7 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, reads, 
       projectOperation={props.projectOperation
         ? <Button variant="ghost" size="compact" className="max-w-80" onClick={props.onOpenProjectSettings}><span className="flex min-w-0 items-center gap-1 text-caption text-muted-foreground"><OperationStatusLine operation={props.projectOperation} /><span className="shrink-0">· Details</span></span></Button>
         : undefined}
-      onUpdateBase={props.projectOperation && operationActive(props.projectOperation) ? undefined : () => perform(async () => {
-        const result = await rpcClient.project.updateBase({ projectId: inspection.project.id });
-        if (result.status === 'error') throw result.error;
-      })}
+      onUpdateBase={props.projectOperation && operationActive(props.projectOperation) ? undefined : () => perform(() => updateProjectBase(inspection.project.id))}
       onSetWorkspaceRelations={relationsEditable ? setRelations : undefined}
       deployment={deploymentValue ? { status: deploymentValue, launch: launch.launch, isGitSpaceProject: inspection.project.role === 'gitspace-source', branch: inspection.project.baseBranch, onLaunch: workspaceId => setLaunchRequest({ source: { kind: 'workspace', workspaceId }, targets: RELEASE_TARGETS }), onLaunchBranch: () => perform(async () => {
         const checked = await rpcClient.deployment.checkCanonical({});

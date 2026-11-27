@@ -14,6 +14,7 @@ import { useInference } from './InferenceContext.js';
 import { ProjectInferenceSelector } from './InferencePage.js';
 import { latestOperation, OperationCardActions, operationActive, OperationProgress, OperationStatusLine } from './OperationProgress.js';
 import { useToasts, type Toast } from './toasts.js';
+import { updateProjectBase } from './project-base-update.js';
 
 export interface AccountWorkPagesProps {
   projects: readonly ProjectLifecycleView[];
@@ -402,8 +403,11 @@ function ProjectOrigin({ project, operations }: { project: ProjectLifecycleView;
     if (pendingRef.current) return;
     pendingRef.current = true; setPending(action); setError(null);
     try {
-      const result = action === 'update' ? await rpcClient.project.updateBase({ projectId: project.id }) : await rpcClient.project.remote.refresh({ projectId: project.id });
-      if (result.status === 'error') throw result.error;
+      if (action === 'update') await updateProjectBase(project.id);
+      else {
+        const result = await rpcClient.project.remote.refresh({ projectId: project.id });
+        if (result.status === 'error') throw result.error;
+      }
     } catch (failure) { setError(rpcErrorMessage(failure, action === 'update' ? 'Update base' : 'Check origin')); }
     finally { pendingRef.current = false; setPending(null); }
   };

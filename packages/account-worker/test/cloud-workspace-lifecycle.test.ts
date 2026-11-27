@@ -1035,6 +1035,33 @@ describe('cloud workspace lifecycle with no machines', () => {
     expect(notices.mock.calls.at(-1)?.[1]).toBe("Base branch main already holds origin's 2222222.");
   });
 
+  it('finishes Update base from the copy a machine moved for an origin only it reads, reading no origin', async () => {
+    const { userId, client, project, artifacts, authority, run } = await cloudProject('Bridged base', 'https://github.com/acme/private-app.git');
+    const identity = RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId: project.id });
+    const space = env.SPACE_AUTHORITY.getByName(`${userId}:${project.id}`);
+    await space.runtimeRepositoryCheckpoint(identity);
+    cloudHistory({ [commit('1')]: [], [commit('2')]: [commit('1')] });
+    // The cloud cannot read this origin.
+    const reads = vi.spyOn(ArtifactsCodeStore.prototype, 'fetchOriginBranch').mockRejectedValue(new Error('Git discovery failed (401)'));
+    const notices = vi.spyOn(SpaceAuthorityDO.prototype, 'runtimeProjectNotice').mockResolvedValue(undefined);
+    // The machine fast-forwarded the project's copy from the origin.
+    artifacts.refs.set(`project-${project.id} refs/heads/main`, commit('2'));
+    expect(await run(client.project.updateBase({ projectId: project.id, copied: { baseBranch: 'main', previous: commit('1'), commit: commit('2') } }))).toMatchObject({ kind: 'project.updateBase', state: 'succeeded' });
+    expect(reads).not.toHaveBeenCalled();
+    expect(artifacts.refs.get(`workspace-${project.id} refs/heads/main`)).toBe(commit('2'));
+    expect(await space.runtimeRepositoryCheckpoint(identity)).toMatchObject({ branch: 'main', headCommit: commit('2'), worktreeCommit: commit('2') });
+    expect(notices.mock.calls.map(call => call[1])).toEqual(['Base branch main updated to 2222222 from origin.']);
+    expect((await authority.getProject())?.remote).toMatchObject({ head: commit('2'), behind: false });
+
+    // A copy no longer where the machine left it is not taken for the origin's head.
+    expect(await run(client.project.updateBase({ projectId: project.id, copied: { baseBranch: 'main', previous: commit('2'), commit: commit('3') } }))).toMatchObject({
+      state: 'failed', error: expect.stringContaining("The project's main is at 2222222, not origin's 3333333 that the machine copied"),
+    });
+    expect(reads).not.toHaveBeenCalled();
+    expect(await space.runtimeRepositoryCheckpoint(identity)).toMatchObject({ headCommit: commit('2') });
+    expect((await authority.getProject())?.remote).toMatchObject({ head: commit('2') });
+  });
+
   it('moves a cloud-only project\'s base checkout on Update base, as the GitSpace project is before any machine opens it', async () => {
     const { userId, client, project, artifacts, authority, run } = await cloudProject('Cloud-only base', 'https://github.com/acme/app.git');
     await authority.setProjectLifecycle((await authority.getProject())!.revision, 'cloud-only');

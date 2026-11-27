@@ -56,7 +56,11 @@ test('copies a project base branch from its origin into the project repository, 
           project: async id => ({ repositoryReference: origins[id] ?? null, baseBranch: 'HEAD' }),
           scratchRoot: root,
           gitEnvironment: url => ({ GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: `url.${reached[url]}.insteadOf`, GIT_CONFIG_VALUE_0: url }),
-          projectRepository: { async publishRef(input) { published.push({ repository: input.binding.repository, ref: input.ref, commit: input.commit }); } },
+          projectRepository: {
+            async readRef() { return null; },
+            async publishRef(input) { published.push({ repository: input.binding.repository, ref: input.ref, commit: input.commit }); },
+            async advanceRef() { throw new Error('An empty project repository is never advanced'); },
+          },
         }, projectId),
       },
     });
@@ -65,7 +69,7 @@ test('copies a project base branch from its origin into the project repository, 
     }) });
     expect(await client.project.seed({ projectId: 'widgets', machineId: 'machine-b' })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('machine-b') } } });
     expect(published).toEqual([]);
-    expect(await client.project.seed({ projectId: 'widgets', machineId: 'machine-a' })).toEqual({ status: 'ok', value: { baseBranch: 'trunk', commit: head } });
+    expect(await client.project.seed({ projectId: 'widgets', machineId: 'machine-a' })).toEqual({ status: 'ok', value: { baseBranch: 'trunk', previous: null, commit: head } });
     expect(published).toEqual([{ repository: 'project-widgets', ref: 'refs/heads/trunk', commit: head }]);
     // A repository with nothing in it has nothing to copy, and says so.
     expect(await client.project.seed({ projectId: 'blank', machineId: 'machine-a' })).toMatchObject({ status: 'error', error: { data: { message: 'https://github.com/acme-labs/blank.git has no commits for GitSpace to copy yet: push a first commit to it, then copy again' } } });

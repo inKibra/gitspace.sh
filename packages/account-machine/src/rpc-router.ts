@@ -10,6 +10,7 @@ import { deviceCanAdminister } from '@gitspace/protocol/device-grant';
 import { DeploymentLaunchError, type DeploymentLauncher } from './deployment-launcher.js';
 import { callerFor } from './signed-rpc.js';
 import { WorkspaceHubSpaceUnavailable, WorkspaceHubTerminalUnavailable, type WorkspaceHubTerminalCoordinator } from './workspace-hub.js';
+import type { ProjectCopy } from './project-lifecycle.js';
 import type { WorkspaceEnvironmentManager } from './workspace-environment.js';
 
 /** Machines expose only explicitly addressed tools, never account authority. */
@@ -17,8 +18,9 @@ export type GitSpaceRpcRouterOptions = {
   terminals: WorkspaceHubTerminalCoordinator;
   environments?: WorkspaceEnvironmentManager;
   deployment?: Pick<DeploymentLauncher, 'launch'>;
-  /** Copies a project's base branch from its origin into the project's repository with this machine's git identity. */
-  projects?: { seed(projectId: string): Promise<{ baseBranch: string; commit: string }> };
+  /** Copies a project's base branch from its origin into the project's repository with this machine's git identity, or
+   * fast-forwards the copy there. */
+  projects?: { seed(projectId: string): Promise<ProjectCopy> };
   machineId: string;
   onInternalError?: (input: { incidentId: string; phase: string; cause: unknown; procedurePath?: string }) => void;
 };
