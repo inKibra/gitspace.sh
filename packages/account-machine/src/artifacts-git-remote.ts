@@ -62,12 +62,13 @@ async function git(repositoryPath: string, args: string[], environment: Record<s
 
 const MAX_BLOB_BYTES = 32_000_000;
 
-/** Runs `run` with `boundary` as the only shallow commit, so nothing older than it is ever read or pushed. */
-async function withShallowBoundary<T>(boundary: string | null, run: (environment: Record<string, string>) => Promise<T>): Promise<T> {
+/** Runs `run` with `boundary` and `held` as the only shallow commits, so nothing older than them is ever read or
+ * pushed. `held` are commits the remote already holds, which the push never sends. */
+async function withShallowBoundary<T>(boundary: string | null, held: string[], run: (environment: Record<string, string>) => Promise<T>): Promise<T> {
   if (boundary === null) return run({});
   const directory = await mkdtemp(join(tmpdir(), 'gitspace-push-'));
   try {
-    await writeFile(join(directory, 'shallow'), `${boundary}\n`);
+    await writeFile(join(directory, 'shallow'), [...new Set([boundary, ...held])].map(commit => `${commit}\n`).join(''));
     return await run({ GIT_SHALLOW_FILE: join(directory, 'shallow') });
   } finally { await rm(directory, { recursive: true, force: true }); }
 }
@@ -284,8 +285,16 @@ export class ArtifactsGitRemote {
       // A boundary at a commit the remote holds would make it record that commit as having no parents.
       if (await ancestry.exited === 0 && !oversizedHistory) boundary = null;
     }
-    await withShallowBoundary(boundary, async shallow => {
-      const auth = await this.auth(input.binding, 'write');
+    const auth = await this.auth(input.binding, 'write');
+    // A forced push whose remote ref holds a commit this checkout has checks whether it fast-forwards, walking the new
+    // commit's whole history whatever the remote holds. A checkout of a project copied in from its tip stops at that
+    // tip (its own shallow boundary), and the walk read the tip's missing parent: git 2.54 failed the push ("Could not
+    // read <parent>", every sync of two workspaces, 2026-11-27). The checkout's boundaries the remote advertises stay
+    // boundaries; any other may lie among the commits sent, where it would conceal a missing layer.
+    const ownFile = await git(input.repositoryPath, ['rev-parse', '--path-format=absolute', '--git-path', 'shallow']);
+    const own = boundary !== null && existsSync(ownFile) ? (await readFile(ownFile, 'utf8')).split('\n').filter(Boolean) : [];
+    const advertised = own.length ? new Set((await git(input.repositoryPath, ['ls-remote', auth.remote], auth.environment)).split('\n').map(line => line.split('\t')[0])) : new Set<string>();
+    await withShallowBoundary(boundary, own.filter(commit => advertised.has(commit)), async shallow => {
       await this.transfer(input.binding, pushToArtifacts({ repositoryPath: input.repositoryPath, remote: auth.remote, refspec: `${commit}:${input.checkpointRef}`, force: true, auth: auth.environment, shallow }));
     });
   }
@@ -298,7 +307,7 @@ export class ArtifactsGitRemote {
     if (!/^refs\/(?:heads|tags)\/./u.test(input.ref) && !/^refs\/pull\/[1-9][0-9]*\/head$/u.test(input.ref)) throw new ArtifactsGitError('ref', `Unsupported ref ${input.ref}`);
     await git(input.repositoryPath, ['check-ref-format', input.ref]);
     await git(input.repositoryPath, ['cat-file', '-e', `${input.commit}^{commit}`]);
-    await withShallowBoundary(input.commit, async shallow => {
+    await withShallowBoundary(input.commit, [], async shallow => {
       await checkCurrentLayers(input.repositoryPath, input.commit, null, shallow);
       // Even read credentials may create the remote repository: check first.
       const probe = await this.auth(input.binding, 'read');

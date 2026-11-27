@@ -556,3 +556,40 @@ it('sends history below the remote\'s unadvertised shallow boundary when a push 
     if (previous === undefined) delete process.env.GIT_CONFIG_GLOBAL; else process.env.GIT_CONFIG_GLOBAL = previous;
   }
 });
+
+it('publishes over a checkpoint the remote holds when the new one reaches the tip a project was copied in from', async () => {
+  const f = fixture();
+  // The origin: the tip X and its parent P. The project repository holds X alone, copied in from the tip.
+  const origin = join(f.root, 'origin');
+  git(f.root, 'init', '--quiet', '-b', 'main', origin);
+  writeFileSync(join(origin, 'file'), 'p'); git(origin, 'add', 'file'); git(origin, 'commit', '--quiet', '-m', 'P');
+  writeFileSync(join(origin, 'file'), 'x'); git(origin, 'commit', '--quiet', '-am', 'X');
+  const x = git(origin, 'rev-parse', 'HEAD');
+  const seed = join(f.root, 'seed.git');
+  git(f.root, 'clone', '--quiet', '--bare', '--depth', '1', `file://${origin}`, seed);
+  git(seed, 'push', '--quiet', f.remote, `${x}:refs/heads/main`);
+  // A checkout shallow at X whose earlier checkpoint on X the remote holds, then HEAD on history of its own.
+  const checkout = join(f.root, 'checkout');
+  git(f.root, 'clone', '--quiet', '--depth', '1', '--branch', 'main', `file://${f.remote}`, checkout);
+  git(checkout, 'config', `url.${f.remote}.insteadOf`, 'https://artifacts.invalid/repository');
+  const earlier = git(checkout, 'commit-tree', '-p', x, '-m', 'earlier checkpoint', `${x}^{tree}`);
+  git(checkout, 'push', '--quiet', f.remote, `${earlier}:${f.checkpointRef}`);
+  git(checkout, 'checkout', '--quiet', '--orphan', 'own');
+  writeFileSync(join(checkout, 'file'), 'o'); git(checkout, 'add', 'file'); git(checkout, 'commit', '--quiet', '-m', 'O');
+  const head = git(checkout, 'rev-parse', 'HEAD');
+  const checkpoint = git(checkout, 'commit-tree', '-p', earlier, '-p', head, '-m', 'checkpoint', `${head}^{tree}`);
+  git(checkout, 'update-ref', f.checkpointRef, checkpoint);
+  // git 2.54 fails a push whose fast-forward check cannot read a commit; this test's git only prints the error.
+  const bin = join(f.root, 'shim'); mkdirSync(bin);
+  writeFileSync(join(bin, 'git'), `#!/bin/sh
+case " $* " in *" push "*) '${Bun.which('git')!}' "$@" 2> "$0.err"; status=$?; cat "$0.err" >&2; if grep -q 'Could not read' "$0.err"; then exit 1; fi; exit $status ;; esac
+exec '${Bun.which('git')!}' "$@"
+`);
+  chmodSync(join(bin, 'git'), 0o755);
+  const path = process.env.PATH;
+  process.env.PATH = `${bin}:${path}`;
+  try {
+    await f.publication.publishCheckpoint({ repositoryPath: checkout, binding: { projectId: 'test', repository: 'test' }, checkpointRef: f.checkpointRef, headCommit: head, remoteHead: null });
+  } finally { process.env.PATH = path; }
+  expect(git(f.remote, 'rev-parse', f.checkpointRef)).toBe(checkpoint);
+});
