@@ -69,6 +69,7 @@ import { GhostGlyph } from './ghost/ghost-parts.js';
 import { GhostMainTranscript, GhostWorkspace } from './ghost/GhostEntry.js';
 import { GhostDock } from './ghost/GhostWindow.js';
 import { composeInWorkspace, finishGhostRequest, summonGhost, useGhostRequest, useGhosts, type GhostSubject } from './ghost/ghost-store.js';
+import { QuestionCardsContext } from './QuestionCards.js';
 
 /**
  * Where a space lives right now. A cloud runtime workspace lives in the cloud and reports its own status (machines are
@@ -531,7 +532,7 @@ function AgentCanvas({ workspace, mainAgent, sessionControls, controlsError, onR
     <div ref={composerOverlay} data-composer-overlay className="pointer-events-none absolute inset-x-0 bottom-0 z-20 flex justify-center px-6 pb-4">
       <div className="w-full max-w-xl">
         {standaloneAsk && pendingAsk && sessionControls
-          ? <div className={`${shape.container} pointer-events-auto mb-2 flex max-h-[50dvh] flex-col gap-2 overflow-y-auto bg-surface-3 p-3 shadow-surface-3`}>
+          ? <div data-question={pendingAsk.id} className={`${shape.container} pointer-events-auto mb-2 flex max-h-[50dvh] flex-col gap-2 overflow-y-auto bg-surface-3 p-3 shadow-surface-3`}>
               {pendingAsk.links.length
                 ? <nav aria-label="Review before answering" className="flex flex-wrap gap-3 text-caption">
                     {pendingAsk.links.map((link) => <ResourceLink key={link.uri} href={link.uri} className="text-foreground underline underline-offset-2">{link.label}</ResourceLink>)}
@@ -716,12 +717,15 @@ function Shell({ project, projects, workspace, baseSpace, workspaces, mainAgent,
   const accountDirectory = useContext(AccountDirectoryContext);
   const beside = useContext(BoardBesideContext);
   // A link naming a capture (`?capture=<id>`, the extension's "Open in GitSpace") opens the Inspector's Browser tab,
-  // which plays it.
-  const capturing = typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('capture');
-  const [inspectorOpen, setInspectorOpen] = useState(capturing);
+  // which plays it; one naming the Environment panel (`?panel=environment`, an MCP client's link to an approval waiting
+  // there) opens its Environment tab.
+  const linked = typeof window === 'undefined' ? null : new URLSearchParams(window.location.search);
+  const capturing = linked?.has('capture') ?? false;
+  const environmentLinked = linked?.get('panel') === 'environment';
+  const [inspectorOpen, setInspectorOpen] = useState(capturing || environmentLinked);
   /** The Inspector in the conversation's place, its tab strip on top; Escape or "Back to conversation" returns. */
   const [inspectorFull, setInspectorFull] = useState(false);
-  const [inspectorSection, setInspectorSection] = useState<'environment' | 'browser' | 'goal' | undefined>(capturing ? 'browser' : undefined);
+  const [inspectorSection, setInspectorSection] = useState<'environment' | 'browser' | 'goal' | undefined>(capturing ? 'browser' : environmentLinked ? 'environment' : undefined);
   const openEnvironment = (): void => { setInspectorSection('environment'); setInspectorOpen(true); };
   const [resourceRequest, setResourceRequest] = useState<{ spaceId: string; request: ResourceRequest } | null>(null);
   const [guideSection, setGuideSection] = useState<{ spaceId: string; entity: string; serial: number } | null>(null);
@@ -883,6 +887,31 @@ function Shell({ project, projects, workspace, baseSpace, workspaces, mainAgent,
     const timer = window.setTimeout(() => row?.classList.remove('ghost-flash'), 2600);
     return () => { cancelAnimationFrame(frame); window.clearTimeout(timer); row?.classList.remove('ghost-flash'); };
   }, [flashRow, transcript?.navigation]);
+  // A link naming a question (`?question=<id>`, an MCP client's link to a card only a person decides) shows its card
+  // once: an approval above the composer lights up; a card in the transcript is jumped to, which lights its row.
+  const [linkedQuestion, setLinkedQuestion] = useState(() => linked?.get('question') ?? null);
+  const questionCards = useContext(QuestionCardsContext);
+  const pendingAskId = sessionControls?.value.pendingAsk?.id;
+  useEffect(() => {
+    if (!linkedQuestion) return;
+    if (pendingAskId === linkedQuestion) {
+      setLinkedQuestion(null);
+      const panel = document.querySelector<HTMLElement>(`[data-question="${CSS.escape(linkedQuestion)}"]`);
+      panel?.scrollIntoView({ block: 'nearest' });
+      panel?.classList.add('ghost-flash');
+      window.setTimeout(() => panel?.classList.remove('ghost-flash'), 2600);
+      return;
+    }
+    const question = questionCards?.questions.find((item) => item.id === linkedQuestion);
+    if (!question || !transcript || !transcriptReady) return;
+    // An ask or plan card names its question; a take-over, lifecycle approval, secure input or MCP request card is its
+    // call's.
+    const callId = question.takeover?.callId ?? question.lifecycle?.callId ?? question.secureInput?.callId ?? question.mcpElicitation?.callId;
+    const row = transcript.rows.find(({ item }) => item.type === 'ask' ? item.questionId === question.id : item.type === 'tool-call' && item.toolCallId === callId);
+    if (!row) return;
+    setLinkedQuestion(null);
+    transcript.jumpToOrdinal(row.ordinal);
+  }, [linkedQuestion, pendingAskId, questionCards, transcript, transcriptReady]);
   const content = <GhostWorkspace.Provider value={ghostHere}><BlockReferences.Provider value={referenceTargets}><ResourceFiles.Provider value={resolveResourceFile ?? null}><ResourceNavigation.Provider value={renderInspector ? (request) => { setResourceRequest({ spaceId: workspace.id, request }); setInspectorSection(undefined); setInspectorOpen(true); } : null}><GuideSectionNavigation.Provider value={renderInspector ? (id: string) => openGuideEntity(`section:${id}`) : null}><DocumentNavigation.Provider value={renderInspector ? openDocument : null}>
     {/* Beside the board, the header's sidebar toggle folds the board back to the list instead of hiding the sidebar. */}
     <div data-workspace-panel className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden" onClickCapture={beside ? (event) => {

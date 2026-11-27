@@ -42,6 +42,13 @@ const PromptSchema = z.object({ command: z.looseObject({ type: z.literal('prompt
 const SubmittedSchema = z.object({ result: z.object({ cursor: z.number().int().nonnegative(), conversationId: z.string() }) });
 const PromptedSchema = z.object({ result: z.object({ control: z.object({ sessionId: z.string() }) }) });
 const RunReadSchema = z.object({ result: z.object({ run: RuntimeRunSchema, control: z.object({ todos: z.array(z.object({ tasks: z.array(z.object({ content: z.string(), status: z.string() })) })) }) }) });
+/** The part of a runtime snapshot that says what the workspace's machines' setup waits on. */
+const SetupReadSchema = z.object({ result: z.object({ attachments: z.array(z.object({ state: z.string(), cache: z.object({ setup: z.array(z.object({ phase: z.string(), state: z.string() })) }).optional() })) }) });
+/** The part of a workspace's environment view that names what waits for a person's approval in Environment. */
+const EnvironmentReadSchema = z.object({ result: z.object({
+  executions: z.array(z.object({ kind: z.string(), label: z.string(), phase: z.string().nullable(), fileName: z.string().nullable(), approval: z.string().nullable() })),
+  browserSites: z.array(z.object({ pattern: z.string(), state: z.string() })),
+}) });
 /** The form a plain question asks through: one of its choices, or a written answer. */
 const AnswerSchema = z.object({ choice: z.string().optional(), answer: z.string().optional() });
 /** `tasks/update` params as the handler sees them: the SDK lifts `inputResponses` out into `ctx.mcpReq.inputResponses`. */
@@ -73,6 +80,23 @@ function elicitationModes(ctx: ServerContext): { form: boolean; url: boolean } {
 }
 /** What a secure-input request asks for, as its elicitation and status name it. */
 const SECURE_INPUT_KIND_NAMES: Record<RuntimeSecureInputKind, string> = { password: 'password', otp: 'one-time code', text: 'text' };
+/** The wait a question puts the run in when only a person decides it, on its card in the workspace, as one line: a plan
+ * or tool approval (`approval`, with `tool` for a tool's), a lifecycle approval, a take-over request. Undefined for a
+ * plain question, a secure-input request and an MCP server's request, which have their own ways. */
+function personDecides(question: NonNullable<RuntimeRun['question']>): string | undefined {
+  // A prompt's first line, without a Markdown heading's marks: a plan's title, a tool approval's request.
+  const line = question.prompt.split('\n').map(text => text.replace(/^#+\s*/u, '').trim()).find(Boolean) ?? question.id;
+  switch (question.kind) {
+    case 'approval': return question.tool ? `Approve or reject in GitSpace: ${line}` : `Approve the plan: ${line}`;
+    case 'lifecycle-approval': {
+      const card = question.lifecycle;
+      if (!card) return `Approve the environment's scripts in GitSpace: ${line}`;
+      return `Approve ${card.scripts.map(script => script.fileName ?? script.label).join(', ')} to run ${card.phase === 'checks' ? 'the environment checks' : card.phase}`;
+    }
+    case 'takeover': return `Take over the browser tab: ${line}`;
+    case 'ask': case 'secure-input': case 'mcp-elicitation': return undefined;
+  }
+}
 
 export function createGitSpaceTasks(options: { key: string; capabilities: readonly string[]; execute: Execute }): GitSpaceTasks {
   const caller = decodeApiKey(options.key);
@@ -150,13 +174,45 @@ export function createGitSpaceTasks(options: { key: string; capabilities: readon
     }
   }
 
+  /** The workspace's page on the account's origin, opening `focus`: one card (`question`), or the Environment panel. */
+  function workspacePage(handle: Handle, focus: { question: string } | { panel: 'environment' }): string {
+    if (!caller) throw new ProtocolError(ProtocolErrorCode.InternalError, 'The MCP access key cannot be read');
+    const page = new URL('/', caller.rpcUrl);
+    page.search = new URLSearchParams({ project: handle.projectId, workspace: handle.workspaceId, ...focus }).toString();
+    return page.href;
+  }
+  /** What waits in the workspace's Environment panel for a person, outside any question: a machine's setup phase whose
+   * scripts need approval (`waiting-for-approval`), and committed browser sites no approval covers. Each read needs its
+   * own grant; one this caller's grant refuses, or that fails, names no wait. */
+  async function environmentWaits(handle: Handle, signal: AbortSignal): Promise<Array<{ key: string; message: string }>> {
+    const [snapshot, environment] = await Promise.all([
+      options.execute('runtime.snapshot', { projectId: handle.projectId, workspaceId: handle.workspaceId }, signal).then(value => SetupReadSchema.safeParse(value).data, () => undefined),
+      options.execute('environment.get', { spaceId: handle.workspaceId }, signal).then(value => EnvironmentReadSchema.safeParse(value).data, () => undefined),
+    ]);
+    const unapproved = environment?.result.executions.filter(execution => execution.approval === null) ?? [];
+    const phases = new Set(snapshot?.result.attachments.flatMap(attachment => attachment.state === 'detached' ? [] : attachment.cache?.setup.flatMap(step => step.state === 'waiting-for-approval' ? [step.phase] : []) ?? []));
+    const waits = [...phases].map(phase => {
+      const names = unapproved.filter(execution => phase === 'checks' ? execution.kind === 'check' : execution.phase === phase).map(execution => execution.fileName ?? execution.label);
+      return { key: `setup:${phase}`, message: `Approve ${names.length > 0 ? names.join(', ') : 'its scripts'} to run ${phase === 'checks' ? 'the environment checks' : phase}` };
+    });
+    const sites = environment?.result.browserSites.flatMap(site => site.state === 'needs-approval' ? [site.pattern] : []) ?? [];
+    if (sites.length > 0) waits.push({ key: 'browser-sites', message: `Approve ${sites.join(', ')} in Environment` });
+    return waits;
+  }
   /** The `DetailedTask` for `handle`'s run (GITSPACE-MCP-CAPABILITY-MATRIX.md, MCP Tasks). */
   async function detailed(taskId: string, handle: Handle, ctx: ServerContext): Promise<DetailedTaskV2> {
     const { value, run, working } = await readRun(handle, ctx.mcpReq.signal);
     const task = { taskId, createdAt: handle.createdAt, lastUpdatedAt: new Date().toISOString(), ttlMs: TASK_TTL_MS, pollIntervalMs: POLL_WORKING_MS };
     switch (run.state) {
-      case 'queued': return { ...task, status: 'working', statusMessage: 'Queued: the agent takes it when the conversation\'s current turn ends.' };
-      case 'running': return { ...task, status: 'working', statusMessage: working ? `The agent is working: ${working}` : 'The agent is working.' };
+      case 'queued': case 'running': {
+        const waits = await environmentWaits(handle, ctx.mcpReq.signal);
+        if (waits.length === 0) return { ...task, status: 'working', statusMessage: run.state === 'queued' ? 'Queued: the agent takes it when the conversation\'s current turn ends.' : working ? `The agent is working: ${working}` : 'The agent is working.' };
+        // A person approves these in the Environment panel; a client gets only its link, and nothing it answers approves.
+        const statusMessage = waits.map(wait => wait.message).join('; ');
+        if (!elicitationModes(ctx).url) return { ...task, pollIntervalMs: POLL_PERSON_MS, status: 'working', statusMessage };
+        const page = workspacePage(handle, { panel: 'environment' });
+        return { ...task, pollIntervalMs: POLL_PERSON_MS, status: 'input_required', statusMessage, inputRequests: Object.fromEntries(waits.map(wait => [wait.key, elicitUrl(`${wait.message}. Only a person approves this, in the workspace's Environment panel in GitSpace; a reply here decides nothing.`, page)])) };
+      }
       case 'waiting': {
         const question = run.question;
         if (!question) throw new ProtocolError(ProtocolErrorCode.InternalError, 'GitSpace reported a waiting run without its question');
@@ -185,6 +241,15 @@ export function createGitSpaceTasks(options: { key: string; capabilities: readon
             : !options.capabilities.includes('operator.decide') ? 'this MCP access is not granted operator.decide'
             : card.request.mode === 'url' ? 'this client did not declare URL elicitation' : 'this client did not declare form elicitation';
           return { ...task, pollIntervalMs: POLL_PERSON_MS, status: 'working', statusMessage: `Waiting in GitSpace for a person to answer ${card.connection}'s question "${card.request.message}" (question ${question.id})${at}; ${why}.` };
+        }
+        const decides = personDecides(question);
+        if (decides) {
+          // A person decides it on its card in the workspace's main conversation; a client gets only the link, never a
+          // form, and nothing it answers decides it.
+          if (elicitationModes(ctx).url) {
+            return { ...task, pollIntervalMs: POLL_PERSON_MS, status: 'input_required', statusMessage: decides, inputRequests: { [question.id]: elicitUrl(`${decides}. Only a person decides this, on its card in GitSpace; a reply here decides nothing.`, workspacePage(handle, { question: question.id })) } };
+          }
+          return { ...task, pollIntervalMs: POLL_PERSON_MS, status: 'working', statusMessage: decides };
         }
         if (answerable(run, ctx)) return { ...task, pollIntervalMs: POLL_PERSON_MS, status: 'input_required', statusMessage: `The agent asks: ${question.prompt}`, inputRequests: { [question.id]: inputRequest(question) } };
         const why = question.kind !== 'ask' ? 'only a person answers it in GitSpace' : !options.capabilities.includes('operator.decide') ? 'this MCP access is not granted operator.decide' : 'this client did not declare form elicitation';
@@ -269,6 +334,8 @@ export function createGitSpaceTasks(options: { key: string; capabilities: readon
           }
           return COMPLETE;
         }
+        // A question only a person decides (`personDecides`) takes nothing from a client: a reply to its link is accepted
+        // and decides nothing.
         const response = answerable(run, ctx) ? inputResponse(ctx.mcpReq.inputResponses, question.id) : null;
         if (response?.kind !== 'elicit' || response.action !== 'accept') return COMPLETE;
         const parsed = AnswerSchema.safeParse(response.content ?? {});

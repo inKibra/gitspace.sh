@@ -4,7 +4,8 @@ import { contractDigest, ok } from 'result-rpc';
 import { createFetchHandler, serverRpc } from 'result-rpc/server';
 import { z } from 'zod';
 import { deviceProtocolBase64, encodeApiKey } from '@gitspace/protocol/device-grant';
-import { gitspaceContract, runtimeCancelContract, runtimeSessionContract, runtimeSubmitContract, type GitSpaceRpcContext } from '@gitspace/protocol/rpc-contract';
+import { getWorkspaceEnvironmentContract, gitspaceContract, runtimeCancelContract, runtimeSessionContract, runtimeSnapshotContract, runtimeSubmitContract, type GitSpaceRpcContext, type WorkspaceEnvironmentView } from '@gitspace/protocol/rpc-contract';
+import { RuntimeSnapshotSchema, type RuntimeCacheObservation } from '@gitspace/protocol-runtime';
 import type { RuntimeRun, SessionControlView } from '@gitspace/protocol-runtime/session-controls';
 import { createGitSpaceMcpHandler } from '../src/index.js';
 
@@ -38,11 +39,64 @@ const mcpQuestion = (id: string, request: { mode: 'form'; message: string; reque
 });
 const formQuestion = mcpQuestion('q-form', { mode: 'form', message: 'Which region and how many seats?', requestedSchema: FORM });
 const PREFIX = 'Billing (an MCP server in workspace workspace) asks';
+/** The workspace the tasks' runs are in, as GitSpace opens it on the account's origin. */
+const WORKSPACE_PAGE = 'https://account.test/?project=project&workspace=workspace';
+/** The workspace's page with its Environment panel open. */
+const ENVIRONMENT_PAGE = `${WORKSPACE_PAGE}&panel=environment`;
+/** What waits in the Environment panel for a person outside any question, each with the wait the task names. */
+const ENVIRONMENT_WAITS: Array<{ name: string; key: string; environment: Partial<FakeEnvironment>; message: string }> = [
+  {
+    name: 'a machine setup phase waiting for approval', key: 'setup:workspace/materialize', message: 'Approve setup.sh to run workspace/materialize',
+    environment: {
+      setup: [{ phase: 'machine/prepare', state: 'succeeded', runId: 'run-1', error: null }, { phase: 'workspace/materialize', state: 'waiting-for-approval', runId: null, error: null }],
+      executions: [
+        { id: 'machine/prepare:deps.sh', kind: 'script', label: 'deps.sh', command: 'deps.sh', hash: `sha256:${'b'.repeat(64)}`, content: 'apt-get install jq', approval: 'project', phase: 'machine/prepare', fileName: 'deps.sh' },
+        { id: 'workspace/materialize:setup.sh', kind: 'script', label: 'setup.sh', command: 'setup.sh', hash: `sha256:${'c'.repeat(64)}`, content: 'bun install', approval: null, phase: 'workspace/materialize', fileName: 'setup.sh' },
+      ],
+    },
+  },
+  {
+    name: 'a browser site waiting for approval', key: 'browser-sites', message: 'Approve bank.example in Environment',
+    environment: { browserSites: [{ pattern: 'docs.example', state: 'approved', hash: `sha256:${'d'.repeat(64)}`, level: 'full' }, { pattern: 'bank.example', state: 'needs-approval', hash: `sha256:${'e'.repeat(64)}` }, { pattern: 'staging.example', state: 'uncommitted' }] },
+  },
+];
+/** The questions only a person decides on their cards, each with the wait the task names. */
+const PERSON_WAITS: Array<{ name: string; question: NonNullable<RuntimeRun['question']>; message: string }> = [
+  {
+    name: 'a plan approval',
+    question: { id: 'q-plan', conversationId: 'conversation', kind: 'approval', prompt: '## Move the cache to Durable Objects\n\n1. Read the cache code.\n2. Replace it.', choices: ['Approve', 'Reject'], answer: null },
+    message: 'Approve the plan: Move the cache to Durable Objects',
+  },
+  {
+    name: 'a tool approval',
+    question: { id: 'q-attach', conversationId: 'conversation', kind: 'approval', prompt: 'Attach Build box to this workspace? Agents may not attach it on their own.', choices: ['Approve', 'Reject'], answer: null, tool: { name: 'machines', args: { op: 'attach', machine: 'machine-1' } } },
+    message: 'Approve or reject in GitSpace: Attach Build box to this workspace? Agents may not attach it on their own.',
+  },
+  {
+    name: 'a lifecycle approval',
+    question: {
+      id: 'q-lifecycle', conversationId: 'conversation', kind: 'lifecycle-approval', prompt: 'The agent wants to run workspace/materialize. setup.sh needs your approval first.', choices: ['Approve for the project', 'Only this workspace', 'Not now'], answer: null,
+      lifecycle: { phase: 'workspace/materialize', callId: 'call-2', scripts: [{ hash: `sha256:${'a'.repeat(64)}`, kind: 'script', label: 'setup', phase: 'workspace/materialize', fileName: 'setup.sh', content: 'bun install', previous: null }] },
+    },
+    message: 'Approve setup.sh to run workspace/materialize',
+  },
+  {
+    name: 'a take-over request',
+    question: {
+      id: 'q-takeover', conversationId: 'conversation', kind: 'takeover', prompt: 'Solve the captcha on the sign-in page', choices: ['Take over', 'Not now'], answer: null,
+      takeover: { source: 'chrome', pairingId: crypto.randomUUID(), browser: 'Work Chrome', groupId: crypto.randomUUID(), targetId: 'tab-3', url: 'https://accounts.example.com/login', title: 'Sign in', holder: 'agent', callId: 'call-3', askedAt: new Date().toISOString() },
+    },
+    message: 'Take over the browser tab: Solve the captcha on the sign-in page',
+  },
+];
 
 /** An MCP endpoint as the account worker serves it. */
 interface McpEndpoint { fetch(request: Request): Promise<Response> }
+/** What the workspace's Environment panel shows: its machine's setup phases, its executions with their approvals, and
+ * its browser sites. */
+interface FakeEnvironment { setup: RuntimeCacheObservation['setup']; executions: WorkspaceEnvironmentView['executions']; browserSites: WorkspaceEnvironmentView['browserSites'] }
 /** The account's runtime over a fake workspace (`workspace()`): its fetch, the RPC calls it took, and its runs. */
-interface FakeWorkspace { fetch: typeof globalThis.fetch; calls: Array<{ path: string; input: unknown }>; runs: Map<string, RuntimeRun>; move(started: string, next: Partial<RuntimeRun>): void }
+interface FakeWorkspace { fetch: typeof globalThis.fetch; calls: Array<{ path: string; input: unknown }>; runs: Map<string, RuntimeRun>; environment: FakeEnvironment; move(started: string, next: Partial<RuntimeRun>): void }
 
 /** The account's runtime procedures over a fake workspace: each input taken with a request id is one run, keyed by that
  * id, whose state a test moves the way the workspace would. Prompts and submits sent again with a taken request id add
@@ -78,14 +132,29 @@ function workspace(): FakeWorkspace {
     for (const [started, run] of runs) if (run.state !== 'finished') runs.set(started, { ...run, state: 'stopped', text: 'it was stopped before it finished' });
     return ok({ accepted: true as const, cursor: 8 });
   });
-  const rpc = createFetchHandler({ router: server.router({ runtime: { session, submit, cancel } }), endpoint: '/rpc', contractVersion: contractDigest(gitspaceContract), createContext: () => ({}) });
+  const environment: FakeEnvironment = { setup: [], executions: [], browserSites: [] };
+  // One machine whose setup is `environment.setup`, while it has any.
+  const snapshot = server.implement(runtimeSnapshotContract).handler(async ({ input }) => ok(RuntimeSnapshotSchema.parse({
+    version: 1, projectId: input.projectId, workspaceId: input.workspaceId, cursor: 1, conversations: [], tasks: [], questions: [], documents: {},
+    attachments: environment.setup.length === 0 ? [] : [{
+      projectId: input.projectId, workspaceId: input.workspaceId, attachmentId: 'attachment-1', machineId: 'machine-1', generation: 1, checkout: { kind: 'shared', branch: 'main' },
+      state: 'attaching', capabilities: [], updatedAt: new Date().toISOString(), online: true, failure: null,
+      cache: { state: 'setup', platform: null, lastSyncAt: null, setup: environment.setup, unsent: null, syncProblem: null },
+    }],
+  })));
+  const environmentGet = server.implement(getWorkspaceEnvironmentContract).handler(async ({ input }) => ok({
+    spaceId: input.spaceId, projectId: 'project', bundleJson: '{"version":1,"profiles":{"base":{}}}', selectedProfile: 'base', effective: { name: 'base', checks: [], secrets: [], values: [], notes: [] },
+    configuredSecrets: [], secretMetadata: [], values: { global: {}, project: {}, workspace: {}, effective: {} }, executions: environment.executions, browserSites: environment.browserSites, runs: [],
+    lifecycle: { revision: 0, projectId: 'project', spaceId: input.spaceId, bundleJson: null, selectedProfile: null, executions: [], browserOrigins: [], values: { global: {}, project: {}, workspace: {} }, approvals: [], policy: { automatic: false }, bindings: {}, provisioned: null, destroyedAt: null, runs: [], claim: null },
+  }));
+  const rpc = createFetchHandler({ router: server.router({ runtime: { session, submit, cancel, snapshot }, environment: { get: environmentGet } }), endpoint: '/rpc', contractVersion: contractDigest(gitspaceContract), createContext: () => ({}) });
   const fetch: typeof globalThis.fetch = Object.assign(async (input: Parameters<typeof globalThis.fetch>[0], init?: Parameters<typeof globalThis.fetch>[1]) => rpc(new Request(input, init)), { preconnect: globalThis.fetch.preconnect });
   const move = (started: string, next: Partial<RuntimeRun>) => {
     const run = runs.get(started);
     if (!run) throw new Error(`No run ${started}`);
     runs.set(started, { ...run, ...next });
   };
-  return { fetch, calls, runs, move };
+  return { fetch, calls, runs, environment, move };
 }
 
 function mcp(backend: FakeWorkspace, key = keyFor('owner'), granted = capabilities): McpEndpoint {
@@ -397,6 +466,76 @@ describe('GitSpace MCP server on SDK v2', () => {
       expect(answers(backend)).toEqual([]);
     } finally { await client.close(); }
   });
+
+  for (const { name, question: asked, message } of PERSON_WAITS) {
+    test(`${name}: a URL client gets the workspace's link and the wait named, any other client the same name, and the task goes on once the card settles`, async () => {
+      const backend = workspace();
+      const handler = mcp(backend);
+      const taskId = z.string().parse((await startTask(handler, 'gitspace_runtime_submit', { ...identity, requestId: 'person', text: 'Go on' })).taskId);
+      backend.move('person', { state: 'waiting', question: asked });
+      const linked = await tasksClient(handler, { form: {}, url: {} });
+      try {
+        const waiting = await getTask(linked, taskId);
+        expect(waiting).toMatchObject({ status: 'input_required', statusMessage: message, inputRequests: { [asked.id]: { method: 'elicitation/create', params: {
+          mode: 'url', url: `${WORKSPACE_PAGE}&question=${asked.id}`, message: `${message}. Only a person decides this, on its card in GitSpace; a reply here decides nothing.`,
+        } } } });
+        expect(JSON.stringify(waiting)).not.toContain('requestedSchema');
+        // A reply to the link is taken and decides nothing in GitSpace.
+        for (const action of ['accept', 'decline', 'cancel'] as const) {
+          await linked.request({ method: 'tasks/update', params: { taskId, inputResponses: { [asked.id]: action === 'accept' ? { action, content: { choice: asked.choices[0] } } : { action } } } }, z.looseObject({}));
+        }
+        expect(answers(backend)).toEqual([]);
+      } finally { await linked.close(); }
+      for (const elicitation of [{ form: {} }, null]) {
+        const client = await tasksClient(handler, elicitation);
+        try {
+          const waiting = await getTask(client, taskId);
+          expect(waiting).toMatchObject({ status: 'working', statusMessage: message });
+          expect(waiting.inputRequests).toBeUndefined();
+        } finally { await client.close(); }
+      }
+      // A person settles the card in GitSpace: the run goes on with its event, then finishes.
+      backend.move('person', { requestId: `question-closed:${asked.id}`, state: 'running', question: null });
+      const client = await tasksClient(handler, { url: {} });
+      try {
+        expect(await getTask(client, taskId)).toMatchObject({ status: 'working', statusMessage: 'The agent is working: Read the cache code' });
+        backend.move('person', { state: 'finished', text: 'Done.' });
+        expect(await getTask(client, taskId)).toMatchObject({ status: 'completed', result: { content: [{ type: 'text', text: 'Done.' }] } });
+      } finally { await client.close(); }
+    });
+  }
+
+  for (const { name, key, environment, message } of ENVIRONMENT_WAITS) {
+    test(`${name}: a URL client gets the Environment panel's link and the wait named, any other client the same name, and the task works again once it is approved`, async () => {
+      const backend = workspace();
+      const handler = mcp(backend);
+      const taskId = z.string().parse((await startTask(handler, 'gitspace_runtime_submit', { ...identity, requestId: 'setup', text: 'Go on' })).taskId);
+      Object.assign(backend.environment, environment);
+      const linked = await tasksClient(handler, { form: {}, url: {} });
+      try {
+        expect(await getTask(linked, taskId)).toMatchObject({ status: 'input_required', statusMessage: message, inputRequests: { [key]: { method: 'elicitation/create', params: {
+          mode: 'url', url: ENVIRONMENT_PAGE, message: `${message}. Only a person approves this, in the workspace's Environment panel in GitSpace; a reply here decides nothing.`,
+        } } } });
+        for (const action of ['accept', 'decline', 'cancel'] as const) {
+          await linked.request({ method: 'tasks/update', params: { taskId, inputResponses: { [key]: { action } } } }, z.looseObject({}));
+        }
+        expect(answers(backend)).toEqual([]);
+      } finally { await linked.close(); }
+      for (const elicitation of [{ form: {} }, null]) {
+        const client = await tasksClient(handler, elicitation);
+        try {
+          const waiting = await getTask(client, taskId);
+          expect(waiting).toMatchObject({ status: 'working', statusMessage: message });
+          expect(waiting.inputRequests).toBeUndefined();
+        } finally { await client.close(); }
+      }
+      // A person approves it in Environment: nothing waits there any more.
+      Object.assign(backend.environment, { setup: [], executions: [], browserSites: [] });
+      const client = await tasksClient(handler, { url: {} });
+      try { expect(await getTask(client, taskId)).toMatchObject({ status: 'working', statusMessage: 'The agent is working: Read the cache code' }); }
+      finally { await client.close(); }
+    });
+  }
 
   test('tasks methods from a client that did not declare Tasks are refused as a missing capability', async () => {
     const backend = workspace();
