@@ -120,3 +120,15 @@ test('a checkout with a commit the cloud never received is refused naming it', a
   expect(await git(checkout, 'rev-parse', '--short', 'HEAD')).toBe(local);
   expect(published).toEqual([]);
 }, 30_000);
+
+test('a clean checkout whose commit is on a remote-tracking branch is admitted at the cloud version', async () => {
+  const { checkout, cloud, published, state, failure } = await attachExisting(async checkout => {
+    await commit(checkout, 'tracked.txt', 'pushed\n', 'pushed');
+    await git(checkout, 'update-ref', 'refs/remotes/origin/feature', 'HEAD');
+  });
+  expect(failure()).toBeNull();
+  expect(state()).toBe('ready');
+  expect(await git(checkout, 'rev-parse', 'HEAD')).toBe(cloud.headCommit ?? '');
+  expect(await git(checkout, 'write-tree')).toBe(cloud.indexTree);
+  expect(published).toEqual([]);
+}, 30_000);
