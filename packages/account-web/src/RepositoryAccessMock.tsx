@@ -23,8 +23,8 @@ import { RepositoryAccessCard, type BlockedProjectAccess, type MachineCopyProps 
 type State = 'needs-app' | 'requested' | 'not-selected' | 'importing' | 'today' | 'built';
 type View = 'project' | 'settings';
 
-const ORG = 'BrandByX';
-const REPO = 'payne-portals';
+const ORG = 'Meadowlark';
+const REPO = 'garden-portal';
 const APP = 'GitSpace bradleat';
 const STATES: readonly { id: State; label: string }[] = [
   { id: 'needs-app', label: 'App not installed on the organization' },
@@ -40,7 +40,7 @@ const BUILT: readonly BlockedProjectAccess[] = [
   { state: 'needs-app', repository: `${ORG}/${REPO}`, organization: ORG, appName: APP, bridge: null, branches: ['main'], awaitsCopy: true },
   { state: 'needs-app', repository: `${ORG}/${REPO}`, organization: ORG, appName: APP, bridge: null, branches: ['main'], awaitsCopy: false },
   { state: 'requested', repository: `${ORG}/${REPO}`, organization: ORG, appName: APP, request: { id: 'request', organization: ORG, project: { id: 'portal', name: 'Harbor Portal' }, repository: `${ORG}/${REPO}`, firstRequestedAt: hoursAgo(17), lastRequestedAt: hoursAgo(8), times: 2 }, bridge: null, branches: ['main'], awaitsCopy: true },
-  { state: 'not-selected', repository: `${ORG}/${REPO}`, organization: ORG, appName: APP, installation: { id: 7, account: { login: ORG, kind: 'organization' }, repositorySelection: 'selected', repositories: [`${ORG}/brandbyx-site`, `${ORG}/field-notes`], permissions: {}, installedAt: hoursAgo(3), projects: [] }, bridge: null, branches: ['main'], awaitsCopy: false },
+  { state: 'not-selected', repository: `${ORG}/${REPO}`, organization: ORG, appName: APP, installation: { id: 7, account: { login: ORG, kind: 'organization' }, repositorySelection: 'selected', repositories: [`${ORG}/meadowlark-site`, `${ORG}/field-notes`], permissions: {}, installedAt: hoursAgo(3), projects: [] }, bridge: null, branches: ['main'], awaitsCopy: false },
   { state: 'needs-app', repository: `${ORG}/${REPO}`, organization: ORG, appName: null, bridge: null, branches: ['main'], awaitsCopy: true },
   { state: 'awaits-copy', origin: 'https://git.example.org/harbor/portal-assets.git' },
 ];
@@ -113,7 +113,7 @@ function AccessCard({ state }: { state: Exclude<State, 'today'> }): ReactElement
         <p className="text-body text-muted-foreground">You asked to install <span className="text-foreground">{APP}</span> on {ORG}. Only an organization owner can approve it. GitSpace imports <span className="font-mono text-foreground">{REPO}</span> as soon as they do; nothing else is needed from you.</p>
       </div>
       <ol className="flex flex-col gap-3">
-        <Step state="done" title="Requested by you" detail="Today, 6:16 PM · for BrandByX/payne-portals" />
+        <Step state="done" title="Requested by you" detail="Today, 6:16 PM · for Meadowlark/garden-portal" />
         <Step state="current" title={`An owner of ${ORG} approves it on GitHub`} detail="Pending for 2 hours · checked 1 minute ago" />
         <Step state="next" title={`GitSpace imports ${REPO}`} detail="Starts on its own when GitHub reports the install." />
       </ol>
@@ -129,7 +129,7 @@ function AccessCard({ state }: { state: Exclude<State, 'today'> }): ReactElement
         <p className="text-body text-muted-foreground"><span className="text-foreground">{APP}</span> is installed on {ORG}, but only for selected repositories, and <span className="font-mono text-foreground">{REPO}</span> isn't one of them. An owner adds it in the App's repository access.</p>
       </div>
       <ol className="flex flex-col gap-3">
-        <Step state="done" title={`Installed on ${ORG}`} detail="Selected repositories: brandbyx-site, field-notes" />
+        <Step state="done" title={`Installed on ${ORG}`} detail="Selected repositories: meadowlark-site, field-notes" />
         <Step state="current" title={`${REPO} added to the App's repositories`} detail="GitHub → Settings → GitHub Apps → GitSpace bradleat → Configure → Repository access" />
         <Step state="next" title={`GitSpace imports ${REPO}`} />
       </ol>
@@ -185,7 +185,7 @@ function monogram(letter: string): IconComponent {
   return function Monogram({ className }: IconComponentProps) { return <span aria-hidden className={`text-[12px] font-semibold leading-none ${className ?? ''}`}>{letter}</span>; };
 }
 const INKIBRA = monogram('I');
-const BRANDBYX = monogram('B');
+const MEADOWLARK = monogram('M');
 
 /** Settings → GitHub's installations, with the pending request named and tracked. */
 function SettingsPage({ state }: { state: State }): ReactElement {
@@ -198,14 +198,14 @@ function SettingsPage({ state }: { state: State }): ReactElement {
         <CardGroup orientation="inline" border="outlined" separated proximityHover={false}>
           <Card size="compact" index={0}>
             <CardMedia icon={INKIBRA} />
-            <CardHeader><span className="text-body font-medium text-foreground">inKibra</span><CardDescription>inKibra/core, inKibra/gitspace.sh · projects GitSpace, inkibra core</CardDescription></CardHeader>
+            <CardHeader><span className="text-body font-medium text-foreground">inKibra</span><CardDescription>inKibra/core, inKibra/gitspace.sh · projects GitSpace, Acme core</CardDescription></CardHeader>
             <CardFooter><Badge variant="dot" size="compact" color="green">Installed</Badge></CardFooter>
           </Card>
           <Card size="compact" index={1} className="flex-wrap">
-            <CardMedia icon={BRANDBYX} />
+            <CardMedia icon={MEADOWLARK} />
             <CardHeader>
               <span className="text-body font-medium text-foreground">{ORG}</span>
-              <CardDescription>{state === 'not-selected' ? 'Installed for brandbyx-site, field-notes · not payne-portals' : state === 'importing' ? 'Installed · payne-portals importing' : `Requested for ${REPO} · project Harbor Portal`}</CardDescription>
+              <CardDescription>{state === 'not-selected' ? 'Installed for meadowlark-site, field-notes · not garden-portal' : state === 'importing' ? 'Installed · garden-portal importing' : `Requested for ${REPO} · project Harbor Portal`}</CardDescription>
             </CardHeader>
             <CardFooter>
               {state === 'not-selected' ? <Badge variant="dot" size="compact" color="amber">Repository not allowed</Badge>

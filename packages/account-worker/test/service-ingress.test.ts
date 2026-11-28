@@ -17,7 +17,7 @@ const WORKSPACE_URL = `api--${WORKSPACE}--${env.TENANT_ID}-srv.gssh.dev`;
 const HOOKS: ServiceIngressRoute[] = [{ method: '*', path: '/hooks/*' }];
 const machineKey = Uint8Array.from({ length: 32 }, (_, index) => 100 + index);
 const grant = signCredentialAuthorityGrant({
-  version: 1, userId: env.ACCOUNT_ID, machineId: 'darktop', generation: 1, capabilities: ['storage.access', 'space.control'],
+  version: 1, userId: env.ACCOUNT_ID, machineId: 'desktop', generation: 1, capabilities: ['storage.access', 'space.control'],
   signingPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(machineKey)), exchangePublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(machineKey)),
 }, tenantRootPrivateKey);
 
@@ -36,14 +36,14 @@ afterEach(async () => {
 });
 
 async function lease(hostname: string): Promise<void> {
-  await env.HOSTED_ROUTES.getByName(hostname).lease(env.ACCOUNT_ID, 'project-a', { hostname, workspaceId: WORKSPACE, serviceName: 'api', source: 'declared', machineId: 'darktop', ingress: 'http://127.0.0.1:3000', portName: 'http', port: 3000, generation: 1, leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(), health: 'healthy', updatedAt: new Date().toISOString() }, 'darktop');
+  await env.HOSTED_ROUTES.getByName(hostname).lease(env.ACCOUNT_ID, 'project-a', { hostname, workspaceId: WORKSPACE, serviceName: 'api', source: 'declared', machineId: 'desktop', ingress: 'http://127.0.0.1:3000', portName: 'http', port: 3000, generation: 1, leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(), health: 'healthy', updatedAt: new Date().toISOString() }, 'desktop');
 }
 
 interface Forwarded { method: string; path: string; headers: Headers; body: string; caller: ServiceCaller | undefined }
 
 /** The machine serving `hostname`: records each request it receives, with the caller the worker signed, and answers `served`. */
 async function machine(hostname: string): Promise<Forwarded[]> {
-  const target = '/ws?role=machine&id=darktop';
+  const target = '/ws?role=machine&id=desktop';
   const response = await exports.default.fetch(new Request(`https://relay.test${target}`, { headers: {
     upgrade: 'websocket', authorization: createRelayAuthorization(machineKey, target),
     'x-gitspace-machine-grant': btoa(JSON.stringify(grant)).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, ''),
@@ -58,7 +58,7 @@ async function machine(hostname: string): Promise<Forwarded[]> {
     const message = tunnelRequestMessageSchema.parse(JSON.parse(String(event.data)));
     if (message.type === 'tunnel.request.start') {
       const headers = new Headers(message.headers);
-      const caller = verifyServiceAssertion({ header: headers.get(SERVICE_ASSERTION_HEADER), publicKey, accountId: env.ACCOUNT_ID, machineId: 'darktop', hostname, method: message.method, target: message.path })?.caller;
+      const caller = verifyServiceAssertion({ header: headers.get(SERVICE_ASSERTION_HEADER), publicKey, accountId: env.ACCOUNT_ID, machineId: 'desktop', hostname, method: message.method, target: message.path })?.caller;
       const entry = { method: message.method, path: message.path, headers, body: '', caller };
       forwarded.push(entry);
       open.set(message.requestId, entry);
@@ -105,7 +105,7 @@ async function issuer(forwardAuthorization = false): Promise<Issuer> {
 describe('signed callers on workspace URLs', () => {
   it('forwards a declared route with a valid token, less its token header, while other paths and machine URLs keep the browser sign-in', async () => {
     const oidc = await issuer();
-    const machineUrl = `api--darktop-1a2b--${WORKSPACE}--${env.TENANT_ID}-srv.gssh.dev`;
+    const machineUrl = `api--desktop-1a2b--${WORKSPACE}--${env.TENANT_ID}-srv.gssh.dev`;
     for (const hostname of [WORKSPACE_URL, machineUrl]) {
       await lease(hostname);
       await env.HOSTED_ROUTES.getByName(hostname).registerIngress(env.ACCOUNT_ID, WORKSPACE, HOOKS, [oidc.credential], new Date().toISOString());
@@ -223,7 +223,7 @@ describe('signed caller registration', () => {
   async function control(operation: ControlOperation, payload: Record<string, unknown>): Promise<{ status: string; value?: unknown }> {
     const response = await exports.default.fetch(new Request('https://auth.test/v1/control', {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(createSignedControlRequest({ userId: env.ACCOUNT_ID, machineId: 'darktop', operation, payload, signingPrivateKey: machineKey })),
+      body: JSON.stringify(createSignedControlRequest({ userId: env.ACCOUNT_ID, machineId: 'desktop', operation, payload, signingPrivateKey: machineKey })),
     }));
     return response.json();
   }
@@ -242,7 +242,7 @@ describe('signed caller registration', () => {
       if (result.status === 'error') throw new Error(result.failure.message);
     };
     const hash = await executionHash({ kind: 'ingress', command: content });
-    await mutate({ op: 'configure', bundleJson: JSON.stringify({ version: 1, profiles: { base: {} } }), executions: [{ id: 'ingress', kind: 'ingress', label: 'Signed callers', command: '.gitspace/services.json', hash, phase: null, fileName: null, content }] }, machineActor('darktop'));
+    await mutate({ op: 'configure', bundleJson: JSON.stringify({ version: 1, profiles: { base: {} } }), executions: [{ id: 'ingress', kind: 'ingress', label: 'Signed callers', command: '.gitspace/services.json', hash, phase: null, fileName: null, content }] }, machineActor('desktop'));
     const run = async (runId: string, machineId: string) => {
       await mutate({ op: 'claim', runId, phase: 'cloud/provision', profile: 'base', executionHashes: [], generation: null, rerun: false }, machineActor(machineId));
       await mutate({ op: 'start', runId }, machineActor(machineId));
@@ -253,14 +253,14 @@ describe('signed caller registration', () => {
 
   it('accepts only this machine\'s running provision run for approved routes, replaces earlier URLs, and ends them at archive and delete', async () => {
     const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`);
-    await authority.bootstrap({ id: projectId, name: 'Ingress', repositoryReference: null, baseBranch: 'main', createdBy: 'darktop' });
+    await authority.bootstrap({ id: projectId, name: 'Ingress', repositoryReference: null, baseBranch: 'main', createdBy: 'desktop' });
     const first = `api--ws-a--${env.TENANT_ID}-srv.gssh.dev`;
     const renamed = `api--ws-renamed--${env.TENANT_ID}-srv.gssh.dev`;
     const runA = await provisioning(authority, 'ws-a');
     expect(await register('ws-a', 'provision', first)).toMatchObject({ status: 'error' });
     await runA('elsewhere', 'other-machine');
     expect(await register('ws-a', 'elsewhere', first)).toMatchObject({ status: 'error' });
-    await runA('provision', 'darktop');
+    await runA('provision', 'desktop');
     expect(await register('ws-a', 'provision', first, unapproved)).toMatchObject({ status: 'error' });
     expect(await ingress(first)).toBeNull();
     expect(await register('ws-a', 'provision', first)).toEqual({ status: 'ok', value: { hostnames: [first] } });
@@ -276,7 +276,7 @@ describe('signed caller registration', () => {
     expect(await ingress(renamed)).toBeNull();
 
     const other = `api--ws-b--${env.TENANT_ID}-srv.gssh.dev`;
-    await (await provisioning(authority, 'ws-b'))('provision-b', 'darktop');
+    await (await provisioning(authority, 'ws-b'))('provision-b', 'desktop');
     expect(await register('ws-b', 'provision-b', other)).toMatchObject({ status: 'ok' });
     expect(await ingress(other)).toMatchObject({ workspaceId: 'ws-b' });
     await authority.deleteProject((await authority.getProject())!.revision);

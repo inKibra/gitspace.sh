@@ -45,7 +45,7 @@ const PROJECT_CAPTURES: CaptureRow[] = [
   ['b42f3170', 'DocuSign · step 11', 'Chrome · Studio desktop', 'yesterday'],
   ['d85bd456', 'Upload with your phone', 'Chrome · Studio desktop', 'yesterday'],
   ['4e0755ae', 'Remote and demo side by side', 'Cloud browser', '3 days ago'],
-  ['5dc9009d', 'Golconda demo – landing', 'Cloud browser', '3 days ago'],
+  ['5dc9009d', 'Ledger demo – landing', 'Cloud browser', '3 days ago'],
 ];
 const WORKSPACE_CAPTURES: CaptureRow[] = [
   ['a1c09e77', 'Lockout after 3 attempts', 'Cloud browser', '20 min ago'],
@@ -63,7 +63,7 @@ const DRIVES: Record<string, { label: string; files: DriveFile[]; captures: Capt
       { path: 'plans/remote-control-ux.md', size: 9_800, mediaType: 'text/markdown', added: '2 h ago' },
       { path: 'plans/enrollment-flow.md', size: 14_100, mediaType: 'text/markdown', added: null },
       { path: 'uploads/brand-guidelines.pdf', size: 3_400_000, mediaType: 'application/pdf', added: null },
-      { path: 'uploads/golconda-logo.svg', size: 6_100, mediaType: 'image/svg+xml', added: null },
+      { path: 'uploads/ledger-logo.svg', size: 6_100, mediaType: 'image/svg+xml', added: null },
       { path: 'uploads/walkthrough.mp4', size: 48_000_000, mediaType: 'video/mp4', added: '4 days ago' },
       { path: 'reference.txt', size: 824, mediaType: 'text/plain', added: null },
     ],
@@ -341,7 +341,7 @@ function DocumentTab({ document, onShowInDrive, onDelete }: { document: OpenDocu
   const mediaType = item.kind === 'file' ? item.file.mediaType : 'image/jpeg';
   const textual = mediaType.startsWith('text/') || mediaType === 'application/json';
   const source = item.kind === 'capture'
-    ? JSON.stringify({ version: 2, captureId: item.path.split('/').at(-1), name: item.name, by: 'agent', browser: item.capture.browser, page: { url: 'https://demo--golconda-ppva-enro-170ed69a.gssh.dev/', title: 'Golconda PPVA demo' }, tracks: { image: { path: 'image.jpg', width: 1280, height: 720 } } }, null, 2)
+    ? JSON.stringify({ version: 2, captureId: item.path.split('/').at(-1), name: item.name, by: 'agent', browser: item.capture.browser, page: { url: 'https://demo--ledger-enroll-170ed69a.gssh.dev/', title: 'Ledger Enrollment demo' }, tracks: { image: { path: 'image.jpg', width: 1280, height: 720 } } }, null, 2)
     : mediaType === 'text/markdown' ? MARKDOWN : textual ? 'quarter,total\nq3,42\nq4,57\n' : null;
   const action = (label: string, icon: ReactNode, onClick?: () => void) => <Tooltip content={label} side="bottom"><Button variant="ghost" size="icon-compact" aria-label={label} onClick={onClick}>{icon}</Button></Tooltip>;
   return <div className="flex min-h-0 flex-1 flex-col">
@@ -463,7 +463,7 @@ function DriveMock() {
     </header>
     <div className="flex min-h-0 flex-1">
       <div className="hidden min-w-0 flex-1 flex-col gap-3 border-r border-border p-6 lg:flex">
-        <span className="text-caption text-muted-foreground">{page === 'project' ? 'Golconda PPVA Enrollment · project agent' : 'Golconda PPVA Enrollment / remote-control-ux · workspace agent'}</span>
+        <span className="text-caption text-muted-foreground">{page === 'project' ? 'Ledger Enrollment · project agent' : 'Ledger Enrollment / remote-control-ux · workspace agent'}</span>
         <div className="max-w-xl rounded-xl bg-surface-2 p-3 text-body">Here are both options side by side. Option A puts the fill buttons on the Control tab… <span className="text-[#6B97FF] underline">Option A – Control tab</span></div>
         <ul className="mt-4 flex max-w-xl list-disc flex-col gap-1.5 pl-5">
           <Note>The filter matches names, paths and capture titles across the whole drive, as you type; it does not search inside files.</Note>

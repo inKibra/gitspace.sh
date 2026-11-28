@@ -348,7 +348,7 @@ function MockSidebar({ sim, view, onView }: { sim: Simulation; view: View; onVie
               <SidebarMenuButton icon={GitSpaceDot} isActive={view === 'project'} onClick={() => onView('project')}>GitSpace</SidebarMenuButton>
             </Tooltip>
           </SidebarMenuItem>
-          {['Golconda IDF Data Vault', 'Golconda PPVA Enrollment', 'Landscaping Portal', 'inkibra core'].map(name => <SidebarMenuItem key={name}><SidebarMenuButton icon={IdleDot}>{name}</SidebarMenuButton></SidebarMenuItem>)}
+          {['Ledger Data Vault', 'Ledger Enrollment', 'Garden Portal', 'Acme core'].map(name => <SidebarMenuItem key={name}><SidebarMenuButton icon={IdleDot}>{name}</SidebarMenuButton></SidebarMenuItem>)}
         </SidebarMenu>
       </SidebarGroup>
     </SidebarContent>

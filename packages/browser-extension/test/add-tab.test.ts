@@ -17,7 +17,7 @@ async function adding(ready: Record<string, unknown> = { addTab: true }) {
     { projectId: 'project', project: 'Shop', workspaceId: 'workspace', name: 'Checkout', approved: true },
     { projectId: 'tone', project: 'ToneTempo', workspaceId: 'coach', name: 'Coach subscriptions', approved: true },
     { projectId: 'tone', project: 'ToneTempo', workspaceId: 'streaks', name: 'Challenges and streaks', approved: true },
-    { projectId: 'core', project: 'inkibra core', workspaceId: 'schedules', name: 'Workflow schedules', approved: false },
+    { projectId: 'core', project: 'Acme core', workspaceId: 'schedules', name: 'Workflow schedules', approved: false },
   );
   return chrome;
 }
@@ -67,7 +67,7 @@ describe('adding a tab to a workspace from the popup', () => {
     expect(rows(popup)).toEqual(['Recent', '> Checkout · ShopIts group here · 3 tabs', 'Coach subscriptions · ToneTempoNo tab group here yet · adding makes one', 'Challenges and streaks · ToneTempoNo tab group here yet · adding makes one']);
 
     await search(popup, 'work');
-    expect(rows(popup)).toEqual(['inkibra core', 'Workflow schedulesThis Chrome isn\'t approved in inkibra coreApprove…']);
+    expect(rows(popup)).toEqual(['Acme core', 'Workflow schedulesThis Chrome isn\'t approved in Acme coreApprove…']);
     await search(popup, 'tone');
     expect(rows(popup)).toEqual(['ToneTempo', '> Coach subscriptionsNo tab group here yet · adding makes one', 'Challenges and streaksNo tab group here yet · adding makes one']);
     await press(popup, 'ArrowDown');

@@ -21,7 +21,7 @@ import worker, { SpaceAuthorityDO, UserRelayDO } from '../src/index.js';
 
 const rootKey = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
 const machineKey = Uint8Array.from({ length: 32 }, (_, index) => 100 + index);
-const machineId = 'darktop';
+const machineId = 'desktop';
 const projectId = 'presence-project';
 function grantFor(id: string) {
   return signCredentialAuthorityGrant({
@@ -42,7 +42,7 @@ beforeEach(async () => {
   await vault.bootstrap({ userId: env.ACCOUNT_ID, rootPublicKey: env.AUTH_PUBLIC_KEY, vaultKey: credentialProtocolBase64.encode(new Uint8Array(32).fill(49)) });
   await vault.registerDevice(grant);
   await fleet().putMachine({
-    id: machineId, label: 'Darktop', state: 'offline', rpcEndpoint: `/tunnel/${machineId}/rpc`, kind: 'physical', provider: 'physical',
+    id: machineId, label: 'Desktop', state: 'offline', rpcEndpoint: `/tunnel/${machineId}/rpc`, kind: 'physical', provider: 'physical',
     notes: '', desiredState: 'online', lifecycleRevision: 1, operationId: null, error: null,
   });
   const project = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`);
@@ -389,8 +389,8 @@ describe('machine notices', () => {
     clock.mockRestore();
     await report(true);
     expect(await notices(workspace.workspaceId)).toEqual([
-      'Machine Darktop went offline. Commands on it fail until it reconnects; attach another machine if this work cannot wait.',
-      'Machine Darktop is back online; commands can run on it again.',
+      'Machine Desktop went offline. Commands on it fail until it reconnects; attach another machine if this work cannot wait.',
+      'Machine Desktop is back online; commands can run on it again.',
     ]);
   });
 
@@ -405,7 +405,7 @@ describe('machine notices', () => {
     clock.mockRestore();
     await connect();
     // The workspace names the machine in its notice while the relay's presence pass waits for that workspace.
-    await eventually(async () => (await notices(workspace.workspaceId)).includes('Machine Darktop is back online; commands can run on it again.'));
+    await eventually(async () => (await notices(workspace.workspaceId)).includes('Machine Desktop is back online; commands can run on it again.'));
     expect(await machineState()).toBe('online');
   });
 
@@ -440,7 +440,7 @@ describe('machine notices', () => {
     });
     await report();
     await report();
-    expect(await notices(workspace.workspaceId)).toEqual(['Setup on Darktop failed at workspace/materialize: 30-fail.sh exited 3. Commands that need it wait until setup runs again.']);
+    expect(await notices(workspace.workspaceId)).toEqual(['Setup on Desktop failed at workspace/materialize: 30-fail.sh exited 3. Commands that need it wait until setup runs again.']);
   });
 
   it('tells the conversation of a sync failure only once it lasts five minutes', async () => {
@@ -462,6 +462,6 @@ describe('machine notices', () => {
       await report('internal error; reference = d');
       await report('internal error; reference = e');
     } finally { clock.mockRestore(); }
-    expect(await notices(workspace.workspaceId)).toEqual(['Sync with Darktop failed: internal error; reference = d']);
+    expect(await notices(workspace.workspaceId)).toEqual(['Sync with Desktop failed: internal error; reference = d']);
   });
 });

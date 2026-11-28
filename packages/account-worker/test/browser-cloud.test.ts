@@ -13,7 +13,7 @@ const SetCookies = z.object({ cookies: z.tuple([z.object({ name: z.string(), val
 const workspace = { projectId: 'project', workspaceId: 'workspace' };
 const hostname = `app--workspace--${env.TENANT_ID}-srv.gssh.dev`;
 async function leaseService(name: string, workspaceId: string) {
-  await env.HOSTED_ROUTES.getByName(name).lease(env.ACCOUNT_ID, 'project', { hostname: name, workspaceId, serviceName: 'app', source: 'declared', machineId: 'darktop', ingress: 'http://127.0.0.1:3000', portName: 'http', port: 3000, generation: 1, leaseExpiresAt: new Date(Date.now() + 600_000).toISOString(), health: 'healthy', updatedAt: new Date().toISOString() }, 'darktop');
+  await env.HOSTED_ROUTES.getByName(name).lease(env.ACCOUNT_ID, 'project', { hostname: name, workspaceId, serviceName: 'app', source: 'declared', machineId: 'desktop', ingress: 'http://127.0.0.1:3000', portName: 'http', port: 3000, generation: 1, leaseExpiresAt: new Date(Date.now() + 600_000).toISOString(), health: 'healthy', updatedAt: new Date().toISOString() }, 'desktop');
 }
 
 test.each(['Fetch', 'Image', 'Document', 'Redirect', 'Unknown'])('cloud sets its own session cookie for an explicit service navigation and lets it go to the network, but denies ordinary-document %s access', async resource => {
@@ -99,9 +99,9 @@ test('a script going to its workspace service gets the session cookie first; one
 test('a script going to localhost on the cloud browser is refused with the workspace URL of the service on that port', async () => {
   const sent: string[] = [];
   const upstream: BrowserChannel = { async send(method) { sent.push(method); return method === 'Target.createTarget' ? { targetId: 'page' } : { frameId: 'frame' }; }, subscribe() { return () => {}; }, async close() {} };
-  const cookies = new CloudServiceCookies(env, upstream, workspace, async () => [{ name: 'web', url: `https://web--workspace--${env.TENANT_ID}-srv.gssh.dev`, port: 5173, machine: 'Darktop' }]);
+  const cookies = new CloudServiceCookies(env, upstream, workspace, async () => [{ name: 'web', url: `https://web--workspace--${env.TENANT_ID}-srv.gssh.dev`, port: 5173, machine: 'Desktop' }]);
   const script = (await CdpBrowserShim.open(upstream, { navigating: url => cookies.navigating(url) })).client(() => {});
-  await expect(script.send('Target.createTarget', { url: 'http://localhost:5173/' })).rejects.toThrow(`This workspace's \`web\` service on port 5173 is at https://web--workspace--${env.TENANT_ID}-srv.gssh.dev; open that. For a port with no service URL, add on:"Darktop".`);
+  await expect(script.send('Target.createTarget', { url: 'http://localhost:5173/' })).rejects.toThrow(`This workspace's \`web\` service on port 5173 is at https://web--workspace--${env.TENANT_ID}-srv.gssh.dev; open that. For a port with no service URL, add on:"Desktop".`);
   await expect(script.send('Target.createTarget', { url: 'http://127.0.0.1:9000/' })).rejects.toThrow('no service of this workspace has a URL for port 9000');
   expect(sent).not.toContain('Target.createTarget');
 });

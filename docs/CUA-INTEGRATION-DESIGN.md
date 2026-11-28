@@ -49,7 +49,7 @@ Non-goals (V1):
 ```text
 Workspace (Workspace DO)
 └── gitspace.desktops            document, one row per desktop
-    ├── desktop "web-e2e"        open    · linux container · on machine Darktop
+    ├── desktop "web-e2e"        open    · linux container · on machine Desktop
     └── desktop "mac-build"      pinned  · macOS VM (Lume) · on machine Studio
 ```
 

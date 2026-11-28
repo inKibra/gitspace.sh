@@ -71,7 +71,7 @@ function stageInput(sha: string): StageReleaseInput {
 describe('release sources migration', () => {
   it('gives stored records their source once and drops a launch recorded before launch sources', async () => {
     const commit = 'c'.repeat(40);
-    const base = { inferenceVersion: 1, builtBy: 'darktop', createdAt: '2026-10-01T00:00:00.000Z', artifacts: { worker: null, machine: null, frontend: null }, worker: null, status: { worker: 'pending', frontend: 'pending', machines: {} }, error: null };
+    const base = { inferenceVersion: 1, builtBy: 'desktop', createdAt: '2026-10-01T00:00:00.000Z', artifacts: { worker: null, machine: null, frontend: null }, worker: null, status: { worker: 'pending', frontend: 'pending', machines: {} }, error: null };
     await runInDurableObject(env.TENANT_RELEASES.getByName(`migration-${crypto.randomUUID()}`), async (_instance, state) => {
       const legacy = [
         { ...base, sha: `${commit}-dirty.0123456789ab`, label: 'feature @ cccccccccccc', workspaceId: 'workspace-a' },
@@ -79,7 +79,7 @@ describe('release sources migration', () => {
         { ...base, sha: 'channel:12', label: 'Channel build', workspaceId: null },
       ];
       for (const record of legacy) state.storage.sql.exec('INSERT OR REPLACE INTO releases(sha, created_at, record_json) VALUES (?, ?, ?)', record.sha, record.createdAt, JSON.stringify(record));
-      state.storage.sql.exec('INSERT OR REPLACE INTO latest_launch(id, machine_id, record_json) VALUES (1, ?, ?)', 'darktop', JSON.stringify({ launchId: crypto.randomUUID(), workspaceId: 'workspace-a', targets: ['worker'], sha: null, phase: 'queued', message: '', status: 'running', error: null, startedAt: base.createdAt, updatedAt: base.createdAt }));
+      state.storage.sql.exec('INSERT OR REPLACE INTO latest_launch(id, machine_id, record_json) VALUES (1, ?, ?)', 'desktop', JSON.stringify({ launchId: crypto.randomUUID(), workspaceId: 'workspace-a', targets: ['worker'], sha: null, phase: 'queued', message: '', status: 'running', error: null, startedAt: base.createdAt, updatedAt: base.createdAt }));
       // A new instance runs the constructor's migration over what an older release stored.
       new TenantReleasesDO(state, env);
       const stored = state.storage.sql.exec<{ sha: string; record_json: string }>('SELECT sha, record_json FROM releases').toArray();

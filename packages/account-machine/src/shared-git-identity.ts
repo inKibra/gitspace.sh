@@ -16,7 +16,7 @@ const SSH_REWRITE = 'url.git@github.com:.insteadOf';
 const GITHUB_HELPER = 'credential.https://github.com.helper';
 const GITHUB_HTTP_PATH = 'credential.https://github.com.useHttpPath';
 /** Checkouts routed at once: each reads its origin access from its workspace's cloud object, then runs a few `git
- *  config` processes. One at a time, Darktop's 77 checkouts took 51.6 s (2026-11-02). */
+ *  config` processes. One at a time, Desktop's 77 checkouts took 51.6 s (2026-11-02). */
 const APPLY_CONCURRENCY = 8;
 
 export interface GitIdentityCloud {

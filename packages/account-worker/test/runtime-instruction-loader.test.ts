@@ -63,7 +63,7 @@ describe('committed project rules', () => {
 });
 
 describe('committed project skills', () => {
-  /** inkibra core's layout: skills live in `skills/`, and `.agents/skills` links to them. */
+  /** Acme core's layout: skills live in `skills/`, and `.agents/skills` links to them. */
   function symlinkedSkills(remotion = '---\ndescription: Remotion rules\n---\nRender carefully.') {
     const code: ArtifactsCodeStore = Object.create(ArtifactsCodeStore.prototype);
     const identity = { name: 'Fixture', email: 'fixture@example.invalid' };

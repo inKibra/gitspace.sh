@@ -45,7 +45,7 @@ const PICKER_WORKSPACES: PickerWorkspace[] = [
   { name: 'Coach subscriptions', project: 'ToneTempo', color: null, tabs: 0, approved: true, recent: true },
   { name: 'Challenges UI storybook', project: 'ToneTempo', color: null, tabs: 0, approved: true },
   { name: 'Session recovery and bounded history', project: 'GitSpace', color: null, tabs: 0, approved: true },
-  { name: 'Workflow schedules', project: 'inkibra core', color: null, tabs: 0, approved: false },
+  { name: 'Workflow schedules', project: 'Acme core', color: null, tabs: 0, approved: false },
 ];
 /** Search as you type over workspace and project names; empty shows the recent ones. Choosing one moves the tab into
  * that workspace's tab group in this Chrome, making the group if the workspace has none here yet. */

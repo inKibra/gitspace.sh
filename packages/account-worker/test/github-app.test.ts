@@ -332,7 +332,7 @@ describe('GitHub App', () => {
     const app = await project('Octo App', 'git@github.com:octo-labs/private-app.git');
     network.use(http.get('https://github.com/octo-labs/private-app.git/info/refs', () => new HttpResponse('Repository not found', { status: 401 })));
     await env.FLEET_CATALOG.getByName(env.ACCOUNT_ID).putMachine({
-      id: 'darktop', label: 'Darktop', state: 'online', rpcEndpoint: '/tunnel/darktop/rpc', kind: 'physical', provider: 'physical',
+      id: 'desktop', label: 'Desktop', state: 'online', rpcEndpoint: '/tunnel/desktop/rpc', kind: 'physical', provider: 'physical',
       notes: '', desiredState: 'online', lifecycleRevision: 1, operationId: null, error: null,
     });
     vi.spyOn(ArtifactsCodeStore.prototype, 'awaitsMachineSeed').mockResolvedValue(false);
@@ -350,12 +350,12 @@ describe('GitHub App', () => {
       await change(new AttachmentStore(state.storage, { seal: async () => 'sealed', open: async () => 'secret', dispatch: async () => { throw new Error('No dispatch in access tests'); } }));
     });
     // Attached while its relay connection is down.
-    await attachments(store => store.attach(RuntimeAttachInputSchema.parse({ ...base, machineId: 'darktop', generation: 1, checkout: { kind: 'shared', branch: 'main' }, capabilities: [] }), false));
-    expect(await github().projectAccess(app.id)).toEqual({ ...needsApp, bridge: { machineId: 'darktop', label: 'Darktop', online: false } });
-    await attachments(async store => store.presence(RuntimeMachineIdSchema.parse('darktop'), true));
-    expect(await github().projectAccess(app.id)).toEqual({ ...needsApp, bridge: { machineId: 'darktop', label: 'Darktop', online: true } });
+    await attachments(store => store.attach(RuntimeAttachInputSchema.parse({ ...base, machineId: 'desktop', generation: 1, checkout: { kind: 'shared', branch: 'main' }, capabilities: [] }), false));
+    expect(await github().projectAccess(app.id)).toEqual({ ...needsApp, bridge: { machineId: 'desktop', label: 'Desktop', online: false } });
+    await attachments(async store => store.presence(RuntimeMachineIdSchema.parse('desktop'), true));
+    expect(await github().projectAccess(app.id)).toEqual({ ...needsApp, bridge: { machineId: 'desktop', label: 'Desktop', online: true } });
     // A detached checkout bridges nothing.
-    await attachments(async store => store.remove(RuntimeMachineIdSchema.parse('darktop')));
+    await attachments(async store => store.remove(RuntimeMachineIdSchema.parse('desktop')));
     expect(await github().projectAccess(app.id)).toEqual({ ...needsApp, bridge: null });
   });
 
@@ -379,36 +379,36 @@ describe('GitHub App', () => {
     const key = await rsaKey('pkcs1');
     await createApp(key);
     vi.spyOn(ArtifactsCodeStore.prototype, 'awaitsMachineSeed').mockResolvedValue(false);
-    const portal = await project('Landscaping Portal', 'https://github.com/BrandByX/payne-portals.git');
+    const portal = await project('Garden Portal', 'https://github.com/Meadowlark/garden-portal.git');
     network.use(
-      http.get(`${API}/users/BrandByX`, () => HttpResponse.json({ id: 160976157, login: 'BrandByX' })),
-      http.get('https://github.com/BrandByX/payne-portals.git/info/refs', () => new HttpResponse('Repository not found', { status: 401 })),
+      http.get(`${API}/users/Meadowlark`, () => HttpResponse.json({ id: 1000001, login: 'Meadowlark' })),
+      http.get('https://github.com/Meadowlark/garden-portal.git/info/refs', () => new HttpResponse('Repository not found', { status: 401 })),
     );
-    expect(await github().projectAccess(portal.id)).toEqual({ state: 'needs-app', repository: 'BrandByX/payne-portals', organization: 'BrandByX', appName: 'GitSpace test', bridge: null, branches: ['main'], awaitsCopy: false });
+    expect(await github().projectAccess(portal.id)).toEqual({ state: 'needs-app', repository: 'Meadowlark/garden-portal', organization: 'Meadowlark', appName: 'GitSpace test', bridge: null, branches: ['main'], awaitsCopy: false });
 
     // Started from the project, GitHub opens with the repository's owner chosen, and the request names it.
     for (let attempt = 0; attempt < 2; attempt++) {
       const { url } = await github().startInstall(portal.id);
-      expect(url).toMatch(/^https:\/\/github\.com\/apps\/gitspace-test\/installations\/new\/permissions\?target_id=160976157&state=[A-Za-z0-9_-]{43}$/u);
+      expect(url).toMatch(/^https:\/\/github\.com\/apps\/gitspace-test\/installations\/new\/permissions\?target_id=1000001&state=[A-Za-z0-9_-]{43}$/u);
       expect(outcome(await setupCallback(0, 'request', new URL(url).searchParams.get('state'))).get('github')).toBe('requested');
     }
     const requested = await github().projectAccess(portal.id);
-    expect(requested).toMatchObject({ state: 'requested', branches: ['main'], request: { organization: 'BrandByX', project: { id: portal.id, name: 'Landscaping Portal' }, repository: 'BrandByX/payne-portals', times: 2 } });
+    expect(requested).toMatchObject({ state: 'requested', branches: ['main'], request: { organization: 'Meadowlark', project: { id: portal.id, name: 'Garden Portal' }, repository: 'Meadowlark/garden-portal', times: 2 } });
     expect((await github().state()).requests).toHaveLength(1);
     // GitHub drops the state on its own pages (a request already pending sends the install to its target picker): the
     // redirect records nothing, and the account's own browser records what it started.
     expect(outcome(await setupCallback(0, 'request', null)).get('github')).toBe('request-unrecorded');
     expect((await github().state()).requests).toMatchObject([{ times: 2 }]);
-    expect((await github().recordStartedRequest(portal.id)).requests).toMatchObject([{ organization: 'BrandByX', project: { id: portal.id }, times: 3 }]);
+    expect((await github().recordStartedRequest(portal.id)).requests).toMatchObject([{ organization: 'Meadowlark', project: { id: portal.id }, times: 3 }]);
 
-    // An owner of BrandByX approves it elsewhere: no state reaches GitSpace, only the webhook.
-    installationApi(key, 95, 'BrandByX', { names: ['BrandByX/payne-portals'] });
-    const approved = JSON.stringify(createdPayload(95, 'BrandByX', 'leather-s'));
-    expect((await deliver('installation', 'brandbyx-approved', approved, await signature(approved))).status).toBe(202);
+    // An owner of Meadowlark approves it elsewhere: no state reaches GitSpace, only the webhook.
+    installationApi(key, 95, 'Meadowlark', { names: ['Meadowlark/garden-portal'] });
+    const approved = JSON.stringify(createdPayload(95, 'Meadowlark', 'meadow-owner'));
+    expect((await deliver('installation', 'meadowlark-approved', approved, await signature(approved))).status).toBe(202);
     const kept = await github().state();
-    expect(kept.installations.map((installation) => installation.account.login)).toEqual(['BrandByX']);
+    expect(kept.installations.map((installation) => installation.account.login)).toEqual(['Meadowlark']);
     expect(kept.requests).toEqual([]);
-    expect(kept.deliveries[0]?.outcome).toBe('kept: answers the request for BrandByX');
+    expect(kept.deliveries[0]?.outcome).toBe('kept: answers the request for Meadowlark');
     expect(await github().projectAccess(portal.id)).toEqual({ state: 'ready' });
 
     // The App's owner installs it straight from GitHub, with no request at all.
@@ -464,11 +464,11 @@ describe('GitHub App', () => {
     network.use(http.delete(`${API}/app/installations/:id`, ({ params }) => { deleted.push(String(params.id)); return new HttpResponse(null, { status: 204 }); }));
     installationApi(key, 91, 'inKibra', { names: ['inKibra/pantry'] });
     expect(outcome(await setupCallback(91, 'install', await installState())).get('github')).toBe('installed');
-    const removedOnGitHub = JSON.stringify({ action: 'deleted', installation: { id: 91 }, sender: { login: 'leather-s' } });
+    const removedOnGitHub = JSON.stringify({ action: 'deleted', installation: { id: 91 }, sender: { login: 'meadow-owner' } });
     await deliver('installation', 'removed-on-github', removedOnGitHub, await signature(removedOnGitHub));
     const lost = await github().state();
     expect(lost.installations).toEqual([]);
-    expect(lost.uninstalled).toEqual([{ id: 91, account: { login: 'inKibra', kind: 'organization' }, uninstalledBy: 'leather-s', uninstalledAt: expect.any(String), projects: [{ id: pantry.id, name: 'Pantry', repository: 'inKibra/pantry' }] }]);
+    expect(lost.uninstalled).toEqual([{ id: 91, account: { login: 'inKibra', kind: 'organization' }, uninstalledBy: 'meadow-owner', uninstalledAt: expect.any(String), projects: [{ id: pantry.id, name: 'Pantry', repository: 'inKibra/pantry' }] }]);
     expect((await github().dismissUninstalled(91)).uninstalled).toEqual([]);
 
     installationApi(key, 93, 'inKibra', { names: ['inKibra/pantry'] });

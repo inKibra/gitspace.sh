@@ -22,8 +22,8 @@ import { restoreAppearance } from './appearance.js';
 
 type Scenario = 'waiting' | 'approved' | 'unclaimed' | 'stranger' | 'uninstall' | 'removed' | 'today';
 const SCENARIOS: readonly { id: Scenario; label: string }[] = [
-  { id: 'waiting', label: 'BrandByX request waiting on an owner' },
-  { id: 'approved', label: 'BrandByX approved: org known, kept automatically' },
+  { id: 'waiting', label: 'Meadowlark request waiting on an owner' },
+  { id: 'approved', label: 'Meadowlark approved: org known, kept automatically' },
   { id: 'unclaimed', label: 'Install while an unknown-org request is pending' },
   { id: 'stranger', label: 'Install with no request pending: removed' },
   { id: 'uninstall', label: 'Uninstalling inKibra from GitSpace' },
@@ -42,14 +42,14 @@ const REMOVED: readonly { org: string; by: string; at: string }[] = [
 function monogram(letter: string): IconComponent {
   return function Monogram({ className }: IconComponentProps) { return <span aria-hidden className={`text-[12px] font-semibold leading-none ${className ?? ''}`}>{letter}</span>; };
 }
-const TILES: Readonly<Record<string, IconComponent>> = { inKibra: monogram('I'), BrandByX: monogram('B'), 'acme-labs': monogram('A'), unknown: monogram('?') };
+const TILES: Readonly<Record<string, IconComponent>> = { inKibra: monogram('I'), Meadowlark: monogram('M'), 'acme-labs': monogram('A'), unknown: monogram('?') };
 
 /** This account's data as the built page reads it: one installation, and the two Settings requests migrated into one
  * whose organization is unknown. */
 const TODAY: GitHubState = {
   app: { id: 1, slug: 'gitspace-bradleat', name: APP, htmlUrl: 'https://github.com/apps/gitspace-bradleat', owner: { login: 'bradleat', kind: 'user' }, createdAt: '2026-10-17T08:25:25.000Z', keyUpdatedAt: '2026-10-17T08:25:25.000Z' },
   person: { login: null, source: null },
-  installations: [{ id: 11, account: { login: 'inKibra', kind: 'organization' }, repositorySelection: 'selected', repositories: ['inKibra/core', 'inKibra/gitspace.sh'], permissions: { checks: 'write', contents: 'write', issues: 'write', metadata: 'read', pull_requests: 'write', statuses: 'write', workflows: 'write' }, installedAt: '2026-10-17T08:30:00.000Z', projects: [{ id: 'gitspace', name: 'GitSpace', repository: 'inKibra/gitspace.sh' }, { id: 'core', name: 'inkibra core', repository: 'inKibra/core' }] }],
+  installations: [{ id: 11, account: { login: 'inKibra', kind: 'organization' }, repositorySelection: 'selected', repositories: ['inKibra/core', 'inKibra/gitspace.sh'], permissions: { checks: 'write', contents: 'write', issues: 'write', metadata: 'read', pull_requests: 'write', statuses: 'write', workflows: 'write' }, installedAt: '2026-10-17T08:30:00.000Z', projects: [{ id: 'gitspace', name: 'GitSpace', repository: 'inKibra/gitspace.sh' }, { id: 'core', name: 'Acme core', repository: 'inKibra/core' }] }],
   requests: [{ id: 'migrated', organization: null, project: null, repository: null, firstRequestedAt: '2026-10-31T01:16:03.000Z', lastRequestedAt: '2026-10-31T10:22:46.000Z', times: 2 }],
   unconfirmed: [],
   removed: [],
@@ -125,51 +125,51 @@ function Organizations({ scenario }: { scenario: Exclude<Scenario, 'today'> }): 
           <Button variant="ghost" size="compact" type="button" onClick={() => setUninstalling('inKibra')}>Uninstall…</Button>
         </>}>
         <Fact label="Repositories"><span className="font-mono">inKibra/core, inKibra/gitspace.sh</span></Fact>
-        <Fact label="Projects">GitSpace, inkibra core</Fact>
+        <Fact label="Projects">GitSpace, Acme core</Fact>
         <Fact label="Installed">Oct 17 · by you</Fact>
       </OrganizationRow>
       {scenario === 'approved'
-        ? <OrganizationRow login="BrandByX" index={1} summary="Organization · 1 selected repository" state={<Badge variant="dot" size="compact" color="green">Installed</Badge>}
+        ? <OrganizationRow login="Meadowlark" index={1} summary="Organization · 1 selected repository" state={<Badge variant="dot" size="compact" color="green">Installed</Badge>}
             actions={<>
               <Button variant="secondary" size="compact" type="button" trailingIcon={glyph(LinkExternal01)}>Choose repositories on GitHub</Button>
-              <Button variant="ghost" size="compact" type="button" onClick={() => setUninstalling('BrandByX')}>Uninstall…</Button>
+              <Button variant="ghost" size="compact" type="button" onClick={() => setUninstalling('Meadowlark')}>Uninstall…</Button>
             </>}>
-            <Fact label="Repositories"><span className="font-mono">BrandByX/payne-portals</span></Fact>
-            <Fact label="Projects">Landscaping Portal · importing</Fact>
-            <Fact label="Installed">{time(at(3))} by <span className="font-mono">leather-s</span>, an owner of BrandByX · it answered your request from {time(at(17))}, so GitSpace kept it.</Fact>
+            <Fact label="Repositories"><span className="font-mono">Meadowlark/garden-portal</span></Fact>
+            <Fact label="Projects">Garden Portal · importing</Fact>
+            <Fact label="Installed">{time(at(3))} by <span className="font-mono">meadow-owner</span>, an owner of Meadowlark · it answered your request from {time(at(17))}, so GitSpace kept it.</Fact>
           </OrganizationRow>
         : scenario === 'unclaimed'
-          ? <OrganizationRow login="BrandByX" index={1} summary="Organization · 1 selected repository" state={<Badge variant="dot" size="compact" color="amber">Is this yours?</Badge>}
+          ? <OrganizationRow login="Meadowlark" index={1} summary="Organization · 1 selected repository" state={<Badge variant="dot" size="compact" color="amber">Is this yours?</Badge>}
               actions={<>
                 <Button variant="primary" size="compact" type="button">Yes, it's mine</Button>
                 <Button variant="ghost" size="compact" type="button">Not mine: uninstall</Button>
               </>}>
-              <Fact label="Installed">{time(at(0.1))} by <span className="font-mono">leather-s</span>, an owner of BrandByX</Fact>
+              <Fact label="Installed">{time(at(0.1))} by <span className="font-mono">meadow-owner</span>, an owner of Meadowlark</Fact>
               <Fact label="Why we ask">You have a request from {time(at(30))} whose organization GitSpace doesn't know. If this is the answer to it, confirm and the request is resolved.</Fact>
-              <Fact label="Repositories"><span className="font-mono">BrandByX/payne-portals</span> · would link Landscaping Portal</Fact>
+              <Fact label="Repositories"><span className="font-mono">Meadowlark/garden-portal</span> · would link Garden Portal</Fact>
               <Fact label="Until you confirm">GitSpace doesn't use it: no access to its repositories, none of its events. Uninstalled in 7 days if not confirmed.</Fact>
             </OrganizationRow>
           : scenario === 'removed'
-            ? <OrganizationRow login="BrandByX" index={1} summary="Organization · not installed" state={<Badge variant="dot" size="compact" color="red">Uninstalled on GitHub</Badge>}
+            ? <OrganizationRow login="Meadowlark" index={1} summary="Organization · not installed" state={<Badge variant="dot" size="compact" color="red">Uninstalled on GitHub</Badge>}
                 actions={<>
-                  <Button variant="primary" size="compact" type="button" trailingIcon={glyph(LinkExternal01)}>Install again on BrandByX</Button>
+                  <Button variant="primary" size="compact" type="button" trailingIcon={glyph(LinkExternal01)}>Install again on Meadowlark</Button>
                   <Button variant="ghost" size="compact" type="button">Dismiss</Button>
                 </>}>
-                <Fact label="Uninstalled">{time(at(1))} by <span className="font-mono">leather-s</span> on GitHub</Fact>
-                <Fact label="Affected">Landscaping Portal can no longer sync <span className="font-mono">BrandByX/payne-portals</span>; its workspaces keep their cloud copies.</Fact>
+                <Fact label="Uninstalled">{time(at(1))} by <span className="font-mono">meadow-owner</span> on GitHub</Fact>
+                <Fact label="Affected">Garden Portal can no longer sync <span className="font-mono">Meadowlark/garden-portal</span>; its workspaces keep their cloud copies.</Fact>
               </OrganizationRow>
             : cancelled
               ? null
-              : <OrganizationRow login="BrandByX" index={1} summary="Organization · not installed" state={<Badge variant="dot" size="compact" color="amber">Waiting on an owner</Badge>}
+              : <OrganizationRow login="Meadowlark" index={1} summary="Organization · not installed" state={<Badge variant="dot" size="compact" color="amber">Waiting on an owner</Badge>}
                   actions={<>
                     <Button variant="primary" size="compact" type="button" leadingIcon={glyph(copied ? Check : Copy01)} onClick={() => setCopied(true)}>{copied ? 'Copied' : 'Copy steps for the owner'}</Button>
                     <Button variant="secondary" size="compact" type="button" trailingIcon={glyph(LinkExternal01)}>I'm an owner: open on GitHub</Button>
                     <Button variant="ghost" size="compact" type="button" onClick={() => setCancelled(true)}>Cancel request</Button>
                   </>}>
                   <Fact label="Requested">by you · {time(at(17))}, and again {time(at(8))} (shown once)</Fact>
-                  <Fact label="For">Landscaping Portal · <span className="font-mono">BrandByX/payne-portals</span></Fact>
-                  <Fact label="Waiting"><Clock className="mr-1 inline align-[-2px]" width={12} height={12} strokeWidth={1.5} />17 hours · GitSpace keeps the install when an owner of BrandByX approves it, whenever that is.</Fact>
-                  <OwnerSteps org="BrandByX" />
+                  <Fact label="For">Garden Portal · <span className="font-mono">Meadowlark/garden-portal</span></Fact>
+                  <Fact label="Waiting"><Clock className="mr-1 inline align-[-2px]" width={12} height={12} strokeWidth={1.5} />17 hours · GitSpace keeps the install when an owner of Meadowlark approves it, whenever that is.</Fact>
+                  <OwnerSteps org="Meadowlark" />
                 </OrganizationRow>}
       {scenario === 'waiting'
         ? <OrganizationRow login="unknown" index={2} summary="Organization not known yet" state={<Badge variant="dot" size="compact" color="gray">Requested</Badge>}
@@ -183,7 +183,7 @@ function Organizations({ scenario }: { scenario: Exclude<Scenario, 'today'> }): 
           </OrganizationRow>
         : null}
     </CardGroup>
-    <UninstallDialog org={uninstalling ?? ''} projects={uninstalling === 'BrandByX' ? 'Landscaping Portal' : 'GitSpace and inkibra core'} open={uninstalling !== null} onOpenChange={open => { if (!open) setUninstalling(null); }} />
+    <UninstallDialog org={uninstalling ?? ''} projects={uninstalling === 'Meadowlark' ? 'Garden Portal' : 'GitSpace and Acme core'} open={uninstalling !== null} onOpenChange={open => { if (!open) setUninstalling(null); }} />
     {scenario === 'stranger'
       ? <div className="flex items-center gap-2 text-caption text-muted-foreground">
           <span>GitSpace removed {REMOVED.length} installs it didn't expect · latest {time(REMOVED[0]?.at ?? at(0))}</span>
@@ -238,7 +238,7 @@ function ProposedPage({ scenario }: { scenario: Exclude<Scenario, 'today'> }): R
         <AccordionContent>
           <ul className="flex flex-col gap-2 text-caption">
             <li className="flex gap-3"><span className="w-36 shrink-0 tabular-nums text-muted-foreground">{time('2026-10-31T17:17:25.000Z')}</span><span className="font-mono">check_suite.completed</span><span className="text-muted-foreground">inKibra/core · ran 1 automation</span></li>
-            <li className="flex gap-3"><span className="w-36 shrink-0 tabular-nums text-muted-foreground">{time('2026-10-31T14:08:15.000Z')}</span><span className="font-mono">installation.created</span><span className="text-muted-foreground">BrandByX · your request, kept</span></li>
+            <li className="flex gap-3"><span className="w-36 shrink-0 tabular-nums text-muted-foreground">{time('2026-10-31T14:08:15.000Z')}</span><span className="font-mono">installation.created</span><span className="text-muted-foreground">Meadowlark · your request, kept</span></li>
           </ul>
         </AccordionContent>
       </AccordionItem>

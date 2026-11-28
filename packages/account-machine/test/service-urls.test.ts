@@ -48,7 +48,7 @@ function dispatch(machineId: string, args: Record<string, unknown>) {
 test('workspace URLs have no machine part, machine URLs carry the readable machine, and each part keeps its share of one DNS label', () => {
   expect(serviceHostname('gssh.dev', 'test', 'workspace', 'web', null)).toBe('web--workspace--test-srv.gssh.dev');
   expect(serviceHostname('gssh.dev', 'test', 'workspace', 'web', 'alpha-aaaa')).toBe('web--alpha-aaaa--workspace--test-srv.gssh.dev');
-  const [one, two] = ['one', 'two'].map(suffix => serviceHostname('gssh.dev', 'bradleat', `typia-narrow-${'x'.repeat(40)}-${suffix}`, 'storybook-preview-server', 'darktop-workstation-aaaa'));
+  const [one, two] = ['one', 'two'].map(suffix => serviceHostname('gssh.dev', 'bradleat', `typia-narrow-${'x'.repeat(40)}-${suffix}`, 'storybook-preview-server', 'desktop-workstation-aaaa'));
   expect(one).not.toBe(two);
   for (const hostname of [one, two]) {
     expect(hostname?.split('.')[0]?.length).toBeLessThanOrEqual(63);

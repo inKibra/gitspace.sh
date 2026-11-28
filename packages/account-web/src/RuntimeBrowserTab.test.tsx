@@ -55,7 +55,7 @@ function filter(label: string): HTMLElement {
 }
 function Tab({ machines, onCompose }: { machines: readonly { id: string; label: string }[]; onCompose?: (text: string) => void }) {
   const browsers = useWorkspaceBrowsers(snapshot, undefined);
-  return <RuntimeBrowserTab snapshot={snapshot} projectName="Golconda" browsers={browsers} machines={machines} onOpenEnvironment={() => {}} onCompose={onCompose} />;
+  return <RuntimeBrowserTab snapshot={snapshot} projectName="Ledger" browsers={browsers} machines={machines} onOpenEnvironment={() => {}} onCompose={onCompose} />;
 }
 async function render(machines: readonly { id: string; label: string }[] = [], onCompose?: (text: string) => void) { await act(async () => root.render(<Tab machines={machines} onCompose={onCompose} />)); }
 /** Lets fetches, their bodies and the renders they cause finish. */
@@ -159,8 +159,8 @@ it('offers to approve a confirmed Chrome when none is approved here, making it t
   vi.mocked(updateProjectBrowserSettings).mockImplementation(async () => { overview = { ...overview, chromes: overview.chromes.map(chrome => ({ ...chrome, approved: true, isDefault: true })) }; return settings; });
   await render();
   expect(container.textContent).toContain("Agents here can't use your Chrome yet");
-  expect(container.textContent).toContain('Work Chrome is paired and online, but not approved for Golconda');
-  await act(async () => button('Approve Work Chrome for Golconda').click());
+  expect(container.textContent).toContain('Work Chrome is paired and online, but not approved for Ledger');
+  await act(async () => button('Approve Work Chrome for Ledger').click());
   expect(updateProjectBrowserSettings).toHaveBeenCalledWith('project', 4, { defaultPairingId: work, approvals: [{ pairingId: work, powers: [] }] });
   expect(container.textContent).not.toContain("Agents here can't use your Chrome yet");
   expect(container.querySelector(`[aria-label="Work Chrome"]`)?.textContent).toContain('Project default');
@@ -272,16 +272,16 @@ it('marks the tab an agent acts on as Agent acting and a tab you hold as You’r
 it('opens a machine’s headless tab in the Watch dialog from its preview, reading its preview every few seconds and showing how old it is', async () => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date(started));
-  overview = { ...overview, machines: [{ machineId: 'darktop', groupId: machineGroup, tabs: [{ targetId: 'tab-m', url: 'https://app.example.com/login', title: 'Login', addedBy: null, usable: true }], error: null }] };
+  overview = { ...overview, machines: [{ machineId: 'desktop', groupId: machineGroup, tabs: [{ targetId: 'tab-m', url: 'https://app.example.com/login', title: 'Login', addedBy: null, usable: true }], error: null }] };
   previews = { 'tab-m': { targetId: 'tab-m', capturedAt: new Date(Date.parse(started) - 3000).toISOString(), image: { mediaType: 'image/jpeg', data: 'aW1hZ2U=' }, reason: null } };
-  await render([{ id: 'darktop', label: 'Darktop' }]);
+  await render([{ id: 'desktop', label: 'Desktop' }]);
   await settle();
   expect(labelled('Tab Login').textContent).toContain('3 s ago');
   const reads = commands('browserPreview').length;
   await act(async () => labelled('Preview of Login').click());
   await settle();
   const dialog = document.body.querySelector('[role="dialog"]')!;
-  expect(dialog.textContent).toContain('Headless browser on Darktop');
+  expect(dialog.textContent).toContain('Headless browser on Desktop');
   expect(dialog.querySelector('img[alt="Live view of Login"]')?.getAttribute('src')).toBe('data:image/jpeg;base64,aW1hZ2U=');
   await act(async () => { await vi.advanceTimersByTimeAsync(WATCH_REFRESH_MS); });
   // The dialog reads once when it opens and again after WATCH_REFRESH_MS; the tile waits for its own ten seconds.
@@ -293,7 +293,7 @@ it('opens a machine’s headless tab in the Watch dialog from its preview, readi
 
 it('counts the browsers with open tabs, and those running scripts, for the tab label and Environment', () => {
   const tab = { targetId: 'tab-a', url: 'https://app.example.com', title: 'App', addedBy: null, usable: true };
-  expect(browserActivity(RuntimeBrowserOverviewSchema.parse({ ...overview, chromes: [{ ...chromeWithTab()[0]!, running: 1 }, { ...chromeWithTab()[0]!, pairingId: '00000000-0000-4000-8000-000000000009', approved: false }], cloud: { groupId: group, running: 0, tabs: [tab] }, machines: [{ machineId: 'darktop', groupId: null, tabs: [], error: null }] }))).toEqual({ open: 2, running: 1 });
+  expect(browserActivity(RuntimeBrowserOverviewSchema.parse({ ...overview, chromes: [{ ...chromeWithTab()[0]!, running: 1 }, { ...chromeWithTab()[0]!, pairingId: '00000000-0000-4000-8000-000000000009', approved: false }], cloud: { groupId: group, running: 0, tabs: [tab] }, machines: [{ machineId: 'desktop', groupId: null, tabs: [], error: null }] }))).toEqual({ open: 2, running: 1 });
   expect(browserActivity(RuntimeBrowserOverviewSchema.parse(overview))).toEqual({ open: 0, running: 0 });
 });
 
@@ -326,21 +326,21 @@ it('revokes this workspace\'s group on a Chrome only after you confirm, then sho
 
 it('shows each attached machine\'s headless browser with its tabs and previews, and revokes its group on that machine', async () => {
   overview = { ...overview, machines: [
-    { machineId: 'darktop', groupId: machineGroup, tabs: [{ targetId: 'tab-m', url: 'https://app.example.com/dash', title: 'Dashboard', addedBy: null, usable: true }], error: null },
+    { machineId: 'desktop', groupId: machineGroup, tabs: [{ targetId: 'tab-m', url: 'https://app.example.com/dash', title: 'Dashboard', addedBy: null, usable: true }], error: null },
     { machineId: 'old-box', groupId: null, tabs: [], error: 'Update GitSpace on this machine to see its browser' },
   ] };
   previews = { 'tab-m': { targetId: 'tab-m', capturedAt: '2026-10-23T12:00:00.000Z', image: null, reason: 'The headless browser is busy' } };
   vi.stubGlobal('confirm', vi.fn(() => true));
-  await render([{ id: 'darktop', label: 'Darktop' }]);
-  const darktop = container.querySelector('[aria-label="Headless browser on Darktop"]')!;
-  expect(darktop.textContent).toContain('Dashboard');
-  expect(darktop.textContent).toContain('The headless browser is busy');
+  await render([{ id: 'desktop', label: 'Desktop' }]);
+  const desktop = container.querySelector('[aria-label="Headless browser on Desktop"]')!;
+  expect(desktop.textContent).toContain('Dashboard');
+  expect(desktop.textContent).toContain('The headless browser is busy');
   expect(commands('browserPreview').map(([input]) => input.command)).toEqual([{ type: 'browserPreview', groupId: machineGroup, targetId: 'tab-m' }]);
   const old = container.querySelector('[aria-label="Headless browser on old-box"]')!;
   expect(old.textContent).toContain('Update GitSpace on this machine to see its browser');
   expect(old.textContent).toContain('No open tabs.');
   await act(async () => button('Revoke access').click());
-  expect(commands('browserRevoke').map(([input]) => input.command)).toEqual([{ type: 'browserRevoke', machineId: 'darktop', groupId: machineGroup }]);
+  expect(commands('browserRevoke').map(([input]) => input.command)).toEqual([{ type: 'browserRevoke', machineId: 'desktop', groupId: machineGroup }]);
 });
 
 it('shows the group in its Chrome colour with ▶ and each agent acting there: its call, commands, time and what it is doing', async () => {
@@ -375,8 +375,8 @@ it('closes a tab of a connected Chrome\'s group or of the cloud browser from its
   overview = { ...overview,
     chromes: [chromeWithTab()[0]!, { ...chromeWithTab()[0]!, pairingId: home, name: 'Home Chrome', isDefault: false, connected: false, groupId: homeGroup, tabs: [{ targetId: 'tab-h', url: 'https://app.example.com/home', title: 'Home', addedBy: 'you', usable: true }] }],
     cloud: { groupId: cloudGroup, running: 0, tabs: [{ targetId: 'tab-c', url: 'https://app.example.com', title: 'App', addedBy: null, usable: true }] },
-    machines: [{ machineId: 'darktop', groupId: machineGroup, tabs: [{ targetId: 'tab-m', url: 'https://app.example.com/dash', title: 'Dashboard', addedBy: null, usable: true }], error: null }] };
-  await render([{ id: 'darktop', label: 'Darktop' }]);
+    machines: [{ machineId: 'desktop', groupId: machineGroup, tabs: [{ targetId: 'tab-m', url: 'https://app.example.com/dash', title: 'Dashboard', addedBy: null, usable: true }], error: null }] };
+  await render([{ id: 'desktop', label: 'Desktop' }]);
   expect(labelled('Tab Home').querySelector('[aria-label="Close tab Home"]')).toBeNull();
   expect(labelled('Tab Dashboard').querySelector('[aria-label="Close tab Dashboard"]')).toBeNull();
   const reads = commands('browserOverview').length;
@@ -822,20 +822,20 @@ it('lists recent runs newest first with when and where they ran, failures and re
   overview = { ...overview, runs: [
     run(1, { at: '2026-10-24T19:21:00.000Z', where: { kind: 'chrome', name: 'Work Chrome' }, tool: 'act', summary: 'act fill “Customer name”', durationMs: 900, details: ['ref 4ed25e98:3', 'changed 1 field'] }),
     run(2, { at: '2026-10-24T19:20:00.000Z', summary: 'goto localhost:5173/settings', outcome: 'failed' }),
-    run(3, { at: '2026-10-24T19:15:00.000Z', where: { kind: 'machine', machineId: 'darktop' }, tool: 'screenshot', summary: 'screenshot app.example.com/dash' }),
-    run(4, { at: '2026-10-24T19:12:00.000Z', where: { kind: 'chrome', name: null }, summary: 'Refused: no Chrome approved for Golconda', outcome: 'refused' }),
+    run(3, { at: '2026-10-24T19:15:00.000Z', where: { kind: 'machine', machineId: 'desktop' }, tool: 'screenshot', summary: 'screenshot app.example.com/dash' }),
+    run(4, { at: '2026-10-24T19:12:00.000Z', where: { kind: 'chrome', name: null }, summary: 'Refused: no Chrome approved for Ledger', outcome: 'refused' }),
   ] };
-  await render([{ id: 'darktop', label: 'Darktop' }]);
+  await render([{ id: 'desktop', label: 'Desktop' }]);
   const runs = labelled('Recent runs');
   expect([...runs.querySelectorAll('li[aria-label]')].map(row => row.textContent)).toEqual([
     `${clock('2026-10-24T19:21:00.000Z')}Work Chromeact fill “Customer name”Details`,
     `${clock('2026-10-24T19:20:00.000Z')}Cloud browsergoto localhost:5173/settingsDetails`,
-    `${clock('2026-10-24T19:15:00.000Z')}Headless browser on Darktopscreenshot app.example.com/dashDetails`,
-    `${clock('2026-10-24T19:12:00.000Z')}Your ChromeRefused: no Chrome approved for GolcondaDetails`,
+    `${clock('2026-10-24T19:15:00.000Z')}Headless browser on Desktopscreenshot app.example.com/dashDetails`,
+    `${clock('2026-10-24T19:12:00.000Z')}Your ChromeRefused: no Chrome approved for LedgerDetails`,
   ]);
   expect(labelled('Run act fill “Customer name”').querySelector('.text-destructive')).toBeNull();
   expect(labelled('Run goto localhost:5173/settings').querySelector('.text-destructive')?.textContent).toBe('goto localhost:5173/settings');
-  expect(labelled('Run Refused: no Chrome approved for Golconda').querySelector('.text-destructive')?.textContent).toBe('Refused: no Chrome approved for Golconda');
+  expect(labelled('Run Refused: no Chrome approved for Ledger').querySelector('.text-destructive')?.textContent).toBe('Refused: no Chrome approved for Ledger');
 
   const first = labelled('Run act fill “Customer name”');
   await act(async () => first.querySelector('button')!.click());

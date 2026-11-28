@@ -320,9 +320,9 @@ test('a headless single step goes to the cloud browser even with a ready headles
 });
 test('a cloud step to localhost is answered with the service URL on that port, or how to reach a port without one, before any browser', async () => {
   const f = await fixture();
-  f.services.push({ name: 'web', url: 'https://web--workspace--account-srv.gssh.dev', port: 5173, machine: 'Darktop' });
+  f.services.push({ name: 'web', url: 'https://web--workspace--account-srv.gssh.dev', port: 5173, machine: 'Desktop' });
   const step = (args: Record<string, unknown>, attemptId: string) => f.authority.prepare({ ...f.input, args: RuntimeBrowserArgumentsSchema.parse({ source: 'headless', ...args }), requestId: attemptId, attemptId });
-  const hint = 'localhost isn\'t reachable from the cloud browser. This workspace\'s `web` service on port 5173 is at https://web--workspace--account-srv.gssh.dev; open that. For a port with no service URL, add on:"Darktop".';
+  const hint = 'localhost isn\'t reachable from the cloud browser. This workspace\'s `web` service on port 5173 is at https://web--workspace--account-srv.gssh.dev; open that. For a port with no service URL, add on:"Desktop".';
   await expect(step({ action: 'open', url: 'http://localhost:5173/login' }, 'open')).rejects.toThrow(hint);
   await expect(step({ action: 'navigate', targetId: 'tab', url: 'http://[::1]:5173/' }, 'navigate')).rejects.toThrow(hint);
   await expect(step({ action: 'open', url: 'http://127.0.0.1:9000/' }, 'unknown')).rejects.toThrow('no service of this workspace has a URL for port 9000. Declare the service in .gitspace/services.json');
@@ -330,7 +330,7 @@ test('a cloud step to localhost is answered with the service URL on that port, o
 });
 test('a step on a machine’s headless browser ends with a note: the service URL for a localhost port that has one, the cloud browser for any other site', async () => {
   const f = await fixture();
-  f.services.push({ name: 'web', url: 'https://web--workspace--account-srv.gssh.dev', port: 5173, machine: 'Darktop' });
+  f.services.push({ name: 'web', url: 'https://web--workspace--account-srv.gssh.dev', port: 5173, machine: 'Desktop' });
   const step = async (url: string, attemptId: string) => {
     const input = { ...f.input, args: RuntimeBrowserArgumentsSchema.parse({ action: 'open', source: 'headless', on: 'machine', url }), requestId: attemptId, attemptId };
     await f.authority.prepare(input);

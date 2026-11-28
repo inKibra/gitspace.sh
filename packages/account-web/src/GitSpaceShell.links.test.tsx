@@ -10,7 +10,7 @@ import { QuestionCardsContext, type QuestionCards } from './QuestionCards.js';
 import type { TranscriptHistory } from './useTranscriptHistory.js';
 
 const plan: RuntimeQuestion = { id: 'question:task-2', conversationId: 'main', kind: 'approval', prompt: '## Loyalty stamps\n\nOne stamp per paid order.', choices: ['Approve', 'Reject'], answer: null };
-const attach: RuntimeQuestion = { id: 'machine-attach:m-1:a', conversationId: 'main', kind: 'approval', prompt: 'Attach Darktop to this workspace? Agents may not attach it on their own.', choices: ['Approve', 'Reject'], answer: null, tool: { name: 'machines', args: { op: 'attach', machine: 'm-1' } } };
+const attach: RuntimeQuestion = { id: 'machine-attach:m-1:a', conversationId: 'main', kind: 'approval', prompt: 'Attach Desktop to this workspace? Agents may not attach it on their own.', choices: ['Approve', 'Reject'], answer: null, tool: { name: 'machines', args: { op: 'attach', machine: 'm-1' } } };
 const rejects = async () => { throw new Error('not used'); };
 
 let root: Root;
@@ -65,7 +65,7 @@ it('a link naming a tool approval lights up its approval above the composer', as
   };
   await open(`/?project=project&workspace=workspace&question=${encodeURIComponent(attach.id)}`, [attach], { sessionControls });
   const panel = container.querySelector(`[data-question="${CSS.escape(attach.id)}"]`);
-  expect(panel?.textContent).toContain('Attach Darktop to this workspace?');
+  expect(panel?.textContent).toContain('Attach Desktop to this workspace?');
   expect(panel?.classList.contains('ghost-flash')).toBe(true);
 });
 

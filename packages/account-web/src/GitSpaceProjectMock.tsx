@@ -61,7 +61,7 @@ function ask(event: Event, source: Source, branch: string, running: Running): As
     lead: <>GitSpace <strong>v0.2.0-rc.42</strong> is out, and GitHub already built it. Since your default ({code(running.defaultRelease)}): machines download LFS files without CPU limit failures, a stuck supervisor no longer blocks a checkout, and pushes declare Artifacts' shallow boundaries.</>,
     prompt: 'Update this account to GitSpace v0.2.0-rc.42?',
     options: [
-      { id: 'launch-release', title: 'Launch it now', description: 'The worker and frontend swap now; Darktop and Lightbook follow as they go idle. Nothing is built here.' },
+      { id: 'launch-release', title: 'Launch it now', description: 'The worker and frontend swap now; Desktop and Lightbook follow as they go idle. Nothing is built here.' },
       { id: 'later', title: 'Not now', description: 'I ask again with the next release.' },
       { id: 'skip', title: 'Skip this release', description: 'I will not ask about rc.42 again.' },
     ],
@@ -77,10 +77,10 @@ function ask(event: Event, source: Source, branch: string, running: Running): As
   };
   // On upstream a moving develop is not a release: the project only shows Behind origin, with Update base.
   if (event === 'branch' && source === 'fork') return {
-    lead: <>PR #20 (watch editor) and PR #21 (release cards) are merged into {code(branch)} since your default, and its checks pass. They are not a release, so launching builds them on Darktop.</>,
+    lead: <>PR #20 (watch editor) and PR #21 (release cards) are merged into {code(branch)} since your default, and its checks pass. They are not a release, so launching builds them on Desktop.</>,
     prompt: `Build ${branch} @ 5f2a9c1 and launch it as the default?`,
     options: [
-      { id: 'launch-branch', title: 'Build on Darktop and launch', description: 'About 6 minutes to build; then it is the default for the worker, the frontend and the machines.' },
+      { id: 'launch-branch', title: 'Build on Desktop and launch', description: 'About 6 minutes to build; then it is the default for the worker, the frontend and the machines.' },
       { id: 'trial-branch', title: 'Launch the frontend as a trial first', description: 'The default stays; Back to default undoes it.' },
       { id: 'later', title: 'Not now', description: 'I ask again when more changes land.' },
     ],
@@ -109,13 +109,13 @@ function ask(event: Event, source: Source, branch: string, running: Running): As
 
 /** What the agent says after an answer. */
 const REPLY: Record<string, (branch: string, running: Running) => ReactNode> = {
-  'launch-release': () => <>Launched. The worker and the frontend run v0.2.0-rc.42; Darktop has applied it and Lightbook will when it is idle. It is the default release now.</>,
+  'launch-release': () => <>Launched. The worker and the frontend run v0.2.0-rc.42; Desktop has applied it and Lightbook will when it is idle. It is the default release now.</>,
   merge: branch => <>Started <strong>merge-v0-2-0-rc-42</strong>. It resolved both conflicts and opened PR #19 into {code(branch)}. Once it is merged I will ask whether to build and launch it.</>,
-  'launch-branch': (_branch, running) => <>Built on Darktop in 5 min 40 s and launched. {code(running.defaultRelease)} is the default release now.</>,
+  'launch-branch': (_branch, running) => <>Built on Desktop in 5 min 40 s and launched. {code(running.defaultRelease)} is the default release now.</>,
   'trial-branch': (_branch, running) => <>Launched the frontend from {code(running.trial ?? '')} as a trial. Tell me when it looks right and I will make it the default.</>,
   'pr-upstream': () => <>Opened PR #231 on {code(UPSTREAM)} from automations-watch-ui. The trial stays until it ships in a release.</>,
-  'move-to-fork': (_branch, running) => <>This project's repository is now {code(FORK)} and its base branch {code(FORK_BRANCH)} (Project settings). I merged automations-watch-ui there, built it on Darktop and launched it: {code(running.defaultRelease)} is the default release. GitSpace releases will now arrive as merges into your fork.</>,
-  'merge-trial': (branch, running) => <>Merged automations-watch-ui into {code(branch)}, built it on Darktop and launched it: {code(running.defaultRelease)} is the default release.</>,
+  'move-to-fork': (_branch, running) => <>This project's repository is now {code(FORK)} and its base branch {code(FORK_BRANCH)} (Project settings). I merged automations-watch-ui there, built it on Desktop and launched it: {code(running.defaultRelease)} is the default release. GitSpace releases will now arrive as merges into your fork.</>,
+  'merge-trial': (branch, running) => <>Merged automations-watch-ui into {code(branch)}, built it on Desktop and launched it: {code(running.defaultRelease)} is the default release.</>,
   keep: () => <>Keeping the trial.</>,
   back: (_branch, running) => <>Back to default: the frontend runs {code(running.defaultRelease)} again.</>,
   later: () => <>Leaving it for now.</>,
@@ -227,7 +227,7 @@ function ReleasesPage({ running }: { running: Running }): ReactElement {
       <div className={box}><dl className="grid grid-cols-[7rem_minmax(0,1fr)] gap-x-4 gap-y-2">
         {detail('Worker', code(running.defaultRelease))}
         {detail('Frontend', running.trial ? <>{code(running.trial)} <Badge size="compact" color="green">Trial</Badge></> : code(running.defaultRelease))}
-        {detail('Machines', <>Darktop, Lightbook · {code(running.defaultRelease)}</>)}
+        {detail('Machines', <>Desktop, Lightbook · {code(running.defaultRelease)}</>)}
       </dl></div>
     </section>
     <section aria-label="Default release" className="mb-6 flex flex-col gap-3">
@@ -240,7 +240,7 @@ function ReleasesPage({ running }: { running: Running }): ReactElement {
     <section aria-label="All releases" className="flex flex-col gap-3">
       <h2 className="text-subtitle font-semibold">All releases</h2>
       {[running.defaultRelease, ...(running.trial ? [running.trial] : []), 'v0.2.0-rc.40'].map((label, index) => <Card key={label} size="compact" index={index}>
-        <CardHeader><CardTitle>{label}</CardTitle><CardDescription>{label.startsWith('v') ? 'A published GitSpace release · built by GitHub' : 'Built on Darktop'}</CardDescription></CardHeader>
+        <CardHeader><CardTitle>{label}</CardTitle><CardDescription>{label.startsWith('v') ? 'A published GitSpace release · built by GitHub' : 'Built on Desktop'}</CardDescription></CardHeader>
         <CardFooter><Badge variant="dot" color={label === running.defaultRelease ? 'blue' : label === running.trial ? 'green' : 'gray'}>{label === running.defaultRelease ? 'Default' : label === running.trial ? 'Trial · frontend' : 'Earlier'}</Badge></CardFooter>
       </Card>)}
     </section>
@@ -307,7 +307,7 @@ function AppSidebarMock({ project, page, asking, running, merging, onPage, onSet
               </SidebarMenuActions>
             </SidebarMenuSubItem>)}</SidebarMenuSub>
           </SidebarMenuItem>
-          <SidebarMenuItem><SidebarMenuButton icon={STATUS_GLYPH.dim}>inkibra core</SidebarMenuButton></SidebarMenuItem>
+          <SidebarMenuItem><SidebarMenuButton icon={STATUS_GLYPH.dim}>Acme core</SidebarMenuButton></SidebarMenuItem>
         </SidebarMenu>
       </SidebarGroup>
     </SidebarContent>

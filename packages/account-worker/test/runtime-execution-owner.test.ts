@@ -530,17 +530,17 @@ test('machines attach picks the named machine, else the default, else an online 
 });
 
 test('machines attach finds a machine by its platform, and a miss names what the account has', async () => {
-  await withFleet([{ label: 'Darktop' }, { label: 'MacBook-Pro-2.local' }], 'Darktop', async ids => {
+  await withFleet([{ label: 'Desktop' }, { label: 'MacBook-Pro-2.local' }], 'Desktop', async ids => {
     const releases = env.TENANT_RELEASES.getByName(env.ACCOUNT_ID);
     const mac = machineId(ids, 'MacBook-Pro-2.local');
-    await releases.machineProtocol(machineId(ids, 'Darktop'), { version: null, platform: 'linux-x64' });
+    await releases.machineProtocol(machineId(ids, 'Desktop'), { version: null, platform: 'linux-x64' });
     await releases.machineProtocol(mac, { version: null, platform: 'darwin-arm64' });
-    // The default is Darktop; only the Mac offers macOS, darwin-arm64 or arm64.
+    // The default is Desktop; only the Mac offers macOS, darwin-arm64 or arm64.
     for (const needs of [['macos'], ['darwin'], ['darwin-arm64'], ['bash', 'arm64']]) {
       expect(await attachInFreshWorkspace({ needs })).toMatchObject({ outcome: { state: 'attaching', machineId: mac }, requested: [mac] });
     }
-    expect(await attachInFreshWorkspace({ needs: ['ios'] })).toMatchObject({ error: 'No online machine offers ios. Online: Darktop (linux-x64), MacBook-Pro-2.local (darwin-arm64).', requested: [] });
-    expect(await attachInFreshWorkspace({ machine: 'MacBook' })).toMatchObject({ error: 'No machine is named MacBook. This account\'s machines: Darktop, MacBook-Pro-2.local.', requested: [] });
+    expect(await attachInFreshWorkspace({ needs: ['ios'] })).toMatchObject({ error: 'No online machine offers ios. Online: Desktop (linux-x64), MacBook-Pro-2.local (darwin-arm64).', requested: [] });
+    expect(await attachInFreshWorkspace({ machine: 'MacBook' })).toMatchObject({ error: 'No machine is named MacBook. This account\'s machines: Desktop, MacBook-Pro-2.local.', requested: [] });
   });
 });
 
@@ -556,8 +556,8 @@ test('machines attach asks the user instead of attaching a machine agents may no
 });
 
 test('a machine tool with no ready machine attaches the default one and says to retry; the conversation hears when it is ready', async () => {
-  await withFleet([{ label: 'Darktop' }], 'Darktop', async ids => {
-    const darktop = machineId(ids, 'Darktop');
+  await withFleet([{ label: 'Desktop' }], 'Desktop', async ids => {
+    const desktop = machineId(ids, 'Desktop');
     await runInDurableObject(env.SPACE_AUTHORITY.getByName(`first-need:${crypto.randomUUID()}`), async (_instance, ctx) => {
       const { runtime, root, calls, attachRequests } = await ownerFixture(ctx);
       const machine = vi.spyOn(runtime.attachments, 'execute');
@@ -571,18 +571,18 @@ test('a machine tool with no ready machine attaches the default one and says to 
         const result = (await root.context(BACKGROUND_CONTEXT)).messages.find(message => message.role === 'toolResult' && message.toolCallId === 'shell');
         if (!result || result.role !== 'toolResult') throw new Error('Missing tool result');
         expect(result.isError).toBe(true);
-        expect(JSON.stringify(result.content)).toContain('No machine was ready, so Darktop is being attached to this workspace. Retry this call when its setup finishes');
+        expect(JSON.stringify(result.content)).toContain('No machine was ready, so Desktop is being attached to this workspace. Retry this call when its setup finishes');
         // Attaching happens instead of running; nothing ran.
         expect((await runtime.harness.snapshot(QuestionsDoc, BACKGROUND_CONTEXT))?.items ?? []).toEqual([]);
         expect(machine).not.toHaveBeenCalled();
-        expect(attachRequests).toEqual([darktop]);
-        const attachment = runtime.attachments.list().find(item => item.machineId === darktop);
-        if (!attachment) throw new Error('Darktop was not attached');
+        expect(attachRequests).toEqual([desktop]);
+        const attachment = runtime.attachments.list().find(item => item.machineId === desktop);
+        if (!attachment) throw new Error('Desktop was not attached');
         expect(attachment.state).toBe('attaching');
         ctx.storage.sql.exec("UPDATE runtime_attachments SET record=json_set(record,'$.state','ready') WHERE id=?", attachment.attachmentId);
         await runtime.cacheReady(attachment.attachmentId, attachment.generation);
         const entries = (await root.entries({}, 100, undefined, BACKGROUND_CONTEXT)).items.filter(entry => entry.kind === 'gitspace.machine-ready');
-        expect(entries.map(entry => entry.data)).toEqual([expect.objectContaining({ requestId: `machine-ready:${attachment.attachmentId}:${attachment.generation}`, text: expect.stringContaining('Machine Darktop is attached and ready') })]);
+        expect(entries.map(entry => entry.data)).toEqual([expect.objectContaining({ requestId: `machine-ready:${attachment.attachmentId}:${attachment.generation}`, text: expect.stringContaining('Machine Desktop is attached and ready') })]);
       } finally { machine.mockRestore(); await runtime.snapshot(); await runtime.harness.close(BACKGROUND_CONTEXT); }
     });
   });

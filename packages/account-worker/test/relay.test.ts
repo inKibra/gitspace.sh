@@ -32,7 +32,7 @@ const machinePrivateKey = Uint8Array.from({ length: 32 }, (_, index) => 100 + in
 const machineGrant: SignedCredentialAuthorityGrant = signCredentialAuthorityGrant({
   version: 1,
   userId: env.ACCOUNT_ID,
-  machineId: 'darktop',
+  machineId: 'desktop',
   signingPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(machinePrivateKey)),
   exchangePublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(machinePrivateKey)),
   capabilities: ['storage.access', 'space.control'],
@@ -133,7 +133,7 @@ async function settledRelay(): Promise<void> {
 
 describe('portable RelayDO', () => {
   it('routes opaque frames between hibernatable endpoints', async () => {
-    const machine = await openSocket('machine', 'darktop');
+    const machine = await openSocket('machine', 'desktop');
     const client = await openSocket('client', 'browser');
     const received = nextMessage(client);
     const frame = {
@@ -149,12 +149,12 @@ describe('portable RelayDO', () => {
   });
 
   it.each(['revoked', 'stale'] as const)('rejects a %s machine grant before replacing the live socket or accessing blobs', async (reason) => {
-    const machine = await openSocket('machine', 'darktop');
+    const machine = await openSocket('machine', 'desktop');
     const vault = env.CREDENTIALS.getByName(env.ACCOUNT_ID);
-    if (reason === 'revoked') await vault.removeManagedDevice('darktop');
+    if (reason === 'revoked') await vault.removeManagedDevice('desktop');
     else await vault.registerDevice(signCredentialAuthorityGrant({ ...machineGrant.grant, generation: 2 }, privateKey));
     const rejected = await exports.default.fetch(machineAuthorizedRequest(
-      'https://relay.test/ws?role=machine&id=darktop', { headers: { upgrade: 'websocket' } },
+      'https://relay.test/ws?role=machine&id=desktop', { headers: { upgrade: 'websocket' } },
     ));
     expect(rejected.status).toBe(401);
     expect(machine.readyState).toBe(WebSocket.OPEN);
@@ -170,7 +170,7 @@ describe('portable RelayDO', () => {
   it('fails closed when current authority is unreachable and no usable registry is cached', async () => {
     interruptAuthority();
     const connect = await exports.default.fetch(machineAuthorizedRequest(
-      'https://relay.test/ws?role=machine&id=darktop', { headers: { upgrade: 'websocket' } },
+      'https://relay.test/ws?role=machine&id=desktop', { headers: { upgrade: 'websocket' } },
     ));
     expect(connect.status).toBe(503);
     expect(await connect.json()).toMatchObject({ error: { code: 'DEVICE_AUTHORITY_UNAVAILABLE', message: 'Device authority is unavailable; retry shortly' } });
@@ -212,7 +212,7 @@ describe('portable RelayDO', () => {
 
     it('rejects a self-signed grant for a root-paired device even with its own key', async () => {
       const selfSigned = signCredentialAuthorityGrant(machineGrant.grant, machinePrivateKey);
-      const [socket, artifact] = await attempt('darktop', machinePrivateKey, selfSigned);
+      const [socket, artifact] = await attempt('desktop', machinePrivateKey, selfSigned);
       expect(socket.status).toBe(401);
       expect(artifact.status).toBe(401);
     });
@@ -227,29 +227,29 @@ describe('portable RelayDO', () => {
   });
 
   it('rechecks authority before sending a new tunnel to an already connected revoked machine', async () => {
-    const machine = await openSocket('machine', 'darktop');
+    const machine = await openSocket('machine', 'desktop');
     const messages: unknown[] = [];
     machine.addEventListener('message', (event) => messages.push(event.data));
     const closed = new Promise<CloseEvent>((resolve) => machine.addEventListener('close', resolve, { once: true }));
-    await env.CREDENTIALS.getByName(env.ACCOUNT_ID).removeManagedDevice('darktop');
-    const response = await exports.default.fetch(authorizedRequest('https://relay.test/tunnel/darktop/private'));
+    await env.CREDENTIALS.getByName(env.ACCOUNT_ID).removeManagedDevice('desktop');
+    const response = await exports.default.fetch(authorizedRequest('https://relay.test/tunnel/desktop/private'));
     expect(response.status).toBe(503);
     expect((await closed).code).toBe(1008);
     expect(messages).toEqual([]);
   });
 
   it.each(['machine', 'client'] as const)('blocks %s frames once the machine authority lease expires', async (sender) => {
-    const machine = await openSocket('machine', 'darktop');
+    const machine = await openSocket('machine', 'desktop');
     const client = await openSocket('client', 'browser');
     const messages: unknown[] = [];
     (sender === 'machine' ? client : machine).addEventListener('message', (event) => messages.push(event.data));
     const closed = new Promise<CloseEvent>((resolve) => machine.addEventListener('close', resolve, { once: true }));
-    await env.CREDENTIALS.getByName(env.ACCOUNT_ID).removeManagedDevice('darktop');
+    await env.CREDENTIALS.getByName(env.ACCOUNT_ID).removeManagedDevice('desktop');
     vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 30_001);
     (sender === 'machine' ? machine : client).send(JSON.stringify({
       version: RELAY_PROTOCOL_VERSION,
       type: 'frame',
-      to: sender === 'machine' ? 'client:browser' : 'machine:darktop',
+      to: sender === 'machine' ? 'client:browser' : 'machine:desktop',
       payload: 'must-not-be-delivered',
     }));
     expect((await closed).code).toBe(1008);
@@ -259,9 +259,9 @@ describe('portable RelayDO', () => {
 
   it('closes an idle machine socket as soon as the vault revokes its credential, with no alarm', async () => {
     await settledRelay();
-    const machine = await openSocket('machine', 'darktop');
+    const machine = await openSocket('machine', 'desktop');
     const closed = new Promise<CloseEvent>((resolve) => machine.addEventListener('close', resolve, { once: true }));
-    await env.CREDENTIALS.getByName(env.ACCOUNT_ID).removeManagedDevice('darktop');
+    await env.CREDENTIALS.getByName(env.ACCOUNT_ID).removeManagedDevice('desktop');
     expect((await closed).code).toBe(1008);
     expect(await relayAlarm()).toBeNull();
   });
@@ -271,7 +271,7 @@ describe('portable RelayDO', () => {
     const expiresAt = Date.now() + 10 * 60_000;
     const expiring = signCredentialAuthorityGrant({ ...machineGrant.grant, generation: 2, expiresAt }, privateKey);
     await env.CREDENTIALS.getByName(env.ACCOUNT_ID).registerDevice(expiring);
-    const response = await exports.default.fetch(machineAuthorizedRequest('https://relay.test/ws?role=machine&id=darktop', { headers: { upgrade: 'websocket' } }, machinePrivateKey, expiring));
+    const response = await exports.default.fetch(machineAuthorizedRequest('https://relay.test/ws?role=machine&id=desktop', { headers: { upgrade: 'websocket' } }, machinePrivateKey, expiring));
     expect(response.status).toBe(101);
     const machine = response.webSocket;
     if (!machine) throw new Error('Expected relay WebSocket');
@@ -285,10 +285,10 @@ describe('portable RelayDO', () => {
   });
 
   it('keeps legacy machine recovery transport alive after inference cutover', async () => {
-    const machine = await openSocket('machine', 'darktop');
+    const machine = await openSocket('machine', 'desktop');
     await env.CREDENTIALS.getByName(env.ACCOUNT_ID).ensureInference();
     await env.RELAY.getByName(env.RELAY_NAME).machineCredentialsChanged();
-    const frame = { version: RELAY_PROTOCOL_VERSION, type: 'frame', to: 'machine:darktop', payload: 'recover' };
+    const frame = { version: RELAY_PROTOCOL_VERSION, type: 'frame', to: 'machine:desktop', payload: 'recover' };
     const echoed = nextMessage(machine);
     machine.send(JSON.stringify(frame));
     expect(JSON.parse(await echoed)).toEqual(frame);
@@ -297,21 +297,21 @@ describe('portable RelayDO', () => {
 
   it('echoes the v1 frame previous-release machines use for liveness and fails a silent one\'s in-flight request by its heartbeat lease, with a CORS error', async () => {
     await settledRelay();
-    const machine = await openSocket('machine', 'darktop', true);
-    const frame = { version: RELAY_PROTOCOL_VERSION, type: 'frame', to: 'machine:darktop', payload: crypto.randomUUID() };
+    const machine = await openSocket('machine', 'desktop', true);
+    const frame = { version: RELAY_PROTOCOL_VERSION, type: 'frame', to: 'machine:desktop', payload: crypto.randomUUID() };
     const echoed = nextMessage(machine);
     machine.send(JSON.stringify(frame));
     expect(JSON.parse(await echoed)).toEqual(frame);
     // Idle, it holds no wake.
     expect(await relayAlarm()).toBeNull();
     const received = nextMessage(machine);
-    const responsePromise = exports.default.fetch(authorizedRequest('https://relay.test/tunnel/darktop/rpc', {
+    const responsePromise = exports.default.fetch(authorizedRequest('https://relay.test/tunnel/desktop/rpc', {
       method: 'POST',
       headers: { origin: `https://${env.RELAY_NAME}.gitspace.sh` },
     }));
     expect(parseTunnelRequest(await received).type).toBe('tunnel.request.start');
     // With a request in flight the relay wakes when the machine's heartbeat lease ends.
-    const lease = await runInDurableObject(env.RELAY.getByName(env.RELAY_NAME), (_instance, state) => z.object({ heartbeatExpiresAt: z.number() }).parse(state.getWebSockets('endpoint:machine:darktop')[0]?.deserializeAttachment()).heartbeatExpiresAt);
+    const lease = await runInDurableObject(env.RELAY.getByName(env.RELAY_NAME), (_instance, state) => z.object({ heartbeatExpiresAt: z.number() }).parse(state.getWebSockets('endpoint:machine:desktop')[0]?.deserializeAttachment()).heartbeatExpiresAt);
     expect(await relayAlarm()).toBe(lease);
     const closed = new Promise<CloseEvent>((resolve) => machine.addEventListener('close', resolve, { once: true }));
     vi.spyOn(Date, 'now').mockReturnValue(lease + 1);
@@ -325,14 +325,14 @@ describe('portable RelayDO', () => {
 
   it('a wake after in-flight work ended finds nothing due and leaves no alarm', async () => {
     await settledRelay();
-    const machine = await openSocket('machine', 'darktop', true);
+    const machine = await openSocket('machine', 'desktop', true);
     machine.addEventListener('message', (event) => {
       const message = parseTunnelRequest(String(event.data));
       if (message.type !== 'tunnel.request.start') return;
       machine.send(JSON.stringify({ version: RELAY_PROTOCOL_VERSION, type: 'tunnel.response.start', requestId: message.requestId, status: 200, headers: [] }));
       machine.send(JSON.stringify({ version: RELAY_PROTOCOL_VERSION, type: 'tunnel.response.end', requestId: message.requestId }));
     });
-    const response = await exports.default.fetch(authorizedRequest('https://relay.test/tunnel/darktop/rpc', { method: 'POST' }));
+    const response = await exports.default.fetch(authorizedRequest('https://relay.test/tunnel/desktop/rpc', { method: 'POST' }));
     expect(response.status).toBe(200);
     await response.arrayBuffer();
     expect(await relayAlarm()).not.toBeNull();
@@ -345,7 +345,7 @@ describe('portable RelayDO', () => {
   it('leaves a machine that sends no pings connected past the heartbeat lease', async () => {
     const clock = vi.spyOn(Date, 'now');
     const start = Date.now();
-    const legacy = await openSocket('machine', 'darktop');
+    const legacy = await openSocket('machine', 'desktop');
     clock.mockReturnValue(start + 100_000);
     await runDurableObjectAlarm(env.RELAY.getByName(env.RELAY_NAME));
     expect(legacy.readyState).toBe(WebSocket.OPEN);
@@ -353,15 +353,15 @@ describe('portable RelayDO', () => {
   });
 
   it('fails an old in-flight request on replacement without replaying it or failing the new socket request', async () => {
-    const old = await openSocket('machine', 'darktop');
+    const old = await openSocket('machine', 'desktop');
     let oldServer: WebSocket | undefined;
     await runInDurableObject(env.RELAY.getByName(env.RELAY_NAME), async (_instance, state) => {
-      oldServer = state.getWebSockets('endpoint:machine:darktop')[0];
+      oldServer = state.getWebSockets('endpoint:machine:desktop')[0];
     });
     const oldReceived = nextMessage(old);
-    const oldResponse = exports.default.fetch(authorizedRequest('https://relay.test/tunnel/darktop/rpc', { method: 'POST' }));
+    const oldResponse = exports.default.fetch(authorizedRequest('https://relay.test/tunnel/desktop/rpc', { method: 'POST' }));
     const oldRequest = parseTunnelRequest(await oldReceived);
-    const replacement = await openSocket('machine', 'darktop');
+    const replacement = await openSocket('machine', 'desktop');
     expect((await oldResponse).status).toBe(502);
     const received: TunnelRequestMessage[] = [];
     const newStarted = Promise.withResolvers<string>();
@@ -371,7 +371,7 @@ describe('portable RelayDO', () => {
       received.push(message);
       if (message.type === 'tunnel.request.start') newStarted.resolve(message.requestId);
     });
-    const newResponse = exports.default.fetch(authorizedRequest('https://relay.test/tunnel/darktop/health'));
+    const newResponse = exports.default.fetch(authorizedRequest('https://relay.test/tunnel/desktop/health'));
     const requestId = await newStarted.promise;
     await runInDurableObject(env.RELAY.getByName(env.RELAY_NAME), async (instance) => {
       // An unclean, delayed close must neither echo reserved code 1006 nor poison the replacement.
@@ -385,12 +385,12 @@ describe('portable RelayDO', () => {
   });
 
   it('turns a synchronous socket send failure into a CORS transport response', async () => {
-    const machine = await openSocket('machine', 'darktop');
+    const machine = await openSocket('machine', 'desktop');
     await runInDurableObject(env.RELAY.getByName(env.RELAY_NAME), async (_instance, state) => {
-      const socket = state.getWebSockets('endpoint:machine:darktop')[0]!;
+      const socket = state.getWebSockets('endpoint:machine:desktop')[0]!;
       vi.spyOn(socket, 'send').mockImplementation(() => { throw new Error('Transport send failed'); });
     });
-    const response = await exports.default.fetch(authorizedRequest('https://relay.test/tunnel/darktop/rpc', {
+    const response = await exports.default.fetch(authorizedRequest('https://relay.test/tunnel/desktop/rpc', {
       method: 'POST',
       headers: { origin: `https://${env.RELAY_NAME}.gitspace.sh` },
     }));
@@ -401,7 +401,7 @@ describe('portable RelayDO', () => {
   });
 
   it('releases a cancelled downstream response and asks the machine to abort only that request', async () => {
-    const machine = await openSocket('machine', 'darktop', true);
+    const machine = await openSocket('machine', 'desktop', true);
     const cancelled = Promise.withResolvers<string>();
     let requestId = '';
     machine.addEventListener('message', (event) => {
@@ -414,7 +414,7 @@ describe('portable RelayDO', () => {
         cancelled.resolve(message.requestId);
       }
     });
-    const response = await exports.default.fetch(authorizedRequest('https://relay.test/tunnel/darktop/events'));
+    const response = await exports.default.fetch(authorizedRequest('https://relay.test/tunnel/desktop/events'));
     await response.body!.cancel();
     expect(await cancelled.promise).toBe(requestId);
     expect(machine.readyState).toBe(WebSocket.OPEN);
@@ -422,7 +422,7 @@ describe('portable RelayDO', () => {
   });
 
   it('streams a signed 33 MiB upload through the real relay without a buffered DO RPC body', async () => {
-    const machine = await openSocket('machine', 'darktop');
+    const machine = await openSocket('machine', 'desktop');
     const device = await enrollServiceBrowser();
     const size = 33 * 1024 * 1024, chunk = new Uint8Array(64 * 1024).fill(37);
     const expected = createHash('sha256');
@@ -441,7 +441,7 @@ describe('portable RelayDO', () => {
         machine.send(JSON.stringify({ version: RELAY_PROTOCOL_VERSION, type: 'tunnel.response.end', requestId: message.requestId }));
       }
     });
-    const path = '/tunnel/darktop/upload';
+    const path = '/tunnel/desktop/upload';
     const body = new ReadableStream<Uint8Array>({ pull(controller) { produced += chunk.byteLength; controller.enqueue(chunk); if (produced === size) controller.close(); } }, { highWaterMark: 0 });
     // The shared fixture uses a 2s header deadline; this throughput proof has its own 30s test deadline.
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
@@ -454,7 +454,7 @@ describe('portable RelayDO', () => {
   }, 30_000);
 
   it.each(['digest', 'length'] as const)('cancels a signed upload with a mismatched %s without sending normal EOF', async mismatch => {
-    const machine = await openSocket('machine', 'darktop', true);
+    const machine = await openSocket('machine', 'desktop', true);
     const device = await enrollServiceBrowser();
     const chunk = new Uint8Array(64 * 1024).fill(37);
     const bodySha256 = createHash('sha256').update(mismatch === 'digest' ? new Uint8Array(chunk.byteLength) : chunk).digest('base64');
@@ -469,7 +469,7 @@ describe('portable RelayDO', () => {
         machine.send(JSON.stringify({ version: RELAY_PROTOCOL_VERSION, type: 'tunnel.response.end', requestId: message.requestId }));
       }
     });
-    const path = '/tunnel/darktop/upload';
+    const path = '/tunnel/desktop/upload';
     const body = new ReadableStream<Uint8Array>({ pull(controller) { controller.enqueue(chunk); controller.close(); } });
     try {
       const response = await relayWorker.fetch(new Request(`https://relay.test${path}`, { method: 'PUT', headers: { 'content-length': String(chunk.byteLength + (mismatch === 'length' ? 1 : 0)), 'x-gitspace-device': signRpcDigestRequest({ ...device, method: 'PUT', path, bodySha256 }) }, body }), env);
@@ -480,7 +480,7 @@ describe('portable RelayDO', () => {
   });
 
   it('streams a development HTTP request through the machine socket', async () => {
-    const machine = await openSocket('machine', 'darktop');
+    const machine = await openSocket('machine', 'desktop');
     const bodyParts: Uint8Array[] = [];
     let requestId = '';
     let startMessage: Extract<TunnelRequestMessage, { type: 'tunnel.request.start' }> | undefined;
@@ -516,7 +516,7 @@ describe('portable RelayDO', () => {
     });
 
     const response = await exports.default.fetch(authorizedRequest(
-      'https://relay.test/tunnel/darktop/api/hello?mode=dev',
+      'https://relay.test/tunnel/desktop/api/hello?mode=dev',
       {
         method: 'POST',
         headers: { 'content-type': 'text/plain', 'x-request-test': 'kept', 'x-gitspace-signed-target': '/forged', 'x-gitspace-role': 'machine', 'x-gitspace-endpoint-id': 'forged', 'x-gitspace-tunnel-machine': 'other-machine', 'x-gitspace-tunnel-path': '/forged', 'x-gitspace-service-session': 'forged', 'x-forwarded-host': 'forged.gssh.dev', 'x-gitspace-service-assertion': 'forged' },
@@ -529,7 +529,7 @@ describe('portable RelayDO', () => {
     expect(await response.text()).toBe('local response');
     expect(startMessage).toMatchObject({ method: 'POST', path: '/api/hello?mode=dev' });
     expect(startMessage?.headers).toContainEqual(['x-request-test', 'kept']);
-    expect(new Headers(startMessage?.headers).get('x-gitspace-signed-target')).toBe('/tunnel/darktop/api/hello?mode=dev');
+    expect(new Headers(startMessage?.headers).get('x-gitspace-signed-target')).toBe('/tunnel/desktop/api/hello?mode=dev');
     for (const name of ['x-gitspace-role', 'x-gitspace-endpoint-id', 'x-gitspace-tunnel-machine', 'x-gitspace-tunnel-path', 'x-gitspace-service-session', 'x-forwarded-host', 'x-gitspace-service-assertion']) expect(new Headers(startMessage?.headers).has(name)).toBe(false);
     const requestBody = new Uint8Array(bodyParts.reduce((total, part) => total + part.byteLength, 0));
     let offset = 0;
@@ -541,7 +541,7 @@ describe('portable RelayDO', () => {
     machine.close(1000, 'done');
   });
   it('passes a compressed machine response through with its encoding, so the client decodes the original body', async () => {
-    const machine = await openSocket('machine', 'darktop');
+    const machine = await openSocket('machine', 'desktop');
     const page = '<p>inKibra</p>'.repeat(4_000);
     const gzipped = new Uint8Array(await new Response(new Blob([page]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
     machine.addEventListener('message', (event) => {
@@ -554,7 +554,7 @@ describe('portable RelayDO', () => {
       machine.send(JSON.stringify({ version: RELAY_PROTOCOL_VERSION, type: 'tunnel.response.end', requestId: message.requestId }));
     });
 
-    const response = await exports.default.fetch(authorizedRequest('https://relay.test/tunnel/darktop/', { headers: { 'accept-encoding': 'gzip' } }));
+    const response = await exports.default.fetch(authorizedRequest('https://relay.test/tunnel/desktop/', { headers: { 'accept-encoding': 'gzip' } }));
 
     expect(response.status).toBe(200);
     expect(await response.text()).toBe(page);
@@ -587,15 +587,15 @@ describe('portable RelayDO', () => {
 
   it('serves host-cookie HTTP, cloud internal fetch, and authenticated second-machine access through signed relay ingress', async () => {
     const hostname = `web--space-a--${env.TENANT_ID}-srv.gssh.dev`;
-    await env.HOSTED_ROUTES.getByName(hostname).lease(env.ACCOUNT_ID, 'project-a', { hostname, workspaceId: 'space-a', serviceName: 'web', source: 'declared', machineId: 'darktop', ingress: 'http://127.0.0.1:3000', portName: 'http', port: 3000, generation: 1, leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(), health: 'healthy', updatedAt: new Date().toISOString() }, 'darktop');
+    await env.HOSTED_ROUTES.getByName(hostname).lease(env.ACCOUNT_ID, 'project-a', { hostname, workspaceId: 'space-a', serviceName: 'web', source: 'declared', machineId: 'desktop', ingress: 'http://127.0.0.1:3000', portName: 'http', port: 3000, generation: 1, leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(), health: 'healthy', updatedAt: new Date().toISOString() }, 'desktop');
     const trust = await env.ACCOUNT_STATE.getByName(env.ACCOUNT_ID).browserTrust();
-    const machine = await openSocket('machine', 'darktop');
+    const machine = await openSocket('machine', 'desktop');
     const observed: string[] = [];
     let cloudHeaders: Headers | undefined;
     machine.addEventListener('message', event => {
       const message = parseTunnelRequest(String(event.data));
       if (message.type !== 'tunnel.request.start') return;
-      const assertion = verifyServiceAssertion({ header: new Headers(message.headers).get(SERVICE_ASSERTION_HEADER), publicKey: trust.publicKey, accountId: env.ACCOUNT_ID, machineId: 'darktop', hostname, method: message.method, target: message.path });
+      const assertion = verifyServiceAssertion({ header: new Headers(message.headers).get(SERVICE_ASSERTION_HEADER), publicKey: trust.publicKey, accountId: env.ACCOUNT_ID, machineId: 'desktop', hostname, method: message.method, target: message.path });
       if (!assertion) throw new Error('Worker did not sign service request');
       observed.push(assertion.caller.kind === 'device' ? assertion.caller.deviceId : assertion.caller.workspaceId);
       if (message.path === '/cloud') cloudHeaders = new Headers(message.headers);
@@ -621,15 +621,15 @@ describe('portable RelayDO', () => {
     const responseB = await exports.default.fetch(new Request(`https://relay.test${path}`, { headers: { 'x-gitspace-machine': 'machine-b', authorization: createRelayAuthorization(keyB, `GET\n${path}`) } }));
     expect(await responseB.text()).toBe('private service');
     expect(observed).toEqual([browserId, 'space-a', 'machine-b']);
-    const forged = await exports.default.fetch(new Request('https://relay.test/tunnel/darktop/private', { headers: { 'x-forwarded-host': hostname } }));
+    const forged = await exports.default.fetch(new Request('https://relay.test/tunnel/desktop/private', { headers: { 'x-forwarded-host': hostname } }));
     expect(forged.status).toBe(401);
     machine.close();
   });
 
   it.each(['expiry', 'revocation', 'logout'] as const)('closes cookie-authenticated service WebSocket on %s after a successful roundtrip', async reason => {
     const hostname = `socket--space-a--${env.TENANT_ID}-srv.gssh.dev`;
-    await env.HOSTED_ROUTES.getByName(hostname).lease(env.ACCOUNT_ID, 'project-a', { hostname, workspaceId: 'space-a', serviceName: 'socket', source: 'declared', machineId: 'darktop', ingress: 'http://127.0.0.1:3001', portName: 'http', port: 3001, generation: 1, leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(), health: 'healthy', updatedAt: new Date().toISOString() }, 'darktop');
-    const machine = await openSocket('machine', 'darktop');
+    await env.HOSTED_ROUTES.getByName(hostname).lease(env.ACCOUNT_ID, 'project-a', { hostname, workspaceId: 'space-a', serviceName: 'socket', source: 'declared', machineId: 'desktop', ingress: 'http://127.0.0.1:3001', portName: 'http', port: 3001, generation: 1, leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(), health: 'healthy', updatedAt: new Date().toISOString() }, 'desktop');
+    const machine = await openSocket('machine', 'desktop');
     machine.addEventListener('message', event => {
       const message = parseTunnelRequest(String(event.data));
       if (message.type === 'tunnel.request.start') {
@@ -682,15 +682,15 @@ describe('portable RelayDO', () => {
 
   /** A machine serving `routes` (hostname, workspace): plain requests answer `private service`, WebSockets echo. */
   async function cloudServiceMachine(routes: ReadonlyArray<readonly [string, string]>) {
-    for (const [name, workspaceId] of routes) await env.HOSTED_ROUTES.getByName(name).lease(env.ACCOUNT_ID, 'project-a', { hostname: name, workspaceId, serviceName: 'socket', source: 'declared', machineId: 'darktop', ingress: 'http://127.0.0.1:3001', portName: 'http', port: 3001, generation: 1, leaseExpiresAt: new Date(Date.now() + 3_600_000).toISOString(), health: 'healthy', updatedAt: new Date().toISOString() }, 'darktop');
+    for (const [name, workspaceId] of routes) await env.HOSTED_ROUTES.getByName(name).lease(env.ACCOUNT_ID, 'project-a', { hostname: name, workspaceId, serviceName: 'socket', source: 'declared', machineId: 'desktop', ingress: 'http://127.0.0.1:3001', portName: 'http', port: 3001, generation: 1, leaseExpiresAt: new Date(Date.now() + 3_600_000).toISOString(), health: 'healthy', updatedAt: new Date().toISOString() }, 'desktop');
     const trust = await env.ACCOUNT_STATE.getByName(env.ACCOUNT_ID).browserTrust();
-    const machine = await openSocket('machine', 'darktop');
+    const machine = await openSocket('machine', 'desktop');
     const callers: unknown[] = [];
     machine.addEventListener('message', event => {
       const message = parseTunnelRequest(String(event.data));
       if (message.type === 'tunnel.request.start') {
         const headers = new Headers(message.headers);
-        callers.push(verifyServiceAssertion({ header: headers.get(SERVICE_ASSERTION_HEADER), publicKey: trust.publicKey, accountId: env.ACCOUNT_ID, machineId: 'darktop', hostname: headers.get('x-forwarded-host') ?? '', method: message.method, target: message.path })?.caller);
+        callers.push(verifyServiceAssertion({ header: headers.get(SERVICE_ASSERTION_HEADER), publicKey: trust.publicKey, accountId: env.ACCOUNT_ID, machineId: 'desktop', hostname: headers.get('x-forwarded-host') ?? '', method: message.method, target: message.path })?.caller);
         if (headers.get('upgrade') === 'websocket') { machine.send(JSON.stringify({ version: 1, type: 'tunnel.websocket.open', requestId: message.requestId })); return; }
         machine.send(JSON.stringify({ version: 1, type: 'tunnel.response.start', requestId: message.requestId, status: 200, headers: [] }));
         machine.send(JSON.stringify({ version: 1, type: 'tunnel.response.chunk', requestId: message.requestId, data: encodeTunnelChunk(new TextEncoder().encode('private service')) }));
@@ -756,8 +756,8 @@ describe('portable RelayDO', () => {
 
   it.each(['the machine closes the service', 'the browser closes', 'the machine disconnects'] as const)('carries a service WebSocket on a hibernatable socket until %s', async ending => {
     const hostname = `socket--space-a--${env.TENANT_ID}-srv.gssh.dev`;
-    await env.HOSTED_ROUTES.getByName(hostname).lease(env.ACCOUNT_ID, 'project-a', { hostname, workspaceId: 'space-a', serviceName: 'socket', source: 'declared', machineId: 'darktop', ingress: 'http://127.0.0.1:3001', portName: 'http', port: 3001, generation: 1, leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(), health: 'healthy', updatedAt: new Date().toISOString() }, 'darktop');
-    const machine = await openSocket('machine', 'darktop');
+    await env.HOSTED_ROUTES.getByName(hostname).lease(env.ACCOUNT_ID, 'project-a', { hostname, workspaceId: 'space-a', serviceName: 'socket', source: 'declared', machineId: 'desktop', ingress: 'http://127.0.0.1:3001', portName: 'http', port: 3001, generation: 1, leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(), health: 'healthy', updatedAt: new Date().toISOString() }, 'desktop');
+    const machine = await openSocket('machine', 'desktop');
     const forwarded = Promise.withResolvers<TunnelRequestMessage>();
     const machineClosed = Promise.withResolvers<TunnelRequestMessage>();
     machine.addEventListener('message', event => {
@@ -780,7 +780,7 @@ describe('portable RelayDO', () => {
       const [service] = objectState.getWebSockets('service');
       if (!service) throw new Error('The service WebSocket is not hibernatable');
       const attachment = z.object({ role: z.literal('service'), requestId: z.string(), machineId: z.string() }).parse(service.deserializeAttachment());
-      expect(attachment.machineId).toBe('darktop');
+      expect(attachment.machineId).toBe('desktop');
       // A relay object with no memory, as after hibernation, still routes the browser's frame to the machine.
       await new UserRelayDO(objectState, env).webSocketMessage(service, 'after-wake');
       return attachment.requestId;

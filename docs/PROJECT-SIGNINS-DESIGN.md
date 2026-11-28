@@ -4,7 +4,7 @@
 
 ## 1. Problem
 
-Interactive cloud logins happen once per workspace. Golconda's `.gitspace/lifecycle/machine/prepare/30-aws-login.sh` reads the IAM key and MFA serial from project values, asks for a six-digit code, calls `sts:GetSessionToken` and saves the session to `.gitspace/local/aws-dev-session.env` inside that checkout. Every workspace has its own checkout, so every workspace asks again; Deedible's setup has the same shape. An agent with no terminal cannot answer the prompt, so automatic setup skips it.
+Interactive cloud logins happen once per workspace. Ledger's `.gitspace/lifecycle/machine/prepare/30-aws-login.sh` reads the IAM key and MFA serial from project values, asks for a six-digit code, calls `sts:GetSessionToken` and saves the session to `.gitspace/local/aws-dev-session.env` inside that checkout. Every workspace has its own checkout, so every workspace asks again; Deedible's setup has the same shape. An agent with no terminal cannot answer the prompt, so automatic setup skips it.
 
 ## 2. Project sign-ins
 
@@ -38,7 +38,7 @@ Instead of a person's session, the tenant becomes an OIDC identity provider and 
 
 - The tenant publishes `https://<tenant-host>/.well-known/openid-configuration` and its JWKS; the signing key lives in the tenant vault.
 - When a command needs credentials, the account mints a short-lived JWT (`iss` = tenant host, `aud` = the cloud's audience such as `sts.amazonaws.com`, `sub` naming project, workspace and phase) and exchanges it: AWS `AssumeRoleWithWebIdentity`, GCP workload identity federation, Azure federated credentials.
-- One-time setup per cloud account: register the issuer and a role whose trust policy matches `sub`, for example only `project:golconda-idf-data-vault:*` for the dev role, or only the ship phase for a production role.
+- One-time setup per cloud account: register the issuer and a role whose trust policy matches `sub`, for example only `project:ledger-data-vault:*` for the dev role, or only the ship phase for a production role.
 
 | | Project sign-in | OIDC federation |
 |---|---|---|

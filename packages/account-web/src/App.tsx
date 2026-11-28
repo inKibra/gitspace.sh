@@ -14,11 +14,11 @@ const unrelated: Pick<WorkspaceView, 'relations' | 'stack'> = { relations: { dep
 
 export const verticalSliceFixture: GitSpaceShellProps = {
   project: { id: 'project-a', name: 'GitSpace', repository: 'gitspace.sh', connected: true },
-  workspace: { kind: 'workspace', id: 'workspace-a', projectId: 'project-a', projectName: 'GitSpace', name: 'agent-blame', branch: 'develop', phase: 'code', generation: 1, possessedBy: 'Darktop', holder: { kind: 'held', machineId: 'darktop', label: 'Darktop' }, status: status('green'), closedAt: null, ...unrelated },
-  baseSpace: { kind: 'project', id: 'project-a', projectId: 'project-a', projectName: 'GitSpace', name: 'GitSpace', branch: 'develop', phase: null, generation: 1, possessedBy: 'Darktop', holder: { kind: 'held', machineId: 'darktop', label: 'Darktop' }, status: status('blue'), closedAt: null },
+  workspace: { kind: 'workspace', id: 'workspace-a', projectId: 'project-a', projectName: 'GitSpace', name: 'agent-blame', branch: 'develop', phase: 'code', generation: 1, possessedBy: 'Desktop', holder: { kind: 'held', machineId: 'desktop', label: 'Desktop' }, status: status('green'), closedAt: null, ...unrelated },
+  baseSpace: { kind: 'project', id: 'project-a', projectId: 'project-a', projectName: 'GitSpace', name: 'GitSpace', branch: 'develop', phase: null, generation: 1, possessedBy: 'Desktop', holder: { kind: 'held', machineId: 'desktop', label: 'Desktop' }, status: status('blue'), closedAt: null },
   workspaces: [
-    { kind: 'workspace', id: 'workspace-a', projectId: 'project-a', projectName: 'GitSpace', name: 'agent-blame', branch: 'develop', phase: 'code', generation: 1, possessedBy: 'Darktop', holder: { kind: 'held', machineId: 'darktop', label: 'Darktop' }, status: status('green'), closedAt: null, ...unrelated },
-    { kind: 'workspace', id: 'workspace-b', projectId: 'project-a', projectName: 'GitSpace', name: 'relay-hardening', branch: 'relay-hardening', phase: 'review', generation: 1, possessedBy: 'Darktop', holder: { kind: 'held', machineId: 'darktop', label: 'Darktop' }, status: status('orange'), closedAt: null, ...unrelated },
+    { kind: 'workspace', id: 'workspace-a', projectId: 'project-a', projectName: 'GitSpace', name: 'agent-blame', branch: 'develop', phase: 'code', generation: 1, possessedBy: 'Desktop', holder: { kind: 'held', machineId: 'desktop', label: 'Desktop' }, status: status('green'), closedAt: null, ...unrelated },
+    { kind: 'workspace', id: 'workspace-b', projectId: 'project-a', projectName: 'GitSpace', name: 'relay-hardening', branch: 'relay-hardening', phase: 'review', generation: 1, possessedBy: 'Desktop', holder: { kind: 'held', machineId: 'desktop', label: 'Desktop' }, status: status('orange'), closedAt: null, ...unrelated },
     { kind: 'workspace', id: 'workspace-c', projectId: 'project-b', projectName: 'Website', name: 'release', branch: 'release/1.0', phase: 'ship', generation: 1, possessedBy: 'Studio', holder: { kind: 'held', machineId: 'studio', label: 'Studio' }, status: status('blue'), closedAt: null, ...unrelated },
   ],
   mainAgent: { id: 'session-a', title: 'Workspace agent', state: 'running', model: 'GPT-5.6' },
@@ -48,13 +48,13 @@ export const deploymentStatusFixture: DeploymentStatusView = {
   defaultRelease: 'c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00',
   current: {
     worker: { sha: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0', version: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0' },
-    machines: { darktop: { sha: null, generation: 'gen-0f3a9c' }, studio: { sha: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0', generation: 'gen-77ab21' } },
+    machines: { desktop: { sha: null, generation: 'gen-0f3a9c' }, studio: { sha: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0', generation: 'gen-77ab21' } },
   },
   releases: [{
     sha: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0',
     label: 'agent-blame @ a1b2c3d4e5f6 + 3 uncommitted',
     source: { kind: 'workspace', workspaceId: 'workspace-a', commit: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0', uncommittedFiles: 3 },
-    builtBy: 'darktop',
+    builtBy: 'desktop',
     createdAt: '2026-08-30T09:58:00.000Z',
     artifacts: {
       worker: { key: 'releases/a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0/worker.mjs', hash: `sha256:${'1'.repeat(64)}`, size: 1024 },

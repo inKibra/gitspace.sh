@@ -19,7 +19,7 @@ const installed: GitHubState = {
     installedAt: '2026-10-17T11:00:00.000Z',
     projects: [{ id: 'project-1', name: 'GitSpace', repository: 'inKibra/gitspace.sh' }],
   }],
-  requests: [{ id: 'request-1', organization: 'BrandByX', project: { id: 'portal', name: 'Landscaping Portal' }, repository: 'BrandByX/payne-portals', firstRequestedAt: '2026-10-17T12:00:00.000Z', lastRequestedAt: '2026-10-18T12:00:00.000Z', times: 2 }],
+  requests: [{ id: 'request-1', organization: 'Meadowlark', project: { id: 'portal', name: 'Garden Portal' }, repository: 'Meadowlark/garden-portal', firstRequestedAt: '2026-10-17T12:00:00.000Z', lastRequestedAt: '2026-10-18T12:00:00.000Z', times: 2 }],
   unconfirmed: [{ id: 99, account: { kind: 'organization', login: 'acme-labs' }, installedBy: 'octocat', installedAt: '2026-10-18T13:00:00.000Z', removeAt: '2026-10-25T13:00:00.000Z', repositorySelection: 'all', repositories: [] }],
   removed: [],
   uninstalled: [],
@@ -120,7 +120,7 @@ it('shows each organization once, by what holds it up, and sends what the person
   const text = document.body.textContent ?? '';
   expect(text).toContain('inKibra/gitspace.sh, inKibra/site');
   expect(text).toContain('Waiting on an owner');
-  expect(text).toContain('Landscaping Portal · BrandByX/payne-portals');
+  expect(text).toContain('Garden Portal · Meadowlark/garden-portal');
   expect(text).toContain('2 requests, shown once');
   expect(text).toContain('Is this yours?');
   await click("Yes, it's mine");

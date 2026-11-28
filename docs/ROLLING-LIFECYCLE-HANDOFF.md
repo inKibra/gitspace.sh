@@ -79,7 +79,7 @@ Deleted through supported project deletion:
 - `tenant-image-live-proof-a-f18be16e-fd5001a9`.
 - `tenant-image-live-proof-b-41573d58-168a3c9d`.
 
-Pre-deletion inventory verified those machines held only the disposable projects. Post-deletion readback showed no proof machines or projects. Remaining machine: **Darktop**, `m-021d0c06-bf17-41de-ace7-4779e2ab5e9b`. Remaining projects: the real GitSpace source project and `inkibra-core-af58c70d`. No disposable data recovery was attempted. Cached image/provider resources were not indiscriminately removed.
+Pre-deletion inventory verified those machines held only the disposable projects. Post-deletion readback showed no proof machines or projects. Remaining machine: **Desktop**, `m-021d0c06-bf17-41de-ace7-4779e2ab5e9b`. Remaining projects: the real GitSpace source project and `acme-core-af58c70d`. No disposable data recovery was attempted. Cached image/provider resources were not indiscriminately removed.
 
 ### Initial persisted tenant Worker log activation
 
@@ -159,7 +159,7 @@ If deployment is subsequently authorized:
 2. Use the existing tenant/application deployment authority for account-owned targets. Shared platform deployment is separate; the metadata-upload fixes live in platform code.
 3. Provider lifecycle changes require the corrected provider Worker implementation to be selected through the existing immutable provider-image preparation path. Do not mutate a shared app under unrelated machines.
 4. Verify the exact changed boundary with correlated logs. Check native readiness **and** restoration of the operation's recorded workspace set before treating a cloud image update as complete.
-5. Do not create another broad cloud proof fleet, recover deleted fixtures, or roll Darktop as part of merely reading this handoff. Obtain a concrete deployment/validation instruction first.
+5. Do not create another broad cloud proof fleet, recover deleted fixtures, or roll Desktop as part of merely reading this handoff. Obtain a concrete deployment/validation instruction first.
 
 ## Durable journal evidence
 

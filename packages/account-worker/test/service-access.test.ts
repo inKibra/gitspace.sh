@@ -164,10 +164,10 @@ describe('private hosted service access', () => {
   it('answers a workspace URL whose machine is down with the machine it points at', async () => {
     const offline = `api--space-a--${env.TENANT_ID}-srv.gssh.dev`;
     const registry = env.HOSTED_ROUTES.getByName(offline);
-    await registry.lease(env.ACCOUNT_ID, 'project-a', { hostname: offline, workspaceId: 'space-a', serviceName: 'api', source: 'declared', machineId: 'service-machine', ingress: 'http://127.0.0.1:3001', portName: 'http', port: 3001, generation: 1, leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(), health: 'healthy', updatedAt: new Date().toISOString() }, 'darktop');
+    await registry.lease(env.ACCOUNT_ID, 'project-a', { hostname: offline, workspaceId: 'space-a', serviceName: 'api', source: 'declared', machineId: 'service-machine', ingress: 'http://127.0.0.1:3001', portName: 'http', port: 3001, generation: 1, leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(), health: 'healthy', updatedAt: new Date().toISOString() }, 'desktop');
     expect(await registry.release(env.ACCOUNT_ID, 'service-machine', 1)).toBe(true);
     const response = await fetchInternalService(env, { kind: 'cloud', accountId: env.ACCOUNT_ID, projectId: 'project-a', workspaceId: 'space-a' }, new Request(`https://${offline}/`));
     expect(response.status).toBe(503);
-    expect(await response.text()).toBe('Service is offline on darktop');
+    expect(await response.text()).toBe('Service is offline on desktop');
   });
 });

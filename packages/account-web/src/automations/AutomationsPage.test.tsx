@@ -15,7 +15,7 @@ vi.mock('result-rpc/react', async () => ({
 }));
 
 const at = new Date('2026-10-27T09:00:00Z');
-const github = { repository: 'inKibra/inkibra-core', bot: '@gitspace-bradleat' };
+const github = { repository: 'Acme/acme-core', bot: '@gitspace-bradleat' };
 
 const proposed: AutomationView = {
   id: 'audit', projectId: 'project', revision: 3, name: 'Nightly dependency audit',
@@ -283,12 +283,12 @@ it('tests against the chosen recorded event and runs it only for the saved autom
   queries.set('events', events);
   rpc.test.mockResolvedValue({ status: 'ok', value: {
     results: [{ label: 'PR #1144 · pull_request.opened', result: 'Would start workspace review-pr-1144 in Review with model role Default, linked to PR #1144', runs: true }],
-    instruction: 'Review https://github.com/inKibra/inkibra-core/pull/1144.',
+    instruction: 'Review https://github.com/Acme/acme-core/pull/1144.',
     checks: [{ label: 'base branch is main', passed: true }, { label: 'not a draft', passed: null }],
   } });
   const run: AutomationRunView = {
     id: 'run-1144', projectId: 'project', automationId: 'review', automationName: 'Review pull requests', trigger: 'github', event: 'pull_request.opened',
-    subject: { kind: 'pullRequest', number: 1144, branch: 'tone', title: 'Faster tone detection', url: 'https://github.com/inKibra/inkibra-core/pull/1144' },
+    subject: { kind: 'pullRequest', number: 1144, branch: 'tone', title: 'Faster tone detection', url: 'https://github.com/Acme/acme-core/pull/1144' },
     state: 'running', workspaceId: 'review-pr-1144', phase: 'review', skipReason: null, outcome: 'Started in Review and linked to PR #1144', checks: [], timeline: [], scheduledFor: at, startedAt: at, finishedAt: null,
     events: [{ at, event: 'pull_request.opened', label: 'PR #1144 · Faster tone detection opened', url: null, folded: false }],
   };
@@ -310,7 +310,7 @@ it('tests against the chosen recorded event and runs it only for the saved autom
   const checks = [...field('[aria-label="Checks"]').querySelectorAll('li')].map(check => check.textContent);
   expect(checks).toEqual(['base branch is main', 'not a draft (not checked)']);
   expect(field('[aria-label="Test result"]').textContent).toBe('Would start workspace review-pr-1144 in Review with model role Default, linked to PR #1144');
-  expect(field('[aria-label="Rendered instruction"]').textContent).toBe('Review https://github.com/inKibra/inkibra-core/pull/1144.');
+  expect(field('[aria-label="Rendered instruction"]').textContent).toBe('Review https://github.com/Acme/acme-core/pull/1144.');
   expect(rpc.runOnEvent).not.toHaveBeenCalled();
 
   await act(async () => button('Run it').click());
@@ -319,7 +319,7 @@ it('tests against the chosen recorded event and runs it only for the saved autom
 });
 
 it('links the pull request or issue a number or GitHub link names to the chosen workspace', async () => {
-  rpc.link.mockResolvedValueOnce({ status: 'error', error: automationErrors.automationInvalid({ field: 'subject', message: 'PR #1140 is not in inKibra/inkibra-core' }) });
+  rpc.link.mockResolvedValueOnce({ status: 'error', error: automationErrors.automationInvalid({ field: 'subject', message: 'PR #1140 is not in Acme/acme-core' }) });
   rpc.link.mockResolvedValue({ status: 'ok', value: {} });
   await renderProject([review]);
 
@@ -332,10 +332,10 @@ it('links the pull request or issue a number or GitHub link names to the chosen 
   await type(subject, '#1140');
   await act(async () => button('Link').click());
   expect(rpc.link).toHaveBeenLastCalledWith({ projectId: 'project', subject: { kind: 'pullRequest', number: 1140 }, workspaceId: 'ws-recovery' });
-  expect(alerts()).toContain('PR #1140 is not in inKibra/inkibra-core');
+  expect(alerts()).toContain('PR #1140 is not in Acme/acme-core');
 
   await choose('Workspace', 'old-work (closed)');
-  await type(subject, 'https://github.com/inKibra/inkibra-core/issues/386');
+  await type(subject, 'https://github.com/Acme/acme-core/issues/386');
   await act(async () => button('Link').click());
   expect(rpc.link).toHaveBeenLastCalledWith({ projectId: 'project', subject: { kind: 'issue', number: 386 }, workspaceId: 'ws-old' });
 });

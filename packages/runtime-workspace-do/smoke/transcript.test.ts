@@ -115,15 +115,15 @@ test('withdrawn notices leave the transcript while the other notices stay', asyn
   await fixture(async (_harness, storage, root) => {
     await turn(root, 0, 1);
     const notice = (text: string) => root.commit(tx => tx.appendEntry(root.id, { kind: 'gitspace.machine-notice', data: { source: 'Machine' }, model: [{ role: 'user', content: text, timestamp: 1 }] }), context);
-    const flood = await Promise.all([notice('Sync with Darktop failed: internal error; reference = a'), notice('Sync with Darktop failed: internal error; reference = b')]);
-    await notice('Machine Darktop went offline.');
+    const flood = await Promise.all([notice('Sync with Desktop failed: internal error; reference = a'), notice('Sync with Desktop failed: internal error; reference = b')]);
+    await notice('Machine Desktop went offline.');
     await turn(root, 1, 1);
     const ids = new Set(flood.map(entry => String(entry.id)));
     const withdrawn: WithdrawnNotices = { has: id => ids.has(id), add: () => {} };
     const page = await createTranscriptReader(storage, withdrawn).page(root.id, { generation: null, before: null, after: null, around: null });
     const text = JSON.stringify(page.rows);
-    expect(text).not.toContain('Sync with Darktop failed');
-    expect(text).toContain('Machine Darktop went offline.');
+    expect(text).not.toContain('Sync with Desktop failed');
+    expect(text).toContain('Machine Desktop went offline.');
     expect(text).toContain('answer 1');
   });
 });

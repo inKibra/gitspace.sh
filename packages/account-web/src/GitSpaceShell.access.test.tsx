@@ -9,10 +9,10 @@ import { GitSpaceShell, type GitSpaceShellProps } from './GitSpaceShell.js';
 import { Toasts } from './toasts.js';
 
 const stamp = '2026-11-01T09:00:00.000Z';
-const needsApp: GitHubBlockedAccess = { state: 'needs-app', repository: 'octo-labs/portal', organization: 'octo-labs', appName: 'GitSpace BrandByX', bridge: null, branches: ['main'], awaitsCopy: false };
+const needsApp: GitHubBlockedAccess = { state: 'needs-app', repository: 'octo-labs/portal', organization: 'octo-labs', appName: 'GitSpace Meadowlark', bridge: null, branches: ['main'], awaitsCopy: false };
 const noApp: GitHubBlockedAccess = { ...needsApp, appName: null };
-const requested: GitHubBlockedAccess = { state: 'requested', repository: 'octo-labs/portal', organization: 'octo-labs', appName: 'GitSpace BrandByX', request: { id: 'request', organization: 'octo-labs', project: { id: 'portal', name: 'Portal' }, repository: 'octo-labs/portal', firstRequestedAt: stamp, lastRequestedAt: stamp, times: 1 }, bridge: null, branches: ['main'], awaitsCopy: false };
-const notSelected: GitHubBlockedAccess = { state: 'not-selected', repository: 'octo-labs/portal', organization: 'octo-labs', appName: 'GitSpace BrandByX', installation: { id: 7, account: { login: 'octo-labs', kind: 'organization' }, repositorySelection: 'selected', repositories: ['octo-labs/site'], permissions: {}, installedAt: stamp, projects: [] }, bridge: null, branches: ['main'], awaitsCopy: false };
+const requested: GitHubBlockedAccess = { state: 'requested', repository: 'octo-labs/portal', organization: 'octo-labs', appName: 'GitSpace Meadowlark', request: { id: 'request', organization: 'octo-labs', project: { id: 'portal', name: 'Portal' }, repository: 'octo-labs/portal', firstRequestedAt: stamp, lastRequestedAt: stamp, times: 1 }, bridge: null, branches: ['main'], awaitsCopy: false };
+const notSelected: GitHubBlockedAccess = { state: 'not-selected', repository: 'octo-labs/portal', organization: 'octo-labs', appName: 'GitSpace Meadowlark', installation: { id: 7, account: { login: 'octo-labs', kind: 'organization' }, repositorySelection: 'selected', repositories: ['octo-labs/site'], permissions: {}, installedAt: stamp, projects: [] }, bridge: null, branches: ['main'], awaitsCopy: false };
 const machines = [{ id: 'machine-1', label: 'studio-mac' }, { id: 'machine-2', label: 'garage-box' }];
 const noCopy = { machines, onCopy: async () => { throw new Error('No copy in this test'); } };
 const online: GitHubProjectBridge = { machineId: 'machine-1', label: 'studio-mac', online: true };
@@ -53,7 +53,7 @@ function buttons(within: Element | null): string[] {
 
 it('keeps the transcript and a working composer on a bridged project, with the App as an upgrade in a toast', async () => {
   const toast = await renderBridged(needsApp, online);
-  expect(toast?.textContent).toContain('Syncs with GitHub through studio-mac, using your own access. Install GitSpace BrandByX on octo-labs for pull requests, checks, automations and syncing without a machine.');
+  expect(toast?.textContent).toContain('Syncs with GitHub through studio-mac, using your own access. Install GitSpace Meadowlark on octo-labs for pull requests, checks, automations and syncing without a machine.');
   expect(buttons(toast)).toContain('Install on octo-labs');
   expect(container.textContent).toContain(transcriptText);
   expect(container.querySelector('[aria-label="Repository access"]')).toBeNull();
@@ -92,18 +92,18 @@ it('hides a dismissed bridge toast while its condition holds, and shows it again
 
 it('says GitHub sync is paused while the bridging machine is offline', async () => {
   const toast = await renderBridged(needsApp, { ...online, online: false });
-  expect(toast?.textContent).toContain('GitHub sync paused: studio-mac is offline. Install GitSpace BrandByX on octo-labs for pull requests, checks, automations and syncing without a machine.');
+  expect(toast?.textContent).toContain('GitHub sync paused: studio-mac is offline. Install GitSpace Meadowlark on octo-labs for pull requests, checks, automations and syncing without a machine.');
   expect(buttons(toast)).toContain('Install on octo-labs');
   expect(container.textContent).toContain(transcriptText);
 });
 
 it('names what is pending instead of offering Install while an install is requested or the repository not selected', async () => {
   const waiting = await renderBridged(requested, online);
-  expect(waiting?.textContent).toContain('Waiting for an owner of octo-labs to approve GitSpace BrandByX');
+  expect(waiting?.textContent).toContain('Waiting for an owner of octo-labs to approve GitSpace Meadowlark');
   expect(buttons(waiting).some((label) => label.startsWith('Install'))).toBe(false);
   expect(buttons(waiting)).toContain('Copy steps for the owner');
   const notAllowed = await renderBridged(notSelected, online);
-  expect(notAllowed?.textContent).toContain("GitSpace BrandByX is installed on octo-labs, but portal isn't one of its selected repositories.");
+  expect(notAllowed?.textContent).toContain("GitSpace Meadowlark is installed on octo-labs, but portal isn't one of its selected repositories.");
   expect(buttons(notAllowed).some((label) => label.startsWith('Install'))).toBe(false);
   const appless = await renderBridged(noApp, online);
   expect(appless?.textContent).toContain('Create your GitHub App in Settings → GitHub');
@@ -156,7 +156,7 @@ it('shows why a copy failed, with another machine and the App still offered', as
   await act(() => button('Copy through studio-mac').click());
   const alert = container.querySelector('[role="alert"]');
   expect(alert?.textContent).toContain(`Copying through studio-mac failed: ${reason}`);
-  expect(alert?.textContent).toContain('Choose another machine that can read it, or install GitSpace BrandByX on octo-labs instead.');
+  expect(alert?.textContent).toContain('Choose another machine that can read it, or install GitSpace Meadowlark on octo-labs instead.');
   expect(buttons(container)).toEqual(expect.arrayContaining(['Install on octo-labs', 'Copy through studio-mac']));
   expect(container.querySelector('[aria-label="Machine to copy through"]')).not.toBeNull();
 });

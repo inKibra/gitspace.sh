@@ -232,7 +232,7 @@ export function MarketingApp() {
           <div className="flex items-center justify-between px-3 pb-3 pt-1 text-caption text-muted-foreground"><span>Active workspaces</span><span>4 across 3 machines</span></div>
           <div className="space-y-2">
             {[
-              ['checkout-redesign', 'Shop', 'Working', 'Darktop', 'bg-emerald-500'],
+              ['checkout-redesign', 'Shop', 'Working', 'Desktop', 'bg-emerald-500'],
               ['relay-hardening', 'GitSpace', 'Needs attention', 'Studio', 'bg-orange-500'],
               ['docs-refresh', 'GitSpace', 'Waiting', 'Cloud machine', 'bg-blue-500'],
               ['release-check', 'API', 'Failed', 'Home server', 'bg-red-500'],

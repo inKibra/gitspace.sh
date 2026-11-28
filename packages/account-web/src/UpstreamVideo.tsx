@@ -76,7 +76,7 @@ function AppSidebar({ workspaces, gitspace, active, running }: { workspaces: rea
             <SidebarMenuButton icon={STATUS_GLYPH.dim}>tonetempo</SidebarMenuButton>
             <SidebarMenuSub open><SidebarMenuSubItem><SidebarMenuSubButton render={<button type="button" />} icon={STATUS_GLYPH.green} isActive={active === 'tonetempo'}>challenges-and-streaks</SidebarMenuSubButton></SidebarMenuSubItem></SidebarMenuSub>
           </SidebarMenuItem>
-          <SidebarMenuItem><SidebarMenuButton icon={STATUS_GLYPH.dim}>inkibra core</SidebarMenuButton></SidebarMenuItem>
+          <SidebarMenuItem><SidebarMenuButton icon={STATUS_GLYPH.dim}>Acme core</SidebarMenuButton></SidebarMenuItem>
         </SidebarMenu>
       </SidebarGroup>
     </SidebarContent>
@@ -373,7 +373,7 @@ function ReviewScene({ t }: { t: number }): ReactElement {
 
 const LAUNCH_OPTIONS: readonly Option[] = [
   { id: 'trial', title: 'Launch the frontend as a trial first', description: 'The default stays; Back to default undoes it.' },
-  { id: 'launch', title: 'Build on Darktop and launch', description: 'It becomes the default for the worker, the frontend and the machines.' },
+  { id: 'launch', title: 'Build on Desktop and launch', description: 'It becomes the default for the worker, the frontend and the machines.' },
   { id: 'later', title: 'Not now', description: 'I ask again when more changes land.' },
 ];
 
@@ -381,9 +381,9 @@ function LaunchScene({ t }: { t: number }): ReactElement {
   const answered = t >= 4200 ? 'trial' : null;
   if (t < 6400) return <App title="GitSpace" sidebar={<AppSidebar workspaces={GITSPACE_WORKSPACES} gitspace={answered ? 'blue' : 'orange'} active="gitspace" running="Trial · sidebar-pins @ 4c1e9a2" />}>
     <Conversation>
-      <Bubble who="agent" at="now">PR #19 is merged into {code(BRANCH)} and its checks pass. It is not a published release, so launching builds it on Darktop.</Bubble>
+      <Bubble who="agent" at="now">PR #19 is merged into {code(BRANCH)} and its checks pass. It is not a published release, so launching builds it on Desktop.</Bubble>
       <Reveal t={t} at={900}><AskBlockView item={askBlock('launch-rc43', `Build ${BRANCH} @ 7aa31c0 and launch it?`, LAUNCH_OPTIONS, answered)} /></Reveal>
-      <Reveal t={t} at={5000}><Bubble who="agent" at="now">Built on Darktop and launched the frontend from {code(`${BRANCH} @ 7aa31c0`)} as a trial.</Bubble></Reveal>
+      <Reveal t={t} at={5000}><Bubble who="agent" at="now">Built on Desktop and launched the frontend from {code(`${BRANCH} @ 7aa31c0`)} as a trial.</Bubble></Reveal>
       <div className="mt-auto"><Composer text="" /></div>
     </Conversation>
   </App>;
@@ -397,7 +397,7 @@ function LaunchScene({ t }: { t: number }): ReactElement {
         <div className={`${shape} bg-surface-2 px-5 py-4 shadow-surface-1 flex flex-col gap-2`}>
           <div className="flex gap-4 text-body"><span className="text-caption font-medium text-muted-foreground" style={{ width: 96 }}>Worker</span>{code('ui-experiments @ 9b7e0d1')}</div>
           <div className="flex items-center gap-4 text-body"><span className="text-caption font-medium text-muted-foreground" style={{ width: 96 }}>Frontend</span>{code(running)} <Badge size="compact" color="green">Trial</Badge></div>
-          <div className="flex gap-4 text-body"><span className="text-caption font-medium text-muted-foreground" style={{ width: 96 }}>Machines</span><span>Darktop, Lightbook · {code('ui-experiments @ 9b7e0d1')}</span></div>
+          <div className="flex gap-4 text-body"><span className="text-caption font-medium text-muted-foreground" style={{ width: 96 }}>Machines</span><span>Desktop, Lightbook · {code('ui-experiments @ 9b7e0d1')}</span></div>
         </div>
       </section>
       <section className="flex flex-col gap-3">
@@ -428,7 +428,7 @@ function KeepWorkingScene({ t }: { t: number }): ReactElement {
         <Reveal t={t} at={7400}><Bubble who="agent" name="Agent · challenges-and-streaks" at="now">Weekly streaks are in, with 24 passing tests, and pushed. The streak card on the challenges page shows the current week.</Bubble></Reveal>
       </div>
       <div className={`${shape.container} flex flex-col gap-1 bg-surface-2 p-4 font-mono text-caption shadow-surface-1`} style={{ width: 420 }}>
-        <span className="text-muted-foreground">Terminal · Darktop · still running</span>
+        <span className="text-muted-foreground">Terminal · Desktop · still running</span>
         {lines.slice(0, t >= 4000 ? 6 : 5).map(line => <span key={line} className="text-foreground" style={{ whiteSpace: 'pre' }}>{line}</span>)}
       </div>
     </div>

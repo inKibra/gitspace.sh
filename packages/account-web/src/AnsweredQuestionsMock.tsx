@@ -62,7 +62,7 @@ const PLAN: readonly Asked[] = [
 const IOS: readonly Asked[] = [
   { id: 'machine', prompt: 'Which machine should build the iOS app?', options: [
     { id: 'mac', title: 'MacBook-Pro-2.local', description: 'darwin-arm64 · online' },
-    { id: 'darktop', title: 'Darktop', description: 'linux-x64 · cannot run Xcode' },
+    { id: 'desktop', title: 'Desktop', description: 'linux-x64 · cannot run Xcode' },
   ] },
   { id: 'tests', prompt: 'Run the full test suite or only the changed targets?', options: [{ id: 'full', title: 'Full suite' }, { id: 'changed', title: 'Changed targets' }] },
 ];
@@ -146,7 +146,7 @@ function MockSidebar(): ReactElement {
         <SidebarMenu>
           <SidebarMenuItem><SidebarMenuButton icon={dot('blue')}>GitSpace</SidebarMenuButton></SidebarMenuItem>
           <SidebarMenuItem>
-            <SidebarMenuButton icon={dot('blue')}>inkibra core</SidebarMenuButton>
+            <SidebarMenuButton icon={dot('blue')}>Acme core</SidebarMenuButton>
             <SidebarMenuSub open>
               {['DJMC · Jev arc policies', 'ToneTempo · Challenges and streaks', 'automatic-music-updates', 'inkibra-site-posthog-brief'].map(name => <SidebarMenuSubItem key={name}>
                 <SidebarMenuSubButton render={<button type="button" />} icon={dot(name.startsWith('ToneTempo') ? 'orange' : 'blue')} isActive={name.startsWith('ToneTempo')}>{name}</SidebarMenuSubButton>

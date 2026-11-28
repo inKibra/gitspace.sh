@@ -469,7 +469,7 @@ Secrets stay sealed in the cloud and are materialized per run. New: grants on se
 ### 10.8 Open questions
 
 - Shared cloud resources across copies (inkibra's preview): default shared through bindings, per-copy opt-in later.
-- Fixed ports (golconda) collide when two copies share a machine.
+- Fixed ports (ledger) collide when two copies share a machine.
 - Clean-up of runner copies and how long warm copies are kept.
 
 ### 10.9 Browser origin grants
@@ -613,11 +613,11 @@ A classifier role defaulting to TypeSafe Jev (available through `typesafe`, `ope
 
 ## 15. Milestones
 
-Each milestone ends with its exit criteria demonstrated on Darktop and recorded as Goal evidence.
+Each milestone ends with its exit criteria demonstrated on Desktop and recorded as Goal evidence.
 
 | ID | Milestone | Exit criteria |
 |---|---|---|
-| **M0** | Decisions and spikes | S0: Codex model and usage request from Cloudflare egress. S1: pi-durable + Chord + `pi-ai` in a DO: one conversation, one tool call over the relay, CPU per turn and per commit, Worker bundle compatibility, provider-aborted stream behaviour, context edits omitting a span, tool set changed mid-conversation. S2: Artifacts import of inkibra-core, fork, clone/push timings, snapshot to a private ref, `readFile` from a DO, LFS answer, WalGit comparison. Go/no-go for option B. |
+| **M0** | Decisions and spikes | S0: Codex model and usage request from Cloudflare egress. S1: pi-durable + Chord + `pi-ai` in a DO: one conversation, one tool call over the relay, CPU per turn and per commit, Worker bundle compatibility, provider-aborted stream behaviour, context edits omitting a span, tool set changed mid-conversation. S2: Artifacts import of acme-core, fork, clone/push timings, snapshot to a private ref, `readFile` from a DO, LFS answer, WalGit comparison. Go/no-go for option B. |
 | **M1** | Runtime core | Workspace DO hosts a Session; vault-backed providers with the catalog overlay on DO storage; machine attachment and routing for `read`/`write`/`edit`/`apply_patch`/`bash`/`grep`/`find` with the edit-tool rule; relay transport; kill-and-resume tests for DO and machine. |
 | **M2** | Agent parity | `todo`, `ask`, plan mode and approval, skills, rules (tool-call and judged TTSR), `space_*`, MCP via `pi-mcp`, `drive://`, cloud WorkerLoader codemode, web search, images, titles, QA reporting, history search. Real-model test suite equivalent to today's `account-omp` suite. |
 | **M3** | Supervisor and environments | Supervisor replaces the OMP broker for terminals, services, lifecycle runs; `LifecycleRun` tasks; environment definitions from commits; `jobs`/`proc`/`agents` tools; Agent hub panel. |
@@ -652,7 +652,7 @@ Each milestone ends with its exit criteria demonstrated on Darktop and recorded 
 
 ## 18. Type system
 
-The rules live in the repository skill `.agents/skills/type-system` (adapted from inkibra core's skill to zod, `better-result`, result-rpc and tsgo; also linked from `.claude/skills`). Every new package in §5.4 follows it strictly; existing packages adopt it where they are touched. This section records only how the runtime applies it.
+The rules live in the repository skill `.agents/skills/type-system` (adapted from Acme core's skill to zod, `better-result`, result-rpc and tsgo; also linked from `.claude/skills`). Every new package in §5.4 follows it strictly; existing packages adopt it where they are touched. This section records only how the runtime applies it.
 
 ### 18.1 Owners in the runtime
 
@@ -688,5 +688,5 @@ New packages keep `src/**/*.typecheck.ts` files, compiled by `bun run typecheck:
 - OMP Rust rewrite: `can1357/oh-my-pi` branch `omp2`, `README.md`, `PHILOSOPHY.md`, `scripts/gen-npm-packages.py`.
 - Cloudflare Artifacts: changelog 2026-10-01; docs `artifacts/api/workers-binding`, `platform/limits`, `platform/pricing`, `api/git-protocol`.
 - GitSpace code: `account-machine/src/{workspace-environment,workspace-hub,workspace-services,protected-lifecycle,provider-auth,omp-runtime,session-coordinator}.ts`, `account-worker/src/{application,project-environment,project-secrets,providers}.ts`, `platform/src/{index,deployer,tenant-deployments}.ts`, `protocol-environment/src/{schema,lifecycle}.ts`, `sandbox-worker/src/index.ts`.
-- `.agents/skills/type-system` in this repository, adapted from inkibra core's `skills/type-system`.
+- `.agents/skills/type-system` in this repository, adapted from Acme core's `skills/type-system`.
 - Related docs: `docs/INFERENCE-PROFILES-DESIGN.md`, `packages/docs/src/workspace-lifecycle.mdx`, `docs/FLEET.md`.

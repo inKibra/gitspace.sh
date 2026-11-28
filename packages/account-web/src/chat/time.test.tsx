@@ -86,7 +86,7 @@ describe('item times', () => {
     expect(times({ id: 'u1', type: 'message', role: 'user', text: 'Ship it', at: local(6, 9, 5) })).toEqual([{ text: '09:05', title: 'Friday, November 6, 2026 at 09:05' }]);
     expect(times({ id: 'u2', type: 'message', role: 'user', text: 'Ship it', at: local(4, 18, 48) })).toEqual([{ text: 'Nov 4 · 18:48', title: 'Wednesday, November 4, 2026 at 18:48' }]);
     expect(times({ id: 'e1', type: 'interruption', reason: 'event', kind: 'agent-message', title: 'Reviewer', detail: 'No findings.', at: local(4, 18, 48) })).toEqual([{ text: 'Nov 4 · 18:48', title: 'Wednesday, November 4, 2026 at 18:48' }]);
-    expect(times({ id: 'n1', type: 'interruption', reason: 'machine', title: 'Machine', detail: 'Darktop is online.', at: local(6, 11, 30) })).toEqual([{ text: '11:30', title: 'Friday, November 6, 2026 at 11:30' }]);
+    expect(times({ id: 'n1', type: 'interruption', reason: 'machine', title: 'Machine', detail: 'Desktop is online.', at: local(6, 11, 30) })).toEqual([{ text: '11:30', title: 'Friday, November 6, 2026 at 11:30' }]);
     expect(times({ id: 'w1', type: 'workspace-report', projectId: 'p', workspaceId: 'w', name: 'FEAT-1', requestId: 'r', outcome: 'finished', excerpt: null, source: null, at: local(5, 7) })).toEqual([{ text: 'Nov 5 · 07:00', title: 'Thursday, November 5, 2026 at 07:00' }]);
   });
 
@@ -101,7 +101,7 @@ describe('item times', () => {
       { id: 'u1', type: 'message', role: 'user', text: 'Ship it' },
       { id: 'a1', type: 'message', role: 'assistant', text: 'Done.' },
       { id: 'e1', type: 'interruption', reason: 'event', kind: 'agent-message', title: 'Reviewer', detail: 'No findings.' },
-      { id: 'n1', type: 'interruption', reason: 'machine', title: 'Machine', detail: 'Darktop is online.' },
+      { id: 'n1', type: 'interruption', reason: 'machine', title: 'Machine', detail: 'Desktop is online.' },
       { id: 'c1', type: 'interruption', reason: 'compacted', title: 'Context compacted', recovered: true },
     ];
     for (const item of items) {

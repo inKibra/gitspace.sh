@@ -42,7 +42,7 @@ function Site({ host, level }: { host: string; level: 'read' | 'interact' | 'ful
 const projects = [
   { id: 'gitspace', name: 'GitSpace' },
   { id: 'tonetempo', name: 'ToneTempo' },
-  { id: 'recordless', name: 'recordless' },
+  { id: 'riverbend', name: 'riverbend' },
 ];
 
 function PluginsBrowsers() {
@@ -71,8 +71,8 @@ function PluginsBrowsers() {
           </Card>
           <Card size="compact">
             <CardMedia icon={MonitorGlyph} />
-            <CardHeader><CardTitle>Darktop</CardTitle><CardDescription>Chrome 141 · Linux · extension 5.2.2</CardDescription><span className="text-caption text-[#b45309]">Paired, but not approved for any project, so no agent can use it.</span></CardHeader>
-            <CardFooter className="gap-2"><Badge color="gray">Offline · seen 2 h ago</Badge><Button variant="secondary" onClick={() => setManage(true)}>Approve for projects</Button><Button variant="tertiary" size="icon-compact" aria-label="Forget Darktop"><Trash01 width={16} height={16} strokeWidth={1.5} /></Button></CardFooter>
+            <CardHeader><CardTitle>Desktop</CardTitle><CardDescription>Chrome 141 · Linux · extension 5.2.2</CardDescription><span className="text-caption text-[#b45309]">Paired, but not approved for any project, so no agent can use it.</span></CardHeader>
+            <CardFooter className="gap-2"><Badge color="gray">Offline · seen 2 h ago</Badge><Button variant="secondary" onClick={() => setManage(true)}>Approve for projects</Button><Button variant="tertiary" size="icon-compact" aria-label="Forget Desktop"><Trash01 width={16} height={16} strokeWidth={1.5} /></Button></CardFooter>
           </Card>
         </CardGroup>
       </section>
@@ -90,8 +90,8 @@ function PluginsBrowsers() {
 }
 
 function ManageChromeDialog({ open, onOpenChange }: { open: boolean; onOpenChange(open: boolean): void }) {
-  const [approved, setApproved] = useState<Record<string, boolean>>({ gitspace: true, tonetempo: true, recordless: false });
-  const [defaults, setDefaults] = useState<Record<string, boolean>>({ gitspace: true, tonetempo: false, recordless: false });
+  const [approved, setApproved] = useState<Record<string, boolean>>({ gitspace: true, tonetempo: true, riverbend: false });
+  const [defaults, setDefaults] = useState<Record<string, boolean>>({ gitspace: true, tonetempo: false, riverbend: false });
   return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent size="lg">
     <DialogHeader><DialogTitle>Studio desktop</DialogTitle><DialogDescription>Paired Oct 23 · fingerprint <span className="font-mono">9F2A 61C0 3B7E D104</span> · online now</DialogDescription></DialogHeader>
     <InputGroup><InputField index={0} label="Name" value="Studio desktop" onChange={() => {}} /><InputField index={1} label="Note for agents" value="Signed in to the staging admin account" onChange={() => {}} /></InputGroup>
@@ -121,7 +121,7 @@ function Step({ n, title, done, children }: { n: number; title: string; done?: b
 function PairChromeDialog({ open, onOpenChange }: { open: boolean; onOpenChange(open: boolean): void }) {
   const [answered, setAnswered] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
-  const [chosen, setChosen] = useState<Record<string, boolean>>({ gitspace: true, tonetempo: false, recordless: false });
+  const [chosen, setChosen] = useState<Record<string, boolean>>({ gitspace: true, tonetempo: false, riverbend: false });
   return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent size="lg">
     <DialogHeader><DialogTitle>Pair a Chrome</DialogTitle><DialogDescription>One pass from install to an agent-ready Chrome. Nothing is usable until you confirm the fingerprint.</DialogDescription></DialogHeader>
     <ol className="flex flex-col gap-2">

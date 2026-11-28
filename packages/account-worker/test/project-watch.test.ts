@@ -117,7 +117,7 @@ test('only the turn the project agent started reports, once; later turns, a pers
       await f.submit('person', 'Rename the bucket too.', 'device-1');
       await f.settle();
       f.reply('Synced.');
-      await f.submit('machine', 'Sync finished on Darktop.');
+      await f.submit('machine', 'Sync finished on Desktop.');
       await f.settle();
       expect(f.reports).toHaveLength(1);
     } finally { await f.runtime.harness.close(BACKGROUND_CONTEXT); }
@@ -438,7 +438,7 @@ test('plan, tool and lifecycle approvals and take-over requests are listed as a 
       await f.runtime.harness.commit(async tx => {
         (await tx.doc(QuestionsDoc)).items.push(
           { id: 'plan', conversationId, kind: 'approval', prompt: 'Approve the plan?', choices: [], answer: null },
-          { id: 'machine', conversationId, kind: 'approval', prompt: 'Attach Darktop?', choices: ['Approve', 'Reject'], answer: null, tool: { name: 'machines', args: { op: 'attach', machine: 'darktop' } } },
+          { id: 'machine', conversationId, kind: 'approval', prompt: 'Attach Desktop?', choices: ['Approve', 'Reject'], answer: null, tool: { name: 'machines', args: { op: 'attach', machine: 'desktop' } } },
           { id: 'scripts', conversationId, kind: 'lifecycle-approval', prompt: 'Run setup?', choices: ['project', 'workspace', 'not-now'], answer: null },
           { id: 'tab', conversationId, kind: 'takeover', prompt: 'Sign in for me.', choices: ['Take over', 'Not now'], answer: null, takeover },
         );

@@ -205,48 +205,48 @@ const REVIEW_CHECKS = (draft: boolean | null, author: boolean | null) => [
 
 const RUNS: readonly Run[] = [
   {
-    id: 'r9', project: 'inkibra core', status: 'queued', by: 'Review pull requests', event: 'pull_request.opened', subject: 'PR #1143 · Drop .omp agent support',
+    id: 'r9', project: 'Acme core', status: 'queued', by: 'Review pull requests', event: 'pull_request.opened', subject: 'PR #1143 · Drop .omp agent support',
     workspace: null, outcome: 'Waiting for a slot: 2 of 2 runs are working', at: '1 min ago', checks: REVIEW_CHECKS(true, true),
     timeline: [{ at: '14:02:11', label: 'Delivery received' }, { at: '14:02:11', label: 'Author has write access' }, { at: '14:02:11', label: 'Conditions passed' }, { at: '14:02:11', label: 'Queued: 2 of 2 runs working' }],
   },
   {
-    id: 'r8', project: 'inkibra core', status: 'running', by: 'Review feedback to its workspace', event: 'pull_request_review_comment.created', subject: 'PR #1140 · Bounded history for sessions',
+    id: 'r8', project: 'Acme core', status: 'running', by: 'Review feedback to its workspace', event: 'pull_request_review_comment.created', subject: 'PR #1140 · Bounded history for sessions',
     workspace: 'session-recovery', outcome: 'Review comment from @dana: woke its agent', at: '3 min ago', checks: [],
     timeline: [{ at: '13:59:02', label: 'Delivery received' }, { at: '13:59:02', label: 'Linked to session-recovery (same branch)' }, { at: '13:59:02', label: 'Review comment from a person: wakes the agent' }, { at: '13:59:03', label: 'Round 2 of 5 today on this pull request' }, { at: '13:59:03', label: 'Sent; agent working' }],
   },
   {
-    id: 'r7', project: 'inkibra core', status: 'running', by: 'Start work from labels', event: 'issues.labeled · gitspace:plan', subject: 'Issue #391 · Coach subscriptions renew twice',
+    id: 'r7', project: 'Acme core', status: 'running', by: 'Start work from labels', event: 'issues.labeled · gitspace:plan', subject: 'Issue #391 · Coach subscriptions renew twice',
     workspace: 'plan-issue-391', outcome: 'Started in Plan and linked to the issue', at: '9 min ago', checks: [],
     timeline: [{ at: '13:53:40', label: 'Delivery received' }, { at: '13:53:40', label: 'Label gitspace:plan added by @bradleat (write access)' }, { at: '13:53:41', label: 'Started workspace plan-issue-391 in Plan' }, { at: '13:53:41', label: 'Linked to Issue #391' }],
   },
   {
-    id: 'r6', project: 'inkibra core', status: 'skipped', by: 'Review pull requests', event: 'pull_request.opened', subject: 'PR #1144 · Faster tone detection',
+    id: 'r6', project: 'Acme core', status: 'skipped', by: 'Review pull requests', event: 'pull_request.opened', subject: 'PR #1144 · Faster tone detection',
     workspace: null, outcome: 'Author not trusted: @outside-dev', at: '20 min ago', checks: REVIEW_CHECKS(true, true),
     timeline: [{ at: '13:42:15', label: 'Delivery received' }, { at: '13:42:15', label: 'Skipped: @outside-dev has no write access and is not on the trust list' }],
   },
   {
-    id: 'r5', project: 'inkibra core', status: 'finished', by: `Mentions of ${BOT}`, event: 'issue_comment.created', subject: 'Issue #392 · Renewal emails go to the old address',
+    id: 'r5', project: 'Acme core', status: 'finished', by: `Mentions of ${BOT}`, event: 'issue_comment.created', subject: 'Issue #392 · Renewal emails go to the old address',
     workspace: 'plan-issue-391', outcome: 'No linked workspace: the project agent linked it to plan-issue-391', at: '41 min ago', checks: [],
     timeline: [{ at: '13:21:08', label: 'Delivery received' }, { at: '13:21:08', label: `Comment by @bradleat mentions ${BOT}` }, { at: '13:21:08', label: 'Issue #392 has no linked workspace: sent to the project agent' }, { at: '13:21:40', label: 'Project agent linked Issue #392 to plan-issue-391 and sent it the comment' }],
   },
   {
-    id: 'r4', project: 'inkibra core', status: 'skipped', by: 'Review pull requests', event: 'pull_request.opened', subject: 'PR #1141 · WIP: automations run model',
+    id: 'r4', project: 'Acme core', status: 'skipped', by: 'Review pull requests', event: 'pull_request.opened', subject: 'PR #1141 · WIP: automations run model',
     workspace: null, outcome: 'Conditions: the pull request is a draft', at: '38 min ago', checks: REVIEW_CHECKS(false, null),
     timeline: [{ at: '13:24:19', label: 'Delivery received' }, { at: '13:24:19', label: 'Skipped: the pull request is a draft' }],
   },
   {
-    id: 'r3', project: 'inkibra core', status: 'finished', by: 'Merged or closed', event: 'pull_request.closed · merged', subject: 'PR #1131 · Storybook JIT server memory',
+    id: 'r3', project: 'Acme core', status: 'finished', by: 'Merged or closed', event: 'pull_request.closed · merged', subject: 'PR #1131 · Storybook JIT server memory',
     workspace: 'storybook-jit', outcome: 'Merged: a notice to its workspace; the agent stays asleep', at: '1 h ago', checks: [],
     timeline: [{ at: '12:58:51', label: 'Delivery received' }, { at: '12:58:51', label: 'Linked to storybook-jit (linked by you)' }, { at: '12:58:51', label: 'Notice added; the agent stays asleep' }],
   },
   {
-    id: 'r2', project: 'inkibra core', status: 'finished', by: 'Triage new issues', event: 'issues.opened', subject: 'Issue #387 · Settings page loses scroll',
-    workspace: 'inkibra core', outcome: 'The project agent started triage-issue-387 in Plan', at: '2 h ago', checks: [{ label: "no label 'wontfix'", passed: true }],
+    id: 'r2', project: 'Acme core', status: 'finished', by: 'Triage new issues', event: 'issues.opened', subject: 'Issue #387 · Settings page loses scroll',
+    workspace: 'Acme core', outcome: 'The project agent started triage-issue-387 in Plan', at: '2 h ago', checks: [{ label: "no label 'wontfix'", passed: true }],
     timeline: [{ at: '11:40:55', label: 'Delivery received' }, { at: '11:40:55', label: 'Conditions passed' }, { at: '11:40:56', label: 'Asked the project agent' }, { at: '11:41:30', label: 'Project agent started triage-issue-387 in Plan and linked it' }],
   },
   {
-    id: 'r1', project: 'inkibra core', status: 'failed', by: 'Nightly dependency audit', event: 'schedule 06:00 UTC', subject: '—',
-    workspace: 'inkibra core', outcome: 'anthropic/claude-sonnet-5-5: every Anthropic account is out until 08:00', at: '7 h ago', checks: [],
+    id: 'r1', project: 'Acme core', status: 'failed', by: 'Nightly dependency audit', event: 'schedule 06:00 UTC', subject: '—',
+    workspace: 'Acme core', outcome: 'anthropic/claude-sonnet-5-5: every Anthropic account is out until 08:00', at: '7 h ago', checks: [],
     timeline: [{ at: '06:00:00', label: 'Tick' }, { at: '06:00:01', label: 'Sent to the project agent' }, { at: '06:00:04', label: 'Failed: anthropic/claude-sonnet-5-5: every Anthropic account is out until 08:00' }],
   },
 ];
@@ -295,10 +295,10 @@ function gitspaceRuns(source: GitSpaceSource): readonly Run[] {
 }
 
 const PROJECTS: readonly { name: string; on: string; failed: number }[] = [
-  { name: 'inkibra core', on: '8 of 10 on · 1 proposed', failed: 1 },
+  { name: 'Acme core', on: '8 of 10 on · 1 proposed', failed: 1 },
   { name: GITSPACE, on: '7 on · watches 2 repositories · 1 linked pull request', failed: 0 },
-  { name: 'Golconda IDF Data Vault', on: 'No automations · GitHub App not installed', failed: 0 },
-  { name: 'Golconda PPVA Enrollment', on: 'No automations · GitHub App not installed', failed: 0 },
+  { name: 'Ledger Data Vault', on: 'No automations · GitHub App not installed', failed: 0 },
+  { name: 'Ledger Enrollment', on: 'No automations · GitHub App not installed', failed: 0 },
 ];
 const ALL_PROJECTS = 'All projects';
 
@@ -453,7 +453,7 @@ function TrustList(): ReactElement {
   const [trusted, setTrusted] = useState<readonly string[]>(['@mira-contract', '@renovate[bot]']);
   const [draft, setDraft] = useState('');
   return <div className={`${shape.container} flex flex-col gap-3 bg-surface-2 px-5 py-4 shadow-surface-1`}>
-    <p className="text-body text-muted-foreground">An event runs only if its author has write access to <span className="font-mono text-caption text-foreground">inKibra/inkibra-core</span> (6 people, checked through the GitHub App when the event arrives) or is listed here. For a comment, the author is the commenter. Events from anyone else do not match any automation; they show as skipped in recent runs. Schedules and manual runs are always trusted.</p>
+    <p className="text-body text-muted-foreground">An event runs only if its author has write access to <span className="font-mono text-caption text-foreground">Acme/acme-core</span> (6 people, checked through the GitHub App when the event arrives) or is listed here. For a comment, the author is the commenter. Events from anyone else do not match any automation; they show as skipped in recent runs. Schedules and manual runs are always trusted.</p>
     <div className="flex flex-wrap gap-2">{trusted.map(login => <span key={login} className={`${shape.input} flex items-center gap-1 border border-border bg-background py-0.5 pl-2 pr-0.5`}>
       <span className="font-mono text-caption">{login}</span>
       <Button variant="ghost" size="icon" type="button" aria-label={`Stop trusting ${login}`} onClick={() => setTrusted(current => current.filter(entry => entry !== login))}><XCircle width={14} height={14} strokeWidth={1.5} /></Button>
@@ -543,7 +543,7 @@ function TestWithPastEvent(): ReactElement {
         ? <p className="text-body">Would skip: {untrusted ? 'the author is not trusted' : 'the pull request is a draft'}.</p>
         : <>
           <p className="text-body">Would start workspace <span className="font-mono text-caption">review-pr-1143</span> in <strong className="font-semibold">Review</strong> with agent <span className="font-mono text-caption">reviewer</span>, linked to PR #1143. Its first message:</p>
-          <blockquote className={`${shape.input} border border-border bg-surface-2 p-2 text-body`}>Review https://github.com/inKibra/inkibra-core/pull/1143 against main. Leave one review with inline comments; request changes only for correctness or security problems.</blockquote>
+          <blockquote className={`${shape.input} border border-border bg-surface-2 p-2 text-body`}>Review https://github.com/Acme/acme-core/pull/1143 against main. Leave one review with inline comments; request changes only for correctness or security problems.</blockquote>
         </>}
       <div><Button variant="primary" size="compact" type="button" leadingIcon={glyph(Play)} disabled={untrusted || draft}>Run it</Button></div>
     </div> : null}
@@ -913,14 +913,14 @@ function AllProjects({ onPick, onOpen }: { onPick(project: string): void; onOpen
 
 function AutomationsMock(): ReactElement {
   const shape = useShape();
-  const [project, setProject] = useState('inkibra core');
+  const [project, setProject] = useState('Acme core');
   const [editing, setEditing] = useState<EditorPreset | null>(null);
   const [source, setSource] = useState<GitSpaceSource>('upstream');
   const [linking, setLinking] = useState(false);
   const [run, setRun] = useState<Run | null>(null);
   const all = project === ALL_PROJECTS;
   const gitspace = project === GITSPACE;
-  const empty = project !== ALL_PROJECTS && project !== 'inkibra core' && !gitspace;
+  const empty = project !== ALL_PROJECTS && project !== 'Acme core' && !gitspace;
   return <div className="flex h-dvh flex-col bg-background">
     <PageCanvas>
       <PageHeader kicker={<ProjectPicker project={project} onPick={setProject} />} title="Automations"

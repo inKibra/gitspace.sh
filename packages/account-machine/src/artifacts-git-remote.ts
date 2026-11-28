@@ -172,7 +172,7 @@ type ArtifactsPush = {
  * Artifacts' receive-pack refuses some pushes that a differently built one passes (`artifactsPushRefusal`):
  * - packs of deltas, which it accepts sent whole: with HTTP 500 (djmc, 2026-10-19: 164 objects, 146 deltas, refused
  *   every time), saying a delta's base is missing though it advertised that base (inkibra-cell-executor-sandbox-spike,
- *   2026-10-28), or saying an offset delta's base, always in the same pack, is not found (three inkibra-core workspaces
+ *   2026-10-28), or saying an offset delta's base, always in the same pack, is not found (three acme-core workspaces
  *   since 2026-10-23);
  * - packs leaving out commits it lacks. It advertises no shallow boundaries, so git counts the history below them,
  *   which this checkout may hold, as the remote's and omits it: the executor-sandbox push, sent whole, was refused with

@@ -1094,7 +1094,7 @@ describe('cloud workspace lifecycle with no machines', () => {
     const identity = RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId: project.id });
     const space = env.SPACE_AUTHORITY.getByName(`${userId}:${project.id}`);
     await space.runtimeRepositoryCheckpoint(identity);
-    const cache = RuntimeAttachmentSchema.parse({ ...identity, attachmentId: 'base-cache', machineId: 'darktop', generation: 1, role: 'cache', state: 'ready',
+    const cache = RuntimeAttachmentSchema.parse({ ...identity, attachmentId: 'base-cache', machineId: 'desktop', generation: 1, role: 'cache', state: 'ready',
       checkout: { kind: 'shared', branch: 'main' }, capabilities: [], updatedAt: new Date().toISOString(), online: true });
     await runInDurableObject(space, (_instance, state) => {
       state.storage.sql.exec('INSERT OR REPLACE INTO runtime_attachments(id,record,secret) VALUES(?,?,?)', cache.attachmentId, JSON.stringify(cache), 'fixture');

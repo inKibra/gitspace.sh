@@ -101,7 +101,7 @@ function workspacesMakeGroups(root: Identity) {
 test('your Chrome’s popup lists the account’s active workspaces: those of projects that approved this Chrome first, the one whose group here was used last first, then the most recently changed; the others after, saying so', async () => {
   const shop = await project('Shop', ['Checkout', 'Returns'], ['Old sale']);
   const tone = await project('ToneTempo', ['Coach subscriptions', 'Challenges and streaks']);
-  const core = await project('inkibra core', ['Workflow schedules']);
+  const core = await project('Acme core', ['Workflow schedules']);
   const ours = new Set([shop.projectId, tone.projectId, core.projectId]);
   await runInDurableObject(env.RELAY.getByName(env.RELAY_NAME), async (relay: UserRelayDO) => {
     const root = await keys();
@@ -111,7 +111,7 @@ test('your Chrome’s popup lists the account’s active workspaces: those of pr
     await approve(relay, tone.projectId, browser);
     workspacesMakeGroups(root);
     const list = async () => Workspaces.parse((await signed(browser, { op: 'list' })).value).workspaces.filter(item => ours.has(item.projectId)).map(item => `${item.project} / ${item.name}${item.approved ? '' : ' (not approved)'}`);
-    expect(await list()).toEqual(['ToneTempo / Challenges and streaks', 'ToneTempo / Coach subscriptions', 'Shop / Returns', 'Shop / Checkout', 'inkibra core / Workflow schedules (not approved)']);
+    expect(await list()).toEqual(['ToneTempo / Challenges and streaks', 'ToneTempo / Coach subscriptions', 'Shop / Returns', 'Shop / Checkout', 'Acme core / Workflow schedules (not approved)']);
     // Checkout's group here is used: it comes first.
     expect(await signed(browser, { op: 'add', projectId: shop.projectId, workspaceId: shop.id('Checkout'), targetId: 'your-tab' })).toMatchObject({ status: 200 });
     expect((await list())[0]).toBe('Shop / Checkout');
@@ -121,7 +121,7 @@ test('your Chrome’s popup lists the account’s active workspaces: those of pr
 
 test('adding a tab: the workspace makes or renews its group on this Chrome and the tab joins it as if you dragged it in; refused for a project that has not approved this Chrome or a workspace that is not active', async () => {
   const shop = await project('Shop', ['Checkout'], ['Old sale']);
-  const core = await project('inkibra core', ['Workflow schedules']);
+  const core = await project('Acme core', ['Workflow schedules']);
   await runInDurableObject(env.RELAY.getByName(env.RELAY_NAME), async (relay: UserRelayDO) => {
     const root = await keys();
     const browser = await chrome(relay, root, '192.0.2.72', { addTab: true }, message => {
@@ -133,7 +133,7 @@ test('adding a tab: the workspace makes or renews its group on this Chrome and t
     const asked = workspacesMakeGroups(root);
     const adopted = () => browser.received.filter(message => message.operation === 'adoptTab').map(({ groupId, targetId }) => ({ groupId, targetId }));
 
-    expect(await signed(browser, { op: 'add', projectId: core.projectId, workspaceId: core.id('Workflow schedules'), targetId: 'your-tab' })).toMatchObject({ status: 403, error: { code: 'WORKSPACE_CHROME_UNAPPROVED', message: 'This Chrome isn\'t approved in inkibra core: approve it in GitSpace, Plugins → Browsers → Manage Chrome' } });
+    expect(await signed(browser, { op: 'add', projectId: core.projectId, workspaceId: core.id('Workflow schedules'), targetId: 'your-tab' })).toMatchObject({ status: 403, error: { code: 'WORKSPACE_CHROME_UNAPPROVED', message: 'This Chrome isn\'t approved in Acme core: approve it in GitSpace, Plugins → Browsers → Manage Chrome' } });
     expect(await signed(browser, { op: 'add', projectId: shop.projectId, workspaceId: shop.id('Old sale'), targetId: 'your-tab' })).toMatchObject({ status: 404, error: { code: 'WORKSPACE_UNKNOWN' } });
     expect(await signed(browser, { op: 'add', projectId: core.projectId, workspaceId: shop.id('Checkout'), targetId: 'your-tab' })).toMatchObject({ status: 404, error: { code: 'WORKSPACE_UNKNOWN' } });
     expect(asked).toEqual([]);

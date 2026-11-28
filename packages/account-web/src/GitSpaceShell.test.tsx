@@ -50,7 +50,7 @@ describe('GitSpaceShell', () => {
   it('mentions the inference profile only while the next turn would use a different one', () => {
     const admitted = { profileId: 'default', profileRevision: 3 };
     expect(pendingProfileChange(admitted, { id: 'default', name: 'Default', revision: 3 })).toBeNull();
-    expect(pendingProfileChange(admitted, { id: 'golconda', name: 'Golconda', revision: 1 })).toBe('Next turn uses Golconda');
+    expect(pendingProfileChange(admitted, { id: 'ledger', name: 'Ledger', revision: 1 })).toBe('Next turn uses Ledger');
     expect(pendingProfileChange(admitted, { id: 'default', name: 'Default', revision: 4 })).toBe('Next turn uses updated Default');
     // No session admission yet, or assignments still loading: nothing to compare.
     expect(pendingProfileChange(undefined, { id: 'default', name: 'Default', revision: 3 })).toBeNull();
@@ -123,7 +123,7 @@ describe('GitSpaceShell', () => {
     const rejects = async () => { throw new Error('not used'); };
     const pendingAsk: NonNullable<NonNullable<GitSpaceShellProps['sessionControls']>['value']['pendingAsk']> = {
       id: 'machine-attach:m-1:a', source: 'gitspace', links: [{ label: 'Open plan', uri: 'drive://workspace/music-updates-plan.md' }],
-      questions: [{ id: 'decision', question: 'Attach Darktop to this workspace? Agents may not attach it on their own.', header: 'Approval required', multi: false, recommended: null, written: false, options: [
+      questions: [{ id: 'decision', question: 'Attach Desktop to this workspace? Agents may not attach it on their own.', header: 'Approval required', multi: false, recommended: null, written: false, options: [
         { label: 'Approve', description: null, preview: null },
         { label: 'Reject', description: null, preview: null },
       ] }],
@@ -133,14 +133,14 @@ describe('GitSpaceShell', () => {
       onCycleRole: rejects, onSetModel: rejects, onSetThinking: rejects, onSetFast: rejects, onSetGoal: rejects, onCompact: rejects, onClearQueue: rejects, onRemoveQueuedMessage: rejects, onPromoteQueuedMessage: rejects, onDismissAutomationRun: rejects, onStop: rejects, onNavigateTree: rejects,
     };
     const html = renderToStaticMarkup(<GitSpaceShell {...verticalSliceFixture} sessionControls={sessionControls} />);
-    expect(html).toContain('Attach Darktop to this workspace?');
+    expect(html).toContain('Attach Desktop to this workspace?');
     expect(html).toContain('Approve');
     expect(html).toContain('Reject');
     expect(html).not.toContain('Describe in your own words');
     expect(html).toContain('Open plan');
     expect(html).toContain(`href="${resourceLinkHref('drive://workspace/music-updates-plan.md')}"`);
     const toolAsk = renderToStaticMarkup(<GitSpaceShell {...verticalSliceFixture} sessionControls={{ ...sessionControls, value: { ...sessionControls.value, pendingAsk: { ...pendingAsk, source: 'ask-tool' } } }} />);
-    expect(toolAsk).not.toContain('Attach Darktop to this workspace?');
+    expect(toolAsk).not.toContain('Attach Desktop to this workspace?');
   });
 
   it('never offers a dependent as a new dependency on the Overview', () => {

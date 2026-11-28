@@ -39,7 +39,7 @@ const GIT_BULK = /(?:^|\/)\.git\/(?:.+\/)?(?:objects|lfs|logs|refs\/(?:remotes|t
 
 /**
  * Linux watches each folder on its own (inotify), so one recursive `fs.watch` of a checkout held a watch for every
- * folder in it, `node_modules`, build output and Git's objects included: Darktop held 751,731 of the 1,048,576 its user
+ * folder in it, `node_modules`, build output and Git's objects included: Desktop held 751,731 of the 1,048,576 its user
  * may, and a checkout whose watch then failed stopped noticing edits (2026-11-02). This watches only the folders where
  * Git sees a change: none Git lists as ignored (`--directory` names a folder only when nothing in it is tracked), and
  * none of Git's bulk folders (`GIT_BULK`). A

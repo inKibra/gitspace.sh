@@ -395,7 +395,7 @@ describe('when items happened', () => {
       { sessionId: 's1', ordinal: 3, kind: 'message_update', payload: reply('Start'), createdAt: at(3) },
       { sessionId: 's1', ordinal: 4, kind: 'message_end', payload: reply('Started.'), createdAt: new Date(at(9)) },
       { sessionId: 's1', ordinal: 5, kind: 'message_end', payload: { message: { role: 'user', content: [{ type: 'text', text: formatConversationEvents([{ kind: 'agent-message', source: 'Reviewer', text: 'No findings.' }]) }] } }, createdAt: at(10) },
-      { sessionId: 's1', ordinal: 6, kind: 'message_end', payload: { message: { role: 'custom', customType: 'gitspace.machine-notice', display: true, title: 'Machine', content: 'Darktop is online.' } }, createdAt: at(11) },
+      { sessionId: 's1', ordinal: 6, kind: 'message_end', payload: { message: { role: 'custom', customType: 'gitspace.machine-notice', display: true, title: 'Machine', content: 'Desktop is online.' } }, createdAt: at(11) },
       { sessionId: 's1', ordinal: 7, kind: 'message_end', payload: { message: { role: 'custom', customType: 'gitspace.workspace', display: true, content: '', details: { projectId: 'p', workspaceId: 'w', name: 'FEAT-1', requestId: 'r', outcome: 'finished', excerpt: null } } }, createdAt: at(12) },
       { sessionId: 's1', ordinal: 8, kind: 'compaction', payload: {} },
     ]);

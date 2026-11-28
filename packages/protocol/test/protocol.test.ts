@@ -16,7 +16,7 @@ const publicKey = btoa(String.fromCharCode(...ed25519.getPublicKey(privateKey)))
 describe('relay authorization', () => {
   it('signs the exact path and rejects replay against another target', () => {
     const now = 1_800_000_000_000;
-    const target = '/ws?role=machine&id=darktop';
+    const target = '/ws?role=machine&id=desktop';
     const header = createRelayAuthorization(privateKey, target, now, '12345678-1234-4234-8234-123456789abc');
 
     expect(verifyRelayAuthorization({ header, signingPublicKey: publicKey, target, now, maxSkewMs: 60_000 }).status).toBe('ok');
@@ -25,7 +25,7 @@ describe('relay authorization', () => {
 
   it('marks only validly signed proofs outside the window as expired', () => {
     const issuedAt = 1_800_000_000_000;
-    const target = '/ws?role=machine&id=darktop';
+    const target = '/ws?role=machine&id=desktop';
     const header = createRelayAuthorization(privateKey, target, issuedAt, '12345678-1234-4234-8234-123456789abc');
     const late = { signingPublicKey: publicKey, now: issuedAt + 60_001, maxSkewMs: 60_000 };
     expect(verifyRelayAuthorization({ ...late, header, target, now: issuedAt + 60_000 }).status).toBe('ok');
