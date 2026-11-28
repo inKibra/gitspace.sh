@@ -722,8 +722,9 @@ export const setProjectOriginCheckContract = gitspaceRpc
 const OriginBranchCodec = wire.object({ branch: wire.string, commit: wire.string });
 
 /** Read the project's base branch and its workspaces' branches on the origin now, as a push webhook would report them.
- * With `branches`, a machine already read every branch of the origin (`project.remote.branches`, for an origin only that
- * machine reads): the cloud reads no origin and records the project's branches from them, one missing as absent. */
+ * With `branches`, a machine already read those branches on the origin (`project.remote.branches` with the `branches`
+ * `github.projectAccess` names, for an origin only that machine reads): the cloud reads no origin and records the
+ * project's branches from them, one missing as absent. */
 export const refreshProjectRemoteContract = gitspaceRpc
   .procedure()
   .input(wire.object({ projectId: wire.string, branches: wire.optional(wire.array(OriginBranchCodec)) }))
@@ -731,11 +732,12 @@ export const refreshProjectRemoteContract = gitspaceRpc
   .errors({ ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
-/** Read every branch of the project's origin through the named machine, with that machine's git identity (the account
- * SSH key). The account forwards it to that machine only. */
+/** Read the named `branches` of the project's origin through the named machine, with that machine's git identity (the
+ * account SSH key): those the origin holds and the commit each names, one the origin lacks left out. The account
+ * forwards it to that machine only. */
 export const projectOriginBranchesContract = gitspaceRpc
   .procedure()
-  .input(wire.object({ projectId: wire.string, machineId: wire.string }))
+  .input(wire.object({ projectId: wire.string, machineId: wire.string, branches: wire.array(wire.string) }))
   .output(wire.array(OriginBranchCodec))
   .errors({ OperationFailed: rpcErrors.operationFailed })
   .query();

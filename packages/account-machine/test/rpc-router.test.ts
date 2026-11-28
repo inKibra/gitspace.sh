@@ -105,7 +105,7 @@ test('starts a project copy on the machine it was sent to and answers at once, t
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test('reads every branch of a project origin with the machine git identity, only on the machine it was sent to', async () => {
+test('reads the named branches of a project origin with the machine git identity, only on the machine it was sent to', async () => {
   const root = mkdtempSync(join(tmpdir(), 'gitspace-project-branches-'));
   try {
     const origin = join(root, 'origin');
@@ -118,6 +118,9 @@ test('reads every branch of a project origin with the machine git identity, only
     git(origin, 'commit', '-q', '--allow-empty', '-m', 'sparkle');
     const feature = git(origin, 'rev-parse', 'HEAD');
     git(origin, 'tag', 'v1');
+    // Branches nobody named, one ending in a named branch's whole name.
+    git(origin, 'branch', 'release/trunk');
+    git(origin, 'branch', 'unrelated');
     const url = 'https://github.com/acme-labs/widgets.git';
     const project = { project: async (id: string) => id === 'widgets' ? { repositoryReference: url, baseBranch: 'trunk' } : null, gitEnvironment: () => ({ GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: `url.file://${origin}.insteadOf`, GIT_CONFIG_VALUE_0: url }) };
     const rpc = createGitSpaceRpcHandler({
@@ -125,14 +128,14 @@ test('reads every branch of a project origin with the machine git identity, only
       projects: {
         seed: async () => { throw new Error('Only origin reads are asked for here'); },
         seedOperation: async () => { throw new Error('Only origin reads are asked for here'); },
-        originBranches: projectId => readProjectOriginBranches(project, projectId),
+        originBranches: (projectId, branches) => readProjectOriginBranches(project, projectId, branches),
       },
     });
     const client = createBrowserClient({ contract: gitspaceContract, transport: fetchTransport({
       url: 'https://machine.test/rpc', fetch: Object.assign(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => rpc.handler(new Request(input, init)), { preconnect: fetch.preconnect }),
     }) });
-    expect(await client.project.remote.branches({ projectId: 'widgets', machineId: 'machine-b' })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('machine-b') } } });
-    const read = await client.project.remote.branches({ projectId: 'widgets', machineId: 'machine-a' });
+    expect(await client.project.remote.branches({ projectId: 'widgets', machineId: 'machine-b', branches: ['trunk'] })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('machine-b') } } });
+    const read = await client.project.remote.branches({ projectId: 'widgets', machineId: 'machine-a', branches: ['trunk', 'feature/sparkle', 'v1', 'gone'] });
     if (read.status === 'error') throw read.error;
     expect([...read.value].sort((a, b) => a.branch.localeCompare(b.branch))).toEqual([{ branch: 'feature/sparkle', commit: feature }, { branch: 'trunk', commit: trunk }]);
   } finally { rmSync(root, { recursive: true, force: true }); }

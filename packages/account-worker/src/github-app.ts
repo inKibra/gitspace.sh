@@ -14,6 +14,7 @@ import { completeGuideReaderSignIn } from './guide-shares.js';
 import { notifyBrowsers } from './live-notices.js';
 import { notifyMachines } from './machine-notices.js';
 import { AUTOMATION_DEFAULTS_REVISION } from './project-automations.js';
+import { projectBranches } from './project-remote.js';
 import { BudgetedDurableObject } from './storage-quarantine.js';
 
 const STATE_TTL_MS = 15 * 60_000;
@@ -404,9 +405,9 @@ export class GitHubAppDO extends BudgetedDurableObject {
    * Whether the cloud reads a project's repository itself. A repository not on GitHub, public, or covered by an
    * installation is ready, unless the cloud's import was refused anyway (`awaits-copy`: private outside GitHub, or too
    * large). A private one the App does not cover is read through the machine attached to the project's base workspace,
-   * its `bridge`; the answer also says what stands in the way of the App: no install on its owner, a request an owner
-   * there has not answered, or an install that leaves this repository out, and whether the project's repository waits
-   * for a machine to copy it in (`awaitsCopy`).
+   * its `bridge`, for the project's `branches` (`projectBranches`); the answer also says what stands in the way of the
+   * App: no install on its owner, a request an owner there has not answered, or an install that leaves this repository
+   * out, and whether the project's repository waits for a machine to copy it in (`awaitsCopy`).
    */
   async projectAccess(projectId: string): Promise<GitHubProjectAccess> {
     const project = (await this.env.USER_PROJECTS.getByName(this.env.ACCOUNT_ID).list('active')).find((candidate) => candidate.id === projectId);
@@ -417,15 +418,16 @@ export class GitHubAppDO extends BudgetedDurableObject {
     const awaitsCopy = await new ArtifactsCodeStore(this.env.ARTIFACTS).awaitsMachineSeed(project.id, project.baseBranch);
     if (repository === null || this.coverage(repository) !== null || await this.publicOnGitHub(repository)) return awaitsCopy ? { state: 'awaits-copy', origin } : { state: 'ready' };
     const organization = repository.slice(0, repository.indexOf('/'));
-    const bridge = await this.projectBridge(projectId);
+    const [bridge, workspaces] = await Promise.all([this.projectBridge(projectId), this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${projectId}`).listWorkspaces()]);
+    const branches = projectBranches(project.baseBranch, workspaces);
     const appName = this.app()?.name ?? null;
-    if (appName === null) return { state: 'needs-app', repository, organization, appName, bridge, awaitsCopy };
+    if (appName === null) return { state: 'needs-app', repository, organization, appName, bridge, branches, awaitsCopy };
     const projects = await this.repositoryProjects();
     const request = this.requestViews(projects).find((candidate) => candidate.organization?.toLowerCase() === organization.toLowerCase());
-    if (request) return { state: 'requested', repository, organization, appName, request, bridge, awaitsCopy };
+    if (request) return { state: 'requested', repository, organization, appName, request, bridge, branches, awaitsCopy };
     const installation = this.installationViews(projects).find((candidate) => candidate.account.login.toLowerCase() === organization.toLowerCase());
-    if (installation) return { state: 'not-selected', repository, organization, appName, installation, bridge, awaitsCopy };
-    return { state: 'needs-app', repository, organization, appName, bridge, awaitsCopy };
+    if (installation) return { state: 'not-selected', repository, organization, appName, installation, bridge, branches, awaitsCopy };
+    return { state: 'needs-app', repository, organization, appName, bridge, branches, awaitsCopy };
   }
 
   /** The machine a ref import or a checkout's origin fetch goes through: one attached (not detached) to the project's

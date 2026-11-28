@@ -158,7 +158,7 @@ it('checks the origin, updates the base and retries a failed update in project S
   const head = 'c'.repeat(40);
   const bridged: ProjectLifecycleView = { ...projects[0]!, repositoryReference: 'https://github.com/acme/vault.git', remote: { head, checkedAt: '2026-10-17T12:00:00.000Z', behind: true } };
   const failed: CloudProjectOperation = { id: crypto.randomUUID(), projectId: 'alpha', workspaceId: null, kind: 'project.updateBase', state: 'failed', steps: [], error: 'Git discovery failed (401)', summary: 'main from origin', dismissedAt: null, restack: null, revision: 1, createdBy: 'account', createdAt: stamp, updatedAt: stamp };
-  const access = { state: 'needs-app', repository: 'acme/vault', organization: 'acme', appName: null, bridge: { machineId: 'laptop', label: 'Laptop', online: true }, awaitsCopy: false };
+  const access = { state: 'needs-app', repository: 'acme/vault', organization: 'acme', appName: null, bridge: { machineId: 'laptop', label: 'Laptop', online: true }, branches: ['main', 'feature/alpha-work'], awaitsCopy: false };
   const copied = { baseBranch: 'main', previous: 'b'.repeat(40), commit: head };
   rpc.projectAccess.mockResolvedValue({ status: 'ok', value: access });
   rpc.branches.mockResolvedValue({ status: 'ok', value: [{ branch: 'main', commit: head }] });
@@ -178,7 +178,7 @@ it('checks the origin, updates the base and retries a failed update in project S
 
   await press('Check origin');
   await vi.waitFor(() => expect(rpc.refresh).toHaveBeenCalledExactlyOnceWith({ projectId: 'alpha', branches: [{ branch: 'main', commit: head }] }));
-  expect(rpc.branches).toHaveBeenCalledExactlyOnceWith({ projectId: 'alpha', machineId: 'laptop' });
+  expect(rpc.branches).toHaveBeenCalledExactlyOnceWith({ projectId: 'alpha', machineId: 'laptop', branches: ['main', 'feature/alpha-work'] });
 
   await press('Update base');
   await vi.waitFor(() => expect(dialog.textContent).toContain('Copying through the machine: fetching from the origin'));

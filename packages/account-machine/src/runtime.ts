@@ -283,7 +283,7 @@ export async function startMachineRuntime() {
     projects: {
       seed: (projectId, then) => projectCopies.start(projectId, then),
       seedOperation: (projectId, operationId) => projectCopies.read(projectId, operationId),
-      originBranches: projectId => readProjectOriginBranches(projectCopy, projectId),
+      originBranches: (projectId, branches) => readProjectOriginBranches(projectCopy, projectId, branches),
     },
     onInternalError: ({ incidentId, phase, cause, procedurePath }) => {
       console.error('[gitspace-rpc]', { incidentId, phase, procedurePath, cause });

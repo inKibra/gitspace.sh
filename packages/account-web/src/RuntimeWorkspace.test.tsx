@@ -212,7 +212,7 @@ it('renders a brand-new workspace whose code document is still null', async () =
 
 const baseInspection: InspectorView = { ...inspection, project: { ...project, repositoryReference: 'git@github.com:octo-labs/portal.git' }, workspace: { ...workspace, id: project.id, kind: 'base', phase: null } };
 const renderProject = () => root.render(<Toasts><RuntimeWorkspaceShell projectId={project.id} workspaceId={project.id} snapshot={snapshot} inspection={baseInspection} connected reads={reads()} refreshInspection={refreshInspection} onOpenSettings={() => {}} onSelectWorkspace={() => {}} onSelectProject={() => {}} renderInspector={() => null} /></Toasts>);
-const needsApp = { state: 'needs-app', repository: 'octo-labs/portal', organization: 'octo-labs', appName: 'GitSpace BrandByX' };
+const needsApp = { state: 'needs-app', repository: 'octo-labs/portal', organization: 'octo-labs', appName: 'GitSpace BrandByX', branches: ['main'] };
 
 it('syncs a project through its bridging machine under a toast instead of walling it off', async () => {
   mocks.access = { ...needsApp, bridge: { machineId: 'machine-1', label: 'studio-mac', online: true } };

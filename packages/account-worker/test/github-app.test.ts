@@ -336,7 +336,12 @@ describe('GitHub App', () => {
       notes: '', desiredState: 'online', lifecycleRevision: 1, operationId: null, error: null,
     });
     vi.spyOn(ArtifactsCodeStore.prototype, 'awaitsMachineSeed').mockResolvedValue(false);
-    const needsApp = { state: 'needs-app', repository: 'octo-labs/private-app', organization: 'octo-labs', appName: null, awaitsCopy: false };
+    // The bridge reads the base branch and live workspaces' branches; a workspace being deleted is not read.
+    const workspaces = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${app.id}`);
+    for (const [branch, lifecycle] of [['sparkle', 'active'], ['retired', 'deleting']] as const) {
+      await workspaces.putWorkspace({ id: `space-${crypto.randomUUID()}`, projectId: app.id, kind: 'worktree', name: branch, branch, phase: 'code', sourceKind: 'base', sourceRef: 'main', sourceCommit: null, lifecycle, goalId: null, expectedRevision: 0 });
+    }
+    const needsApp = { state: 'needs-app', repository: 'octo-labs/private-app', organization: 'octo-labs', appName: null, branches: ['main', 'sparkle'], awaitsCopy: false };
     expect(await github().projectAccess(app.id)).toEqual({ ...needsApp, bridge: null });
 
     const base = RuntimeIdentitySchema.parse({ projectId: app.id, workspaceId: app.id });
@@ -358,7 +363,7 @@ describe('GitHub App', () => {
     const awaits = vi.spyOn(ArtifactsCodeStore.prototype, 'awaitsMachineSeed').mockResolvedValue(true);
     const app = await project('Acme Widgets', 'https://github.com/acme-labs/widgets.git');
     network.use(http.get('https://github.com/acme-labs/widgets.git/info/refs', () => new HttpResponse('Repository not found', { status: 401 })));
-    expect(await github().projectAccess(app.id)).toEqual({ state: 'needs-app', repository: 'acme-labs/widgets', organization: 'acme-labs', appName: null, bridge: null, awaitsCopy: true });
+    expect(await github().projectAccess(app.id)).toEqual({ state: 'needs-app', repository: 'acme-labs/widgets', organization: 'acme-labs', appName: null, bridge: null, branches: ['main'], awaitsCopy: true });
     // An origin GitSpace reads without the App whose import was still refused (outside GitHub here) waits for the copy too.
     const assets = await project('Acme Assets', 'https://git.example.org/acme/assets.git');
     expect(await github().projectAccess(assets.id)).toEqual({ state: 'awaits-copy', origin: 'https://git.example.org/acme/assets.git' });
@@ -379,7 +384,7 @@ describe('GitHub App', () => {
       http.get(`${API}/users/BrandByX`, () => HttpResponse.json({ id: 160976157, login: 'BrandByX' })),
       http.get('https://github.com/BrandByX/payne-portals.git/info/refs', () => new HttpResponse('Repository not found', { status: 401 })),
     );
-    expect(await github().projectAccess(portal.id)).toEqual({ state: 'needs-app', repository: 'BrandByX/payne-portals', organization: 'BrandByX', appName: 'GitSpace test', bridge: null, awaitsCopy: false });
+    expect(await github().projectAccess(portal.id)).toEqual({ state: 'needs-app', repository: 'BrandByX/payne-portals', organization: 'BrandByX', appName: 'GitSpace test', bridge: null, branches: ['main'], awaitsCopy: false });
 
     // Started from the project, GitHub opens with the repository's owner chosen, and the request names it.
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -388,7 +393,7 @@ describe('GitHub App', () => {
       expect(outcome(await setupCallback(0, 'request', new URL(url).searchParams.get('state'))).get('github')).toBe('requested');
     }
     const requested = await github().projectAccess(portal.id);
-    expect(requested).toMatchObject({ state: 'requested', request: { organization: 'BrandByX', project: { id: portal.id, name: 'Landscaping Portal' }, repository: 'BrandByX/payne-portals', times: 2 } });
+    expect(requested).toMatchObject({ state: 'requested', branches: ['main'], request: { organization: 'BrandByX', project: { id: portal.id, name: 'Landscaping Portal' }, repository: 'BrandByX/payne-portals', times: 2 } });
     expect((await github().state()).requests).toHaveLength(1);
     // GitHub drops the state on its own pages (a request already pending sends the install to its target picker): the
     // redirect records nothing, and the account's own browser records what it started.

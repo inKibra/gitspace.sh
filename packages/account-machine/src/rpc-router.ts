@@ -19,11 +19,11 @@ export type GitSpaceRpcRouterOptions = {
   deployment?: Pick<DeploymentLauncher, 'launch'>;
   /** Starts copying a project's base branch from its origin into the project's repository with this machine's git
    * identity, or fast-forwarding the copy there, in the background, and reads that copy as it stands (null: this machine
-   * holds no such copy); and reads every branch of the origin with that identity. */
+   * holds no such copy); and reads the named branches of the origin with that identity, those the origin holds. */
   projects?: {
     seed(projectId: string, then: 'updateBase' | null): Promise<ProjectCopyOperation>;
     seedOperation(projectId: string, operationId: string): Promise<ProjectCopyOperation | null>;
-    originBranches(projectId: string): Promise<Array<{ branch: string; commit: string }>>;
+    originBranches(projectId: string, branches: readonly string[]): Promise<Array<{ branch: string; commit: string }>>;
   };
   machineId: string;
   onInternalError?: (input: { incidentId: string; phase: string; cause: unknown; procedurePath?: string }) => void;
@@ -72,7 +72,7 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
     // The account forwards a read to the machine it names; no other machine reads the origin for it.
     if (input.machineId !== options.machineId) return err(errors.OperationFailed({ operation: 'read project origin', message: `Origin read for machine ${input.machineId} reached machine ${options.machineId}` }));
     try {
-      return ok(await options.projects.originBranches(input.projectId));
+      return ok(await options.projects.originBranches(input.projectId, input.branches));
     } catch (error) {
       return err(errors.OperationFailed({ operation: 'read project origin', message: error instanceof Error ? error.message : 'Unable to read the project origin' }));
     }

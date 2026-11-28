@@ -7,10 +7,12 @@ import { createGitSpaceClient } from '@gitspace/protocol/client';
 import { spaceCheckpointManifestKey, spaceGitCheckpointRef, spaceOmpCheckpointKey, type SpaceCheckpointManifest, type WorkspaceWaiting } from '@gitspace/protocol-workspace';
 import type { ProviderView, ReleaseArtifact } from '@gitspace/protocol';
 import { executionHash, loadEnvironmentBundle, serviceIngressContent, type LifecycleRun } from '@gitspace/protocol-environment';
-import { gitspaceContract, rpcErrors, UserSettingsViewCodec } from '@gitspace/protocol/rpc-contract';
+import { gitspaceContract, projectOriginBranchesContract, rpcErrors, UserSettingsViewCodec, type GitSpaceRpcContext } from '@gitspace/protocol/rpc-contract';
 import { createRoutedTransport } from '@gitspace/protocol/routed-transport';
 import { decodeTranscriptChunks, type TranscriptChunk, type TranscriptEvent } from '@gitspace/protocol/transcript';
 import { createBrowserClient, type BrowserClientOf } from 'result-rpc/client';
+import { contractDigest, ok } from 'result-rpc';
+import { createFetchHandler, serverRpc } from 'result-rpc/server';
 import { parse, stringify } from 'devalue';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import worker from '../src/index.js';
@@ -18,9 +20,9 @@ import { invalidateDeviceAuthority } from '../src/device-authority.js';
 import { tenantRootPrivateKey } from './setup.js';
 import { HttpResponse, http } from 'msw';
 import { network } from './network.js';
-import { ArtifactsCodeStore } from '@gitspace/runtime-workspace-do';
+import { ArtifactsCodeStore, AttachmentStore } from '@gitspace/runtime-workspace-do';
 import { z } from 'zod';
-import { LIFECYCLE_APPROVAL_CHOICES, RuntimeAttachmentSchema, RuntimeIdentitySchema, RuntimeLifecycleDispatchArgumentsSchema, RuntimeSnapshotSchema, type RuntimeGitCheckpoint, type RuntimeLifecycleApprovalAnswer, type RuntimeLifecycleApprovalRequest, type RuntimeToolDispatch } from '@gitspace/protocol-runtime';
+import { LIFECYCLE_APPROVAL_CHOICES, RuntimeAttachInputSchema, RuntimeAttachmentSchema, RuntimeIdentitySchema, RuntimeLifecycleDispatchArgumentsSchema, RuntimeSnapshotSchema, type RuntimeGitCheckpoint, type RuntimeLifecycleApprovalAnswer, type RuntimeLifecycleApprovalRequest, type RuntimeToolDispatch } from '@gitspace/protocol-runtime';
 import { Result } from 'better-result';
 import { SpaceAuthorityDO } from '../src/space-authority.js';
 import { readCloudWorkspaceBase } from '../src/cloud-stack-status.js';
@@ -1026,6 +1028,56 @@ describe('account routing of machine work', () => {
       expect(await response.json()).toMatchObject({ error: { code: 'RPC_PROCEDURE_UNKNOWN' } });
     }
     expect(reached).toEqual([]);
+  });
+
+  it('checks an origin with many branches through its bridge machine, sending only the branches the cloud records', async () => {
+    const { fixture } = await fleet();
+    const origin = 'https://github.com/acme/vault.git';
+    const held = await inspectorWorkspace(fixture.userId, origin);
+    network.use(http.get(`${origin}/info/refs`, () => new HttpResponse('Repository not found', { status: 401 })));
+    vi.spyOn(ArtifactsCodeStore.prototype, 'awaitsMachineSeed').mockResolvedValue(false);
+    // GitSpace's copy holds no base branch yet.
+    vi.spyOn(ArtifactsCodeStore.prototype, 'projectImported').mockResolvedValue(false);
+    vi.spyOn(ArtifactsCodeStore.prototype, 'resolveRef').mockResolvedValue(null);
+    const base = RuntimeIdentitySchema.parse({ projectId: held.projectId, workspaceId: held.projectId });
+    await runInDurableObject(env.SPACE_AUTHORITY.getByName(`${fixture.userId}:${held.projectId}`), async (_instance: SpaceAuthorityDO, state) => {
+      await state.storage.put('runtime.identity', base);
+      const attachments = new AttachmentStore(state.storage, { seal: async () => 'sealed', open: async () => 'secret', dispatch: async () => { throw new Error('No dispatch in origin checks'); } });
+      await attachments.attach(RuntimeAttachInputSchema.parse({ ...base, machineId: 'machine-a', generation: 1, checkout: { kind: 'shared', branch: 'main' }, capabilities: [] }), true);
+    });
+    // The origin holds the project's two branches among twenty thousand others.
+    const commit = (n: number) => n.toString(16).padStart(40, '0');
+    const everyBranch = [{ branch: 'main', commit: commit(1) }, { branch: 'review', commit: commit(2) }, ...Array.from({ length: 20_000 }, (_, n) => ({ branch: `topic/${String(n).padStart(5, '0')}`, commit: commit(n + 3) }))];
+    // Machine A answers as a machine does: the named branches the origin holds.
+    const server = serverRpc.context<GitSpaceRpcContext>();
+    const machineA = createFetchHandler({
+      router: server.router({ project: { remote: { branches: server.implement(projectOriginBranchesContract).handler(async ({ input }) => ok(everyBranch.filter(({ branch }) => input.branches.includes(branch)))) } } }),
+      contractVersion: contractDigest(gitspaceContract), endpoint: '/rpc', createContext: () => ({}),
+    });
+    network.use(http.post('https://machine-a.test/rpc', async ({ request }) => machineA(new Request(request.url, { method: 'POST', headers: request.headers, body: await request.arrayBuffer() }))));
+    const sent: Array<{ procedures: string | null; bytes: number }> = [];
+    const client = inspectorClient(fixture, async (request) => {
+      sent.push({ procedures: new URL(request.url).searchParams.get('p'), bytes: (await request.clone().arrayBuffer()).byteLength });
+      return SELF.fetch(request);
+    });
+
+    // Every branch of the origin is more than the account accepts in one request.
+    const whole = await SELF.fetch(fixture.request(single('project.remote.refresh', { projectId: held.projectId, branches: everyBranch })));
+    expect(whole.status).toBe(413);
+    expect(await whole.json()).toMatchObject({ error: { code: 'RPC_REQUEST_TOO_LARGE' } });
+
+    // Check origin as the project page runs it: the cloud names the branches, the bridge reads them, the cloud records them.
+    const access = await client.github.projectAccess({ projectId: held.projectId });
+    if (access.status === 'error') throw access.error;
+    if (access.value.state === 'ready' || access.value.state === 'awaits-copy') throw new Error(`Expected a bridged origin, got ${access.value.state}`);
+    expect(access.value).toMatchObject({ bridge: { machineId: 'machine-a', online: true }, branches: ['main', 'review'] });
+    const read = await client.project.remote.branches({ projectId: held.projectId, machineId: 'machine-a', branches: access.value.branches });
+    if (read.status === 'error') throw read.error;
+    expect(await client.project.remote.refresh({ projectId: held.projectId, branches: read.value })).toMatchObject({ status: 'ok' });
+    expect((await held.authority.getProject())?.remote).toMatchObject({ head: commit(1) });
+    expect((await held.authority.getWorkspace(held.spaceId))?.remote).toMatchObject({ head: commit(2) });
+    expect(sent.map(({ procedures }) => procedures)).toEqual(['github.projectAccess', 'project.remote.branches', 'project.remote.refresh']);
+    expect(Math.max(...sent.map(({ bytes }) => bytes))).toBeLessThan(4_096);
   });
 });
 

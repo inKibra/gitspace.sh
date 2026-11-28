@@ -534,16 +534,17 @@ export class ProjectCopies {
   }
 }
 
-/** Every branch of a project's origin and the commit it names, read with this machine's git identity: Check origin for
- * a repository the cloud cannot read. */
-export async function readProjectOriginBranches(options: Pick<ProjectCopyOptions, 'project' | 'gitEnvironment'>, projectId: string): Promise<Array<{ branch: string; commit: string }>> {
+/** The named `branches` of a project's origin that the origin holds and the commit each names, read with this machine's
+ * git identity: Check origin for a repository the cloud cannot read. */
+export async function readProjectOriginBranches(options: Pick<ProjectCopyOptions, 'project' | 'gitEnvironment'>, projectId: string, branches: readonly string[]): Promise<Array<{ branch: string; commit: string }>> {
   const project = await options.project(projectId);
   if (!project) throw new Error(`Project ${projectId} is not in this account`);
   if (project.repositoryReference === null) throw new Error('This project has no origin repository to read');
   const repositoryUrl = normalizeRemoteRepositoryUrl(project.repositoryReference.trim());
   const advertised = await runGit(['ls-remote', '--heads', '--', repositoryUrl], { environment: options.gitEnvironment(repositoryUrl) });
+  const named = new Set(branches.map(branch => `refs/heads/${branch}`));
   return advertised.split('\n').flatMap(line => {
     const [commit, name] = line.split('\t');
-    return commit && name?.startsWith('refs/heads/') ? [{ branch: name.slice('refs/heads/'.length), commit }] : [];
+    return commit && name !== undefined && named.has(name) ? [{ branch: name.slice('refs/heads/'.length), commit }] : [];
   });
 }

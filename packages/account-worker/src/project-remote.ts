@@ -20,14 +20,18 @@ export async function readOriginHeads(env: Env, project: CloudProjectSummary, wo
   return projectBranchHeads(project, workspaces, refs);
 }
 
-/** The heads of the project's base branch and its workspaces' branches among an origin's `refs/heads/*`. */
-function projectBranchHeads(project: CloudProjectSummary, workspaces: CloudWorkspaceDefinition[], refs: ReadonlyMap<string, string>): Array<{ branch: string; head: string | null }> {
-  const branches = new Set([project.baseBranch, ...workspaces.filter((workspace) => workspace.lifecycle !== 'deleting').map((workspace) => workspace.branch)]);
-  return [...branches].map((branch) => ({ branch, head: refs.get(`refs/heads/${branch}`) ?? null }));
+/** The branches the cloud records for a project from its origin: its base branch and its live workspaces' branches. */
+export function projectBranches(baseBranch: string, workspaces: CloudWorkspaceDefinition[]): string[] {
+  return [...new Set([baseBranch, ...workspaces.filter((workspace) => workspace.lifecycle !== 'deleting').map((workspace) => workspace.branch)])];
 }
 
-/** Check origin: the origin's branches, read now and recorded on the project. `branches` are every branch of the
- * origin as a machine read them for an origin only it reads (`project.remote.branches`); the cloud then reads none. */
+/** The heads of the project's base branch and its workspaces' branches among an origin's `refs/heads/*`. */
+function projectBranchHeads(project: CloudProjectSummary, workspaces: CloudWorkspaceDefinition[], refs: ReadonlyMap<string, string>): Array<{ branch: string; head: string | null }> {
+  return projectBranches(project.baseBranch, workspaces).map((branch) => ({ branch, head: refs.get(`refs/heads/${branch}`) ?? null }));
+}
+
+/** Check origin: the origin's branches, read now and recorded on the project. `branches` are the project's branches on
+ * the origin as a machine read them for an origin only it reads (`project.remote.branches`); the cloud then reads none. */
 export async function refreshProjectRemote(env: Env, userId: string, projectId: string, branches?: ReadonlyArray<{ branch: string; commit: string }>): Promise<void> {
   const authority = env.PROJECT_AUTHORITY.getByName(`${userId}:${projectId}`);
   const [project, workspaces] = await Promise.all([authority.getProject(), authority.listWorkspaces()]);

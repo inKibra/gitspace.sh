@@ -8,11 +8,11 @@ const COPY_POLL_MS = 2_000;
 const COPY_UNREACHABLE_MS = 3 * 60_000;
 
 /**
- * The machine that reads a project's origin for `action`, or null when the cloud reads it itself. A private GitHub
- * repository the App does not cover is read only by its bridge, the machine attached to the project's base workspace;
- * no bridge, or an offline one, is an error saying what is needed.
+ * The machine that reads a project's origin for `action` and the project's branches it reads there, or null when the
+ * cloud reads the origin itself. A private GitHub repository the App does not cover is read only by its bridge, the
+ * machine attached to the project's base workspace; no bridge, or an offline one, is an error saying what is needed.
  */
-async function originReader(projectId: string, action: string): Promise<string | null> {
+async function originReader(projectId: string, action: string): Promise<{ machineId: string; branches: string[] } | null> {
   const access = await rpcClient.github.projectAccess({ projectId });
   if (access.status === 'error') throw access.error;
   const blocked = access.value;
@@ -20,7 +20,7 @@ async function originReader(projectId: string, action: string): Promise<string |
   const { bridge } = blocked;
   if (bridge === null) throw new Error(`GitSpace can't read ${blocked.repository}: attach one of your machines to the project's base workspace to read it with the account SSH key, or install the GitHub App on ${blocked.organization}, then try again.`);
   if (!bridge.online) throw new Error(`${action} reads ${blocked.repository} through ${bridge.label}, which is offline: bring ${bridge.label} online, then try again.`);
-  return bridge.machineId;
+  return { machineId: bridge.machineId, branches: blocked.branches };
 }
 
 /**
@@ -54,26 +54,26 @@ export async function copyProjectThroughMachine(projectId: string, machineId: st
  * reads go to `progress`) and then asks the account for Update base with that copy itself, so the update finishes
  * whether or not this page stays open; the cloud moves the base workspace without reading the origin. */
 export async function updateProjectBase(projectId: string, progress?: (copy: ProjectCopyOperation) => void): Promise<void> {
-  const machineId = await originReader(projectId, 'Update base');
-  if (machineId === null) {
+  const reader = await originReader(projectId, 'Update base');
+  if (reader === null) {
     const updated = await rpcClient.project.updateBase({ projectId });
     if (updated.status === 'error') throw updated.error;
     return;
   }
-  const copy = await copyProjectThroughMachine(projectId, machineId, progress, 'updateBase');
+  const copy = await copyProjectThroughMachine(projectId, reader.machineId, progress, 'updateBase');
   if (copy.updatedBase?.state !== 'done') throw new Error(copy.updatedBase?.message ?? 'The machine copied the base branch but did not ask for Update base');
 }
 
-/** Check origin. For an origin its bridge reads, that machine reads its branches (`project.remote.branches`) and the
- * cloud records them without reading the origin itself. */
+/** Check origin. For an origin its bridge reads, that machine reads the project's branches there (`project.remote.branches`
+ * with the `branches` `github.projectAccess` names) and the cloud records them without reading the origin itself. */
 export async function checkProjectOrigin(projectId: string): Promise<void> {
-  const machineId = await originReader(projectId, 'Check origin');
-  if (machineId === null) {
+  const reader = await originReader(projectId, 'Check origin');
+  if (reader === null) {
     const checked = await rpcClient.project.remote.refresh({ projectId });
     if (checked.status === 'error') throw checked.error;
     return;
   }
-  const branches = await rpcClient.project.remote.branches({ projectId, machineId });
+  const branches = await rpcClient.project.remote.branches({ projectId, ...reader });
   if (branches.status === 'error') throw branches.error;
   const checked = await rpcClient.project.remote.refresh({ projectId, branches: branches.value });
   if (checked.status === 'error') throw checked.error;

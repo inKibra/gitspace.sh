@@ -9,10 +9,10 @@ import { GitSpaceShell, type GitSpaceShellProps } from './GitSpaceShell.js';
 import { Toasts } from './toasts.js';
 
 const stamp = '2026-11-01T09:00:00.000Z';
-const needsApp: GitHubBlockedAccess = { state: 'needs-app', repository: 'octo-labs/portal', organization: 'octo-labs', appName: 'GitSpace BrandByX', bridge: null, awaitsCopy: false };
+const needsApp: GitHubBlockedAccess = { state: 'needs-app', repository: 'octo-labs/portal', organization: 'octo-labs', appName: 'GitSpace BrandByX', bridge: null, branches: ['main'], awaitsCopy: false };
 const noApp: GitHubBlockedAccess = { ...needsApp, appName: null };
-const requested: GitHubBlockedAccess = { state: 'requested', repository: 'octo-labs/portal', organization: 'octo-labs', appName: 'GitSpace BrandByX', request: { id: 'request', organization: 'octo-labs', project: { id: 'portal', name: 'Portal' }, repository: 'octo-labs/portal', firstRequestedAt: stamp, lastRequestedAt: stamp, times: 1 }, bridge: null, awaitsCopy: false };
-const notSelected: GitHubBlockedAccess = { state: 'not-selected', repository: 'octo-labs/portal', organization: 'octo-labs', appName: 'GitSpace BrandByX', installation: { id: 7, account: { login: 'octo-labs', kind: 'organization' }, repositorySelection: 'selected', repositories: ['octo-labs/site'], permissions: {}, installedAt: stamp, projects: [] }, bridge: null, awaitsCopy: false };
+const requested: GitHubBlockedAccess = { state: 'requested', repository: 'octo-labs/portal', organization: 'octo-labs', appName: 'GitSpace BrandByX', request: { id: 'request', organization: 'octo-labs', project: { id: 'portal', name: 'Portal' }, repository: 'octo-labs/portal', firstRequestedAt: stamp, lastRequestedAt: stamp, times: 1 }, bridge: null, branches: ['main'], awaitsCopy: false };
+const notSelected: GitHubBlockedAccess = { state: 'not-selected', repository: 'octo-labs/portal', organization: 'octo-labs', appName: 'GitSpace BrandByX', installation: { id: 7, account: { login: 'octo-labs', kind: 'organization' }, repositorySelection: 'selected', repositories: ['octo-labs/site'], permissions: {}, installedAt: stamp, projects: [] }, bridge: null, branches: ['main'], awaitsCopy: false };
 const machines = [{ id: 'machine-1', label: 'studio-mac' }, { id: 'machine-2', label: 'garage-box' }];
 const noCopy = { machines, onCopy: async () => { throw new Error('No copy in this test'); } };
 const online: GitHubProjectBridge = { machineId: 'machine-1', label: 'studio-mac', online: true };
