@@ -66,7 +66,7 @@ import { readInspectorTranscriptContent, readInspectorTranscriptPage } from './a
 import type { FleetCatalogDO } from './fleet-catalog.js';
 import type { SpaceAuthorityDO } from './space-authority.js';
 import { createGuideShare, guideShareView } from './guide-shares.js';
-import { cloudRepositoryDiff, cloudRepositoryFile, cloudRepositoryStatus, cloudRepositoryTree, withCloudCheckout, withPinnedCloudCheckout, type CloudCheckout } from './cloud-repository.js';
+import { cloudRepositoryDiff, cloudRepositoryFile, cloudRepositoryStatus, cloudRepositoryTree, withCloudCheckout, withGuideCheckout, withPinnedCloudCheckout, type CloudCheckout } from './cloud-repository.js';
 import type { RepositoryMode } from '@gitspace/protocol/inspector-contract';
 import { canonicalDriveResourceUrl, createResourcePreview, parseResourceUri, type ResourcePreviewFrame } from '@gitspace/protocol/resource-uri';
 import type { InspectorCloudContext } from './account-inspector-data.js';
@@ -350,6 +350,8 @@ export function inspectorCloudProcedures(env: Env, userId: string, currentDevice
   const putGuide = server.implement(inspectorPutChangeGuideContract).handler(async ({ input, errors }) => {
     try {
       const source = await readInspectorContext(env, userId, input.input.spaceId, input.input.projectId, input.expectedGeneration);
+      // The guide's diffs are read from the workspace's cloud repository: its commits are there before it is stored.
+      await env.SPACE_AUTHORITY.getByName(`${userId}:${source.identity.spaceId}`).runtimeEnsureGuideCommits({ projectId: source.identity.projectId, workspaceId: source.identity.spaceId }, { baseCommit: input.input.guide.baseCommit, headCommit: input.input.guide.headCommit });
       const value = await source.context.putChangeGuide({ ...input.input, ...source.identity });
       await source.authority.appendEvent({ scope: 'workspace', entity: 'change-guide', entityId: source.identity.spaceId, revision: value.revision, operation: 'updated', payload: { spaceId: source.identity.spaceId } });
       return ok(value);
@@ -607,7 +609,7 @@ export function inspectorCloudProcedures(env: Env, userId: string, currentDevice
       }
       if (guide.baseCommit === null) return err(errors.InspectorState({ resource: 'change-guide', message: 'This Change Guide predates recorded base commits. Regenerate it to see its diffs.' }));
       const baseCommit = guide.baseCommit;
-      return ok(await withPinnedCloudCheckout(env, source, baseCommit, guide.headCommit, checkout => cloudRepositoryDiff(env, userId, checkout, 'base', input.path)));
+      return ok(await withGuideCheckout(env, source, baseCommit, guide.headCommit, checkout => cloudRepositoryDiff(env, userId, checkout, 'base', input.path)));
     } catch (error) {
       if (error instanceof InspectorWorkspaceMissing) return err(errors.WorkspaceNotFound({ workspaceId: error.spaceId }));
       if (error instanceof InspectorGenerationConflict) return err(errors.SpaceGenerationConflict({ spaceId: error.spaceId, expected: error.expected, actual: error.actual }));

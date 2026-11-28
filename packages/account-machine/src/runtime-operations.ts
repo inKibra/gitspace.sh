@@ -9,7 +9,7 @@ import { RuntimeServiceOperationSchema } from '@gitspace/protocol-runtime/servic
 import { createHash } from 'node:crypto';
 import type { CloudSpaceCheckpointAuthority } from './cloud-space-authority.js';
 import type { MachineMcpCoordinator } from './local-mcp.js';
-import { RuntimeProcessExitedInputSchema, RuntimeBashCommandArgumentsSchema, RuntimeProcArgumentsSchema, RuntimeLifecycleDispatchArgumentsSchema, RuntimeImportRefArgumentsSchema, RuntimeMcpDiscoverArgumentsSchema, discoveredMcpTools } from '@gitspace/protocol-runtime';
+import { RuntimeProcessExitedInputSchema, RuntimeBashCommandArgumentsSchema, RuntimeProcArgumentsSchema, RuntimeLifecycleDispatchArgumentsSchema, RuntimeImportRefArgumentsSchema, RuntimePublishCommitArgumentsSchema, RuntimeMcpDiscoverArgumentsSchema, discoveredMcpTools } from '@gitspace/protocol-runtime';
 import type { ArtifactsGitRemote } from './artifacts-git-remote.js';
 import { workspaceProcessVisible } from './workspace-process.js';
 
@@ -21,7 +21,7 @@ async function runGit(cwd: string, args: string[], environment: Record<string, s
   return stdout.trim();
 }
 
-export function machineOperationalTools(options: { environments: Pick<WorkspaceEnvironmentManager, 'acceptRun'>; services: WorkspaceServiceManager; reportProcessExit: ProcessExitReporter; authority: CloudSpaceCheckpointAuthority; mcp: MachineMcpCoordinator; projectRepository: Pick<ArtifactsGitRemote, 'publishRef'>; originEnvironment: (checkout: LocalAttachment) => Promise<Record<string, string>> }): Record<string, ExecutorOperationHandler> {
+export function machineOperationalTools(options: { environments: Pick<WorkspaceEnvironmentManager, 'acceptRun'>; services: WorkspaceServiceManager; reportProcessExit: ProcessExitReporter; authority: CloudSpaceCheckpointAuthority; mcp: MachineMcpCoordinator; gitRemote: Pick<ArtifactsGitRemote, 'publishRef'>; originEnvironment: (checkout: LocalAttachment) => Promise<Record<string, string>> }): Record<string, ExecutorOperationHandler> {
   return {
     // Fetches into a private ref and publishes from there: the base checkout's HEAD, index and branches never change.
     import_ref: async (dispatch, local, signal) => {
@@ -31,10 +31,30 @@ export function machineOperationalTools(options: { environments: Pick<WorkspaceE
       await runGit(local.rootPath, ['fetch', '--no-tags', '--refmap=', '--no-write-fetch-head', 'origin', `+${ref}:${owned}`], { ...await options.originEnvironment(local), GIT_LFS_SKIP_SMUDGE: '1' }, signal);
       try {
         const commit = await runGit(local.rootPath, ['rev-parse', '--verify', `${owned}^{commit}`], {}, signal);
-        await options.projectRepository.publishRef({ binding: { projectId: dispatch.projectId, repository: `project-${dispatch.projectId}` }, repositoryPath: local.rootPath, ref, commit });
+        await options.gitRemote.publishRef({ binding: { projectId: dispatch.projectId, repository: `project-${dispatch.projectId}` }, repositoryPath: local.rootPath, ref, commit });
         return [{ type: 'text', text: JSON.stringify({ ref, commit }) }];
       } finally {
         await runGit(local.rootPath, ['update-ref', '-d', owned], {}, AbortSignal.timeout(10_000)).catch(() => undefined);
+      }
+    },
+    // A commit the checkout lacks is fetched into a private ref, removed once published: the checkout's HEAD, index and
+    // branches never change. A shallow checkout fetches it one commit deep; a full-history one fetches what it lacks and
+    // stays unshallow. The cloud ref keeps the commit reachable in the workspace repository.
+    publish_commit: async (dispatch, local, signal) => {
+      const { commit } = RuntimePublishCommitArgumentsSchema.parse(dispatch.args);
+      const ref = `refs/gitspace/commits/${commit}`;
+      const present = await runGit(local.rootPath, ['cat-file', '-e', `${commit}^{commit}`], {}, signal).then(() => true, () => false);
+      const owned = `refs/gitspace/import/${createHash('sha256').update(dispatch.attemptId).digest('hex').slice(0, 32)}`;
+      try {
+        if (!present) {
+          const shallow = await runGit(local.rootPath, ['rev-parse', '--is-shallow-repository'], {}, signal) === 'true';
+          await runGit(local.rootPath, ['fetch', '--no-tags', '--refmap=', '--no-write-fetch-head', ...shallow ? ['--depth=1'] : [], 'origin', `+${commit}:${owned}`], { ...await options.originEnvironment(local), GIT_LFS_SKIP_SMUDGE: '1' }, signal)
+            .catch((error: unknown) => { throw new Error(`Commit ${commit} is not in this checkout and its origin did not serve it: ${error instanceof Error ? error.message : String(error)}`); });
+        }
+        await options.gitRemote.publishRef({ binding: { projectId: dispatch.projectId, repository: `workspace-${dispatch.workspaceId}` }, repositoryPath: local.rootPath, ref, commit });
+        return [{ type: 'text', text: JSON.stringify({ ref, commit }) }];
+      } finally {
+        if (!present) await runGit(local.rootPath, ['update-ref', '-d', owned], {}, AbortSignal.timeout(10_000)).catch(() => undefined);
       }
     },
     mcp_discover: async (dispatch, local, signal) => {

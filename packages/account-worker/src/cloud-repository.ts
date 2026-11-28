@@ -167,6 +167,22 @@ export async function withPinnedCloudCheckout<T>(
   });
 }
 
+/** `withPinnedCloudCheckout` for a Change Guide's commits. A read that fails while the workspace's cloud repository lacks
+ * one of them (a guide stored before guide puts published their commits) says which, and how to bring it there. */
+export async function withGuideCheckout<T>(
+  env: Env, source: InspectorCloudContext, baseCommit: string, headCommit: string, read: (checkout: CloudCheckout) => Promise<T>,
+): Promise<T> {
+  try { return await withPinnedCloudCheckout(env, source, baseCommit, headCommit, read); }
+  catch (error) {
+    const code = new ArtifactsCodeStore(env.ARTIFACTS);
+    const repository = artifactsWorkspaceRepository(source.workspace.id);
+    for (const { role, commit } of [{ role: 'base', commit: baseCommit }, { role: 'head', commit: headCommit }]) {
+      if (await code.readCommit(repository, commit) === null) throw new Error(`This guide's ${role} commit ${commit.slice(0, 12)} isn't in GitSpace's copy of the workspace. Put the guide again from a workspace whose machine is online; GitSpace fetches the commit then.`, { cause: error });
+    }
+    throw error;
+  }
+}
+
 /** The snapshots each mode compares: the same pair as its machine `git status`/`git diff` counterpart. */
 function compared(checkout: CloudCheckout, mode: RepositoryMode): { before: string | null; after: string } {
   return {

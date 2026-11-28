@@ -35,6 +35,11 @@ function emptyCommittedSource() {
   vi.spyOn(ArtifactsCodeStore.prototype, 'forkWorkspace').mockResolvedValue(info);
   vi.spyOn(ArtifactsCodeStore.prototype, 'resolveRef').mockResolvedValue(null);
 }
+/** Every workspace's cloud repository holds every commit, as a guide put requires of its base and head. */
+function everyCommitInCloud() {
+  const identity = { name: 'Fixture', email: 'fixture@example.invalid' };
+  vi.spyOn(ArtifactsCodeStore.prototype, 'readCommit').mockImplementation(async (_repository, hash) => ({ hash, treeHash: hash, message: hash, author: identity, committer: identity, parents: [], authoredAt: 1, committedAt: 1 }));
+}
 
 async function account(capabilities: DeviceCapability[] = ['rpc.read', 'rpc.write', 'fleet.control', 'devices.manage'], kind: 'browser' | 'client' = 'browser', scope: DeviceScope = { kind: 'user' }) {
   const userId = env.ACCOUNT_ID;
@@ -350,6 +355,7 @@ describe('Inspector administrative authority', () => {
     const ordinary = await account(['rpc.read', 'rpc.write'], 'client');
     const administrator = await account(['rpc.read', 'rpc.write', 'account.admin'], 'client');
     const { projectId, spaceId } = await inspectorWorkspace(owner.userId);
+    everyCommitInCloud();
     const invoke = async (actor: typeof owner, path: string, input: unknown) => parse(await (await SELF.fetch(actor.request(single(path, { expectedGeneration: 0, input })))).text());
     const identity = { projectId, spaceId };
     expect(await invoke(owner, 'inspector.workflow.put', { ...identity, expectedRevision: 0, workflow: {
@@ -421,6 +427,7 @@ describe('Change Guide revisions', () => {
   it('lists every revision newest first and reads any one of them, refusing a revision that does not exist', async () => {
     const person = await account();
     const { projectId, spaceId } = await inspectorWorkspace(person.userId);
+    everyCommitInCloud();
     const invoke = async (path: string, input: unknown) => parse(await (await SELF.fetch(person.request(single(path, { expectedGeneration: 0, input })))).text());
     const read = async (path: string, input: object) => parse(await (await SELF.fetch(person.request(single(path, { spaceId, expectedGeneration: 0, ...input })))).text());
     const identity = { projectId, spaceId };
@@ -451,6 +458,7 @@ describe('Change Guide revisions', () => {
   it('edits one section at a time over RPC, each a new revision, refusing a stale revision', async () => {
     const person = await account();
     const { projectId, spaceId } = await inspectorWorkspace(person.userId);
+    everyCommitInCloud();
     const invoke = async (path: string, input: unknown) => parse(await (await SELF.fetch(person.request(single(path, { expectedGeneration: 0, input })))).text());
     const identity = { projectId, spaceId };
     const section = (id: string, explanation: string) => ({ id, title: `Section ${id}`, kind: 'behavior', explanation, why: '', exhibits: [], requirementIds: [] });
@@ -465,6 +473,19 @@ describe('Change Guide revisions', () => {
     expect(removed).toMatchObject({ status: 'ok', value: { revision: 4 } });
     expect(ids(removed)).toEqual(['b', 'c']);
     expect(await invoke('inspector.guide.removeSection', { ...identity, expectedRevision: 3, sectionId: 'b', createdBy: 'narrator-b' })).toMatchObject({ status: 'error', error: { data: { message: 'change-guide revision conflict: expected 3, actual 4' } } });
+  });
+
+  it('says a stored guide\'s base commit is missing from the workspace repository when its exhibit diff cannot be read', async () => {
+    const person = await account();
+    const { projectId, spaceId } = await inspectorWorkspace(person.userId);
+    everyCommitInCloud();
+    const guide = { headCommit: 'a'.repeat(40), baseRef: 'main', baseCommit: 'b'.repeat(40), title: 'Merged branch', createdBy: 'narrator-a', sections: [{ id: 'merge', title: 'Merge', kind: 'behavior', explanation: 'Merges main.', why: '', requirementIds: [], exhibits: [{ path: 'a.txt', blobId: null, note: 'Changed.', slowRead: false }] }] };
+    expect(parse(await (await SELF.fetch(person.request(single('inspector.guide.put', { expectedGeneration: 0, input: { projectId, spaceId, expectedRevision: 0, guide } })))).text())).toMatchObject({ status: 'ok' });
+    // Stored before guide puts published their commits: the workspace repository holds the head only.
+    const author = { name: 'Fixture', email: 'fixture@example.invalid' };
+    vi.spyOn(ArtifactsCodeStore.prototype, 'readCommit').mockImplementation(async (_repository, hash) => hash === guide.headCommit ? { hash, treeHash: hash, message: hash, author, committer: author, parents: [], authoredAt: 1, committedAt: 1 } : null);
+    flatTreeReader(() => undefined, () => undefined);
+    expect(parse(await (await SELF.fetch(person.request(single('inspector.guide.diff', { spaceId, expectedGeneration: 0, path: 'a.txt' })))).text())).toMatchObject({ status: 'error', error: { data: { message: `This guide's base commit ${'b'.repeat(12)} isn't in GitSpace's copy of the workspace. Put the guide again from a workspace whose machine is online; GitSpace fetches the commit then.` } } });
   });
 });
 

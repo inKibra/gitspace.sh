@@ -377,7 +377,7 @@ export async function startMachineRuntime() {
     },
     ...(process.env.GITSPACE_ARTIFACTFS_BINARY ? { artifactFsBinary: process.env.GITSPACE_ARTIFACTFS_BINARY } : {}),
     operations: {
-      ...machineOperationalTools({ environments, services: serviceManager, reportProcessExit: async input => { await cloudRuntime.call('runtime.process.exited', input, z.null()); }, authority, mcp, projectRepository: gitRemote, originEnvironment: checkout => gitIdentity.originEnvironment(checkout) }),
+      ...machineOperationalTools({ environments, services: serviceManager, reportProcessExit: async input => { await cloudRuntime.call('runtime.process.exited', input, z.null()); }, authority, mcp, gitRemote, originEnvironment: checkout => gitIdentity.originEnvironment(checkout) }),
       drive_transfer: driveTransferOperation({ blobs: checkpointBlobs, accountId: controlOptions.userId }),
     },
     storeImage: machineImageStore({ blobs: checkpointBlobs, accountId: controlOptions.userId }),

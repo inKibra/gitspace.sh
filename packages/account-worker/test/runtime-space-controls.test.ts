@@ -1,11 +1,20 @@
 import { env, runInDurableObject } from 'cloudflare:test';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
-import { RuntimeIdentitySchema } from '@gitspace/protocol-runtime';
+import { RuntimeAttachmentSchema, RuntimeIdentitySchema, type RuntimeToolDispatch } from '@gitspace/protocol-runtime';
 import { emptyWorkspaceStatus } from '@gitspace/protocol-workspace';
+import { credentialProtocolBase64 } from '@gitspace/protocol';
+import { ArtifactsCodeStore, AttachmentStore } from '@gitspace/runtime-workspace-do';
 import { invokeRuntimeSpaceTool } from '../src/runtime-space-tools.js';
 import { createWorkspaceMetadataTables, storeWorkspaceReport } from '../src/workspace-metadata.js';
 
+afterEach(() => vi.restoreAllMocks());
+/** The commits each Artifacts repository holds; any other commit reads as absent. */
+function cloudCommits(held: Record<string, Set<string>>) {
+  const identity = { name: 'Fixture', email: 'fixture@example.invalid' };
+  return vi.spyOn(ArtifactsCodeStore.prototype, 'readCommit').mockImplementation(async (repository, hash) => held[repository]?.has(hash)
+    ? { hash, treeHash: hash, message: hash, author: identity, committer: identity, parents: [], authoredAt: 1, committedAt: 1 } : null);
+}
 async function fixture() {
   const identity = RuntimeIdentitySchema.parse({ projectId: 'project-a', workspaceId: 'workspace-a' });
   const authority = env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${identity.projectId}`);
@@ -74,6 +83,7 @@ describe('Cloud workspace authority controls', () => {
     const { call, context, owned } = await fixture();
     const section = { id: 'parse', title: 'Parse v2 headers', kind: 'behavior', explanation: 'Reads the version first.', why: '', requirementIds: [], exhibits: [] };
     const draft = { headCommit: 'a'.repeat(40), baseRef: 'main', baseCommit: 'b'.repeat(40), title: 'Parser v2', sections: [section] };
+    cloudCommits({ 'workspace-workspace-a': new Set([draft.headCommit, draft.baseCommit]) });
     const bare = z.record(z.string(), z.unknown()).parse(await call('space_guide', { method: 'put', expectedRevision: 0, guide: draft }));
     expect(Object.keys(bare)[0]).toBe('toAdd');
     expect(bare).toMatchObject({ revision: 1, toAdd: [expect.stringContaining('Sections without a diagram: parse.'), expect.stringContaining('No walkthrough')] });
@@ -83,6 +93,39 @@ describe('Cloud workspace authority controls', () => {
     const drawn = await call('space_guide', { method: 'put', expectedRevision: 1, guide: { ...draft, sections: [{ ...section, diagram }], walkthrough } });
     expect(drawn).toMatchObject({ revision: 2 });
     expect(drawn).not.toHaveProperty('toAdd');
+  });
+  it('publishes a guide\'s base commit the workspace repository lacks through the workspace\'s own machine, then stores the guide', async () => {
+    const { call, context, owned } = await fixture();
+    // The workspace runtime a guide put with a missing commit opens reads the account's credential vault.
+    await env.CREDENTIALS.getByName(env.ACCOUNT_ID).bootstrap({ userId: env.ACCOUNT_ID, rootPublicKey: env.AUTH_PUBLIC_KEY, vaultKey: credentialProtocolBase64.encode(new Uint8Array(32).fill(41)) });
+    const draft = { headCommit: 'a'.repeat(40), baseRef: 'main', baseCommit: 'b'.repeat(40), title: 'Merged branch', sections: [{ id: 'merge', title: 'Merge', kind: 'behavior', explanation: 'Merges main.', why: '', requirementIds: [], exhibits: [] }] };
+    // A workspace copied in from its tip: its repository holds HEAD, not the merge base.
+    const held = new Set([draft.headCommit]);
+    cloudCommits({ 'workspace-workspace-a': held });
+    const attachment = RuntimeAttachmentSchema.parse({ projectId: 'project-a', workspaceId: 'workspace-a', attachmentId: 'cache-a', machineId: 'sandbox-a', generation: 1, role: 'cache', state: 'ready', checkout: { kind: 'shared', branch: 'main' }, capabilities: ['publish_commit'], online: true, updatedAt: new Date().toISOString() });
+    vi.spyOn(AttachmentStore.prototype, 'list').mockReturnValue([attachment]);
+    const dispatches: RuntimeToolDispatch[] = [];
+    vi.spyOn(AttachmentStore.prototype, 'execute').mockImplementation(async dispatch => {
+      dispatches.push(dispatch);
+      const { commit } = z.object({ commit: z.string() }).parse(dispatch.args);
+      held.add(commit);
+      return { status: 'completed', requestId: dispatch.requestId, attemptId: dispatch.attemptId, content: [{ type: 'text', text: JSON.stringify({ ref: `refs/gitspace/commits/${commit}`, commit }) }] };
+    });
+    expect(await call('space_guide', { method: 'put', expectedRevision: 0, guide: draft })).toMatchObject({ revision: 1, baseCommit: draft.baseCommit });
+    expect(dispatches).toMatchObject([{ tool: 'publish_commit', args: { commit: draft.baseCommit }, projectId: 'project-a', workspaceId: 'workspace-a', machineId: 'sandbox-a', attachmentId: 'cache-a' }]);
+    expect(await context.getChangeGuide(owned)).toMatchObject({ revision: 1, baseCommit: draft.baseCommit, headCommit: draft.headCommit });
+  });
+  it('refuses a guide whose base commit the workspace repository lacks while no machine holding the workspace is online, storing nothing', async () => {
+    const { call, context, owned } = await fixture();
+    await env.CREDENTIALS.getByName(env.ACCOUNT_ID).bootstrap({ userId: env.ACCOUNT_ID, rootPublicKey: env.AUTH_PUBLIC_KEY, vaultKey: credentialProtocolBase64.encode(new Uint8Array(32).fill(41)) });
+    const draft = { headCommit: 'a'.repeat(40), baseRef: 'main', baseCommit: 'b'.repeat(40), title: 'Merged branch', sections: [{ id: 'merge', title: 'Merge', kind: 'behavior', explanation: 'Merges main.', why: '', requirementIds: [], exhibits: [] }] };
+    cloudCommits({ 'workspace-workspace-a': new Set([draft.headCommit]) });
+    const offline = RuntimeAttachmentSchema.parse({ projectId: 'project-a', workspaceId: 'workspace-a', attachmentId: 'cache-a', machineId: 'sandbox-a', generation: 1, role: 'cache', state: 'ready', checkout: { kind: 'shared', branch: 'main' }, capabilities: ['publish_commit'], online: false, updatedAt: new Date().toISOString() });
+    vi.spyOn(AttachmentStore.prototype, 'list').mockReturnValue([offline]);
+    const execute = vi.spyOn(AttachmentStore.prototype, 'execute');
+    await expect(call('space_guide', { method: 'put', expectedRevision: 0, guide: draft })).rejects.toThrow(`The guide's base commit ${'b'.repeat(12)} is not in GitSpace's copy of this workspace, so its diffs cannot be shown, and only a machine holding the workspace can publish it. Bring sandbox-a online, then put the guide again.`);
+    expect(execute).not.toHaveBeenCalled();
+    expect(await context.getChangeGuide(owned)).toBeNull();
   });
   it('lists older review threads and refuses opening, replying to or resolving one', async () => {
     const { call } = await fixture();

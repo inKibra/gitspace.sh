@@ -27,7 +27,7 @@ import { RuntimeDraftSaveInputSchema } from '@gitspace/protocol-runtime/draft';
 import { RuntimeServiceInputSchema } from '@gitspace/protocol-runtime/services';
 import { RuntimeSyncRequestInputSchema, RuntimeSyncRequestResultSchema, type RuntimeSyncRequestResult } from '@gitspace/protocol-runtime/tool-arguments';
 import { runtimeServiceControl } from './runtime-service-control.js';
-import { importRefThroughBaseMachine } from './runtime-ref-import.js';
+import { ensureGuideCommits, importRefThroughBaseMachine } from './runtime-ref-import.js';
 import { RuntimeGitCheckpointSchema, RuntimeSnapshotCommitInputSchema } from '@gitspace/protocol-runtime/workspace-controls';
 import { RuntimeAttachmentReadyInputSchema, RuntimeAssignmentsInputSchema, RuntimeCacheAttachmentRequestInputSchema, RuntimeAttachmentDetachRequestInputSchema } from '@gitspace/protocol-runtime/attachment-controls';
 import { RuntimeHeartbeatInputSchema, RuntimeDetachInputSchema } from '@gitspace/protocol-runtime/machine-controls';
@@ -1123,6 +1123,16 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
   async runtimeImportRef(raw: unknown, ref: string): Promise<string> {
     const identity = RuntimeIdentitySchema.parse(raw);
     return importRefThroughBaseMachine(await this.getRuntime(identity), identity, ref);
+  }
+  /** A Change Guide's base and head commits made readable from this workspace's cloud repository before it is stored,
+   * published through the workspace's own machine where missing (`ensureGuideCommits`). */
+  async runtimeEnsureGuideCommits(raw: unknown, commits: { baseCommit: string; headCommit: string }): Promise<void> {
+    const identity = RuntimeIdentitySchema.parse(raw);
+    const fleet = this.env.FLEET_CATALOG.getByName(this.env.ACCOUNT_ID);
+    await ensureGuideCommits({
+      runtime: () => this.getRuntime(identity), code: new ArtifactsCodeStore(this.env.ARTIFACTS), identity, ...commits,
+      machineLabel: async machineId => (await fleet.getMachine(machineId))?.label ?? machineId,
+    });
   }
   /** A person's sync action runs the `sync` tool once per request id as a call of the main conversation. */
   async runtimeSync(raw: unknown): Promise<RuntimeSyncRequestResult> {

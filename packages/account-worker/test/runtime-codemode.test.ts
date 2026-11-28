@@ -1,6 +1,6 @@
 import { env, runInDurableObject } from 'cloudflare:test';
 import { exports } from 'cloudflare:workers';
-import { expect, test } from 'vitest';
+import { afterEach, expect, test, vi } from 'vitest';
 import { createCloudCodemode } from '../src/runtime-codemode.js';
 import { invokeRuntimeSpaceTool } from '../src/runtime-space-tools.js';
 import { z } from 'zod';
@@ -8,7 +8,7 @@ import { storedImages } from '../src/runtime-images.js';
 import { tenantRootPrivateKey } from './setup.js';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { credentialProtocolBase64 } from '@gitspace/protocol';
-import { createToolResultStore, type WorkspaceRuntimeOptions } from '@gitspace/runtime-workspace-do';
+import { ArtifactsCodeStore, createToolResultStore, type WorkspaceRuntimeOptions } from '@gitspace/runtime-workspace-do';
 import { Harness, MemoryStorage, createRegistry, defineExtension } from '@earendil-works/pi-durable';
 import { createModels, createAssistantMessageEventStream, type AssistantMessage, type Models, type Model, type Api } from '@earendil-works/pi-ai';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
@@ -17,6 +17,7 @@ import { RuntimeIdentitySchema, RuntimeToolResultRequestSchema, toolResultRefere
 
 const noModel = async (): Promise<never> => { throw new Error('No inference in local isolate proof'); };
 type Invocation = Parameters<WorkspaceRuntimeOptions['tools']['invoke']>[0];
+afterEach(() => vi.restoreAllMocks());
 
 function invocation(code: string): Invocation {
   return { tool: 'codemode', args: { code, timeoutMs: 1000 }, conversationId: 'conversation', taskId: 'task', requestId: 'request', attemptId: 'attempt', replay: 'unsafe' };
@@ -270,6 +271,9 @@ test('a script edits one section of a Change Guide larger than 64 KiB through sp
   const project = await authority.bootstrap({ id: identity.projectId, name: 'Large guide', repositoryReference: null, baseBranch: 'main', createdBy: 'user' });
   await authority.setProjectLifecycle(project.revision, 'active');
   await authority.putWorkspace({ id: identity.workspaceId, projectId: identity.projectId, kind: 'worktree', name: 'guide', branch: 'main', phase: 'code', sourceKind: 'base', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
+  // The workspace's cloud repository holds the guide's base and head.
+  const author = { name: 'Fixture', email: 'fixture@example.invalid' };
+  vi.spyOn(ArtifactsCodeStore.prototype, 'readCommit').mockImplementation(async (_repository, hash) => ({ hash, treeHash: hash, message: hash, author, committer: author, parents: [], authoredAt: 1, committedAt: 1 }));
   await runInDurableObject(env.SPACE_AUTHORITY.getByName(`codemode-guide:${crypto.randomUUID()}`), async (_instance, ctx) => {
     const sandbox = createCloudCodemode({ loader: env.CODEMODE_LOADER, storage: ctx.storage, model: noModel, images: exports.ImageReader({ props: { workspaceId: 'codemode-images' } }) });
     const codemodeTools: Invocation['codemodeTools'] = async ({ tool, args, callId }) => {

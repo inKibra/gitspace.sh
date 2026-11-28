@@ -3,7 +3,7 @@ import { githubRepositoryOf } from '@gitspace/protocol/github';
 import { sharedGuideSchema, type SharedGuideDenied } from '@gitspace/protocol/inspector-contract';
 import type { GuideShareView } from '@gitspace/protocol/rpc-contract';
 import { readInspectorContext, type InspectorCloudContext } from './account-inspector-data.js';
-import { cloudRepositoryDiff, withPinnedCloudCheckout } from './cloud-repository.js';
+import { cloudRepositoryDiff, withGuideCheckout } from './cloud-repository.js';
 import { base64url, GitHubApiError, githubRequest } from './github-api.js';
 import type { ProjectAuthorityDO } from './project-authority.js';
 
@@ -123,7 +123,7 @@ export async function serveGuideShare(request: Request, env: Env, url: URL): Pro
   }
   try {
     const source = await readInspectorContext(env, env.ACCOUNT_ID, record.workspaceId, projectId);
-    const diff = await withPinnedCloudCheckout(env, source, record.guide.baseCommit, record.guide.headCommit,
+    const diff = await withGuideCheckout(env, source, record.guide.baseCommit, record.guide.headCommit,
       checkout => cloudRepositoryDiff(env, env.ACCOUNT_ID, checkout, 'base', path));
     if (!await authority.getGuideShare(token)) return Response.json({ error: 'This link expired or was revoked' }, { status: 404, headers: NO_STORE });
     return Response.json(diff, { headers: NO_STORE });

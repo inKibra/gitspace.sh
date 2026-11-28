@@ -62,7 +62,10 @@ export async function invokeRuntimeSpaceTool(env: Env, identity: z.infer<typeof 
     case 'space_guide.put': {
       // What the revision lacks to show its change leads the result, so the writer adds it in the same turn.
       const guide = changeGuideAgentDraftSchema.parse(payload.guide);
-      const stored = await publish('change-guide', await context.putChangeGuide(putChangeGuideInputSchema.parse({ ...args, guide: { ...guide, createdBy: actorId } })));
+      const parsed = putChangeGuideInputSchema.parse({ ...args, guide: { ...guide, createdBy: actorId } });
+      // The guide's diffs are read from the workspace's cloud repository: its commits are there before it is stored.
+      await env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${target}`).runtimeEnsureGuideCommits({ projectId: identity.projectId, workspaceId: target }, { baseCommit: parsed.guide.baseCommit, headCommit: parsed.guide.headCommit });
+      const stored = await publish('change-guide', await context.putChangeGuide(parsed));
       const toAdd = guideVisualGaps(guide);
       return toAdd.length > 0 ? { toAdd, ...stored } : stored;
     }

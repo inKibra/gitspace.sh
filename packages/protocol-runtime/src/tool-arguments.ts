@@ -344,6 +344,10 @@ export const RuntimeEnvironmentArgumentsSchema = z.discriminatedUnion('method', 
 export const RuntimeImportRefArgumentsSchema = z.object({
   ref: z.string().max(512).regex(/^refs\/(?:(?:heads|tags)\/[^\0\s]+|pull\/[1-9][0-9]*\/head)$/u),
 }).strict();
+/** `publish_commit` runs on a workspace's own checkout: it publishes one commit to the workspace's cloud repository under
+ * `refs/gitspace/commits/<commit>`, first fetching it from the checkout's origin by id when the checkout lacks it. */
+export const RuntimePublishCommitArgumentsSchema = z.object({ commit: z.string().regex(/^[0-9a-f]{40}$/u) }).strict();
+export const RuntimePublishCommitResultSchema = z.object({ ref: z.string().regex(/^refs\/gitspace\/commits\/[0-9a-f]{40}$/u), commit: z.string().regex(/^[0-9a-f]{40}$/u) }).strict();
 /** A machine's report that a workspace process it supervises exited, sent when its supervisor sees the exit. */
 export const RuntimeProcessExitedInputSchema = RuntimeIdentitySchema.extend({ daemon: DaemonSnapshotSchema.extend({ state: z.enum(['exited', 'failed']) }) }).strict();
 export type RuntimeProcessExitedInput = z.infer<typeof RuntimeProcessExitedInputSchema>;

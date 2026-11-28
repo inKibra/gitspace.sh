@@ -6,7 +6,7 @@ import { z } from 'zod';
 export const CheckoutSourceFactsSchema = z.object({ commit: z.string(), remote: z.string(), requiresFiltersOrSubmodules: z.boolean() });
 export type CheckoutSourceFacts = z.infer<typeof CheckoutSourceFactsSchema>;
 
-export const executorCapabilities = ['read', 'write', 'edit', 'apply_patch', 'bash', 'grep', 'find', 'ast_grep', 'ast_edit', 'ast_resolve', 'proc', 'service', 'browser', 'sync_machine', 'import_ref', 'drive_transfer'];
+export const executorCapabilities = ['read', 'write', 'edit', 'apply_patch', 'bash', 'grep', 'find', 'ast_grep', 'ast_edit', 'ast_resolve', 'proc', 'service', 'browser', 'sync_machine', 'import_ref', 'publish_commit', 'drive_transfer'];
 
 /** Operating system names a `needs` may use for a platform's OS; macOS reports itself as `darwin`. */
 const OS_CAPABILITIES: Record<string, readonly string[]> = { darwin: ['darwin', 'macos'], linux: ['linux'] };
