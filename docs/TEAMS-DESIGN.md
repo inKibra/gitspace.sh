@@ -205,6 +205,12 @@ GitSpace's `/mcp` (OAuth, scoped consent, several connections) acts as the accou
 - **A client shares its person's handle**; its prompts are labelled.
 - **Passkey actions stay human:** a client never opens a cleared shell for a secret; that needs the person's passkey
   (section 12).
+- **Step-up actions need the person's passkey on every surface.** Changing a project's base branch, archiving or
+  deleting a project, and changing a secret's rule ask for a passkey confirmation whether a person starts them in the web
+  app or an MCP client asks for them: one security model. In the web app the confirmation follows the click. Over MCP
+  the tool call answers with a URL elicitation (as person-only waits do, #245): the person opens the link, sees the
+  change, and confirms with their passkey in the browser, which is the only place a passkey works. A client without
+  elicitation support gets the same link in the tool result.
 
 ## 9. Attribution and audit
 
