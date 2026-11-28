@@ -1,7 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { strict as assert } from 'node:assert';
 import { searchSnapshotFiles, type SearchArguments } from '../../protocol-runtime/src/search.js';
-import { CodeSearchIndex, type CodeSearchEvent, type CodeSearchLimits, type CodeSearchSource, type CodeSearchStorage } from '../src/cloud-search-index.js';
+import { CODE_SEARCH_LIMITS, CodeSearchIndex, type CodeSearchEvent, type CodeSearchLimits, type CodeSearchSource, type CodeSearchStorage } from '../src/cloud-search-index.js';
 import { createRunningMarks, type RunningStep } from '../src/running-marks.js';
 
 type Commit = { worktreeCommit: string; worktreeTree: string };
@@ -129,7 +129,7 @@ export class CodeSearchProof extends DurableObject {
     await this.ctx.storage.deleteAll();
     const url = new URL(request.url);
     const latency = Number(url.searchParams.get('latency') ?? 0);
-    return Response.json(latency ? await this.firstBuild(latency) : url.searchParams.has('benchmark') ? await this.benchmark() : await this.proof());
+    return Response.json(latency ? await this.firstBuild(latency) : url.searchParams.has('benchmark') ? await this.benchmark() : url.searchParams.has('bounded') ? await this.boundedSteps() : await this.proof());
   }
 
   private open(repository: Repository, snapshot: { current: Commit | null }, options: { limits?: Partial<CodeSearchLimits>; storage?: CodeSearchStorage; reports?: unknown[]; events?: CodeSearchEvent[]; mark?(step: string, detail: string): RunningStep } = {}) {
@@ -400,6 +400,62 @@ export class CodeSearchProof extends DurableObject {
     await restarted.drive();
     assert.deepEqual((await restarted.search({ pattern: 'reset', path: 'src' })).matches, ['src/reset.ts:1:reset']);
     return { passed: true, steps };
+  }
+
+  /** With the default limits, a repository of 2,000 source files (6 MB) is indexed in steps that each stay within the
+   * step budget when every repository read takes 10 ms; while a rebuild of every file runs with reads that answer at
+   * once, a request queued behind it is answered before the rebuild ends; and with 100 ms reads a step starts no read
+   * once its budget is spent. */
+  private async boundedSteps() {
+    const repository = new Repository();
+    const source = (n: number, version: string) => Array.from({ length: 25 }, (_, k) =>
+      `export function handle${n}_${k}_${version}(input: Record${k % 17}): Promise<Result${(n * 31 + k) % 101}> { return call${(n * k) % 997}(input.field${k}, ${n * k}); }\n`).join('');
+    const files = new Map<string, string>();
+    for (let n = 0; n < 2_000; n++) files.set(`src/dir${String(n % 40).padStart(2, '0')}/file${String(n).padStart(4, '0')}.ts`, source(n, 'first'));
+    const snapshot: { current: Commit | null } = { current: await repository.commit(files) };
+    const events: CodeSearchEvent[] = [];
+    const index = this.open(repository, snapshot, { events });
+    const built = async (version: string) => (await index.search({ pattern: `handle42_3_${version}`, path: '.' }).catch(() => null))?.matches.length === 1;
+    repository.latencyMs = 10;
+    for (let drives = 0; !await built('first'); drives++) {
+      assert.ok(drives < 100, 'The first build finishes');
+      await index.drive();
+    }
+    const progress = events.filter(event => event.event === 'code_search_progress');
+    const slowest = Math.max(...progress.map(event => Number(event.stepMs)));
+    assert.ok(slowest <= CODE_SEARCH_LIMITS.stepBudgetMs, `The slowest step took ${slowest} ms`);
+    const blobSteps = progress.filter(event => event.phase === 'blobs').length;
+    assert.ok(blobSteps >= 40, `Many steps build the index (${blobSteps})`);
+
+    repository.latencyMs = 0;
+    for (let n = 0; n < 2_000; n++) files.set(`src/dir${String(n % 40).padStart(2, '0')}/file${String(n).padStart(4, '0')}.ts`, source(n, 'second'));
+    snapshot.current = await repository.commit(files);
+    let finished = false;
+    const rebuilding = (async () => {
+      for (let drives = 0; !await built('second'); drives++) {
+        assert.ok(drives < 100, 'The rebuild finishes');
+        await index.drive();
+      }
+      finished = true;
+    })();
+    const request = Promise.withResolvers<{ finished: boolean; matches: string[] }>();
+    setTimeout(() => { index.search({ pattern: 'handle42_3_first', path: '.' }).then(result => request.resolve({ finished, matches: result.matches }), request.reject); }, 0);
+    const answered = await request.promise;
+    assert.deepEqual(answered, { finished: false, matches: ['src/dir02/file0042.ts:4:export function handle42_3_first(input: Record3): Promise<Result93> { return call126(input.field3, 126); }'] }, 'A request queued behind the rebuild is answered from the served index before the rebuild ends');
+    await rebuilding;
+
+    const latency = 100;
+    repository.latencyMs = latency;
+    for (let n = 0; n < 120; n++) files.set(`src/dir${String(n % 40).padStart(2, '0')}/file${String(n).padStart(4, '0')}.ts`, source(n, 'third'));
+    snapshot.current = await repository.commit(files);
+    events.length = 0;
+    for (let drives = 0; !await built('third'); drives++) {
+      assert.ok(drives < 100, 'The slow build finishes');
+      await index.drive();
+    }
+    const slowReads = Math.max(...events.filter(event => event.event === 'code_search_progress').map(event => Number(event.stepMs)));
+    assert.ok(slowReads <= CODE_SEARCH_LIMITS.stepBudgetMs + 2 * latency, `With ${latency} ms reads, the slowest step took ${slowReads} ms: reads in flight when the budget ends finish, no new one starts`);
+    return { passed: true, blobSteps, slowestStepMs: slowest, slowReadsStepMs: slowReads };
   }
 
   /** Wall time of a first build shaped like the GitSpace repository (1,283 files in 175 directories) when every

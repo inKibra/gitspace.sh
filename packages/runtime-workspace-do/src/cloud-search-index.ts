@@ -16,19 +16,22 @@ export type CodeSearchSnapshots = {
   distance(ancestor: string, descendant: string, limit: number): number | null;
 };
 export type CodeSearchLimits = {
-  /** Blobs and content bytes read per step; each transaction commits at most `txnBlobs`/`txnBytes` of them. */
+  /** Blobs and content bytes read per step; each transaction commits at most `txnBlobs`/`txnBytes` of them, and
+   * requests queued meanwhile run between transactions. */
   stepBlobs: number; stepBytes: number; txnBlobs: number; txnBytes: number;
   /** Tree pairs diffed per step. */
   stepTrees: number;
+  /** A step starts no repository read once this long has passed since it began; reads in flight finish. */
+  stepBudgetMs: number;
   /** Object reads in flight at once; each blob may be as large as `blobBytes`, so this bounds memory too. */
   readConcurrency: number;
   /** A repository read that has not answered by then fails the step instead of wedging it. */
   readTimeoutMs: number;
   /** Line-aligned chunk size; a chunk row stays well under the 2 MB Durable Object value limit. */
   chunkBytes: number;
-  /** Larger blobs are not indexed and are reported as skipped. Hand-written source sits far below the default: in
-   * inkibra core the 99th percentile file is 112 KB and the largest source file 168 KB; what is larger is bundles,
-   * data, media and changelogs. */
+  /** Larger blobs are not indexed and are reported as skipped. Hand-written source sits far below the default: in a
+   * large production monorepo the 99th percentile file is 112 KB and the largest source file 168 KB; what is larger is
+   * bundles, data, media and changelogs. */
   blobBytes: number;
   /** More candidate chunks than this falls back to the budgeted path-ordered scan. */
   candidateChunks: number;
@@ -38,9 +41,11 @@ export type CodeSearchLimits = {
   stepWindowMs: number;
 };
 /** Bounded so indexing stays far below the 128 MB isolate it shares with agent sessions (and possibly other workspaces):
- * at most `readConcurrency` blobs of `blobBytes` in flight, `stepBytes` held per step, `verifyBytes` per search. */
+ * at most `readConcurrency` blobs of `blobBytes` in flight, `stepBytes` held per step, `verifyBytes` per search. A
+ * transaction's trigram inserts run synchronously and hold the object: `txnBytes` keeps each one short, where 4 MiB
+ * steps committed back to back held it for seconds and machines' reads timed out. */
 export const CODE_SEARCH_LIMITS: CodeSearchLimits = {
-  stepBlobs: 200, stepBytes: 4 * 1024 * 1024, txnBlobs: 25, txnBytes: 1024 * 1024, stepTrees: 64, readConcurrency: 4, readTimeoutMs: 60_000,
+  stepBlobs: 50, stepBytes: 512 * 1024, txnBlobs: 25, txnBytes: 256 * 1024, stepTrees: 64, stepBudgetMs: 250, readConcurrency: 4, readTimeoutMs: 60_000,
   chunkBytes: 1024 * 1024, blobBytes: 256 * 1024, candidateChunks: 50_000, verifyFiles: 2_000, verifyBytes: 8 * 1024 * 1024, stepWindowMs: 20_000,
 };
 /** One structured line per indexing step or failure, for Workers observability. */
@@ -96,6 +101,12 @@ async function pooled<T>(items: readonly T[], limit: number, work: (item: T) => 
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
     while (next < items.length && more()) await work(items[next++]!);
   }));
+}
+/** Settles in a later macrotask: requests queued behind indexing run first, and the Workers clock moves. */
+function nextTask(): Promise<void> {
+  const task = Promise.withResolvers<void>();
+  setTimeout(task.resolve, 0);
+  return task.promise;
 }
 
 /** Line-aligned pieces: a match within one line never spans two chunks, so chunk-level candidates lose nothing. */
@@ -227,6 +238,8 @@ export class CodeSearchIndex {
       try { step = await this.step(); }
       catch (error) { await this.failed(error, Date.now() - started); return; }
       if (!step) return;
+      // Requests run between steps; the clock moves with this wait, so the step's time is measured.
+      await nextTask();
       sql.exec('UPDATE code_search_state SET failure=NULL, failures=0, retry_at=NULL WHERE singleton=1 AND (failure IS NOT NULL OR failures>0)');
       this.log({ event: 'code_search_progress', repository: this.options.repository, phase: step.phase, items: step.items, stepMs: Date.now() - started, ...this.progress() });
       if (Date.now() >= deadline) { await this.options.schedule(Date.now()); return; }
@@ -246,8 +259,9 @@ export class CodeSearchIndex {
     else await this.options.schedule(retryAt);
   }
 
-  /** One bounded unit of work. */
+  /** One bounded unit of work; repository reads start within `stepBudgetMs` of its start. */
   async step(): Promise<CodeSearchStep | null> {
+    const deadline = Date.now() + this.limits.stepBudgetMs;
     const collected = this.collectGarbage();
     if (collected) return { phase: 'collect', items: collected };
     const state = this.state();
@@ -257,9 +271,9 @@ export class CodeSearchIndex {
       this.begin(current);
       return { phase: 'begin', items: 1 };
     }
-    const trees = await this.diffTrees(state.generation + 1);
+    const trees = await this.diffTrees(state.generation + 1, deadline);
     if (trees) return { phase: 'trees', items: trees };
-    const blobs = await this.indexBlobs();
+    const blobs = await this.indexBlobs(deadline);
     if (blobs) return { phase: 'blobs', items: blobs };
     // Every changed path and blob is in place: the next generation becomes visible in one statement.
     this.options.storage.sql.exec(`UPDATE code_search_state SET generation=generation+1, served_commit=target_commit, served_tree=target_tree, target_commit=NULL, target_tree=NULL
@@ -354,8 +368,9 @@ export class CodeSearchIndex {
     });
   }
 
-  /** Unchanged subtrees are never read: only tree pairs whose ids differ are queued. Returns the pairs diffed. */
-  private async diffTrees(next: number): Promise<number> {
+  /** Unchanged subtrees are never read: only tree pairs whose ids differ are queued. Pairs not started by `deadline` wait
+   * for the next step. Returns the pairs diffed. */
+  private async diffTrees(next: number, deadline: number): Promise<number> {
     const { storage, source, repository } = this.options;
     const pairs = storage.sql.exec<{ prefix: string; old_tree: string | null; new_tree: string }>('SELECT prefix, old_tree, new_tree FROM code_search_tree LIMIT ?', this.limits.stepTrees).toArray();
     if (!pairs.length) return 0;
@@ -373,7 +388,7 @@ export class CodeSearchIndex {
         await pooled(pairs, this.limits.readConcurrency, async pair => {
           const [before, after] = await Promise.all([read(pair.old_tree, pair.prefix), read(pair.new_tree, pair.prefix)]);
           diffs.push({ prefix: pair.prefix, new_tree: pair.new_tree, before, after });
-        });
+        }, () => Date.now() < deadline);
       } finally { await bounded(reader.close(), this.limits.readTimeoutMs, 'Closing the repository reader').catch(() => {}); }
       mark?.update(`applying ${diffs.length} changed directories: ${diffs.reduce((sum, diff) => sum + diff.before.length + diff.after.length, 0)} tree entries`);
       storage.transactionSync(() => {
@@ -416,9 +431,10 @@ export class CodeSearchIndex {
     return false;
   }
 
-  /** Reads up to `stepBlobs` pending blobs, `readConcurrency` at a time, and commits them in transactions of at most
-   * `txnBlobs`/`txnBytes` (each FTS5 transaction writes one segment). Returns the blobs settled. */
-  private async indexBlobs(): Promise<number> {
+  /** Reads up to `stepBlobs` pending blobs, `readConcurrency` at a time and none started after `deadline`, and commits
+   * them in transactions of at most `txnBlobs`/`txnBytes` (each FTS5 transaction writes one segment), letting queued
+   * requests run between transactions. Returns the blobs settled. */
+  private async indexBlobs(deadline: number): Promise<number> {
     const { storage, source, repository } = this.options;
     const pending = storage.sql.exec<{ id: number; oid: string }>(`SELECT id, oid FROM code_search_blob WHERE state=${PENDING} LIMIT ?`, this.limits.stepBlobs).toArray();
     if (!pending.length) return 0;
@@ -447,11 +463,12 @@ export class CodeSearchIndex {
             this.blobFailures.delete(blob.id);
             indexed.push({ id: blob.id, state: UNREADABLE, chunks: [], skipped: { oid: blob.oid, message: error instanceof Error ? error.message : String(error) } });
           }
-        }, () => bytes < this.limits.stepBytes);
+        }, () => bytes < this.limits.stepBytes && Date.now() < deadline);
       } finally { await bounded(reader.close(), this.limits.readTimeoutMs, 'Closing the repository reader').catch(() => {}); }
       if (!indexed.length) throw firstError ?? new Error('No pending blob could be read');
       mark?.update(`indexing ${indexed.length} blobs: ${kibibytes(bytes)} read${over ? `, ${over} over ${kibibytes(this.limits.blobBytes)} skipped (largest ${kibibytes(largest)})` : ''}`);
       for (let start = 0; start < indexed.length;) {
+        if (start > 0) await nextTask();
         let end = start, size = 0;
         while (end < indexed.length && end - start < this.limits.txnBlobs && (end === start || size < this.limits.txnBytes)) size += indexed[end++]!.chunks.reduce((sum, chunk) => sum + chunk.content.length, 0);
         const batch = indexed.slice(start, end);

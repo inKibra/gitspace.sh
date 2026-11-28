@@ -7,7 +7,7 @@ import { entryEvents, type WithdrawnNotices } from './transcript.js';
 /** The SQL surface the index uses: Durable Object storage, or a wrapper that observes each statement. */
 export type HistorySearchStorage = { sql: Pick<SqlStorage, 'exec' | 'databaseSize'>; transactionSync<T>(closure: () => T): T };
 export type HistorySearchLimits = {
-  /** Entry bytes one backfill step reads. */
+  /** Entry bytes one backfill step reads and indexes synchronously, holding the object: requests run between steps. */
   stepBytes: number;
   /** Entries and entry bytes one backfill transaction writes. */
   txnEntries: number;
@@ -21,7 +21,7 @@ export type HistorySearchLimits = {
   /** How long one alarm's drive runs steps before it reschedules. */
   stepWindowMs: number;
 };
-export const HISTORY_SEARCH_LIMITS: HistorySearchLimits = { stepBytes: 4_000_000, txnEntries: 500, txnBytes: 1_000_000, liveEntries: 256, liveBytes: 4_000_000, scanEvents: 2_000, scanCharacters: 4_000_000, stepWindowMs: 5_000 };
+export const HISTORY_SEARCH_LIMITS: HistorySearchLimits = { stepBytes: 1_000_000, txnEntries: 500, txnBytes: 1_000_000, liveEntries: 256, liveBytes: 4_000_000, scanEvents: 2_000, scanCharacters: 4_000_000, stepWindowMs: 5_000 };
 /** One structured line per indexing step, the end of the backfill, or a failure, for Workers observability. */
 export type HistorySearchEvent = { event: 'history_search_progress' | 'history_search_built' | 'history_search_step_failed' | 'history_search_live_failed' } & Record<string, string | number | null>;
 /** What one backfill step did: `queued` indexed entries a write's transaction left queued; `backfill` indexed one
