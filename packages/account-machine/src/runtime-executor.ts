@@ -8,7 +8,7 @@ import { RuntimeGitCheckpointSchema, RuntimeAssignmentSchema, RuntimeAssignments
 import { z } from 'zod';
 import type { CloudRuntimeClient } from './cloud-runtime-client.js';
 import { Database } from 'bun:sqlite';
-import { IncrementalGitSnapshots, createGitIntermediateCheckpoint, gitRefsBeyond, gitTreeChanges, gitTreePatch, readGitWorktreeSnapshot, resetGitWorktree, mergeGitBackupIntoWorktree, deleteGitRef, restoreGitIntermediateCheckpoint, applyGitCacheCheckpoint, gitCheckpointIncludes, readGitCacheBase, saveGitCacheBase } from './git-checkpoint.js';
+import { IncrementalGitSnapshots, createGitIntermediateCheckpoint, gitCheckoutUnsyncedWork, gitRefsBeyond, gitTreeChanges, gitTreePatch, readGitWorktreeSnapshot, resetGitWorktree, mergeGitBackupIntoWorktree, deleteGitRef, restoreGitIntermediateCheckpoint, applyGitCacheCheckpoint, gitCheckpointIncludes, readGitCacheBase, saveGitCacheBase } from './git-checkpoint.js';
 import type { GitIntermediateCheckpoint } from './git-checkpoint.js';
 import { artifactsPublicationRejection, type ArtifactsGitRemote } from './artifacts-git-remote.js';
 import { spaceGitCheckpointRef } from '@gitspace/protocol-workspace';
@@ -742,7 +742,13 @@ export async function createMachineExecutor(options: {
             const observed = await createGitIntermediateCheckpoint({ repositoryPath: prepared.rootPath, spaceId: attachment.workspaceId, captureId, revision, lfs: publication })
               .finally(async () => { await publication?.releasePublication?.(); });
             const cloud = assignment.checkpoint;
-            if (observed.headCommit !== cloud.headCommit || observed.branch !== cloud.branch || observed.indexTree !== cloud.indexTree || observed.worktreeTree !== cloud.worktreeTree) throw new Error(`The checkout at ${prepared.rootPath} has changes that were never synced from this workspace; move it aside to attach`);
+            if (observed.headCommit !== cloud.headCommit || observed.branch !== cloud.branch || observed.indexTree !== cloud.indexTree || observed.worktreeTree !== cloud.worktreeTree) {
+              // A checkout holding nothing the cloud lacks takes the cloud's version, so nothing in it is published as a change.
+              const unsynced = await gitCheckoutUnsyncedWork({ repositoryPath: prepared.rootPath, observed, cloud, remote: source?.remote ?? null, env });
+              if (unsynced) throw new Error(`The checkout at ${prepared.rootPath} ${unsynced}; move it aside to attach`);
+              await restoreGitIntermediateCheckpoint({ repositoryPath: prepared.rootPath, checkpoint: cloud, branch: attachment.checkout.branch, lfs: await lfs?.read(prepared) });
+              console.log(JSON.stringify({ event: 'checkout_admitted_at_cloud_version', directory: prepared.rootPath, from: observed.headCommit, to: cloud.headCommit }));
+            }
             base = cloud;
           }
           if (base) {

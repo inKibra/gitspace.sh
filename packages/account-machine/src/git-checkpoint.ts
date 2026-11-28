@@ -276,6 +276,47 @@ export async function gitRefsBeyond(repositoryPath: string, head: string | null)
   return beyond;
 }
 
+/** What a checkout already at a workspace's path holds that the cloud's version `cloud` lacks, or null when it holds
+ * nothing: its index and files equal its HEAD (`observed`, a checkpoint of it), and each commit on HEAD is on `cloud`'s
+ * head or on a remote-tracking branch. With a `remote` (the cloud repository), `cloud`'s commits are fetched from it
+ * first: `cloud`'s head with its history, which the remote sends only down to the newest commit of HEAD's history it
+ * holds, then each layer commit still absent at depth 1, as an acquisition fetches them. A depth-1 fetch of the head
+ * alone would cut its parents, so HEAD could never be found in its history. */
+export async function gitCheckoutUnsyncedWork(input: {
+  repositoryPath: string;
+  observed: GitIntermediateCheckpoint;
+  cloud: GitIntermediateCheckpoint;
+  remote: string | null;
+  env: Record<string, string>;
+}): Promise<string | null> {
+  const { repositoryPath, observed, cloud } = input;
+  const head = observed.headCommit;
+  const headTree = (head === null ? await runGit(repositoryPath, ['hash-object', '-t', 'tree', '--stdin'], { input: '' }) : await runGit(repositoryPath, ['rev-parse', `${head}^{tree}`])).stdout;
+  if (observed.indexTree !== headTree || observed.worktreeTree !== headTree) return 'has uncommitted changes';
+  const env = { ...input.env, GIT_LFS_SKIP_SMUDGE: '1' };
+  const absent = async (commits: string[]) => {
+    const checked = await runGit(repositoryPath, ['cat-file', '--batch-check=%(objectname)'], { input: commits.map(commit => `${commit}\n`).join('') });
+    return checked.stdout.split('\n').flatMap(line => line.endsWith(' missing') ? [line.slice(0, -' missing'.length)] : []);
+  };
+  const unsent = async (from: string) => {
+    const tips = cloud.headCommit !== null && !(await absent([cloud.headCommit])).length ? [cloud.headCommit] : [];
+    return (await runGit(repositoryPath, ['rev-list', '--abbrev-commit', from, '--not', '--remotes', ...tips])).stdout.split('\n').filter(Boolean);
+  };
+  let commits = head === null ? [] : await unsent(head);
+  if (head !== null && commits.length && input.remote && cloud.headCommit !== null) {
+    // The remote fails a fetch it cannot serve: Artifacts with HTTP 500 when no commit of HEAD's history is one it holds
+    // and its own history ends at a boundary it never recorded. HEAD then stays outside `cloud`'s history.
+    await runGit(repositoryPath, ['fetch', '--no-tags', '--update-shallow', input.remote, cloud.headCommit], { env }).catch((error: unknown) => {
+      if (!(error instanceof GitCheckpointError)) throw error;
+    });
+    commits = await unsent(head);
+  }
+  if (commits.length) return `has commits ${commits.slice(0, 5).join(', ')}${commits.length > 5 ? ` and ${commits.length - 5} more` : ''} that GitSpace never received`;
+  const needed = await absent([cloud.headCommit, cloud.indexCommit, cloud.trackedWorktreeCommit, cloud.worktreeCommit].filter(commit => commit !== null));
+  if (input.remote && needed.length) await runGit(repositoryPath, ['fetch', '--depth', '1', '--update-shallow', '--no-tags', input.remote, ...needed], { env });
+  return null;
+}
+
 /** The working copy exactly as a snapshot would send it, without publishing anything. `committedLfs`, the last synced
  * snapshot's LFS objects, are taken as placed; any other LFS object in the history needs the store, which this has not. */
 export async function readGitWorktreeSnapshot(repositoryPath: string, spaceId: string, committedLfs?: GitIntermediateCheckpoint['lfs']): Promise<GitIntermediateCheckpoint> {
