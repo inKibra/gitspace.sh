@@ -296,10 +296,10 @@ describe('cloud lifecycle inspection and explicit authorization', () => {
     await placement.runtimeAccess(identity, false);
     // Two environment calls each wait on a card: one the person declines, one they approve. They are in two
     // conversations: a person's answer closes the other open questions of its own conversation as replied.
-    await runInDurableObject(placement, async (_instance, state) => {
+    await runInDurableObject(placement, async (instance: SpaceAuthorityDO, state) => {
       state.storage.sql.exec('CREATE TABLE IF NOT EXISTS runtime_code_snapshot(singleton INTEGER PRIMARY KEY CHECK(singleton=1), checkpoint TEXT NOT NULL)');
       state.storage.sql.exec('INSERT INTO runtime_code_snapshot(singleton,checkpoint) VALUES(1,?)', JSON.stringify(checkpoint));
-      const runtime = await createAccountWorkspaceRuntime(state, env, identity, async () => {}, async () => { throw new Error('Unexpected machine attach'); });
+      const runtime = await createAccountWorkspaceRuntime(state, env, identity, async () => {}, async () => { throw new Error('Unexpected machine attach'); }, instance);
       const root = await runtime.harness.root(BACKGROUND_CONTEXT);
       const anchor = await root.commit(tx => tx.appendEntry(root.id, { kind: 'test.anchor' }), BACKGROUND_CONTEXT);
       const other = await root.fork(anchor.id, { ownership: { kind: 'ownerless' } }, BACKGROUND_CONTEXT);

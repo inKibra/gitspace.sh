@@ -31,7 +31,7 @@ import { ensureGuideCommits, importRefThroughBaseMachine } from './runtime-ref-i
 import { RuntimeGitCheckpointSchema, RuntimeSnapshotCommitInputSchema } from '@gitspace/protocol-runtime/workspace-controls';
 import { RuntimeAttachmentReadyInputSchema, RuntimeAssignmentsInputSchema, RuntimeCacheAttachmentRequestInputSchema, RuntimeAttachmentDetachRequestInputSchema } from '@gitspace/protocol-runtime/attachment-controls';
 import { RuntimeHeartbeatInputSchema, RuntimeDetachInputSchema } from '@gitspace/protocol-runtime/machine-controls';
-import { CheckoutSourceFactsSchema, RuntimeAttachmentController, machineCapabilities, type RuntimeAttachmentControllerOptions } from './runtime-attachments.js';
+import { CheckoutSourceFactsSchema, RuntimeAttachmentController, checkoutSource, machineCapabilities, type CheckoutSourceServices, type MachineWorkspaceAssignments, type RuntimeAttachmentControllerOptions } from './runtime-attachments.js';
 import { confirmMachinePresence, notifyLifecycleHolders, notifyMachines } from './machine-notices.js';
 import { SpaceEnvironmentStore, type LostLifecycleHolder } from './space-environment.js';
 import { committedBrowserOrigins } from './committed-browser-origins.js';
@@ -77,6 +77,8 @@ const SYNC_NOTICE_AFTER_MS = 5 * 60_000;
 const SyncFailureRunSchema = z.object({ since: z.number(), noticed: z.boolean() });
 /** How often an instance waiting to restart on a newer release checks whether its work has ended. */
 const RELEASE_RESTART_CHECK_MS = 5_000;
+/** How soon a failed fleet catalog write of this workspace's assignments is tried again. */
+const ASSIGNMENTS_RETRY_MS = 30_000;
 
 export class SpaceAuthorityDO extends BudgetedDurableObject {
   private readonly changes: LiveChanges;
@@ -88,6 +90,10 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
   private cloudRuntime: z.infer<typeof RuntimeIdentitySchema> | null = null;
   private cloudRuntimePublished = false;
   private alarmLine: Promise<void> = Promise.resolve();
+  /** Fleet catalog writes of this workspace's assignments, run one at a time (`publishMachineAssignments`). */
+  private assignmentsLine: Promise<void> = Promise.resolve();
+  /** What the last fleet catalog write held, timestamps left out; a write with nothing new for a machine is skipped. */
+  private assignmentsWritten: string | null = null;
   /** A newer release this instance's code predates: it restarts on that code once nothing is running. */
   private releaseRestart: { version: string; since: number; checking: boolean } | null = null;
   private seeding: Promise<WorkspaceMetadata> | undefined;
@@ -127,7 +133,7 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     // Issues are Chatter topics (docs/CHATTER-DESIGN.md §5.1): the workspace's own QA items are gone.
     this.ctx.storage.sql.exec('DROP TABLE IF EXISTS runtime_qa_items; DROP TABLE IF EXISTS runtime_qa_moved');
     // Owners of earlier releases have no handler: their wakes would fire forever.
-    this.ctx.storage.sql.exec("DELETE FROM runtime_alarms WHERE owner NOT IN ('runtime','lfs','presence','presence-notice')");
+    this.ctx.storage.sql.exec("DELETE FROM runtime_alarms WHERE owner NOT IN ('runtime','lfs','presence','presence-notice','assignments')");
     createWorkspaceMetadataTables(this.ctx.storage);
   }
 
@@ -166,6 +172,7 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     await this.flushPortableLfs();
     if (due.some(row => row.owner === 'presence')) await this.applyPresence();
     if (due.some(row => row.owner === 'presence-notice')) await this.noticeOfflineMachines();
+    if (due.some(row => row.owner === 'assignments')) await this.publishMachineAssignments();
     const wake = this.ctx.storage.sql.exec<{ timestamp: number }>("SELECT timestamp FROM runtime_alarms WHERE owner='runtime'").toArray()[0];
     if (wake && wake.timestamp <= Date.now()) {
       await this.scheduleAlarm('runtime', null);
@@ -381,6 +388,7 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     const runtime = await this.getRuntime(identity);
     runtime.attachments.remove(RuntimeMachineIdSchema.parse(machineId));
     runtime.publish();
+    await this.publishMachineAssignments();
     await this.env.FLEET_CATALOG.getByName(this.env.ACCOUNT_ID).detachMachineWorkspace(machineId, identity.workspaceId);
     return runtime.attachments.list().filter(item => item.machineId === machineId);
   }
@@ -638,6 +646,7 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
       detached.push(attachment.machineId);
     }
     runtime.publish();
+    await this.publishMachineAssignments();
     await this.releaseMachines(identity, detached);
   }
 
@@ -1172,7 +1181,10 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
       }));
       verifiedAt = Date.now();
       step = 'commit snapshot';
-      return await runtime.snapshotCommit(input);
+      const result = await runtime.snapshotCommit(input);
+      // Before the machine hears back: its next machine-wide read must not offer it the checkpoint this one replaced.
+      await this.publishMachineAssignments();
+      return result;
     } catch (error) {
       console.error(JSON.stringify({
         event: 'snapshot_commit_failed', step, workspaceId: input.workspaceId, attachmentId: input.attachmentId, worktreeCommit: input.checkpoint.worktreeCommit,
@@ -1200,19 +1212,74 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
 
   private attachmentControllerOver(stores: Pick<RuntimeAttachmentControllerOptions, 'attachments' | 'snapshot'>) {
     return new RuntimeAttachmentController({
-      ...stores, code: new ArtifactsCodeStore(this.env.ARTIFACTS),
-      origin: async projectId => (await this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${projectId}`).getProject())?.repositoryReference ?? null,
+      ...stores, ...this.sourceServices(),
       // The worker authenticated this machine's request; only fleet membership is checked here.
       authorizeMachine: async machineId => {
         const machine = await this.env.FLEET_CATALOG.getByName(this.env.ACCOUNT_ID).getMachine(machineId);
         if (!machine || machine.desiredState === 'removed') throw new Error('Attachment target is not an enrolled account machine');
       },
       capabilities: async machineId => machineCapabilities((await this.env.TENANT_RELEASES.getByName(this.env.ACCOUNT_ID).machinePlatforms())[machineId] ?? null),
+    });
+  }
+
+  private sourceServices(): CheckoutSourceServices {
+    return {
+      code: new ArtifactsCodeStore(this.env.ARTIFACTS),
+      origin: async projectId => (await this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${projectId}`).getProject())?.repositoryReference ?? null,
       sourceFacts: {
         read: async () => CheckoutSourceFactsSchema.nullable().catch(null).parse(await this.ctx.storage.get('assignment.source') ?? null),
         write: facts => this.ctx.storage.put('assignment.source', facts),
       },
+    };
+  }
+
+  /**
+   * Writes this workspace's assignments of every machine it holds attachments of, and of `include` (which may hold none
+   * here), to the fleet catalog: machine-wide assignment reads are answered from these alone. Writes run one at a time,
+   * each with a higher revision than the last, and only when something a machine reads changed; a failed one is retried
+   * from the alarm. Never throws.
+   */
+  publishMachineAssignments(include: readonly string[] = []): Promise<void> {
+    const write = this.assignmentsLine.then(() => this.writeMachineAssignments(include)).catch(async (error: unknown) => {
+      console.error(JSON.stringify({ event: 'machine_assignments_write_failed', message: error instanceof Error ? error.message : String(error) }));
+      await this.scheduleAlarm('assignments', Date.now() + ASSIGNMENTS_RETRY_MS).catch(() => undefined);
     });
+    this.assignmentsLine = write;
+    return write;
+  }
+
+  private async writeMachineAssignments(include: readonly string[]): Promise<void> {
+    // A paused workspace runs nothing, so its assignments do not change.
+    if (this.storageBreakerStatus().quarantined) return;
+    const stored = await this.ctx.storage.get('runtime.identity');
+    if (stored === undefined) return;
+    const identity = RuntimeIdentitySchema.parse(stored);
+    const rows = this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='runtime_attachments'").toArray().length
+      ? this.ctx.storage.sql.exec<{ record: string; secret: string }>('SELECT record,secret FROM runtime_attachments').toArray().map(row => ({ attachment: RuntimeAttachmentSchema.parse(JSON.parse(row.record)), sealedSecret: row.secret }))
+      : [];
+    // Every machine ever attached here: one whose attachments are all detached is written holding none.
+    const machineIds = [...new Set([...rows.map(row => row.attachment.machineId), ...include])].sort();
+    if (!machineIds.length) return;
+    const live = rows.filter(row => row.attachment.state !== 'detached');
+    const checkpoint = await readCurrentCheckpoint(this.ctx.storage);
+    const written = JSON.stringify([identity, machineIds, live, checkpoint], (key, field: unknown) => key.endsWith('At') ? undefined : field);
+    if (written === this.assignmentsWritten) return;
+    let source: MachineWorkspaceAssignments['source'] = null;
+    let sourceFailure: { error: unknown } | null = null;
+    if (checkpoint && live.length) {
+      try { source = await checkoutSource(this.sourceServices(), identity, checkpoint); }
+      catch (error) { sourceFailure = { error }; }
+    }
+    const revision = (await this.ctx.storage.get<number>('assignments.revision') ?? 0) + 1;
+    await this.ctx.storage.put('assignments.revision', revision);
+    // Without its source the workspace is written unavailable: the machine keeps its checkout instead of reading the
+    // checkpoint this write would have replaced.
+    await this.env.FLEET_CATALOG.getByName(this.env.ACCOUNT_ID).putMachineAssignments(identity, revision, Object.fromEntries(machineIds.map(machineId => [
+      machineId, sourceFailure ? null : { attachments: live.filter(row => row.attachment.machineId === machineId), source, checkpoint },
+    ])));
+    if (sourceFailure) throw sourceFailure.error;
+    this.assignmentsWritten = written;
+    if (this.ctx.storage.sql.exec("SELECT owner FROM runtime_alarms WHERE owner='assignments'").toArray().length) await this.scheduleAlarm('assignments', null);
   }
 
   async runtimeCacheAttachmentRequest(raw: unknown) {
@@ -1225,6 +1292,8 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     const platform = (await this.env.TENANT_RELEASES.getByName(this.env.ACCOUNT_ID).machinePlatforms())[input.machineId] ?? null;
     const result = await runtime.attachments.requestCache({ ...input, checkout: { kind: 'shared', branch: workspace.branch }, capabilities: machineCapabilities(platform) }, connected);
     runtime.publish();
+    // Written before the machine is told, so its machine-wide read finds the new attachment.
+    await this.publishMachineAssignments();
     await notifyMachines(this.env, [input.machineId], ['assignments'], input);
     return result;
   }
@@ -1242,6 +1311,7 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     await (await this.getRuntime(input)).processExited(input.daemon);
     return null;
   }
+  /** One workspace's assignments of the machine, read here; the fleet catalog's copy is written from the same state. */
   async runtimeAssignments(raw: unknown) {
     const identity = RuntimeIdentitySchema.parse(raw);
     const input = RuntimeAssignmentsInputSchema.parse(raw);
@@ -1251,6 +1321,7 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     // starts code and history indexing: every machine-wide read woke every workspace the machine holds, and busy ones
     // took minutes to answer (242 s, 2026-11-27). Only a workspace with no checkpoint yet opens it to initialize one.
     const checkpoint = this.runtime ? null : await readCurrentCheckpoint(this.ctx.storage);
+    let result;
     if (checkpoint) {
       const runtime = RuntimeIdentitySchema.parse(stored);
       if (runtime.projectId !== identity.projectId || runtime.workspaceId !== identity.workspaceId) throw new Error('Runtime actor identity mismatch');
@@ -1260,9 +1331,11 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
         open: (ciphertext, scope) => this.env.CREDENTIALS.getByName(this.env.ACCOUNT_ID).openRuntimeGrant(ciphertext, scope),
         dispatch: dispatch => dispatchRuntimeAttachment(this.env, dispatch),
       });
-      return this.attachmentControllerOver({ attachments, snapshot: async () => checkpoint }).assignments(input);
-    }
-    return (await this.attachmentController(identity)).assignments(input);
+      result = await this.attachmentControllerOver({ attachments, snapshot: async () => checkpoint }).assignments(input);
+    } else result = await (await this.attachmentController(identity)).assignments(input);
+    // The read stored the capabilities the machine offers now; a workspace the catalog has no record of writes one.
+    await this.publishMachineAssignments([input.machineId]);
+    return result;
   }
 
   async runtimeAttachmentReady(raw: unknown) {
@@ -1271,6 +1344,7 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     const result = await (await this.attachmentController(input)).ready(input);
     await runtime.cacheReady(input.attachmentId, input.generation);
     runtime.publish();
+    await this.publishMachineAssignments();
     return result;
   }
 
@@ -1284,7 +1358,10 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     const previous = runtime.attachments.list().find(item => item.attachmentId === input.attachmentId);
     const before = visible(previous);
     const attachment = runtime.attachments.observe(input);
-    if (visible(attachment) !== before) runtime.publish();
+    if (visible(attachment) !== before) {
+      runtime.publish();
+      await this.publishMachineAssignments();
+    }
     // What the machine reports going wrong reaches the conversation once, when it first appears.
     const failedSetup = (attachment.cache?.setup ?? []).filter(step => step.state === 'failed' && !previous?.cache?.setup.some(prior => prior.phase === step.phase && prior.state === 'failed' && prior.runId === step.runId));
     const syncProblem = await this.lastingSyncProblem(input.attachmentId, input.generation, attachment.cache?.syncProblem ?? null);
@@ -1317,6 +1394,7 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     const runtime = await this.getRuntime(input);
     const attachment = runtime.attachments.detach(input);
     runtime.publish();
+    await this.publishMachineAssignments();
     await this.env.FLEET_CATALOG.getByName(this.env.ACCOUNT_ID).detachMachineWorkspace(input.machineId, input.workspaceId);
     return { attachment };
   }

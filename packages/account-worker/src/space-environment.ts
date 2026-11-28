@@ -6,8 +6,9 @@ import { z } from 'zod';
 import type { LiveChanges } from './live-changes.js';
 import type { SpaceAuthorityDO } from './space-authority.js';
 
-/** The workspace object's environment operations its own runtime calls in-process. */
-export type WorkspaceEnvironment = Pick<SpaceAuthorityDO, 'getLifecycleState' | 'currentLifecycleState' | 'refreshBrowserOrigins' | 'mutateLifecycleState' | 'getLifecycleRunLog' | 'lifecycleRunEnded'>;
+/** The workspace object's operations its own runtime calls in-process: its environment, and the fleet catalog's copy
+ * of its machine assignments. */
+export type WorkspaceEnvironment = Pick<SpaceAuthorityDO, 'getLifecycleState' | 'currentLifecycleState' | 'refreshBrowserOrigins' | 'mutateLifecycleState' | 'getLifecycleRunLog' | 'lifecycleRunEnded' | 'publishMachineAssignments'>;
 
 const StoredEnvironmentSchema = LifecycleStateSchema.extend({ browserOriginsAvailable: z.boolean().default(true) });
 type StoredEnvironment = z.output<typeof StoredEnvironmentSchema>;

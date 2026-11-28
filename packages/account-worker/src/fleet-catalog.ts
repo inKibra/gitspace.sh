@@ -1,6 +1,6 @@
 import { LiveChanges } from './live-changes.js';
 import { notifyBrowsers } from './live-notices.js';
-import { confirmMachinePresence } from './machine-notices.js';
+import { confirmMachinePresence, notifyMachines } from './machine-notices.js';
 import { z } from 'zod';
 import { cloudImageChoiceSchema, cloudImageOperationActive, cloudImageOperationCancellable, cloudImageProviderStatusSchema, cloudImageSelectionSchema, cloudImageStateSchema, type CloudImageChoice, type CloudImageSelection, type CloudImageState } from '@gitspace/protocol/cloud-image';
 import { machineDiscardConfirmationSchema, machineDiscardScopeSchema, type MachineDiscardConfirmation, type MachineDiscardScope } from '@gitspace/protocol/machine-discard';
@@ -9,6 +9,8 @@ import { controlCloudflareSandboxMachine, createCloudflareSandboxMachine } from 
 import { controlFleetMachine, ownedWorkspaceScopes, type CredentialVaultDO } from './application.js';
 import { listMachineAttachments } from './runtime-machine-loss.js';
 import type { RuntimeAttachment } from '@gitspace/protocol-runtime';
+import { assignedCapabilities } from '@gitspace/runtime-workspace-do';
+import { machineCapabilities, MachineWorkspaceAssignmentsSchema, type MachineWorkspaceAssignments } from './runtime-attachments.js';
 import type { ProjectAuthorityDO, UserProjectIndexDO } from './project-authority.js';
 import { DirectoryPublisher, type DirectoryPublication } from './account-directory.js';
 import type { FleetMachineDefinition } from '@gitspace/protocol/account-directory';
@@ -74,6 +76,8 @@ export class FleetCatalogDO extends BudgetedDurableObject {
   private imageDefaultRun: Promise<CloudImageChoice> | null = null;
   private imageDefaultInitialization: Promise<CloudImageChoice> | null = null;
   private workspaceIndexing: Promise<void> | null = null;
+  /** Workspaces asked, in the background, to write their assignments of a machine here, by `machine:workspace`. */
+  private readonly assignmentRequests = new Map<string, Promise<void>>();
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.changes = new LiveChanges(ctx.storage, (notices) => { ctx.waitUntil(notifyBrowsers(env, notices)); });
@@ -102,6 +106,7 @@ export class FleetCatalogDO extends BudgetedDurableObject {
         CREATE TABLE IF NOT EXISTS machine_idle(machine_id TEXT PRIMARY KEY,idle_since INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS machine_workspaces(machine_id TEXT NOT NULL,workspace_id TEXT NOT NULL,project_id TEXT NOT NULL,PRIMARY KEY(machine_id,workspace_id));
         CREATE TABLE IF NOT EXISTS machine_presence(machine_id TEXT PRIMARY KEY,connected INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS machine_assignments(machine_id TEXT NOT NULL,workspace_id TEXT NOT NULL,project_id TEXT NOT NULL,revision INTEGER NOT NULL,record_json TEXT,PRIMARY KEY(machine_id,workspace_id));
       `);
       this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS machine_operations(machine_id TEXT PRIMARY KEY,operation_id TEXT NOT NULL,deadline_at INTEGER NOT NULL)');
       // Transitions written before operation leases existed lease from their last write.
@@ -606,6 +611,76 @@ export class FleetCatalogDO extends BudgetedDurableObject {
       .map(row => ({ projectId: row.project_id, workspaceId: row.workspace_id }));
   }
 
+  /** A workspace's assignments of each machine it holds attachments of (`MachineWorkspaceAssignments`); `null` when it
+   * could not compute them, which machine-wide reads report unavailable. A write carrying a lower workspace revision
+   * than the stored one changes nothing. */
+  putMachineAssignments(workspace: MachineWorkspace, revision: number, machines: Record<string, MachineWorkspaceAssignments | null>): void {
+    this.ctx.storage.transactionSync(() => {
+      for (const [machineId, record] of Object.entries(machines)) {
+        this.ctx.storage.sql.exec(
+          'INSERT INTO machine_assignments(machine_id,workspace_id,project_id,revision,record_json) VALUES(?,?,?,?,?) ON CONFLICT(machine_id,workspace_id) DO UPDATE SET project_id=excluded.project_id,revision=excluded.revision,record_json=excluded.record_json WHERE excluded.revision>revision',
+          machineId, workspace.workspaceId, workspace.projectId, revision, record === null ? null : JSON.stringify(record),
+        );
+      }
+    });
+  }
+
+  /** The machine-wide assignments: every attachment of the machine in the workspaces the index holds for it, answered
+   * from what those workspaces wrote here (`putMachineAssignments`), never by reading a workspace object. A workspace
+   * that has written nothing yet (its attachments predate these records) is reported unavailable, so the machine keeps
+   * its attachments there, and is asked once in the background to write them. */
+  async machineAssignments(machineId: string) {
+    const machine = this.storedMachine(machineId);
+    if (!machine || machine.desiredState === 'removed') throw new Error('Attachment target is not an enrolled account machine');
+    await this.indexMachineWorkspaces();
+    const rows = this.ctx.storage.sql.exec<{ project_id: string; workspace_id: string; recorded: number; record_json: string | null }>(
+      'SELECT w.project_id,w.workspace_id,a.workspace_id IS NOT NULL AS recorded,a.record_json FROM machine_workspaces w LEFT JOIN machine_assignments a ON a.machine_id=w.machine_id AND a.workspace_id=w.workspace_id WHERE w.machine_id=? ORDER BY w.workspace_id',
+      machineId,
+    ).toArray();
+    const offered = machineCapabilities((await this.env.TENANT_RELEASES.getByName(this.env.ACCOUNT_ID).machinePlatforms())[machineId] ?? null);
+    const vault = this.env.CREDENTIALS.getByName(this.env.ACCOUNT_ID);
+    const unavailable: string[] = [];
+    const listed: Array<MachineWorkspaceAssignments['attachments'][number] & Pick<MachineWorkspaceAssignments, 'source' | 'checkpoint'>> = [];
+    for (const row of rows) {
+      const workspace = { projectId: row.project_id, workspaceId: row.workspace_id };
+      if (!row.recorded) this.requestAssignments(machineId, workspace, true);
+      if (row.record_json === null) { unavailable.push(row.workspace_id); continue; }
+      const { attachments, source, checkpoint } = MachineWorkspaceAssignmentsSchema.parse(JSON.parse(row.record_json));
+      let outdated = false;
+      for (const { attachment, sealedSecret } of attachments) {
+        const capabilities = assignedCapabilities(offered, attachment.capabilities);
+        outdated ||= JSON.stringify(capabilities) !== JSON.stringify(attachment.capabilities);
+        listed.push({ attachment: { ...attachment, capabilities }, sealedSecret, source, checkpoint });
+      }
+      // The workspace stores the capabilities the machine offers now from its own read, as the machine's reads did.
+      if (outdated) this.requestAssignments(machineId, workspace, false);
+    }
+    const assignments = await Promise.all(listed.map(async ({ attachment, sealedSecret, source, checkpoint }) => ({
+      grant: { attachment, executionSecret: await vault.openRuntimeGrant(sealedSecret, attachment) }, source, checkpoint,
+    })));
+    return { assignments, unavailable };
+  }
+
+  /** Asks a workspace in the background, one request at a time, for its own assignments of the machine
+   * (`runtimeAssignments`): that read stores the capabilities the machine offers now and writes its assignments here.
+   * `backfill`: the workspace had written none; one with none is recorded as holding none, and the machine is told to
+   * read again. */
+  private requestAssignments(machineId: string, workspace: MachineWorkspace, backfill: boolean): void {
+    const key = `${machineId}:${workspace.workspaceId}`;
+    if (this.assignmentRequests.has(key)) return;
+    const request = (async () => {
+      const { assignments } = await this.env.SPACE_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${workspace.workspaceId}`).runtimeAssignments({ ...workspace, machineId });
+      if (!backfill) return;
+      // Revision 0 is below every write of the workspace.
+      if (assignments.length === 0) this.ctx.storage.sql.exec('INSERT OR IGNORE INTO machine_assignments(machine_id,workspace_id,project_id,revision,record_json) VALUES(?,?,?,0,?)', machineId, workspace.workspaceId, workspace.projectId, JSON.stringify({ attachments: [], source: null, checkpoint: null }));
+      await notifyMachines(this.env, [machineId], ['assignments']);
+    })().catch((error: unknown) => {
+      console.error(JSON.stringify({ event: 'machine_assignments_request_failed', machineId, workspaceId: workspace.workspaceId, message: error instanceof Error ? error.message : String(error) }));
+    }).finally(() => this.assignmentRequests.delete(key));
+    this.assignmentRequests.set(key, request);
+    this.ctx.waitUntil(request);
+  }
+
   /** The relay's view of the machine's connection. A paired computer's fleet state follows it; cloud machine states
    * stay provider-owned. Returns the workspaces whose attachments must learn it. */
   async machinePresence(machineId: string, connected: boolean): Promise<MachineWorkspace[]> {
@@ -772,6 +847,7 @@ export class FleetCatalogDO extends BudgetedDurableObject {
       this.ctx.storage.sql.exec('DELETE FROM machine_operations WHERE machine_id=?', machineId);
       this.ctx.storage.sql.exec('DELETE FROM machine_workspaces WHERE machine_id=?', machineId);
       this.ctx.storage.sql.exec('DELETE FROM machine_presence WHERE machine_id=?', machineId);
+      this.ctx.storage.sql.exec('DELETE FROM machine_assignments WHERE machine_id=?', machineId);
       const removed = this.ctx.storage.sql.exec('DELETE FROM fleet_machines WHERE machine_id = ?', machineId).rowsWritten > 0;
       if (removed) {
         this.changes.mark('machines');

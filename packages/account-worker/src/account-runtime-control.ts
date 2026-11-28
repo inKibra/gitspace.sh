@@ -10,6 +10,7 @@ import { ArtifactsCodeStore, ArtifactsNotFoundSchema, artifactsProjectRepository
 import { requireWorkspaceAccess } from './runtime-access.js';
 import { ensureRuntimeCodeRepository } from './account-runtime-host.js';
 import { originAccess } from './origin-access.js';
+import { updateCloudProjectBase } from './cloud-workspace-lifecycle.js';
 
 /** Who may write `project-<projectId>`. While it is an empty copy target its base branch has not reached (the cloud's
  * import was refused), any of the account's machines copies the base branch in (`project.seed`); otherwise only a
@@ -31,6 +32,28 @@ async function projectRepositoryCredentials(env: Env, userId: string, machine: s
     && (input.generation === undefined || item.generation === input.generation))) throw new Error('Project repository lease requires a checkout of the base workspace on this machine');
   await code.ensureMachineSeedTarget(project.id, project.baseBranch);
   return code.credentials(repository, input.scope);
+}
+
+const MachineProjectBaseUpdateSchema = z.object({
+  projectId: z.string().min(1),
+  copied: z.object({ baseBranch: z.string().min(1), previous: z.string().nullable(), commit: z.string() }),
+});
+
+/** Update base for a project only its bridge machine reads, run by that machine once its copy of the base branch moved
+ * or was current (`project.seed` with `then: 'updateBase'`), through the same `updateCloudProjectBase` as the browser's
+ * `project.updateBase` with `copied`: fast-forward only, the cloud checking the project's copy is at `copied.commit`.
+ * Only a machine with a ready checkout of the project's base workspace asks, as for the project repository's write
+ * lease. Returns the queued operation's id. */
+export async function machineProjectBaseUpdate(env: Env, userId: string, machineId: string, payload: Record<string, unknown>): Promise<{ operationId: string }> {
+  if (userId !== env.ACCOUNT_ID) throw new Error('Update base belongs to a different account');
+  const input = MachineProjectBaseUpdateSchema.parse(payload);
+  const machine = RuntimeMachineIdSchema.parse(machineId);
+  const base = RuntimeIdentitySchema.parse({ projectId: input.projectId, workspaceId: input.projectId });
+  const access = await requireWorkspaceAccess(env, userId, base, false);
+  const attachments = await access.authority.runtimeAttachmentRecords(base);
+  if (!attachments.some(item => item.machineId === machine && item.state === 'ready')) throw new Error('Update base from a machine requires a ready checkout of the base workspace on this machine');
+  const operation = await updateCloudProjectBase(env, userId, input.projectId, input.copied);
+  return { operationId: operation.id };
 }
 
 /** How this machine's checkout reaches its project's origin, and the installation tokens it uses there. Authorized like
@@ -61,10 +84,6 @@ async function checkoutOrigin(env: Env, userId: string, machine: string, operati
 
 /** A runtime request this slow points at a cold or stuck workspace object; faster ones are not logged. */
 const SLOW_RUNTIME_REQUEST_MS = 30_000;
-/** How long the machine-wide assignments read waits for one workspace before reporting it unavailable, well inside the
- * 45 s the machine gives the whole read: one stuck workspace object must not hold every other workspace's
- * assignments. */
-const WORKSPACE_ASSIGNMENTS_DEADLINE_MS = 15_000;
 
 /** Runs one machine-control or browser runtime request, logging it only when it took SLOW_RUNTIME_REQUEST_MS or more.
  * `failed` tells a request that answered with an error value (the browser procedures' results) from a success. */
@@ -92,28 +111,6 @@ export function runtimeMachineControl(env: Env, request: SignedControlRequest): 
   return observeRuntimeRequest('machine', request.operation, workspace, () => dispatchMachineControl(env, request));
 }
 
-/** The machine-wide assignments: only the workspaces the fleet index holds for this machine, read in parallel. One
- * that fails or misses `deadlineMs` is reported unavailable, so the machine keeps its attachments there instead of
- * releasing them as omitted. */
-export async function machineAssignments(env: Env, userId: string, machine: z.output<typeof RuntimeMachineIdSchema>, deadlineMs = WORKSPACE_ASSIGNMENTS_DEADLINE_MS) {
-  const workspaces = await env.FLEET_CATALOG.getByName(userId).machineWorkspaces(machine);
-  const results = await Promise.all(workspaces.map(async workspace => {
-    const missed = Promise.withResolvers<never>();
-    const timer = setTimeout(() => missed.reject(new Error(`The workspace did not answer within ${deadlineMs / 1000} s`)), deadlineMs);
-    try {
-      const read = env.SPACE_AUTHORITY.getByName(`${userId}:${workspace.workspaceId}`).runtimeAssignments({ ...workspace, machineId: machine });
-      return { workspace, assignments: (await Promise.race([read, missed.promise])).assignments };
-    } catch (error) {
-      console.error(JSON.stringify({ event: 'runtime_assignments_space_failed', projectId: workspace.projectId, workspaceId: workspace.workspaceId, message: error instanceof Error ? error.message : String(error) }));
-      return { workspace, assignments: null };
-    } finally { clearTimeout(timer); }
-  }));
-  return {
-    assignments: results.flatMap(result => result.assignments ?? []),
-    unavailable: results.flatMap(result => result.assignments ? [] : [result.workspace.workspaceId]),
-  };
-}
-
 async function dispatchMachineControl(env: Env, request: SignedControlRequest): Promise<unknown> {
   const { operation, payload, userId, machineId } = request;
   const machine = RuntimeMachineIdSchema.parse(machineId);
@@ -125,7 +122,8 @@ async function dispatchMachineControl(env: Env, request: SignedControlRequest): 
       const access = await requireWorkspaceAccess(env, userId, input.workspace, false);
       return access.authority.runtimeAssignments({ ...input.workspace, ...input });
     }
-    return machineAssignments(env, userId, machine);
+    // The fleet catalog holds every workspace's assignments of the machine; no workspace object is read.
+    return env.FLEET_CATALOG.getByName(userId).machineAssignments(machine);
   }
   if (operation === 'runtime.checkouts.retired') {
     const input = RuntimeRetiredCheckoutsInputSchema.parse(payload);

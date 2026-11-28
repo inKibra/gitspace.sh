@@ -42,6 +42,11 @@ function delay(ms: number, signal: AbortSignal): Promise<void> {
 const RejectionSchema = z.object({ error: z.union([z.string(), z.object({ message: z.string() }).transform(error => error.message)]) });
 const encode = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
 const isBrowserCapability = (capability: string) => capability === 'browser' || capability === 'browser_control' || capability.startsWith('browser.');
+/** An attachment's capabilities once its machine offers `offered`: browser capabilities come from the machine's own
+ * reports (`current`), every other one from what the cloud offers it. */
+export function assignedCapabilities(offered: readonly string[], current: readonly string[]): string[] {
+  return [...offered.filter(capability => !isBrowserCapability(capability)), ...current.filter(isBrowserCapability)];
+}
 const failed = (dispatch: RuntimeToolDispatch, message: string): RuntimeToolResult => ({ requestId: dispatch.requestId, attemptId: dispatch.attemptId, status: 'failed', content: [{ type: 'text', text: message }], error: { code: 'machine_unavailable', message } });
 
 export class AttachmentStore {
@@ -114,7 +119,7 @@ export class AttachmentStore {
     for (const attachment of this.list()) {
       if (attachment.machineId !== machineId || attachment.state === 'detached') continue;
       if (capabilities) {
-        const next = [...capabilities.filter(capability => !isBrowserCapability(capability)), ...attachment.capabilities.filter(isBrowserCapability)];
+        const next = assignedCapabilities(capabilities, attachment.capabilities);
         if (JSON.stringify(next) !== JSON.stringify(attachment.capabilities)) {
           attachment.capabilities = next;
           this.save(attachment);

@@ -188,11 +188,16 @@ export async function createAccountWorkspaceRuntime(
       watch.published(report);
       automationTurns.published(report);
       waitUntil('browser notice', notifyBrowsers(env, [{ ...workspaceLiveKey(identity.workspaceId, 'runtime', identity.projectId), version: snapshot.cursor }]));
+      // Every attachment change publishes, including those made inside the runtime (the machines tool's detach); the
+      // write is skipped when nothing a machine reads changed.
+      waitUntil('machine assignments', environment.publishMachineAssignments());
     },
     turnChanged: (requestId, turn) => { watch.turnChanged(requestId, turn); automationTurns.turnChanged(requestId, turn); },
     personPrompted: watch.personPrompted,
     snapshotChanged: machineIds => {
-      waitUntil('machine snapshot notice', notifyMachines(env, machineIds, ['workspace.snapshot'], identity));
+      // The fleet catalog holds the new checkpoint before any machine hears of it: a machine-wide read offering the one
+      // it replaced would have the machine install that older version over its checkout.
+      waitUntil('machine snapshot notice', environment.publishMachineAssignments().then(() => notifyMachines(env, machineIds, ['workspace.snapshot'], identity)));
       // The environment is derived from the workspace's files: derive it when they change, not when it is read.
       waitUntil('environment derivation', environment.currentLifecycleState(identity).catch((error: unknown) => console.error('Environment was not derived', { workspaceId: identity.workspaceId, error })));
     },

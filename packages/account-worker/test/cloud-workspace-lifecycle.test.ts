@@ -150,8 +150,8 @@ describe('cloud workspace lifecycle with no machines', () => {
     const identity = RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId });
     expect(await client.runtime.snapshot(identity)).toMatchObject({ status: 'ok', value: { ...identity, documents: { 'gitspace.workspace': { phase: 'plan' } } } });
     expect(await env.SPACE_AUTHORITY.getByName(`${userId}:${workspaceId}`).runtimeRepositoryCheckpoint(identity)).toMatchObject({ headCommit: commit('1'), branch: 'feature/cloud' });
-    await runInDurableObject(env.SPACE_AUTHORITY.getByName(`${userId}:${workspaceId}`), async (_instance, state) => {
-      const reopened = await createAccountWorkspaceRuntime(state, env, identity, async () => {}, noAttach);
+    await runInDurableObject(env.SPACE_AUTHORITY.getByName(`${userId}:${workspaceId}`), async (instance: SpaceAuthorityDO, state) => {
+      const reopened = await createAccountWorkspaceRuntime(state, env, identity, async () => {}, noAttach, instance);
       expect((await reopened.snapshot()).documents['gitspace.workspace']).toMatchObject({ phase: 'plan' });
       await reopened.wake();
       await reopened.harness.close(BACKGROUND_CONTEXT);
@@ -749,8 +749,8 @@ describe('cloud workspace lifecycle with no machines', () => {
     expect(await space.runtimeRepositoryCheckpoint(identity)).toMatchObject({ branch: 'develop', headCommit: commit('2'), indexCommit: commit('2'), worktreeCommit: commit('2') });
     expect((await authority.listWorkspaces()).find(workspace => workspace.kind === 'base')).toMatchObject({ branch: 'develop', sourceRef: 'develop', sourceCommit: commit('2') });
     expect(artifacts.refs.get(`workspace-${project.id} refs/heads/develop`)).toBe(commit('2'));
-    await runInDurableObject(space, async (_instance, state) => {
-      const reopened = await createAccountWorkspaceRuntime(state, env, RuntimeIdentitySchema.parse(identity), async () => {}, noAttach);
+    await runInDurableObject(space, async (instance: SpaceAuthorityDO, state) => {
+      const reopened = await createAccountWorkspaceRuntime(state, env, RuntimeIdentitySchema.parse(identity), async () => {}, noAttach, instance);
       expect(await reopened.cloudFiles.initializeSnapshot()).toMatchObject({ branch: 'develop', headCommit: commit('2') });
       await reopened.wake();
       await reopened.harness.close(BACKGROUND_CONTEXT);
@@ -880,9 +880,9 @@ describe('cloud workspace lifecycle with no machines', () => {
     const created = await ready(client.workspace.create({ projectId: project.id, name: 'Reviewed', branch: 'reviewed', phase: 'review', sourceKind: 'base', sourceRef: '' }));
     const identity = RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId: created.workspace.id });
     const space = env.SPACE_AUTHORITY.getByName(`${userId}:${identity.workspaceId}`);
-    await runInDurableObject(space, async (_instance, state) => {
+    await runInDurableObject(space, async (instance: SpaceAuthorityDO, state) => {
       const authority = env.PROJECT_AUTHORITY.getByName(`${userId}:${project.id}`);
-      const runtime = await createAccountWorkspaceRuntime(state, env, identity, async () => {}, noAttach);
+      const runtime = await createAccountWorkspaceRuntime(state, env, identity, async () => {}, noAttach, instance);
       expect((await runtime.harness.snapshot(WorkspaceDoc, BACKGROUND_CONTEXT))?.phase).toBe('review');
       await runtime.session(undefined, { type: 'setWorkspacePhase', phase: 'plan' }, true);
       expect((await authority.listWorkspaces()).find(workspace => workspace.id === identity.workspaceId)?.phase).toBe('plan');
@@ -911,7 +911,7 @@ describe('cloud workspace lifecycle with no machines', () => {
       ]);
       await runtime.wake();
       await runtime.harness.close(BACKGROUND_CONTEXT);
-      const reopened = await createAccountWorkspaceRuntime(state, env, identity, async () => {}, noAttach);
+      const reopened = await createAccountWorkspaceRuntime(state, env, identity, async () => {}, noAttach, instance);
       expect((await reopened.harness.snapshot(WorkspaceDoc, BACKGROUND_CONTEXT))?.phase).toBe('code');
       await reopened.wake();
       await reopened.harness.close(BACKGROUND_CONTEXT);
@@ -925,8 +925,8 @@ describe('cloud workspace lifecycle with no machines', () => {
     const draft = (await ready(client.workspace.create({ projectId: project.id, name: 'Gift cards', branch: 'gift-cards', phase: 'plan', sourceKind: 'base', sourceRef: '' }))).workspace.id;
     const planned = (await ready(client.workspace.create({ projectId: project.id, name: 'Gift codes', branch: 'gift-codes', phase: 'plan', sourceKind: 'workspace', sourceRef: draft }))).workspace.id;
     const phaseOf = async (id: string) => (await authority.getWorkspace(id))?.phase;
-    const inRuntime = (workspaceId: string, body: (runtime: WorkspaceRuntime) => Promise<void>) => runInDurableObject(env.SPACE_AUTHORITY.getByName(`${userId}:${workspaceId}`), async (_instance, state) => {
-      const runtime = await createAccountWorkspaceRuntime(state, env, RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId }), async () => {}, noAttach);
+    const inRuntime = (workspaceId: string, body: (runtime: WorkspaceRuntime) => Promise<void>) => runInDurableObject(env.SPACE_AUTHORITY.getByName(`${userId}:${workspaceId}`), async (instance: SpaceAuthorityDO, state) => {
+      const runtime = await createAccountWorkspaceRuntime(state, env, RuntimeIdentitySchema.parse({ projectId: project.id, workspaceId }), async () => {}, noAttach, instance);
       try { await body(runtime); } finally { await runtime.wake(); await runtime.harness.close(BACKGROUND_CONTEXT); }
     });
 

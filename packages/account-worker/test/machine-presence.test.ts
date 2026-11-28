@@ -13,10 +13,11 @@ import {
   credentialProtocolBase64,
   signCredentialAuthorityGrant,
 } from '@gitspace/protocol';
-import { RuntimeAttachInputSchema, RuntimeIdentitySchema, RuntimeMachineIdSchema } from '@gitspace/protocol-runtime';
+import { RuntimeAssignmentsResultSchema, RuntimeAttachInputSchema, RuntimeGitCheckpointSchema, RuntimeIdentitySchema, RuntimeMachineIdSchema } from '@gitspace/protocol-runtime';
 import { ArtifactsCodeStore, AttachmentStore } from '@gitspace/runtime-workspace-do';
+import { Result } from 'better-result';
+import { z } from 'zod';
 import worker, { SpaceAuthorityDO, UserRelayDO } from '../src/index.js';
-import { machineAssignments } from '../src/account-runtime-control.js';
 
 const rootKey = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
 const machineKey = Uint8Array.from({ length: 32 }, (_, index) => 100 + index);
@@ -65,7 +66,8 @@ async function attachedWorkspace(workspaceId: string, indexed = true) {
   await space(workspaceId).runtimeSnapshot(identity);
   const connected = indexed && (await fleet().attachMachineWorkspace(machineId, identity)).connected;
   await runInDurableObject(space(workspaceId), async (_instance, state) => {
-    const store = new AttachmentStore(state.storage, { seal: async () => 'sealed', open: async () => 'secret', dispatch: async () => { throw new Error('No dispatch in presence tests'); } });
+    const vault = env.CREDENTIALS.getByName(env.ACCOUNT_ID);
+    const store = new AttachmentStore(state.storage, { seal: (secret, scope) => vault.sealRuntimeGrant(secret, scope), open: (ciphertext, scope) => vault.openRuntimeGrant(ciphertext, scope), dispatch: async () => { throw new Error('No dispatch in presence tests'); } });
     await store.attach(RuntimeAttachInputSchema.parse({ ...identity, machineId, generation: 1, checkout: { kind: 'shared', branch: 'main' }, capabilities: [] }), connected);
   });
   return identity;
@@ -283,43 +285,79 @@ describe('relay live notices', () => {
 });
 
 describe('machine-wide assignments', () => {
-  it('read only the workspaces the fleet index holds for the machine', async () => {
-    const indexed = await attachedWorkspace('indexed-a');
-    // Another workspace of the account that this machine is not attached to: the account-wide fan-out read it too.
-    await env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`).putWorkspace({ id: 'unattached-b', projectId, kind: 'worktree', name: 'unattached-b', branch: 'main', phase: null, sourceKind: 'branch', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
-    await space('unattached-b').runtimeSnapshot({ projectId, workspaceId: 'unattached-b' });
-    const reads = vi.spyOn(SpaceAuthorityDO.prototype, 'runtimeAssignments');
+  const checkpoint = RuntimeGitCheckpointSchema.parse({
+    checkpointRef: 'refs/gitspace/spaces/presence/native/1', branch: 'main',
+    headCommit: '1'.repeat(40), indexCommit: '1'.repeat(40), trackedWorktreeCommit: '1'.repeat(40),
+    worktreeCommit: '1'.repeat(40), indexTree: '2'.repeat(40), worktreeTree: '2'.repeat(40),
+  });
+  beforeEach(() => {
+    // Only the external Artifacts service is replaced: every workspace starts from `checkpoint`.
+    vi.spyOn(ArtifactsCodeStore.prototype, 'initialCheckpoint').mockResolvedValue(checkpoint);
+    vi.spyOn(ArtifactsCodeStore.prototype, 'info').mockResolvedValue(repository);
+    vi.spyOn(ArtifactsCodeStore.prototype, 'readCommit').mockImplementation(async (_repository, commit) => ({
+      hash: commit, treeHash: '2'.repeat(40), parents: [], message: 'Checkpoint',
+      author: { name: 'Fixture', email: 'fixture@example.invalid' }, committer: { name: 'Fixture', email: 'fixture@example.invalid' }, authoredAt: 0, committedAt: 0,
+    }));
+    vi.spyOn(ArtifactsCodeStore.prototype, 'readTree').mockResolvedValue([]);
+  });
+
+  /** A worktree the machine is attached to through the cloud's cache request, as a person's attach makes it. */
+  async function cachedWorkspace(workspaceId: string) {
+    await env.PROJECT_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`).putWorkspace({ id: workspaceId, projectId, kind: 'worktree', name: workspaceId, branch: 'main', phase: null, sourceKind: 'branch', sourceRef: 'main', sourceCommit: null, lifecycle: 'active', goalId: null, expectedRevision: 0 });
+    return (await space(workspaceId).runtimeCacheAttachmentRequest({ projectId, workspaceId, machineId })).attachment;
+  }
+
+  async function machineWideRead() {
     const response = await worker.fetch(new Request('https://auth.test/v1/control', {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify(createSignedControlRequest({ userId: env.ACCOUNT_ID, machineId, operation: 'runtime.assignments', payload: { machineId }, signingPrivateKey: machineKey })),
     }), env);
     expect(response.status, await response.clone().text()).toBe(200);
-    expect(reads.mock.calls.map(([input]) => input)).toEqual([{ ...indexed, machineId }]);
+    return RuntimeAssignmentsResultSchema.parse(z.object({ value: z.unknown() }).parse(await response.json()).value);
+  }
+
+  it('answer every attachment of the machine from the fleet catalog, reading no workspace object, so one that never answers holds none back', async () => {
+    const attached = [await cachedWorkspace('busy-a'), await cachedWorkspace('idle-b')];
+    const own = await Promise.all(attached.map(({ workspaceId }) => space(workspaceId).runtimeAssignments({ projectId, workspaceId, machineId })));
+    // A workspace object indexing code answers nothing for minutes.
+    const reads = vi.spyOn(SpaceAuthorityDO.prototype, 'runtimeAssignments').mockImplementation(() => Promise.withResolvers<never>().promise);
+    const read = await machineWideRead();
+    expect(reads).not.toHaveBeenCalled();
+    expect(read).toEqual(RuntimeAssignmentsResultSchema.parse({ assignments: own.flatMap(item => item.assignments), unavailable: [] }));
   });
 
-  it('index, once, the attachments recorded before the index existed, so previous-release machines keep them', async () => {
-    const recorded = await attachedWorkspace('recorded-before', false);
-    const reads = vi.spyOn(SpaceAuthorityDO.prototype, 'runtimeAssignments');
-    const response = await worker.fetch(new Request('https://auth.test/v1/control', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(createSignedControlRequest({ userId: env.ACCOUNT_ID, machineId, operation: 'runtime.assignments', payload: { machineId }, signingPrivateKey: machineKey })),
-    }), env);
-    expect(response.status).toBe(200);
-    expect(reads.mock.calls.map(([input]) => input)).toEqual([{ ...recorded, machineId }]);
+  it('offer the checkpoint a machine\'s sync made current from the next read', async () => {
+    const attachment = await cachedWorkspace('synced-a');
+    const next = RuntimeGitCheckpointSchema.parse({ ...checkpoint, checkpointRef: 'refs/gitspace/spaces/presence/native/2', headCommit: '3'.repeat(40), indexCommit: '3'.repeat(40), trackedWorktreeCommit: '3'.repeat(40), worktreeCommit: '3'.repeat(40) });
+    vi.spyOn(ArtifactsCodeStore.prototype, 'mergeSnapshot').mockResolvedValue(Result.ok(next));
+    await space('synced-a').runtimeSnapshotCommit({ projectId, workspaceId: 'synced-a', attachmentId: attachment.attachmentId, generation: attachment.generation, checkpoint: next, previousWorktreeCommit: checkpoint.worktreeCommit });
+    const { assignments } = await machineWideRead();
+    expect(assignments.map(item => [item.checkpoint?.worktreeCommit, item.source?.commit, item.source?.ref])).toEqual([[next.worktreeCommit, next.worktreeCommit, next.checkpointRef]]);
   });
 
-  it('report a workspace that misses its deadline unavailable, and list the others', async () => {
-    await attachedWorkspace('stuck-a');
-    await attachedWorkspace('answering-b');
-    const listed = { grant: { attachment: { workspaceId: 'answering-b' } } };
-    // Workspace objects as the fan-out reaches them: one answers, one never does, as one busy indexing held the read
-    // for minutes.
-    const objects: Record<string, { runtimeAssignments(): Promise<{ assignments: unknown[] }> }> = {
-      [`${env.ACCOUNT_ID}:stuck-a`]: { runtimeAssignments: () => Promise.withResolvers<never>().promise },
-      [`${env.ACCOUNT_ID}:answering-b`]: { runtimeAssignments: async () => ({ assignments: [listed] }) },
-    };
-    const routed = { ...env, SPACE_AUTHORITY: new Proxy(env.SPACE_AUTHORITY, { get: (target, key) => key === 'getByName' ? (name: string) => objects[name] : Reflect.get(target, key) }) };
-    await expect(machineAssignments(routed, env.ACCOUNT_ID, RuntimeMachineIdSchema.parse(machineId), 200)).resolves.toEqual({ assignments: [listed], unavailable: ['stuck-a'] });
+  it('stop listing an attachment the workspace\'s agent detached with the machines tool', async () => {
+    const kept = await cachedWorkspace('kept-a');
+    const detached = await cachedWorkspace('tool-detached-b');
+    const identity = { projectId, workspaceId: 'tool-detached-b' };
+    // Its own read stores the capabilities the machine offers, so machine-wide reads ask nothing of it.
+    await space('tool-detached-b').runtimeAssignments({ ...identity, machineId });
+    // The machines tool's detach: the runtime's attachment store, then a publication; the fleet index is not touched.
+    await runInDurableObject(space('tool-detached-b'), async (instance: SpaceAuthorityDO) => {
+      const runtime = await instance['getRuntime'](identity);
+      runtime.attachments.detach(detached);
+      runtime.publish();
+    });
+    // The publication's write runs in the workspace's background work.
+    await eventually(async () => JSON.stringify((await machineWideRead()).assignments.map(item => item.grant.attachment.attachmentId)) === JSON.stringify([kept.attachmentId]));
+  });
+
+  it('report a workspace whose attachment predates the fleet index and its records unavailable, then list it once it has written them', async () => {
+    await attachedWorkspace('recorded-before', false);
+    expect(await machineWideRead()).toEqual({ assignments: [], unavailable: ['recorded-before'] });
+    await eventually(async () => {
+      const read = await machineWideRead();
+      return read.unavailable.length === 0 && read.assignments.map(item => item.grant.attachment.workspaceId).join() === 'recorded-before';
+    });
   });
 });
 
