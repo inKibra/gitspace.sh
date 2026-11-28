@@ -58,13 +58,26 @@ export function tagRpcProcedures(fetch: typeof globalThis.fetch): typeof globalT
   return tagged as typeof globalThis.fetch;
 }
 
+/**
+ * The budget of a call that outlasts an ordinary one, in ms; null for an ordinary call. Repository provisioning, image
+ * startup, waking a paused cache for an environment run, a machine's sync capture and a machine copying a project's
+ * repository in (`project.seed`: an 870 MB repository takes about two minutes) get 300 s; a narration clip 120 s.
+ * The web app and the MCP server both read it, so a call never has a shorter budget through one than the other.
+ */
+export function longRpcTimeoutMs(path: string): number | null {
+  if (path === 'project.create' || path === 'project.seed' || path === 'workspace.create' || path === 'workspace.retryCreate' || path === 'machine.createSandbox' ||
+      path === 'machine.resume' || path === 'machine.sleep' || path === 'machine.destroy' || path === 'environment.runChecks' || path === 'environment.runPhase' || path === 'runtime.sync' ||
+      (path.startsWith('machine.image.') && path !== 'machine.image.list')) return 300_000;
+  if (path === 'speech.clip') return 120_000;
+  return null;
+}
+
 export function createRoutedTransport(options: RoutedTransportOptions): ClientTransport {
   const fetch = tagRpcProcedures(options.fetch);
   const batch = () => batchFetchTransport({ url: options.homeUrl, fetch, maxItems: options.maxItems ?? 32 });
   const home = batch();
   const account = batch();
-  // Repository provisioning, image startup, waking a paused cache for an environment run and a machine's sync
-  // capture can outlast ordinary queries. Keep those calls out of their batch and timeout budget.
+  // Calls with a long budget (`longRpcTimeoutMs`) go alone, out of a batch and its budget.
   const provisioning = fetchTransport({ url: options.homeUrl, fetch, timeoutMs: 300_000 });
   // A narration clip takes seconds to make, and a walkthrough asks for its next ones while one plays: each goes alone,
   // so a clip answers when it is made, not when the slowest clip asked with it is, and none holds back other calls.
@@ -104,12 +117,11 @@ export function createRoutedTransport(options: RoutedTransportOptions): ClientTr
   };
 
   const resolve = (path: string, input: unknown): ClientTransport => {
-    if (path === 'project.create' || path === 'workspace.create' || path === 'workspace.retryCreate' || path === 'machine.createSandbox' ||
-        path === 'machine.resume' || path === 'machine.sleep' || path === 'machine.destroy' || path === 'environment.runChecks' || path === 'environment.runPhase' || path === 'runtime.sync' ||
-        (path.startsWith('machine.image.') && path !== 'machine.image.list')) return provisioning;
+    if (path === 'speech.clip') return speech;
+    // `project.seed` runs on its machine (below).
+    if (path !== 'project.seed' && longRpcTimeoutMs(path) !== null) return provisioning;
     if (path === 'inspector.view' || path === 'inspector.transcript' || path === 'inspector.transcriptPage' || path === 'inspector.transcriptContent' || path === 'inspector.availability') return inspectorContext;
     if (path === 'settings.state' || path === 'inference.list' || path === 'machine.image.list') return accountState;
-    if (path === 'speech.clip') return speech;
     if (path === 'runtime.watch' || path === 'runtime.session') {
       const workspace = input !== null && typeof input === 'object' && 'workspaceId' in input && typeof input.workspaceId === 'string' ? input.workspaceId : '';
       let runtime = runtimes.get(workspace);
@@ -120,7 +132,8 @@ export function createRoutedTransport(options: RoutedTransportOptions): ClientTr
     const target = rpcCallTarget(path, input);
     if (!target) return home;
     if (target.kind === 'terminal') return queue(`terminal:${target.spaceId}:${target.machineId}`, false);
-    return path === 'project.seed' ? queue(`machine-long:${target.machineId}`, true) : queue(`machine:${target.machineId}`, false);
+    const long = longRpcTimeoutMs(path) !== null;
+    return queue(`${long ? 'machine-long' : 'machine'}:${target.machineId}`, long);
   };
 
   return {

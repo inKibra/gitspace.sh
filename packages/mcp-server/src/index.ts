@@ -3,6 +3,7 @@ import { CfWorkerJsonSchemaValidator } from '@modelcontextprotocol/server/valida
 import { createGitSpaceClient, type GitSpaceClient } from '@gitspace/protocol/client';
 import { gitspaceContract } from '@gitspace/protocol/rpc-contract';
 import { accountRpcAuthority, rpcCallTarget } from '@gitspace/protocol/account-rpc';
+import { longRpcTimeoutMs } from '@gitspace/protocol/routed-transport';
 import { OPERATOR_SESSION_COMMANDS, requiredCapability, requiredAdministrativeCapability, requiresImageSelectionControl, requiresOperatorDecision, type DeviceScope } from '@gitspace/protocol/device-grant';
 import { procedureJsonRepresentation } from '@gitspace/protocol/json-representation';
 import { DEFAULT_SKILLS } from '@gitspace/protocol/default-skills';
@@ -223,8 +224,11 @@ export function createGitSpaceMcpHandler(options: GitSpaceMcpOptions): { fetch(r
     try { input = representation.decodeInput(payload); } catch { throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'Input does not match the published tool schema'); }
     if (accountRpcAuthority(path) === 'machine' && !rpcCallTarget(path, input)) throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'Machine operations require an explicit machineId and workspace where applicable');
     if (!allowed(path, input)) throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'The backing grant does not authorize this operation');
+    // A call's budget matches the web app's: an agent copying a large repository in through a machine (about two minutes
+    // for 870 MB) failed at a flat 30 s every time (2026-11-27).
+    const timeoutMs = longRpcTimeoutMs(path) ?? 30_000;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 30_000);
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     const combined = AbortSignal.any([signal, controller.signal]);
     const secrets = [options.key, ...inputSecrets(path, input)];
     const encode = (value: unknown) => redactCredentials(representation.encodeOutput(value), secrets);
@@ -238,7 +242,7 @@ export function createGitSpaceMcpHandler(options: GitSpaceMcpOptions): { fetch(r
     // Bun's fetch type carries `preconnect`; the wrapper is only ever called.
     const client = createGitSpaceClient({ key: options.key, fetch: capturingFetch as typeof globalThis.fetch });
     try {
-      const result = await call(client, path)(input, { signal: combined, timeoutMs: 30_000, retry: false });
+      const result = await call(client, path)(input, { signal: combined, timeoutMs, retry: false });
       if (result.status === 'error') throw new OperationFailure(result.error);
       return { result: encode(result.value) };
     } catch (error) {
