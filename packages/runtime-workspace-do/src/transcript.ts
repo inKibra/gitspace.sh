@@ -23,11 +23,14 @@ const WINDOW_ENTRIES = 32;
 /** Entries a window reads past its own so the tool calls it makes show their results. */
 const FORWARD_ENTRIES = 64;
 const FORWARD_IDS = 256;
-/** A page reads earlier (or later) windows until it has this many rows, visiting at most `PAGE_WINDOWS`; a page of one
- * execution's rows, which may be sparse, stops at its first window that has any within `SCOPED_WINDOWS`. */
+/** A page reads earlier (or later) windows until it has `PAGE_FILL_ROWS` rows, visiting at most `PAGE_WINDOWS` once it
+ * has any; a page of one execution's rows, which may be sparse, stops at its first window that has any. Windows that
+ * show no row (entries the transcript skips: data-only entries, withdrawn notices, fix steps) it reads past, up to
+ * `SCAN_WINDOWS`; a page that finds no row by then names the entry the next page in its direction reads from
+ * (`TranscriptPage.before`/`after`). */
 const PAGE_FILL_ROWS = 24;
 const PAGE_WINDOWS = 8;
-const SCOPED_WINDOWS = 128;
+const SCAN_WINDOWS = 128;
 /** Entries a lookup by a tool row's ID scans for its call, when the request does not give the row's ordinal. */
 const SEARCH_ENTRIES = 4096;
 const LIVE_STATUSES = ['pending', 'running', 'waiting', 'completing'] as const;
@@ -490,7 +493,6 @@ export function createTranscriptReader(storage: Storage, withdrawn: WithdrawnNot
       const envelope = { generation, revision: highWater, total: highWater + 1 };
       const openers = await openersOf(conversationId);
       const running = await live(conversationId);
-      const windows = request.executionId ? SCOPED_WINDOWS : PAGE_WINDOWS;
       const enough = request.executionId ? 1 : PAGE_FILL_ROWS;
       // The row a reader holds its place by can be gone when the page is read: the pending rows of the reply being written
       // are replaced by the stored reply under other IDs. Its ordinal still marks the place; without one, or with nothing
@@ -504,37 +506,39 @@ export function createTranscriptReader(storage: Storage, withdrawn: WithdrawnNot
         let hasBefore = false;
         let newer = false;
         let from = entryOf(start);
-        for (let visited = 0; visited < windows; visited++) {
+        for (let visited = 1; ; visited++) {
           const view = await windowStarting(conversationId, from, highWater);
           if (!view.entries.length) break;
           const projection = await project(conversationId, view, openers, running);
           const rowsOf = own(projection, view, request.executionId);
-          if (visited === 0) hasBefore = view.older || rowsOf.some(([, value]) => value.ordinal < start);
+          if (visited === 1) hasBefore = view.older || rowsOf.some(([, value]) => value.ordinal < start);
           rows.push(...rowsOf.filter(([, value]) => value.ordinal >= start).map(([id, value]) => row(projection, id, value)));
           newer = view.newer;
-          if (rows.length >= enough || !view.newer) break;
           from = view.last + 1;
+          if (!view.newer || rows.length >= enough || rows.length > 0 && visited >= PAGE_WINDOWS || visited >= SCAN_WINDOWS) break;
         }
         const fitted = fit(rows);
         const vanished = request.around !== null && anchored === undefined;
-        if (!vanished || fitted.length > 0) return { ...envelope, rows: fitted, hasBefore, hasAfter: fitted.length < rows.length || newer };
+        if (!vanished || fitted.length > 0) return { ...envelope, rows: fitted, hasBefore, hasAfter: fitted.length < rows.length || newer, ...(rows.length === 0 && newer ? { after: from * ENTRY_ORDINALS - 1 } : {}) };
       }
       // Descending: the latest rows, or those before `before`, reading earlier windows until the page is full.
       const before = request.before;
       const collected: TranscriptRow[] = [];
       let older = false;
+      let oldest = 0;
       let maxEntry = before === null ? null : before === 0 ? -1 : entryOf(before - 1);
-      for (let visited = 0; visited < windows && maxEntry !== -1; visited++) {
+      for (let visited = 1; maxEntry !== -1; visited++) {
         const view = await windowEnding(conversationId, maxEntry, highWater);
         if (!view.entries.length) { older = false; break; }
         const projection = await project(conversationId, view, openers, running);
         collected.unshift(...own(projection, view, request.executionId).filter(([, value]) => before === null || value.ordinal < before).map(([id, value]) => row(projection, id, value)));
         older = view.older;
-        if (collected.length >= enough || !view.older) break;
-        maxEntry = view.first - 1;
+        oldest = view.first;
+        maxEntry = oldest - 1;
+        if (!view.older || collected.length >= enough || collected.length > 0 && visited >= PAGE_WINDOWS || visited >= SCAN_WINDOWS) break;
       }
       const fitted = fit([...collected].reverse()).reverse();
-      return { ...envelope, rows: fitted, hasBefore: fitted.length < collected.length || older, hasAfter: before !== null && entryOf(before - 1) < highWater };
+      return { ...envelope, rows: fitted, hasBefore: fitted.length < collected.length || older, hasAfter: before !== null && entryOf(before - 1) < highWater, ...(collected.length === 0 && older ? { before: oldest * ENTRY_ORDINALS } : {}) };
     },
     async content(conversationId: ConversationId, raw: TranscriptContentRequest): Promise<TranscriptContentPage> {
       const request = transcriptContentRequestSchema.parse(raw);

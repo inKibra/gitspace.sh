@@ -246,8 +246,8 @@ export function useTranscriptHistory(source: TranscriptHistorySource | null, ini
       const last = cache.rows[cache.rows.length - 1];
       // Repeated boundary observations must not restart the same request.
       if ((destination === 'older' || destination === 'newer') && pendingNavigation === destination) return;
-      if (destination === 'older' && (!cache.hasBefore || !first)) return;
-      if (destination === 'newer' && (!cache.hasAfter || !last)) return;
+      if (destination === 'older' && (!cache.hasBefore || !first && cache.before === null)) return;
+      if (destination === 'newer' && (!cache.hasAfter || !last && cache.after === null)) return;
       controller?.abort();
       requested = false;
       viewportRefreshRequested = false;
@@ -255,9 +255,10 @@ export function useTranscriptHistory(source: TranscriptHistorySource | null, ini
       const request: TranscriptPageRequest = { generation: cache.generation, before: null, after: null, around: null };
       if (destination === 'older') {
         viewport = { ...viewport, following: false };
-        request.before = first!.ordinal;
+        // A page that found no row names where the next one reads from; else the oldest row does.
+        request.before = cache.before ?? first?.ordinal ?? null;
       } else if (destination === 'newer') {
-        request.after = last!.ordinal;
+        request.after = cache.after ?? last?.ordinal ?? null;
       } else if (destination === 'latest') {
         viewport = { firstId: null, lastId: null, following: true };
       } else if ('rowId' in destination) {

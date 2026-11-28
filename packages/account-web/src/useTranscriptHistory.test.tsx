@@ -263,6 +263,63 @@ it('pages both directions across ordinal gaps and replaces distant windows for e
   expect(history.hasAfter).toBe(false);
 });
 
+it('pages on from where a page that found no row stopped, older from an empty latest page and newer past an empty page', async () => {
+  const latest = controlledPage(page([], { hasBefore: true, before: 9_000, total: 20 }));
+  const empty = controlledPage(page([], { hasBefore: true, hasAfter: true, before: 5_000, total: 20 }));
+  const older = controlledPage(page([row(3)], { hasBefore: true, hasAfter: true, total: 20 }));
+  const gap = controlledPage(page([], { hasBefore: true, hasAfter: true, after: 4_000, total: 20 }));
+  const newer = controlledPage(page([row(4_100)], { hasBefore: true, hasAfter: true, total: 20 }));
+  const silent = controlledPage(page([], { hasBefore: true, hasAfter: true, before: 2, total: 20 }));
+  const newest = controlledPage(page([row(4_200)], { hasBefore: true, total: 20 }));
+  const oldest = controlledPage(page([row(1)], { hasAfter: true, total: 20 }));
+  const { source, requests } = sourceFor('session-a', latest, empty, older, gap, newer, silent, newest, oldest);
+  await act(() => root.render(<Probe source={source} />));
+  await act(() => latest.finish());
+  expect(history.rows).toEqual([]);
+  expect(history.hasBefore).toBe(true);
+  await act(() => history.loadOlder());
+  expect(requests[1]?.before).toBe(9_000);
+  await act(() => empty.finish());
+  await act(() => history.loadOlder());
+  expect(requests[2]?.before).toBe(5_000);
+  await act(() => older.finish());
+  expect(history.rows.map(({ ordinal }) => ordinal)).toEqual([3]);
+  await act(() => history.loadNewer());
+  expect(requests[3]?.after).toBe(3);
+  await act(() => gap.finish());
+  expect(history.rows.map(({ ordinal }) => ordinal)).toEqual([3]);
+  await act(() => history.loadNewer());
+  expect(requests[4]?.after).toBe(4_000);
+  await act(() => newer.finish());
+  expect(history.rows.map(({ ordinal }) => ordinal)).toEqual([3, 4_100]);
+  // The newer page joined the window, so the next older page reads before its oldest row again; finding no row there,
+  // it names where the one after reads on from, which a newer page leaves in place.
+  await act(() => history.loadOlder());
+  expect(requests[5]?.before).toBe(3);
+  await act(() => silent.finish());
+  await act(() => history.loadNewer());
+  expect(requests[6]?.after).toBe(4_100);
+  await act(() => newest.finish());
+  expect(history.rows.map(({ ordinal }) => ordinal)).toEqual([3, 4_100, 4_200]);
+  await act(() => history.loadOlder());
+  expect(requests[7]?.before).toBe(2);
+  await act(() => oldest.finish());
+  expect(history.rows.map(({ ordinal }) => ordinal)).toEqual([1, 3, 4_100, 4_200]);
+  expect(history.hasBefore).toBe(false);
+});
+
+it('drops an older page\'s continuation once the window lets go of its oldest rows', () => {
+  const request = { generation: 'generation-a', before: null, after: null, around: null };
+  const following = { firstId: null, lastId: null, following: true };
+  const rows = Array.from({ length: TRANSCRIPT_CACHE_ROWS }, (_value, index) => row(10 + index));
+  const full = mergeTranscriptPage(EMPTY_TRANSCRIPT_CACHE, page(rows, { hasBefore: true, total: 1_000 }), request, following);
+  const stopped = mergeTranscriptPage(full, page([], { hasBefore: true, hasAfter: true, before: 2, total: 1_000 }), { ...request, before: 10 }, following);
+  expect(stopped.before).toBe(2);
+  const moved = mergeTranscriptPage(stopped, page([row(1_000)], { hasBefore: true, total: 1_000 }), { ...request, after: rows.at(-1)!.ordinal }, following);
+  expect(moved.rows[0]?.ordinal).toBe(11);
+  expect(moved.before).toBeNull();
+});
+
 it('fences superseded navigation and resets a changed generation instead of merging an old cursor', async () => {
   const initial = controlledPage(page([row(40)], { hasBefore: true, total: 2 }));
   const obsolete = controlledPage(page([row(3)], { hasAfter: true, total: 2 }));

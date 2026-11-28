@@ -23,12 +23,16 @@ export interface TranscriptHistoryCache {
   bytes: number;
   hasBefore: boolean;
   hasAfter: boolean;
+  /** Where the next older (newer) page reads from when it is not the oldest (newest) row's ordinal: a page that found no
+   * row in its budget named it (`TranscriptPage.before`/`after`). */
+  before: number | null;
+  after: number | null;
   total: number;
 }
 
 export const EMPTY_TRANSCRIPT_CACHE: TranscriptHistoryCache = {
   generation: null, revision: -1, rows: [], rowBytes: [], rowRevisions: [], bytes: 0,
-  hasBefore: false, hasAfter: false, total: 0,
+  hasBefore: false, hasAfter: false, before: null, after: null, total: 0,
 };
 
 const encoder = new TextEncoder();
@@ -52,8 +56,8 @@ export function mergeTranscriptPage(
   // Ordinal gaps are legal. Overlap or a request at our exact boundary, not
   // arithmetic on ordinals, proves that two source windows are adjacent.
   const adjacent = request.generation === cache.generation && (
-    (first && request.before === first.ordinal && (!pageLast || pageLast.ordinal < first.ordinal))
-    || (last && request.after === last.ordinal && (!pageFirst || pageFirst.ordinal > last.ordinal))
+    (first && request.before === (cache.before ?? first.ordinal) && (!pageLast || pageLast.ordinal < first.ordinal))
+    || (last && request.after === (cache.after ?? last.ordinal) && (!pageFirst || pageFirst.ordinal > last.ordinal))
   );
   const connected = sameGeneration && !replace && page.total !== 0 && (
     adjacent || page.rows.some((row) => oldIds.has(row.id))
@@ -79,17 +83,24 @@ export function mergeTranscriptPage(
   const merged = [...entries.values()].sort((a, b) => a.row.ordinal - b.row.ordinal);
   let hasBefore = page.hasBefore;
   let hasAfter = page.hasAfter;
+  let before = page.before ?? null;
+  let after = page.after ?? null;
   if (connected && first && last) {
-    hasBefore = !page.hasBefore || pageFirst && pageFirst.ordinal <= first.ordinal
-      ? page.hasBefore
-      : adjacent && request.before !== null && !pageFirst ? page.hasBefore : cache.hasBefore;
-    hasAfter = !page.hasAfter || pageLast && pageLast.ordinal >= last.ordinal
-      ? page.hasAfter
-      : adjacent && request.after !== null && !pageLast ? page.hasAfter : cache.hasAfter || page.total > cache.total;
+    // Whether the page reaches (or sets) the window's older and newer edges.
+    const older = !page.hasBefore || pageFirst !== undefined && pageFirst.ordinal <= first.ordinal || adjacent && request.before !== null && !pageFirst;
+    const newer = !page.hasAfter || pageLast !== undefined && pageLast.ordinal >= last.ordinal || adjacent && request.after !== null && !pageLast;
+    if (!older) {
+      hasBefore = cache.hasBefore;
+      before = cache.before;
+    }
+    if (!newer) {
+      hasAfter = cache.hasAfter || page.total > cache.total;
+      after = cache.after;
+    }
   }
 
   if (merged.length === 0) {
-    return { generation: page.generation, revision: page.revision, rows: [], rowBytes: [], rowRevisions: [], bytes: 0, hasBefore, hasAfter, total: page.total };
+    return { generation: page.generation, revision: page.revision, rows: [], rowBytes: [], rowRevisions: [], bytes: 0, hasBefore, hasAfter, before, after, total: page.total };
   }
 
   let start = viewport.following ? merged.length - 1 : merged.findIndex(({ row }) => row.id === viewport.firstId);
@@ -120,6 +131,8 @@ export function mergeTranscriptPage(
     bytes,
     hasBefore: hasBefore || start > 0,
     hasAfter: hasAfter || end < merged.length,
+    before: start > 0 ? null : before,
+    after: end < merged.length ? null : after,
     total: page.total,
   };
 }

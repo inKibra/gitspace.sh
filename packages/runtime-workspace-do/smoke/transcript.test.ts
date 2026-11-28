@@ -111,6 +111,52 @@ test('transcript pages page back losslessly through a long turn, a row has one I
   });
 });
 
+test('a page reads past entries that show no row to the newest rows, and pages past more than it reads at once continue where the last stopped', async () => {
+  await fixture(async (_harness, storage, root) => {
+    // Entries the transcript shows nothing of: a short stretch after turn 0, longer ones after turns 1 and 2.
+    const silent = (count: number) => root.commit(async tx => { for (let index = 0; index < count; index++) await tx.appendEntry(root.id, { kind: 'gitspace.executor-results', data: { results: [] } }); }, context);
+    await turn(root, 0, 1);
+    await silent(400);
+    const reader = createTranscriptReader(storage, none);
+    const request = { generation: null, before: null, after: null, around: null };
+    const text = (rows: readonly TranscriptRow[]) => rows.map(row => row.item.type === 'message' ? row.item.text : row.item.type);
+    expect(text((await reader.page(root.id, request)).rows)).toEqual(['prompt 0', 'tool-call', 'answer 0']);
+    await turn(root, 1, 1);
+    await silent(5000);
+    await turn(root, 2, 1);
+    await silent(5000);
+    let scanned = 0;
+    const scan = storage.scanEntries.bind(storage);
+    storage.scanEntries = async (query, limit, cursor, ctx) => { const page = await scan(query, limit, cursor, ctx); scanned += page.items.length; return page; };
+    const generation = (await reader.page(root.id, request)).generation;
+    // Older pages: the newest 5,000 entries show nothing, so the latest page names where the next reads on from.
+    const older: string[][] = [];
+    let page = await reader.page(root.id, request);
+    older.push(text(page.rows));
+    while (page.hasBefore) {
+      expect(older.length).toBeLessThan(8);
+      const before = page.before ?? page.rows[0]!.ordinal;
+      scanned = 0;
+      page = await reader.page(root.id, { ...request, generation, before });
+      expect(scanned).toBeLessThan(5000);
+      expect(page.rows.every(row => row.ordinal < before)).toBe(true);
+      older.push(text(page.rows));
+    }
+    expect(older).toEqual([[], ['prompt 2', 'tool-call', 'answer 2'], [], ['prompt 1', 'tool-call', 'answer 1'], ['prompt 0', 'tool-call', 'answer 0']]);
+    // Newer pages from turn 0's answer read on the same way, to the end of the conversation.
+    const newer: string[][] = [];
+    let after = page.rows.at(-1)!.ordinal;
+    for (page = await reader.page(root.id, { ...request, generation, after }); ; page = await reader.page(root.id, { ...request, generation, after })) {
+      expect(newer.length).toBeLessThan(8);
+      newer.push(text(page.rows));
+      if (!page.hasAfter) break;
+      after = page.after ?? page.rows.at(-1)!.ordinal;
+    }
+    expect(newer).toEqual([['prompt 1', 'tool-call', 'answer 1'], [], ['prompt 2', 'tool-call', 'answer 2'], [], []]);
+    expect(page.after).toBeUndefined();
+  });
+});
+
 test('withdrawn notices leave the transcript while the other notices stay', async () => {
   await fixture(async (_harness, storage, root) => {
     await turn(root, 0, 1);

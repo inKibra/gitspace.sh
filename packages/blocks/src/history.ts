@@ -82,6 +82,10 @@ export const transcriptPageSchema = z.object({
   hasBefore: z.boolean(),
   hasAfter: z.boolean(),
   total: position,
+  /** A page that read its whole budget of entries without a row: the next older page's `before`, or the next newer
+   * page's `after`, so each page reads on past the entries already read. */
+  before: position.optional(),
+  after: position.optional(),
 }).refine((page) => utf8Bytes(JSON.stringify(page.rows)) <= TRANSCRIPT_PAGE_BYTES, 'Transcript page exceeds its preview byte limit');
 export type TranscriptPage = z.infer<typeof transcriptPageSchema>;
 
