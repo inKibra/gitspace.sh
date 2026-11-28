@@ -42,6 +42,7 @@ function cloudArtifacts(refs: Map<string, string>): void {
   const ref = (name: string, value: string) => `${name} ${value.startsWith('refs/') ? value : `refs/heads/${value}`}`;
   vi.spyOn(ArtifactsCodeStore.prototype, 'importProject').mockImplementation(async projectId => repository(`project-${projectId}`));
   vi.spyOn(ArtifactsCodeStore.prototype, 'forkWorkspace').mockImplementation(async (_projectId, workspaceId) => repository(`workspace-${workspaceId}`));
+  vi.spyOn(ArtifactsCodeStore.prototype, 'createWorkspaceRepository').mockImplementation(async (_projectId, workspaceId) => repository(`workspace-${workspaceId}`));
   vi.spyOn(ArtifactsCodeStore.prototype, 'resolveRef').mockImplementation(async (name, value) => refs.get(ref(name, value)) ?? null);
   vi.spyOn(ArtifactsCodeStore.prototype, 'resolveAdvertisedRef').mockImplementation(async (name, value) => refs.get(ref(name, value)) ?? null);
   vi.spyOn(ArtifactsCodeStore.prototype, 'setBranch').mockImplementation(async (name, branch, value) => { refs.set(ref(name, branch), value); });

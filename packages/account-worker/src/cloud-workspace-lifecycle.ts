@@ -281,11 +281,12 @@ async function operationWorkspace(authority: ProjectAuthority, operation: CloudP
   return definition;
 }
 
-/** Creation in the background: the source resolved in Artifacts, a repository forked from it with the workspace
- * branch at the source commit, then activation, which seeds the workspace object with its definition so it never
- * reads its project to learn what it is. Completed steps stay in place on failure; Retry resumes, Delete discards. A
- * recorded source commit is reused, except that a workspace source is read again so a retry starts from that
- * workspace's current state. */
+/** Creation in the background: the source resolved in Artifacts, a repository forked from the default branch of the
+ * base workspace's repository (or the source's) holding the commit the workspace starts from, with the workspace branch
+ * at the source commit, then activation, which seeds the workspace object with its definition so it never reads its
+ * project to learn what it is. Completed steps stay in place on failure; Retry resumes, Delete discards. A recorded
+ * source commit is reused, except that a workspace source is read again so a retry starts from that workspace's
+ * current state. */
 async function runWorkspaceCreation({ env, userId, authority, operation, advance }: QueuedRun): Promise<void> {
   const definition = await operationWorkspace(authority, operation);
   if (definition.lifecycle !== 'provisioning') throw new Error(`Workspace ${definition.name} is ${definition.lifecycle}; only an unfinished creation runs`);
@@ -302,9 +303,10 @@ async function runWorkspaceCreation({ env, userId, authority, operation, advance
     }
     const resolved = await authority.putWorkspace(revise(definition, { sourceRef: source.sourceRef, sourceCommit: source.sourceCommit }));
     await advance();
-    await code.forkWorkspace(resolved.projectId, resolved.id, source.repository);
+    // A workspace source's checkpoint (uncommitted edits included) descends from its head commit.
+    await code.createWorkspaceRepository(resolved.projectId, resolved.id, source.repository, source.checkpoint?.worktreeCommit ?? resolved.sourceCommit);
     await advance();
-    // A fork can carry a same-named branch from its source; the workspace branch starts at its own source commit.
+    // The fork's default branch can share the workspace branch's name; the workspace branch starts at its own source commit.
     if (resolved.sourceCommit !== null) await code.setBranch(artifactsWorkspaceRepository(resolved.id), resolved.branch, resolved.sourceCommit);
     await advance();
     const workspace = await authority.putWorkspace(revise(resolved, { lifecycle: 'active' }));

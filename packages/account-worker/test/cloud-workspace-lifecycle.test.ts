@@ -26,10 +26,11 @@ afterEach(() => vi.restoreAllMocks());
 const commit = (digit: string) => digit.repeat(40);
 const noAttach = async (): Promise<never> => { throw new Error('Unexpected machine attach'); };
 
-/** Artifacts is the only service outside the account: refs per repository, forks, branch writes and deletions. */
+/** Artifacts is the only service outside the account: refs per repository, forks (with the commit a new workspace starts
+ * from), branch writes and deletions. */
 function cloudArtifacts() {
   const refs = new Map<string, string>();
-  const forks: Array<{ workspaceId: string; source: string | undefined }> = [];
+  const forks: Array<{ workspaceId: string; source: string | undefined; start?: string | null }> = [];
   const deleted: string[] = [];
   const repository = (name: string): ArtifactsRepoInfo => ({ id: name, name, description: null, defaultBranch: 'main', createdAt: '', updatedAt: '', lastPushAt: null, source: null, readOnly: false, remote: `https://artifacts.invalid/${name}.git` });
   const ref = (name: string, value: string) => `${name} ${value === 'HEAD' || value.startsWith('refs/') ? value : `refs/heads/${value}`}`;
@@ -37,15 +38,17 @@ function cloudArtifacts() {
   vi.spyOn(ArtifactsCodeStore.prototype, 'importProject').mockImplementation(async projectId => repository(`project-${projectId}`));
   // A project repository holding any ref holds its import.
   vi.spyOn(ArtifactsCodeStore.prototype, 'projectImported').mockImplementation(async projectId => [...refs.keys()].some(key => key.startsWith(`project-${projectId} `)));
-  vi.spyOn(ArtifactsCodeStore.prototype, 'forkWorkspace').mockImplementation(async (projectId, workspaceId, source) => {
-    const name = `workspace-${workspaceId}`;
-    if (!forks.some(fork => fork.workspaceId === workspaceId)) {
-      forks.push({ workspaceId, source });
-      const from = source ?? `project-${projectId}`;
+  // A repository forks once; later calls find it as it is.
+  const fork = (entry: { workspaceId: string; source: string | undefined; start?: string | null }, from: string) => {
+    const name = `workspace-${entry.workspaceId}`;
+    if (!forks.some(existing => existing.workspaceId === entry.workspaceId)) {
+      forks.push(entry);
       for (const [key, value] of [...refs]) if (key.startsWith(`${from} `)) refs.set(`${name} ${key.slice(from.length + 1)}`, value);
     }
     return repository(name);
-  });
+  };
+  vi.spyOn(ArtifactsCodeStore.prototype, 'forkWorkspace').mockImplementation(async (projectId, workspaceId) => fork({ workspaceId, source: undefined }, `project-${projectId}`));
+  vi.spyOn(ArtifactsCodeStore.prototype, 'createWorkspaceRepository').mockImplementation(async (_projectId, workspaceId, source, start) => fork({ workspaceId, source, start }, source));
   vi.spyOn(ArtifactsCodeStore.prototype, 'resolveRef').mockImplementation(async (name, value) => refs.get(ref(name, value)) ?? null);
   vi.spyOn(ArtifactsCodeStore.prototype, 'resolveAdvertisedRef').mockImplementation(async (name, value) => refs.get(ref(name, value)) ?? null);
   const copyCommit = vi.spyOn(ArtifactsCodeStore.prototype, 'copyCommit').mockImplementation(async (source, destination, value, hash, previous) => {
@@ -144,6 +147,7 @@ describe('cloud workspace lifecycle with no machines', () => {
     expect((await authority.listWorkspaces()).find(workspace => workspace.id === workspaceId)).toMatchObject({ lifecycle: 'active', sourceKind: 'base', sourceRef: 'main', sourceCommit: commit('1') });
     expect((await authority.listOperations()).find(operation => operation.workspaceId === workspaceId)?.steps.map(step => step.state)).toEqual(['succeeded', 'succeeded', 'succeeded', 'succeeded']);
     expect(await index.locateWorkspace(workspaceId)).toBe(project.id);
+    expect(artifacts.forks).toContainEqual({ workspaceId, source: `project-${project.id}`, start: commit('1') });
     expect(artifacts.setBranch).toHaveBeenCalledWith(`workspace-${workspaceId}`, 'feature/cloud', commit('1'));
     expect(await client.space.view({ projectId: project.id, workspaceId })).toMatchObject({ status: 'ok', value: { workspaces: [{ id: workspaceId, branch: 'feature/cloud', phase: 'plan' }] } });
 
@@ -164,7 +168,7 @@ describe('cloud workspace lifecycle with no machines', () => {
     const stacked = await ready(client.workspace.create({ projectId: project.id, name: 'Stacked', branch: 'stacked', phase: 'plan', sourceKind: 'workspace', sourceRef: 'Cloud feature' }));
     expect(stacked.workspace).toMatchObject({ phase: 'plan', relations: { dependsOn: [], stackedOn: workspaceId } });
     expect(stacked.operation.state).toBe('succeeded');
-    expect(artifacts.forks).toContainEqual({ workspaceId: stacked.workspace.id, source: `workspace-${workspaceId}` });
+    expect(artifacts.forks).toContainEqual({ workspaceId: stacked.workspace.id, source: `workspace-${workspaceId}`, start: commit('1') });
     expect(artifacts.setBranch).toHaveBeenCalledWith(`workspace-${stacked.workspace.id}`, 'stacked', commit('1'));
     expect((await authority.listWorkspaces()).filter(workspace => workspace.kind === 'worktree').map(workspace => workspace.name).sort()).toEqual(['Cloud feature', 'Stacked']);
   });

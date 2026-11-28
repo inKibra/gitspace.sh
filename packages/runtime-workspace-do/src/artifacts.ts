@@ -29,6 +29,9 @@ const READ_ATTEMPTS = 5;
 /** Creates of a machine seed target tried while a refused import still holds its name, waiting 0.5 s, 1 s, 2 s and 4 s
  * between tries. */
 const SEED_CREATE_ATTEMPTS = 5;
+/** Forks of a new workspace's repository tried while an interrupted fork still holds its name, deleting it before each
+ * retry and waiting 0.5 s, 1 s, 2 s and 4 s: Artifacts refuses a name for about 2 s after deleting it. */
+const WORKSPACE_FORK_ATTEMPTS = 5;
 type RepositoryReads = Pick<ArtifactsRepo, 'readTree' | 'readBlob' | 'readCommit' | 'info' | 'createToken' | 'revokeToken'>;
 /** One Artifacts read, tried up to READ_ATTEMPTS times; the error that stands names the call and the object, since the
  * provider's own message names neither. */
@@ -244,8 +247,8 @@ export class ArtifactsCodeStore {
       }
       const metadata = await repo.readCommit(commit);
       if (!metadata) throw new Error('Initial workspace commit is unavailable');
-      // A fork holds the source objects and branches, not this workspace's checkpoint
-      // ref. Publish that ref before the runtime can persist or hand out its checkpoint.
+      // A fork holds the source's default branch, and this workspace's checkpoint ref only where creation copied the
+      // commit it starts from there. Publish that ref before the runtime can persist or hand out its checkpoint.
       await createCheckpointRef(commit);
       return { checkpointRef, headCommit: commit, branch, indexCommit: commit, trackedWorktreeCommit: commit, worktreeCommit: commit, indexTree: metadata.treeHash, worktreeTree: metadata.treeHash };
     } finally { await disposeArtifactsRepository(repo); }
@@ -459,12 +462,70 @@ export class ArtifactsCodeStore {
     if (input.headCommit !== null) await this.copyCommit(input.sourceRepository, name, ref, input.headCommit, null);
   }
 
-  /** A workspace forked from another workspace starts from that workspace's repository, which holds commits the project never received. */
-  async forkWorkspace(projectId: string, workspaceId: string, source = artifactsProjectRepository(projectId)) {
+  /** A new workspace's repository, made by its creation. The default branch of a donor is forked: the project's base
+   * workspace repository (`workspace-<projectId>`) when it exists, else `source`. Then `start`, the commit the
+   * workspace's first checkpoint is (null: unborn), is copied from `source` to the workspace's checkpoint ref when the
+   * fork lacks it, negotiated against the forked branch's history. A workspace forked from another workspace starts from
+   * that workspace's repository, which holds commits the project never received.
+   * The base workspace repository is the donor because a fork copies every object its donor stores, whichever branches
+   * it keeps (a default-branch fork holds a pull request head's objects too). A project repository holds everything
+   * copied or imported into it; the base workspace's holds the base branch and its recent history. Measured 2026-11-28
+   * on an 870 MB monorepo's project, whose every-ref forks failed with "An internal error
+   * occurred." after 5.5 minutes: a no-depth fetch of the project repository's base branch failed with HTTP 500 after
+   * 41 s, one of the base workspace repository's took 29 s (178 MiB, 64 commits), and a pull request head the project
+   * holds as a shallow root came as 5.6 MiB with the base branch's commits as haves (146 MiB without).
+   * Only the default branch is forked. On single-branch scratch repositories of 300,000 objects a fork of every ref took
+   * 368 s or had not finished when its caller gave up (211 s, 367 s); a default-branch fork took 22–91 s. Forks of a
+   * repository holding 560 MB or more fail with "An internal error occurred." in about 30 s either way (420 MB: 52 s).
+   * Resumable: a listed repository is a finished fork, and whether it holds `start` is checked. A fork runs only while
+   * the request that started it lasts; an interrupted one leaves its name unlisted, unreadable and refusing a fork
+   * (ALREADY_EXISTS) for good (still so 25 minutes later), so that name is deleted and forked again. Nothing else forks
+   * a workspace's repository before its creation activates the workspace. A failure names the part that failed. */
+  async createWorkspaceRepository(projectId: string, workspaceId: string, source: string, start: string | null): Promise<ArtifactsRepoInfo> {
+    const name = artifactsWorkspaceRepository(workspaceId);
+    if (!await this.find(name)) {
+      const base = artifactsWorkspaceRepository(projectId);
+      const donor = await this.find(base) ? base : source;
+      try { await this.forkDefaultBranch(donor, name); }
+      catch (error) { throw new Error(`Forking the default branch of ${donor} into ${name} failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error }); }
+    }
+    if (start !== null && !await this.readCommit(name, start)) {
+      try { await this.copyCommit(source, name, `refs/gitspace/spaces/${workspaceId}/checkpoints`, start, 'replace'); }
+      catch (error) { throw new Error(`Copying ${start} from ${source} into ${name} failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error }); }
+    }
+    return this.info(name);
+  }
+
+  private async forkDefaultBranch(source: string, name: string): Promise<void> {
+    const origin = await this.binding.get(repositorySchema.parse(source));
+    try {
+      for (let attempt = 1; ; attempt++) {
+        let created: ArtifactsCreateRepoResult | null = null;
+        try { created = await origin.fork(name, { defaultBranchOnly: true, readOnly: false }); }
+        catch (error) { if (!ArtifactsAlreadyExistsSchema.safeParse(error).success) throw error; }
+        if (created !== null) {
+          const repo = await this.binding.get(name);
+          try { await repo.revokeToken(created.token); return; }
+          finally { await disposeArtifactsRepository(repo); }
+        }
+        // A fork an earlier attempt started finished after this one looked.
+        if (await this.find(name)) return;
+        if (attempt >= WORKSPACE_FORK_ATTEMPTS) throw new Error(`Artifacts still holds ${name} after an interrupted fork was deleted; try again shortly`);
+        await this.deleteRepository(name);
+        const { promise, resolve } = Promise.withResolvers<void>();
+        setTimeout(resolve, 500 * 2 ** (attempt - 1));
+        await promise;
+      }
+    } finally { await disposeArtifactsRepository(origin); }
+  }
+
+  /** The repository of a workspace that has none yet, forked from the project repository with every ref; creation makes
+   * a new workspace's (`createWorkspaceRepository`). */
+  async forkWorkspace(projectId: string, workspaceId: string) {
     const name = artifactsWorkspaceRepository(workspaceId);
     const existing = await this.find(name);
     if (existing) return this.info(name);
-    const sourceRepository = await this.binding.get(repositorySchema.parse(source));
+    const sourceRepository = await this.binding.get(artifactsProjectRepository(projectId));
     try {
       const created = await sourceRepository.fork(name, { defaultBranchOnly: false, readOnly: false });
       const repo = await this.binding.get(name);
@@ -488,8 +549,9 @@ export class ArtifactsCodeStore {
     } finally { await disposeArtifactsRepository(repo); }
   }
 
-  /** Copy a commit absent from a fork, then CAS its destination ref. Existing objects need no download. */
-  async copyCommit(source: string, destination: string, ref: string, commit: string, previous: string | null): Promise<void> {
+  /** Copy a commit absent from a fork, then CAS its destination ref from `previous` (null: absent), or from whatever it
+   * holds for `replace`. Existing objects need no download. */
+  async copyCommit(source: string, destination: string, ref: string, commit: string, previous: string | null | 'replace'): Promise<void> {
     commitSchema.parse(commit);
     if (!/^refs\/(?:heads\/|gitspace\/)/u.test(ref)) throw new Error('Unsupported destination ref');
     const target = await this.binding.get(repositorySchema.parse(destination));
@@ -498,8 +560,9 @@ export class ArtifactsCodeStore {
       const token = await target.createToken('write', TRANSFER_LEASE_SECONDS);
       const auth: GitHttpAuth = { kind: 'bearer', token: token.plaintext };
       try {
+        const from = previous === 'replace' ? (await readAdvertisedRefs({ remote: info.remote, auth, refPrefix: ref })).get(ref) ?? null : previous;
         if (await target.readCommit(commit)) {
-          await publishRef({ remote: info.remote, auth, ref, previous, commit });
+          await publishRef({ remote: info.remote, auth, ref, previous: from, commit });
         } else {
           const origin = await this.binding.get(repositorySchema.parse(source));
           try {
@@ -507,8 +570,8 @@ export class ArtifactsCodeStore {
             const sourceInfo = await origin.info();
             const readToken = await origin.createToken('read', TRANSFER_LEASE_SECONDS);
             try {
-              const negotiation = await copyNegotiation(await target.log({ ...(previous === null ? {} : { ref: previous }), limit: NEGOTIATION_WINDOW }), async parent => await origin.readCommit(parent) !== null);
-              await transferCommit({ source: { remote: sourceInfo.remote, auth: { kind: 'bearer', token: readToken.plaintext } }, destination: { remote: info.remote, auth }, ref, previous, commit, negotiation, held: async held => await target.readCommit(held) !== null });
+              const negotiation = await copyNegotiation(await target.log({ ...(from === null ? {} : { ref: from }), limit: NEGOTIATION_WINDOW }), async parent => await origin.readCommit(parent) !== null);
+              await transferCommit({ source: { remote: sourceInfo.remote, auth: { kind: 'bearer', token: readToken.plaintext } }, destination: { remote: info.remote, auth }, ref, previous: from, commit, negotiation, held: async held => await target.readCommit(held) !== null });
             } finally { await origin.revokeToken(readToken.id); }
           } finally { await disposeArtifactsRepository(origin); }
         }

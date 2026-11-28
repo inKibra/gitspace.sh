@@ -1292,6 +1292,159 @@ for (const protocolVersion of [0, 2] as const) test(`a transfer sends objects on
   } finally { request.mockRestore(); await rm(root, { recursive: true, force: true }); }
 }, 15_000);
 
+test('a new workspace repository forks the base workspace repository\'s default branch, not a project Artifacts cannot fork, and copies the pull request head it starts from; an interrupted fork is replaced, and a failure names its part', async () => {
+  // Artifacts as measured (2026-11-28): a fork of a project repository whose history it cannot walk fails with "An
+  // internal error occurred."; a fork of every ref of a large repository outlives its caller and leaves its name held,
+  // unlisted and refusing forks, until it is deleted; a deleted name is refused once more. A default-branch fork keeps
+  // that branch and its shallow boundary.
+  const root = await mkdtemp(join(tmpdir(), 'workspace-repository-'));
+  const identity = { GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.com', GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.com' };
+  const run = (cwd: string, ...args: string[]) => {
+    const result = Bun.spawnSync(['git', '-c', 'protocol.file.allow=always', ...args], { cwd, env: { ...process.env, ...identity } });
+    if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+    return result.stdout.toString().trim();
+  };
+  const artifactsError = (code: string, message: string) => Object.assign(new Error(message), { name: 'ArtifactsError', code });
+  const unsupported = async (): Promise<never> => { throw new Error('Unexpected provider operation'); };
+  const directories = new Map<string, string>();
+  const listed = new Set<string>();
+  const interrupted = new Set<string>();
+  const unforkable = new Set<string>();
+  const forks: Array<{ source: string; name: string; defaultBranchOnly: boolean | undefined }> = [];
+  const uploads: string[] = [];
+  let refusals = 0;
+  let failingUploads = 0;
+  const info = (name: string): ArtifactsRepoInfo => ({ id: name, name, description: null, defaultBranch: 'main', createdAt: '', updatedAt: '', lastPushAt: null, source: null, readOnly: false, remote: `https://${name}.invalid/repo.git` });
+  const metadata = async (gitdir: string, oid: string): Promise<ArtifactsCommitMetadata> => {
+    const value = (await git.readCommit({ fs, gitdir, oid })).commit;
+    return { hash: oid, treeHash: value.tree, parents: value.parent, message: value.message, author: value.author, committer: value.committer, authoredAt: value.author.timestamp, committedAt: value.committer.timestamp };
+  };
+  const handle = (name: string, gitdir: string): ArtifactsRepo => ({
+    ...info(name), [Symbol.dispose]() {}, listTokens: unsupported, readFile: unsupported, readTree: unsupported, readBlob: unsupported,
+    info: async () => info(name),
+    createToken: async (scope = 'write') => ({ id: 'lease', plaintext: 'secret', scope, expiresAt: '' }),
+    revokeToken: async () => true,
+    readCommit: async oid => {
+      try { return await metadata(gitdir, oid); }
+      catch (error) { if (error instanceof git.Errors.NotFoundError) return null; throw error; }
+    },
+    log: async options => {
+      const commits = Bun.spawnSync(['git', 'rev-list', `--max-count=${options?.limit ?? 1}`, `${options?.ref ?? 'HEAD'}^{commit}`], { cwd: gitdir });
+      if (commits.exitCode !== 0) return [];
+      return Promise.all(commits.stdout.toString().split('\n').filter(Boolean).map(oid => metadata(gitdir, oid)));
+    },
+    fork: async (target, options) => {
+      forks.push({ source: name, name: target, defaultBranchOnly: options?.defaultBranchOnly });
+      if (listed.has(target) || interrupted.has(target)) throw artifactsError('ALREADY_EXISTS', `repo already exists: ${target}`);
+      if (refusals > 0) { refusals--; throw artifactsError('ALREADY_EXISTS', `repo already exists: ${target}`); }
+      if (unforkable.has(name)) throw artifactsError('INTERNAL_ERROR', 'An internal error occurred.');
+      if (options?.defaultBranchOnly !== true) { interrupted.add(target); throw artifactsError('INTERNAL_ERROR', 'An internal error occurred.'); }
+      const directory = join(root, `${target}.git`);
+      run(root, 'init', '-q', '--bare', '-b', 'main', directory);
+      run(directory, 'fetch', '-q', '--update-shallow', `file://${gitdir}`, 'refs/heads/main:refs/heads/main');
+      directories.set(target, directory);
+      listed.add(target);
+      return { id: target, name: target, description: null, defaultBranch: 'main', remote: info(target).remote, token: 'initial', tokenExpiresAt: '' };
+    },
+  });
+  const code = new ArtifactsCodeStore({
+    list: async () => ({ repos: [...listed].map(name => info(name)), total: listed.size }),
+    get: async name => {
+      if (interrupted.has(name)) throw artifactsError('FORK_IN_PROGRESS', `Repository "${name}" is currently being forked`);
+      const directory = directories.get(name);
+      if (!directory || !listed.has(name)) throw artifactsError('NOT_FOUND', `Repository not found: ${name}`);
+      return handle(name, directory);
+    },
+    delete: async name => {
+      if (!interrupted.delete(name) && !listed.delete(name)) throw artifactsError('NOT_FOUND', `Repository not found: ${name}`);
+      refusals = 1;
+      return true;
+    },
+    create: unsupported, import: unsupported,
+  });
+  const request = spyOn(globalThis, 'fetch').mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    const url = new URL(String(input));
+    const directory = directories.get(url.hostname.replace(/\.invalid$/u, ''));
+    if (!directory) throw new Error('Unexpected network destination');
+    const headers = new Headers(init?.headers);
+    expect(headers.get('authorization')).toBe('Bearer secret');
+    const advertise = url.pathname.endsWith('/info/refs');
+    const service = (advertise ? url.searchParams.get('service') : url.pathname.split('/').at(-1)) === 'git-upload-pack' ? 'upload-pack' : 'receive-pack';
+    const body = advertise ? null : new Uint8Array(await new Response(init?.body).arrayBuffer());
+    const command = body === null ? '' : new TextDecoder().decode(body);
+    if (service === 'upload-pack' && command.includes('command=fetch')) {
+      uploads.push(`${url.hostname} ${command}`);
+      if (failingUploads-- > 0) return new Response('upload refused', { status: 403 });
+    }
+    const child = Bun.spawn(['git', '-c', 'receive.shallowUpdate=true', service, '--stateless-rpc', ...(advertise ? ['--advertise-refs'] : []), directory], {
+      stdin: body ?? 'ignore', stdout: 'pipe', stderr: 'pipe', env: { ...process.env, GIT_PROTOCOL: headers.get('git-protocol') ?? 'version=0' },
+    });
+    const bytes = new Uint8Array(await new Response(child.stdout).arrayBuffer());
+    const error = await new Response(child.stderr).text();
+    if (await child.exited !== 0) return new Response(error, { status: 500 });
+    return new Response(advertise && service === 'upload-pack' ? new Blob(['001e# service=git-upload-pack\n0000', bytes]) : bytes);
+  }, { preconnect: fetch.preconnect }));
+  try {
+    // A project whose history stops at a shallow boundary, holding a pull request head whose parent it lacks, and its
+    // base workspace repository holding the base branch and a checkpoint of its own.
+    const work = join(root, 'work');
+    run(root, 'init', '-q', '-b', 'main', work);
+    for (const message of ['A', 'B', 'C']) {
+      await Bun.write(join(work, 'app.txt'), `${message}\n`);
+      run(work, 'add', '-A'); run(work, 'commit', '-q', '-m', message);
+    }
+    const tip = run(work, 'rev-parse', 'HEAD');
+    run(work, 'checkout', '-q', '-b', 'pull');
+    for (const message of ['pull base', 'pull head']) {
+      await Bun.write(join(work, 'pull.txt'), `${message}\n`);
+      run(work, 'add', '-A'); run(work, 'commit', '-q', '-m', message);
+    }
+    const pull = run(work, 'rev-parse', 'HEAD');
+    const project = join(root, 'project-acme.git');
+    run(root, 'init', '-q', '--bare', '-b', 'main', project);
+    run(project, 'fetch', '-q', '--depth', '2', `file://${work}`, 'refs/heads/main:refs/heads/main');
+    run(project, 'fetch', '-q', '--depth', '1', `file://${work}`, 'refs/heads/pull:refs/pull/7/head');
+    const base = join(root, 'workspace-acme.git');
+    run(root, 'init', '-q', '--bare', '-b', 'main', base);
+    run(work, 'branch', 'base-checkpoint', 'HEAD~1');
+    run(base, 'fetch', '-q', '--depth', '1', `file://${work}`, 'refs/heads/main:refs/heads/main', 'refs/heads/base-checkpoint:refs/gitspace/spaces/acme/checkpoints');
+    for (const [name, directory] of [['project-acme', project], ['workspace-acme', base], ['project-solo', project]] as const) {
+      directories.set(name, directory);
+      listed.add(name);
+    }
+    unforkable.add('project-acme').add('project-solo');
+
+    // An earlier attempt's fork of every ref was interrupted, and the copy fails once.
+    interrupted.add('workspace-pr');
+    failingUploads = 1;
+    await expect(code.createWorkspaceRepository('acme', 'pr', 'project-acme', pull)).rejects.toThrow(`Copying ${pull} from project-acme into workspace-pr failed: Git fetch failed (403): upload refused`);
+    expect(forks).toEqual(Array.from({ length: 3 }, () => ({ source: 'workspace-acme', name: 'workspace-pr', defaultBranchOnly: true })));
+    // Retried, the forked repository is kept and only the copy runs again, offering the forked base branch as haves.
+    expect(await code.createWorkspaceRepository('acme', 'pr', 'project-acme', pull)).toEqual(info('workspace-pr'));
+    expect(forks).toHaveLength(3);
+    expect(uploads.at(-1)).toStartWith('project-acme.invalid');
+    expect(uploads.at(-1)).toContain(`want ${pull}`);
+    expect(uploads.at(-1)).toContain(`have ${tip}`);
+    const workspace = directories.get('workspace-pr')!;
+    expect(run(workspace, 'for-each-ref', '--format=%(refname) %(objectname)').split('\n').sort()).toEqual([`refs/gitspace/spaces/pr/checkpoints ${pull}`, `refs/heads/main ${tip}`]);
+    expect(run(workspace, 'show', `${pull}:pull.txt`)).toBe('pull head');
+    expect(run(workspace, 'fsck', '--strict', '--no-dangling')).toBe('');
+    const requests = request.mock.calls.length;
+    expect(await code.createWorkspaceRepository('acme', 'pr', 'project-acme', pull)).toEqual(info('workspace-pr'));
+    expect(request.mock.calls.length).toBe(requests);
+    // A retry starting from a newer commit moves the checkpoint ref the earlier attempt left.
+    await Bun.write(join(work, 'pull.txt'), 'pull head, amended\n');
+    run(work, 'commit', '-q', '-am', 'pull head, amended');
+    const amended = run(work, 'rev-parse', 'HEAD');
+    run(project, 'fetch', '-q', '--depth', '1', `file://${work}`, '+refs/heads/pull:refs/pull/7/head');
+    await code.createWorkspaceRepository('acme', 'pr', 'project-acme', amended);
+    expect(run(workspace, 'rev-parse', 'refs/gitspace/spaces/pr/checkpoints')).toBe(amended);
+
+    // Without a base workspace repository the source is forked, and its failure names the fork.
+    await expect(code.createWorkspaceRepository('solo', 'broken', 'project-solo', tip)).rejects.toThrow('Forking the default branch of project-solo into workspace-broken failed: An internal error occurred.');
+  } finally { request.mockRestore(); await rm(root, { recursive: true, force: true }); }
+}, 15_000);
+
 /** How Artifacts words a too-large refusal: its error code (2026-10-31), or only the sizes in its status (2026-11-16). */
 const TOO_LARGE_REFUSALS = {
   code: (size: number, limit: number) => `unpack artifacts_git_receive_pack_request_too_large: push is ${size} bytes, limit is ${limit}\nng refs/heads/main artifacts_git_receive_pack_request_too_large\n`,
