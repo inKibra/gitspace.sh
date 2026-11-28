@@ -2,14 +2,14 @@ import { env, runInDurableObject } from 'cloudflare:test';
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import { credentialProtocolBase64, signCredentialAuthorityGrant } from '@gitspace/protocol';
 import { ArtifactsCodeStore, ArtifactsSnapshotError } from '@gitspace/runtime-workspace-do';
-import { RuntimeGitCheckpointSchema } from '@gitspace/protocol-runtime';
+import { RuntimeGitCheckpointSchema, type RuntimeGitCheckpoint } from '@gitspace/protocol-runtime';
 import { Result } from 'better-result';
 import { afterEach, expect, it, vi } from 'vitest';
 import { tenantRootPrivateKey } from './setup.js';
 
 afterEach(() => vi.restoreAllMocks());
 
-async function cacheFixture() {
+async function cacheFixture(initial: RuntimeGitCheckpoint | null = null) {
   const userId = env.ACCOUNT_ID;
   const projectId = 'cache-policy-project';
   const workspaceId = 'cache-policy-workspace';
@@ -18,7 +18,7 @@ async function cacheFixture() {
   // Only the external Artifacts service is replaced; the workspace has not published code yet.
   vi.spyOn(ArtifactsCodeStore.prototype, 'ensureEmptyProject').mockResolvedValue(repository);
   vi.spyOn(ArtifactsCodeStore.prototype, 'forkWorkspace').mockResolvedValue(repository);
-  vi.spyOn(ArtifactsCodeStore.prototype, 'initialCheckpoint').mockResolvedValue(null);
+  vi.spyOn(ArtifactsCodeStore.prototype, 'initialCheckpoint').mockResolvedValue(initial);
   const vault = env.CREDENTIALS.getByName(userId);
   await vault.bootstrap({ userId, rootPublicKey: credentialProtocolBase64.encode(ed25519.getPublicKey(tenantRootPrivateKey)), vaultKey: credentialProtocolBase64.encode(new Uint8Array(32).fill(19)) });
   await vault.registerDevice(signCredentialAuthorityGrant({
@@ -63,4 +63,26 @@ it('an attachment offers its machine\'s platform to a tool\'s needs once the mac
   await env.TENANT_RELEASES.getByName(env.ACCOUNT_ID).machineProtocol(machineId, { version: null, platform: 'darwin-arm64' });
   const { assignments } = await authority.runtimeAssignments({ projectId, workspaceId, machineId });
   expect(assignments[0]?.grant.attachment.capabilities).toEqual(expect.arrayContaining(['bash', 'darwin-arm64', 'darwin', 'macos', 'arm64']));
+});
+
+it('answers a machine\'s assignment read for an idle workspace without opening its runtime', async () => {
+  const checkpoint = RuntimeGitCheckpointSchema.parse({
+    checkpointRef: 'refs/gitspace/spaces/cache-policy-workspace/native/1', branch: 'main',
+    headCommit: '1'.repeat(40), indexCommit: '1'.repeat(40), trackedWorktreeCommit: '1'.repeat(40),
+    worktreeCommit: '1'.repeat(40), indexTree: '2'.repeat(40), worktreeTree: '2'.repeat(40),
+  });
+  const { projectId, workspaceId, machineId, authority, attachment } = await cacheFixture(checkpoint);
+  vi.spyOn(ArtifactsCodeStore.prototype, 'info').mockResolvedValue({ id: 'repo', name: 'repo', description: null, defaultBranch: 'main', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', lastPushAt: null, source: null, readOnly: false, remote: 'https://artifacts.test/workspace.git' });
+  vi.spyOn(ArtifactsCodeStore.prototype, 'readCommit').mockResolvedValue({
+    hash: checkpoint.worktreeCommit, treeHash: checkpoint.worktreeTree, parents: [], message: 'Checkpoint',
+    author: { name: 'Fixture', email: 'fixture@example.invalid' }, committer: { name: 'Fixture', email: 'fixture@example.invalid' }, authoredAt: 0, committedAt: 0,
+  });
+  vi.spyOn(ArtifactsCodeStore.prototype, 'readTree').mockResolvedValue([]);
+  // The object restarts, as an idle workspace's does: nothing has opened its runtime since.
+  await runInDurableObject(authority, (_instance, state) => { state.abort('restart'); }).catch(() => undefined);
+  const restarted = env.SPACE_AUTHORITY.get(authority.id);
+  const { assignments } = await restarted.runtimeAssignments({ projectId, workspaceId, machineId });
+  expect(assignments.map(item => [item.grant.attachment.attachmentId, item.source?.commit])).toEqual([[attachment.attachmentId, checkpoint.worktreeCommit]]);
+  expect(assignments[0]?.grant.executionSecret).toBeTruthy();
+  await runInDurableObject(restarted, instance => { expect(instance['runtime']).toBeUndefined(); });
 });

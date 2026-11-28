@@ -14,12 +14,12 @@ import { captureReplayAskedText, withCaptureSummaries } from './browser-capture-
 import { readCapture } from './browser-capture.js';
 import { workspaceDrive } from './workspace-drive.js';
 import { refreshCloudEnvironment } from './cloud-environment.js';
-import { ArtifactsCodeStore, artifactsProjectRepository, artifactsWorkspaceRepository, createToolResultStore, isAttachmentOnline, isAttachmentReady, isSupportedBranchName, CloudPublicationUncertain, readCurrentCheckpoint, readRuntimeLfsRoots, reconcileRuntimeLfsSources, type ProjectAnswerOutcome, type ProjectQuestion, type RuntimeAccepted, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
+import { ArtifactsCodeStore, AttachmentStore, artifactsProjectRepository, artifactsWorkspaceRepository, createToolResultStore, isAttachmentOnline, isAttachmentReady, isSupportedBranchName, CloudPublicationUncertain, readCurrentCheckpoint, readRuntimeLfsRoots, reconcileRuntimeLfsSources, type ProjectAnswerOutcome, type ProjectQuestion, type RuntimeAccepted, type WorkspaceRuntime } from '@gitspace/runtime-workspace-do';
 import { settleProjectAnswers } from './project-answers.js';
 import { questionState, type RuntimeSecureFillResult } from '@gitspace/protocol-runtime';
 import { approvedBrowserSites, browserOriginMatches } from '@gitspace/protocol-environment';
 import { secureFillTab, type SecureInputRecord } from './secure-input.js';
-import { createAccountWorkspaceRuntime, ensureProjectCodeRepository } from './account-runtime-host.js';
+import { createAccountWorkspaceRuntime, dispatchRuntimeAttachment, ensureProjectCodeRepository } from './account-runtime-host.js';
 import { runtimeFailureReporter } from './runtime-failures.js';
 import { RuntimeSessionInputSchema, type PendingAskAnswer } from '@gitspace/protocol-runtime/session-controls';
 import { HistorySearchRequestSchema, RuntimeTranscriptRangeSchema, type HistoryWorkspaceHits } from '@gitspace/runtime-core/history';
@@ -31,7 +31,7 @@ import { importRefThroughBaseMachine } from './runtime-ref-import.js';
 import { RuntimeGitCheckpointSchema, RuntimeSnapshotCommitInputSchema } from '@gitspace/protocol-runtime/workspace-controls';
 import { RuntimeAttachmentReadyInputSchema, RuntimeAssignmentsInputSchema, RuntimeCacheAttachmentRequestInputSchema, RuntimeAttachmentDetachRequestInputSchema } from '@gitspace/protocol-runtime/attachment-controls';
 import { RuntimeHeartbeatInputSchema, RuntimeDetachInputSchema } from '@gitspace/protocol-runtime/machine-controls';
-import { CheckoutSourceFactsSchema, RuntimeAttachmentController, machineCapabilities } from './runtime-attachments.js';
+import { CheckoutSourceFactsSchema, RuntimeAttachmentController, machineCapabilities, type RuntimeAttachmentControllerOptions } from './runtime-attachments.js';
 import { confirmMachinePresence, notifyLifecycleHolders, notifyMachines } from './machine-notices.js';
 import { SpaceEnvironmentStore, type LostLifecycleHolder } from './space-environment.js';
 import { committedBrowserOrigins } from './committed-browser-origins.js';
@@ -1181,10 +1181,16 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
 
   private async attachmentController(raw: unknown) {
     const runtime = await this.getRuntime(raw);
-    return new RuntimeAttachmentController({
-      attachments: runtime.attachments, code: new ArtifactsCodeStore(this.env.ARTIFACTS), publish: () => runtime.publish(),
+    return this.attachmentControllerOver({
+      attachments: runtime.attachments,
       // The stored checkpoint; only a workspace that has none yet initializes it (and waits on its retention flush).
       snapshot: async () => await runtime.cloudFiles.snapshot() ?? runtime.cloudFiles.initializeSnapshot(),
+    });
+  }
+
+  private attachmentControllerOver(stores: Pick<RuntimeAttachmentControllerOptions, 'attachments' | 'snapshot'>) {
+    return new RuntimeAttachmentController({
+      ...stores, code: new ArtifactsCodeStore(this.env.ARTIFACTS),
       origin: async projectId => (await this.env.PROJECT_AUTHORITY.getByName(`${this.env.ACCOUNT_ID}:${projectId}`).getProject())?.repositoryReference ?? null,
       // The worker authenticated this machine's request; only fleet membership is checked here.
       authorizeMachine: async machineId => {
@@ -1229,7 +1235,23 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
   async runtimeAssignments(raw: unknown) {
     const identity = RuntimeIdentitySchema.parse(raw);
     const input = RuntimeAssignmentsInputSchema.parse(raw);
-    if (await this.ctx.storage.get('runtime.identity') === undefined) return { assignments: [] };
+    const stored = await this.ctx.storage.get('runtime.identity');
+    if (stored === undefined) return { assignments: [] };
+    // An idle workspace answers from its stored attachments and checkpoint. Opening its runtime wakes it, and a wake
+    // starts code and history indexing: every machine-wide read woke every workspace the machine holds, and busy ones
+    // took minutes to answer (242 s, 2026-11-27). Only a workspace with no checkpoint yet opens it to initialize one.
+    const checkpoint = this.runtime ? null : await readCurrentCheckpoint(this.ctx.storage);
+    if (checkpoint) {
+      const runtime = RuntimeIdentitySchema.parse(stored);
+      if (runtime.projectId !== identity.projectId || runtime.workspaceId !== identity.workspaceId) throw new Error('Runtime actor identity mismatch');
+      authorizeWorkspaceRuntime(await this.metadata(identity), identity, false);
+      const attachments = new AttachmentStore(this.ctx.storage, {
+        seal: (secret, scope) => this.env.CREDENTIALS.getByName(this.env.ACCOUNT_ID).sealRuntimeGrant(secret, scope),
+        open: (ciphertext, scope) => this.env.CREDENTIALS.getByName(this.env.ACCOUNT_ID).openRuntimeGrant(ciphertext, scope),
+        dispatch: dispatch => dispatchRuntimeAttachment(this.env, dispatch),
+      });
+      return this.attachmentControllerOver({ attachments, snapshot: async () => checkpoint }).assignments(input);
+    }
     return (await this.attachmentController(identity)).assignments(input);
   }
 
@@ -1238,6 +1260,7 @@ export class SpaceAuthorityDO extends BudgetedDurableObject {
     const runtime = await this.getRuntime(input);
     const result = await (await this.attachmentController(input)).ready(input);
     await runtime.cacheReady(input.attachmentId, input.generation);
+    runtime.publish();
     return result;
   }
 

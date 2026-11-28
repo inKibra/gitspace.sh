@@ -19,22 +19,23 @@ export function machineCapabilities(platform: string | null): string[] {
   return [...executorCapabilities, platform, ...(OS_CAPABILITIES[os] ?? [os]), arch];
 }
 
+export type RuntimeAttachmentControllerOptions = {
+  attachments: AttachmentStore;
+  code: ArtifactsCodeStore;
+  snapshot(): Promise<RuntimeSnapshotCommitInput['checkpoint'] | null>;
+  /** Canonical project origin; never supplied by the request or the execution grant. */
+  origin(projectId: string): Promise<string | null>;
+  /** Enrollment/trust checks are required even when the target is offline. */
+  authorizeMachine(machineId: RuntimeAttachment['machineId']): Promise<void>;
+  /** What the machine offers to `needs`: its tools and platform (`machineCapabilities`). */
+  capabilities(machineId: RuntimeAttachment['machineId']): Promise<string[]>;
+  /** What the last assignment read learned about a commit's checkout: computed once per commit, not per read. */
+  sourceFacts: { read(): Promise<CheckoutSourceFacts | null>; write(facts: CheckoutSourceFacts): Promise<void> };
+};
+
 /** Invoked behind canonical project/workspace and enrolled-machine authorization. */
 export class RuntimeAttachmentController {
-  constructor(private readonly options: {
-    attachments: AttachmentStore;
-    code: ArtifactsCodeStore;
-    publish(): void;
-    snapshot(): Promise<RuntimeSnapshotCommitInput['checkpoint'] | null>;
-    /** Canonical project origin; never supplied by the request or the execution grant. */
-    origin(projectId: string): Promise<string | null>;
-    /** Enrollment/trust checks are required even when the target is offline. */
-    authorizeMachine(machineId: RuntimeAttachment['machineId']): Promise<void>;
-    /** What the machine offers to `needs`: its tools and platform (`machineCapabilities`). */
-    capabilities(machineId: RuntimeAttachment['machineId']): Promise<string[]>;
-    /** What the last assignment read learned about a commit's checkout: computed once per commit, not per read. */
-    sourceFacts: { read(): Promise<CheckoutSourceFacts | null>; write(facts: CheckoutSourceFacts): Promise<void> };
-  }) {}
+  constructor(private readonly options: RuntimeAttachmentControllerOptions) {}
 
   private async requiresFiltersOrSubmodules(repository: string, commit: string) {
     const metadata = await this.options.code.readCommit(repository, commit);
@@ -76,8 +77,6 @@ export class RuntimeAttachmentController {
   async ready(raw: unknown) {
     const input = RuntimeAttachmentReadyInputSchema.parse(raw);
     await this.options.authorizeMachine(input.machineId);
-    const result = this.options.attachments.ready(input);
-    this.options.publish();
-    return result;
+    return this.options.attachments.ready(input);
   }
 }
