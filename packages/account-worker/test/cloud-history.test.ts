@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { compareCloudHistory } from '../src/cloud-stack-status.js';
+import { compareCloudHistory, forwardPosition } from '../src/cloud-stack-status.js';
 
 function history(entries: { hash: string; parents: string[]; committedAt: number }[]) {
   const commits = new Map(entries.map(entry => [entry.hash, {
@@ -64,5 +64,19 @@ describe('cloud history comparisons at shallow boundaries', () => {
       { hash: 'right', parents: [], committedAt: 2 },
     ]);
     expect(await compareCloudHistory(code, tip('left'), tip('right'))).toEqual({ complete: true, bases: [], leftAhead: 1 });
+  });
+
+  it('proves a busy branch moved forward when more merged commits than the full walk reads lie between its tips', async () => {
+    // `old`, then 3,000 merges into the branch, each bringing one side commit: 6,000 commits between the tips.
+    const entries: { hash: string; parents: string[]; committedAt: number }[] = [{ hash: 'old', parents: ['absent'], committedAt: 1 }];
+    let previous = 'old';
+    for (let index = 0; index < 3_000; index++) {
+      entries.push({ hash: `side-${index}`, parents: [previous], committedAt: 2 + index * 2 });
+      entries.push({ hash: `merge-${index}`, parents: [previous, `side-${index}`], committedAt: 3 + index * 2 });
+      previous = `merge-${index}`;
+    }
+    const code = history(entries);
+    expect(await forwardPosition(code, ['project'], 'old', previous)).toEqual({ kind: 'forward' });
+    expect(await forwardPosition(code, ['project'], previous, 'old')).toEqual({ kind: 'holds' });
   });
 });

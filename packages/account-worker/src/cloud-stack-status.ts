@@ -101,11 +101,47 @@ export async function compareCloudHistory(code: HistoryReader, left: Tip, right:
   };
 }
 
+/** First-parent commits read per page, and at most, when looking for one tip on the other's first-parent chain. */
+const FIRST_PARENT_PAGE = 500;
+const FIRST_PARENT_LIMIT = 100_000;
+/** Commit dates are not strictly ordered along a chain (clocks, rebases): the search runs this far past the target's
+ * date before it gives up. */
+const COMMIT_DATE_SLACK_SECONDS = 7 * 24 * 3_600;
+
+/** Whether `target` is on `from`'s first-parent chain, read a page at a time and stopped once the chain is well past
+ * `target`'s commit date. A branch moved forward by merges and fast-forwards keeps its old tip on that chain, so this
+ * answers in a few reads where the full walk would read every merged commit in between. */
+async function onFirstParentChain(code: HistoryReader, repositories: readonly string[], from: string, target: string): Promise<boolean> {
+  const history = new CommitHistory(code);
+  const goal = await history.read(target, repositories);
+  if (!goal) return false;
+  let next: string | undefined = from;
+  for (let read = 0; next !== undefined && read < FIRST_PARENT_LIMIT;) {
+    let page: Commit[] = [];
+    for (const repository of repositories) {
+      page = await code.log(repository, next, FIRST_PARENT_PAGE).catch(() => []);
+      if (page.length) break;
+    }
+    if (!page.length) return false;
+    for (const commit of page) {
+      if (commit.hash === target) return true;
+      if (commit.committedAt < goal.committedAt - COMMIT_DATE_SLACK_SECONDS) return false;
+    }
+    read += page.length;
+    next = page[page.length - 1]?.parents[0];
+  }
+  return false;
+}
+
 /** How a branch at `commit` relates to `tip`: it already holds `tip` (equal or descended), fast-forwards to it, or has
  * `ahead` commits `tip` lacks (null when cloud history is too shallow to tell, which never counts as a fast-forward). */
 export type ForwardPosition = { kind: 'holds' | 'forward' } | { kind: 'diverged'; ahead: number | null };
 export async function forwardPosition(code: HistoryReader, repositories: readonly string[], commit: string, tip: string): Promise<ForwardPosition> {
   if (commit === tip) return { kind: 'holds' };
+  // Moving a busy base branch forward passed more merged commits than the full walk reads (5,000, 2026-11-28); the old
+  // tip is on the new one's first-parent chain, which proves the fast-forward in a few reads.
+  if (await onFirstParentChain(code, repositories, tip, commit)) return { kind: 'forward' };
+  if (await onFirstParentChain(code, repositories, commit, tip)) return { kind: 'holds' };
   const comparison = await compareCloudHistory(code, { head: commit, repositories }, { head: tip, repositories });
   // Reaching `tip` from `commit` proves containment even where older history is missing.
   if (comparison.bases.includes(tip)) return { kind: 'holds' };
