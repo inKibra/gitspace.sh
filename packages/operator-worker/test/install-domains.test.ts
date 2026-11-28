@@ -46,3 +46,15 @@ describe('an install at its own domains', () => {
     });
   });
 });
+
+describe('an install on one domain (account and service domains alike)', () => {
+  const oneDomain = { ...env, ACCOUNT_DOMAIN: 'studio.test', SERVICE_DOMAIN: 'studio.test' };
+
+  it.each(['work-relay', 'a--b'])('refuses the handle %s, which would take a relay or a hosted service\'s hostname', async (handle) => {
+    const response = await worker.fetch(new Request('https://api.studio.test/v1/accounts/bootstrap', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ rootPublicKey: 'key', handle, invite: 'invite' }),
+    }), oneDomain);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: { code: 'INVALID_HANDLE' } });
+  });
+});

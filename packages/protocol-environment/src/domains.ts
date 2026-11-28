@@ -9,6 +9,10 @@ import { EnvironmentError } from './errors.js';
  * - `service` (default `gssh.dev`): each account's relay at `<handle>.<service>`, the platform at `platform.<service>`
  *   and an account's hosted services at `<name>--<tenant>-srv.<service>`.
  *
+ * The two may be one domain (an install for one organisation on a domain of its own). `<handle>.<domain>` is then the
+ * account, so its relay is `<handle>-relay.<domain>`; a handle may not end in `-relay` or hold `--` there, or it would
+ * name another account's relay or a hosted service.
+ *
  * Every host check and every URL GitSpace hands out is made here, from the install's `ACCOUNT_DOMAIN` and
  * `SERVICE_DOMAIN`, so the patterns are defined once. Unset, they are GitSpace's own, and production is unchanged.
  */
@@ -97,29 +101,66 @@ export const platformUrl = (domains: GitSpaceDomains): string => `https://platfo
 /** An account's hostname: its browser app and RPC. */
 export const accountHostname = (domains: GitSpaceDomains, handle: string): string => `${handle}.${domains.account}`;
 export const accountUrl = (domains: GitSpaceDomains, handle: string): string => `https://${accountHostname(domains, handle)}`;
-/** An account's relay hostname: machines and the transport. */
-export const relayHostname = (domains: GitSpaceDomains, handle: string): string => `${handle}.${domains.service}`;
+/** Whether the install's account and service domains are one domain (its relay hostnames then end in `-relay`). */
+export const sharesOneDomain = (domains: GitSpaceDomains): boolean => domains.account === domains.service;
+
+/** What a relay's label ends with on an install whose account and service domains are one: `<handle>-relay.<domain>`. */
+export const SHARED_DOMAIN_RELAY_SUFFIX = '-relay';
+
+/** An account's relay hostname: machines and the transport. `<handle>.<service>`, or `<handle>-relay.<domain>` when the
+ * account and service domains are one (`<handle>.<domain>` is the account). */
+export const relayHostname = (domains: GitSpaceDomains, handle: string): string =>
+  sharesOneDomain(domains) ? `${handle}${SHARED_DOMAIN_RELAY_SUFFIX}.${domains.service}` : `${handle}.${domains.service}`;
 export const relayUrl = (domains: GitSpaceDomains, handle: string): string => `https://${relayHostname(domains, handle)}`;
 
 /** What every hostname of a tenant's hosted services ends with: `<name>--<tenant>-srv.<service>`. */
 export const hostedServiceSuffix = (domains: GitSpaceDomains, tenantId: string): string => `--${tenantId}-srv.${domains.service}`;
 
-/** The handle of an account hostname (`<handle>.<account>`), or null for any other host. */
-export function handleOfAccountHostname(domains: GitSpaceDomains, hostname: string): string | null {
-  const match = new RegExp(`^([a-z0-9-]+)\\.${domains.account.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}$`, 'u').exec(hostname.toLowerCase());
+/** The single label of `hostname` under `domain` (`<label>.<domain>`), or null. */
+function labelUnder(domain: string, hostname: string): string | null {
+  const match = new RegExp(`^([a-z0-9-]+)\\.${domain.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}$`, 'u').exec(hostname.toLowerCase());
   return match?.[1] ?? null;
 }
 
+/** A label an install with one domain keeps for itself: a relay (`<handle>-relay`) or a hosted service (`…--…`). */
+const sharedDomainReserved = (label: string): boolean => label.endsWith(SHARED_DOMAIN_RELAY_SUFFIX) || label.includes('--');
+
+/** The handle of an account hostname (`<handle>.<account>`), or null for any other host (on an install with one domain,
+ * its relay and hosted-service hostnames are not accounts). */
+export function handleOfAccountHostname(domains: GitSpaceDomains, hostname: string): string | null {
+  const label = labelUnder(domains.account, hostname);
+  return label !== null && sharesOneDomain(domains) && sharedDomainReserved(label) ? null : label;
+}
+
+/** The handle of a relay hostname (`relayHostname`), or null for any other host. (On an install with one domain, an
+ * account's or a hosted service's hostname is not a relay; with two, hosted services are told apart by their shape.) */
+export function handleOfRelayHostname(domains: GitSpaceDomains, hostname: string): string | null {
+  const label = labelUnder(domains.service, hostname);
+  if (label === null) return null;
+  if (!sharesOneDomain(domains)) return label;
+  if (!label.endsWith(SHARED_DOMAIN_RELAY_SUFFIX)) return null;
+  const handle = label.slice(0, -SHARED_DOMAIN_RELAY_SUFFIX.length);
+  return handle === '' || sharedDomainReserved(handle) ? null : handle;
+}
+
+/** Whether `handle` may name an account of this install: on an install with one domain, a handle ending in `-relay` or
+ * holding `--` would take another account's relay or a hosted service's hostname. */
+export const isInstallHandle = (domains: GitSpaceDomains, handle: string): boolean => !(sharesOneDomain(domains) && sharedDomainReserved(handle));
+
 /**
- * The service domain an account's relay URL names (`https://<handle>.<service>`), for a machine that knows its relay but
- * not the install's settings; null when the URL is not that account's relay.
+ * The service domain an account's relay URL names (`https://<handle>.<service>`, or `https://<handle>-relay.<domain>` on
+ * an install with one domain), for a machine that knows its relay but not the install's settings; null when the URL is
+ * not that account's relay.
  */
 export function serviceDomainOfRelayUrl(relay: string, handle: string): string | null {
   let host: string;
   try { host = new URL(relay).hostname.toLowerCase(); } catch { return null; }
-  if (!host.startsWith(`${handle}.`)) return null;
-  const parsed = DomainNameSchema.safeParse(host.slice(handle.length + 1));
-  return parsed.success ? parsed.data : null;
+  for (const label of [handle, `${handle}${SHARED_DOMAIN_RELAY_SUFFIX}`]) {
+    if (!host.startsWith(`${label}.`)) continue;
+    const parsed = DomainNameSchema.safeParse(host.slice(label.length + 1));
+    if (parsed.success) return parsed.data;
+  }
+  return null;
 }
 
 /** A host that belongs to the install itself: its domains and their subdomains. */

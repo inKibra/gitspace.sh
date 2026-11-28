@@ -71,3 +71,20 @@ describe('an install at its own domains', () => {
     expect(hostedServiceUrlPattern(onPrem)).toBe(`*://*--${env.TENANT_ID}-srv.relay.acme.example/*`);
   });
 });
+
+describe('an install on one domain (account and service domains alike)', () => {
+  const oneDomain = { ...env, ACCOUNT_DOMAIN: 'studio.test', SERVICE_DOMAIN: 'studio.test' };
+
+  it('answers account RPC on the account hostname only, not on its relay\'s', async () => {
+    const { handle, rpc } = await browser();
+    expect((await worker.fetch(rpc(`${handle}.studio.test`), oneDomain)).status).toBe(200);
+    const relay = await worker.fetch(rpc(`${handle}-relay.studio.test`), oneDomain);
+    expect(relay.status).toBe(403);
+    expect(await relay.json()).toMatchObject({ error: { code: 'ACCOUNT_HOST_MISMATCH' } });
+  });
+
+  it('knows its hosted services on the one domain', () => {
+    expect(isHostedServiceHostname(oneDomain, `web--space-a--${env.TENANT_ID}-srv.studio.test`)).toBe(true);
+    expect(isHostedServiceHostname(oneDomain, `${env.TENANT_ID}.studio.test`)).toBe(false);
+  });
+});

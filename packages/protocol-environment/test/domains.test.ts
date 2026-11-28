@@ -1,10 +1,11 @@
 import { describe, expect, test } from 'bun:test';
 import {
-  accountUrl, domainsFromMeta, withDomainsMeta, withDomainsPage, apiUrl, DEFAULT_DOMAINS, domainsFromSettings, EnvironmentError, handleOfAccountHostname, hostedServiceSuffix,
-  ingressUrlAllowed, isInstallHostname, platformUrl, relayUrl, sandboxesHostname, serviceDomainOfRelayUrl, siteUrl,
+  accountUrl, domainsFromMeta, withDomainsMeta, withDomainsPage, apiUrl, DEFAULT_DOMAINS, domainsFromSettings, EnvironmentError, handleOfAccountHostname, handleOfRelayHostname,
+  hostedServiceSuffix, ingressUrlAllowed, isInstallHandle, isInstallHostname, platformUrl, relayHostname, relayUrl, sandboxesHostname, serviceDomainOfRelayUrl, siteUrl,
 } from '../src/index.js';
 
 const onPrem = domainsFromSettings({ ACCOUNT_DOMAIN: 'git.acme.example', SERVICE_DOMAIN: 'relay.acme.example' });
+const oneDomain = domainsFromSettings({ ACCOUNT_DOMAIN: 'acme.example', SERVICE_DOMAIN: 'acme.example' });
 
 describe('install domains', () => {
   test('unset or empty settings are GitSpace\'s own domains', () => {
@@ -39,6 +40,29 @@ describe('install domains', () => {
     expect(handleOfAccountHostname(DEFAULT_DOMAINS, 'brad.gitspace.sh')).toBe('brad');
   });
 
+  test('an install on one domain keeps its account at <handle>.<domain> and moves its relay to <handle>-relay.<domain>', () => {
+    expect(accountUrl(oneDomain, 'work')).toBe('https://work.acme.example');
+    expect(relayUrl(oneDomain, 'work')).toBe('https://work-relay.acme.example');
+    expect(hostedServiceSuffix(oneDomain, 'work')).toBe('--work-srv.acme.example');
+    // Each hostname is one thing: the account, its relay, or a hosted service.
+    expect(handleOfAccountHostname(oneDomain, 'work.acme.example')).toBe('work');
+    expect(handleOfAccountHostname(oneDomain, 'work-relay.acme.example')).toBeNull();
+    expect(handleOfAccountHostname(oneDomain, 'web--space-a--work-srv.acme.example')).toBeNull();
+    expect(handleOfRelayHostname(oneDomain, 'work-relay.acme.example')).toBe('work');
+    expect(handleOfRelayHostname(oneDomain, 'work.acme.example')).toBeNull();
+    expect(handleOfRelayHostname(oneDomain, '-relay.acme.example')).toBeNull();
+    expect(handleOfRelayHostname(oneDomain, 'web--space-a--work-srv.acme.example')).toBeNull();
+    // A handle that would take another account's relay or a hosted service's hostname is not an account's.
+    expect(isInstallHandle(oneDomain, 'work')).toBe(true);
+    expect(isInstallHandle(oneDomain, 'work-relay')).toBe(false);
+    expect(isInstallHandle(oneDomain, 'a--b')).toBe(false);
+    // With two domains nothing changes: the relay is <handle>.<service>, and every handle is free.
+    expect(relayHostname(onPrem, 'work')).toBe('work.relay.acme.example');
+    expect(handleOfRelayHostname(onPrem, 'work.relay.acme.example')).toBe('work');
+    expect(handleOfRelayHostname(DEFAULT_DOMAINS, 'work-relay.gssh.dev')).toBe('work-relay');
+    expect(isInstallHandle(DEFAULT_DOMAINS, 'work-relay')).toBe(true);
+  });
+
   test('a malformed domain is refused, not replaced by the default', () => {
     for (const ACCOUNT_DOMAIN of ['https://acme.example', 'Acme.Example', 'acme', 'acme.example.', '*.acme.example']) {
       expect(() => domainsFromSettings({ ACCOUNT_DOMAIN })).toThrow(EnvironmentError);
@@ -58,6 +82,8 @@ describe('install domains', () => {
     expect(serviceDomainOfRelayUrl('https://brad.gssh.dev', 'brad')).toBe('gssh.dev');
     expect(serviceDomainOfRelayUrl('https://brad.relay.acme.example/', 'brad')).toBe('relay.acme.example');
     expect(serviceDomainOfRelayUrl('https://other.gssh.dev', 'brad')).toBeNull();
+    expect(serviceDomainOfRelayUrl('https://work-relay.acme.example', 'work')).toBe('acme.example');
+    expect(serviceDomainOfRelayUrl('https://work-relay.acme.example', 'other')).toBeNull();
     expect(serviceDomainOfRelayUrl('not a url', 'brad')).toBeNull();
   });
 
