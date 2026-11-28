@@ -392,11 +392,11 @@ export async function startMachineRuntime() {
     },
     storeImage: machineImageStore({ blobs: checkpointBlobs, accountId: controlOptions.userId }),
     originEnvironment: checkout => gitIdentity.originEnvironment(checkout),
-    commitSnapshot: async (local, checkpoint, previousWorktreeCommit) => {
+    commitSnapshot: async (local, checkpoint, previousWorktreeCommit, signal) => {
       const accepted = await cloudRuntime.call('runtime.snapshot.commit', RuntimeSnapshotCommitInputSchema.parse({
         projectId: local.attachment.projectId, workspaceId: local.attachment.workspaceId,
         attachmentId: local.attachment.attachmentId, generation: local.attachment.generation, checkpoint, previousWorktreeCommit,
-      }), RuntimeSnapshotCommitResultSchema);
+      }), RuntimeSnapshotCommitResultSchema, signal);
       return accepted.checkpoint;
     },
   });

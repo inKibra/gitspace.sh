@@ -56,6 +56,12 @@ const RETIRE_RECHECK_MS = 60 * 60_000;
 /** How long an assignments read may take: the machine's, and one workspace's. Inside the machine-wide read the cloud
  * gives each workspace 15 s and reports one that misses it unavailable. */
 const ASSIGNMENTS_READ_DEADLINES = { machine: 45_000, workspace: 20_000 };
+/** How long attaching a checkout may take, from the start of the attempt to announcing it ready. */
+const ATTACH_DEADLINE_MS = 30 * 60_000;
+/** How long the cloud may take to commit a published snapshot. It commits after every base-branch change and cloud
+ * edit queued before the snapshot, and finishes a commit whether or not the machine still waits: committing the same
+ * snapshot again returns that commit. */
+const SNAPSHOT_COMMIT_MS = 5 * 60_000;
 
 /** One workspace, named as the cloud addresses it. */
 export type WorkspaceIdentity = { projectId: string; workspaceId: string };
@@ -71,7 +77,7 @@ export async function createMachineExecutor(options: {
   operations?: Record<string, ExecutorOperationHandler>;
   storeImage?: MachineExecutorOptions['storeImage'];
   browser?: Pick<MachineBrowserOptions, 'enabled' | 'services'>;
-  commitSnapshot(local: LocalAttachment, checkpoint: GitIntermediateCheckpoint, previousWorktreeCommit: string | null): Promise<GitIntermediateCheckpoint>;
+  commitSnapshot(local: LocalAttachment, checkpoint: GitIntermediateCheckpoint, previousWorktreeCommit: string | null, signal: AbortSignal): Promise<GitIntermediateCheckpoint>;
   prepareAttachment(local: LocalAttachment, signal: AbortSignal, progress: (step: RuntimeCacheObservation['setup'][number]) => Promise<void>): Promise<void>;
   /** How Git reaches remotes other than Artifacts from a checkout (its origin, its submodules). */
   originEnvironment(checkout: LocalAttachment): Promise<Record<string, string>>;
@@ -80,6 +86,8 @@ export async function createMachineExecutor(options: {
   checkpointEvents?: GitWorktreeEvents;
   /** Overrides `ASSIGNMENTS_READ_DEADLINES`. */
   assignmentsReadDeadlines?: typeof ASSIGNMENTS_READ_DEADLINES;
+  /** Overrides `ATTACH_DEADLINE_MS`. */
+  attachDeadlineMs?: number;
 }): Promise<MachineExecutorRuntime> {
   const directory = join(options.environmentRoot, 'executor');
   await mkdir(directory, { recursive: true, mode: 0o700 });
@@ -110,13 +118,17 @@ export async function createMachineExecutor(options: {
   };
   const captures = new Map<string, IncrementalGitSnapshots>();
   const captureAborts = new Map<string, AbortController>();
-  /** Drops a capture stream without waiting, since a stuck upload never settles. What it has in flight can no longer
-   * save or commit, and its pending snapshot is forgotten, with the failures sending it; the files are still on disk
-   * for the next capture. */
-  const abandonCapture = (key: string) => {
-    captureAborts.get(key)?.abort(new Error('Capture abandoned by sync'));
+  /** Stops a capture stream without waiting for it, since a stuck upload never settles: what it has in flight can no
+   * longer save or commit. */
+  const dropCapture = (key: string, reason: unknown) => {
+    captureAborts.get(key)?.abort(reason);
     captureAborts.delete(key);
     captures.delete(key);
+  };
+  /** Drops a capture stream for a checkout sync is rewriting. Its pending snapshot is forgotten, with the failures
+   * sending it; the files are still on disk for the next capture. */
+  const abandonCapture = (key: string) => {
+    dropCapture(key, new Error('Capture abandoned by sync'));
     snapshots.query('UPDATE snapshots SET pending=NULL WHERE attachment=?').run(key);
     resetSyncFailures(key);
   };
@@ -141,21 +153,25 @@ export async function createMachineExecutor(options: {
     watchers.get(local.rootPath)?.close();
     watchers.delete(local.rootPath);
   };
-  const install = async (local: LocalAttachment, previous: GitIntermediateCheckpoint, checkpoint: GitIntermediateCheckpoint, incoming = false) => {
-    await options.gitRemote.fetchCheckpoint({ binding: { projectId: local.attachment.projectId, repository: `workspace-${local.attachment.workspaceId}` }, repositoryPath: local.rootPath, checkpointRef: checkpoint.checkpointRef, commit: checkpoint.worktreeCommit });
+  const install = async (local: LocalAttachment, previous: GitIntermediateCheckpoint, checkpoint: GitIntermediateCheckpoint, incoming = false, signal?: AbortSignal) => {
+    await options.gitRemote.fetchCheckpoint({ binding: { projectId: local.attachment.projectId, repository: `workspace-${local.attachment.workspaceId}` }, repositoryPath: local.rootPath, checkpointRef: checkpoint.checkpointRef, commit: checkpoint.worktreeCommit, watch: { signal } });
     if (incoming && await gitCheckpointIncludes(local.rootPath, previous, checkpoint)) return false;
     await applyGitCacheCheckpoint({ repositoryPath: local.rootPath, previous, checkpoint, lfs: await lfs?.read(local) });
     return true;
   };
-  const capture = async (local: LocalAttachment): Promise<GitIntermediateCheckpoint | null> => {
+  /** Sends what changed in the checkout. A capture still running when `signal` ends is dropped without waiting for it,
+   * which stops the git and cloud calls it runs; the snapshot it journaled is sent by the next capture. */
+  const capture = async (local: LocalAttachment, signal?: AbortSignal): Promise<GitIntermediateCheckpoint | null> => {
     if (local.attachment.state === 'detached') return null;
     stopping.signal.throwIfAborted();
+    signal?.throwIfAborted();
     const key = keyOf(local.attachment);
     let stream = captures.get(key);
     if (!stream) {
       snapshots.query('INSERT OR IGNORE INTO snapshots (attachment, revision) VALUES (?, ?)').run(key, Date.now());
       const abort = new AbortController();
       captureAborts.set(key, abort);
+      const streamSignal = AbortSignal.any([stopping.signal, abort.signal]);
       stream = new IncrementalGitSnapshots({
         repositoryPath: local.rootPath,
         spaceId: local.attachment.workspaceId,
@@ -164,7 +180,7 @@ export async function createMachineExecutor(options: {
         // One full second of stable dirty-path metadata coalesces editor bursts.
         settleWindowMs: 1000,
         clock: options.checkpointClock,
-        signal: AbortSignal.any([stopping.signal, abort.signal]),
+        signal: streamSignal,
         allocateRevision: async () => {
           const row = snapshots.query<{ revision: number }, [string]>('UPDATE snapshots SET revision=revision+1 WHERE attachment=? RETURNING revision').get(key);
           if (!row) throw new Error('Snapshot journal row missing');
@@ -184,12 +200,12 @@ export async function createMachineExecutor(options: {
         clearPending: async () => { snapshots.query('UPDATE snapshots SET pending=NULL WHERE attachment=?').run(key); },
         publish: (checkpoint, committed) => options.gitRemote.publishCheckpoint({
           binding: { projectId: local.attachment.projectId, repository: `workspace-${local.attachment.workspaceId}` },
-          repositoryPath: local.rootPath, checkpointRef: checkpoint.checkpointRef, headCommit: checkpoint.headCommit, remoteHead: committed?.headCommit ?? null,
+          repositoryPath: local.rootPath, checkpointRef: checkpoint.checkpointRef, headCommit: checkpoint.headCommit, remoteHead: committed?.headCommit ?? null, watch: { signal: streamSignal },
         }),
         commit: async (checkpoint, base) => {
-          const accepted = await options.commitSnapshot(local, checkpoint, base);
+          const accepted = await options.commitSnapshot(local, checkpoint, base, AbortSignal.any([streamSignal, timeoutSignal(SNAPSHOT_COMMIT_MS, `The cloud did not commit the snapshot within ${SNAPSHOT_COMMIT_MS / 60_000} minutes`)]));
           if (accepted.worktreeCommit !== checkpoint.worktreeCommit) {
-            try { await install(local, checkpoint, accepted); }
+            try { await install(local, checkpoint, accepted, false, streamSignal); }
             catch (error) {
               // Keep human edits made during fetch/apply against the actual uploaded base; the next capture retries.
               snapshots.query('UPDATE snapshots SET pending=NULL, committed=? WHERE attachment=?').run(JSON.stringify(checkpoint), key);
@@ -205,7 +221,17 @@ export async function createMachineExecutor(options: {
       captures.set(key, stream);
     }
     try {
-      const checkpoint = await stream.capture();
+      let checkpoint: GitIntermediateCheckpoint;
+      if (signal) {
+        const { promise: ended, reject } = Promise.withResolvers<never>();
+        const end = () => {
+          if (captures.get(key) === stream) dropCapture(key, signal.reason);
+          reject(signal.reason);
+        };
+        signal.addEventListener('abort', end, { once: true });
+        try { checkpoint = await Promise.race([stream.capture(), ended]); }
+        finally { signal.removeEventListener('abort', end); }
+      } else checkpoint = await stream.capture();
       const operation = journal.attachment(local.attachment.attachmentId)?.attachment.failure?.operation;
       if (operation === 'sync' || operation === 'publish') clearFailure(local.attachment);
       return checkpoint;
@@ -222,8 +248,9 @@ export async function createMachineExecutor(options: {
   /** Per followed checkout: schedules its next sync attempt after a failure, on the same backoff as a failed edit sync,
    * and returns the failure to report. */
   const retryAfterFailure = new Map<string, (error: unknown) => unknown>();
-  /** Publishes local changes, then applies a newer cloud version. One reconciliation per checkout runs at a time. */
-  const reconcile = (local: LocalAttachment, incoming?: GitIntermediateCheckpoint | null): Promise<void> => {
+  /** Publishes local changes, then applies a newer cloud version. One reconciliation per checkout runs at a time.
+   * `signal` ending stops the capture and the cloud version's download. */
+  const reconcile = (local: LocalAttachment, incoming?: GitIntermediateCheckpoint | null, signal?: AbortSignal): Promise<void> => {
     const prior = reconciling.get(local.rootPath) ?? Promise.resolve();
     const run = prior.catch(() => {}).then(async () => {
       const key = keyOf(local.attachment);
@@ -231,11 +258,11 @@ export async function createMachineExecutor(options: {
       if (!base?.committed && !base?.pending && incoming) throw new Error('Cache reconciliation requires its durable applied base');
       const before = committedOf(key);
       let accepted: GitIntermediateCheckpoint | null;
-      try { accepted = await capture(local); }
+      try { accepted = await capture(local, signal); }
       catch (error) {
         // Local changes the cloud refuses (an oversized file) never reached it, so they must not keep cloud changes out:
         // the incoming version, say a new .gitignore, is applied over them and the next capture tries again with it.
-        if (incoming && before && artifactsPublicationRejection(error) && await install(local, before, incoming, true)) {
+        if (incoming && before && artifactsPublicationRejection(error) && await install(local, before, incoming, true, signal)) {
           snapshots.query('UPDATE snapshots SET committed=? WHERE attachment=?').run(JSON.stringify(incoming), key);
           await saveGitCacheBase(local.rootPath, incoming);
         }
@@ -243,7 +270,7 @@ export async function createMachineExecutor(options: {
       }
       // Only a no-op capture may apply the incoming tip; a publication already merged inside the cloud.
       if (incoming && accepted && before?.worktreeCommit === accepted.worktreeCommit && incoming.worktreeCommit !== accepted.worktreeCommit) {
-        if (await install(local, accepted, incoming, true)) {
+        if (await install(local, accepted, incoming, true, signal)) {
           snapshots.query('UPDATE snapshots SET committed=? WHERE attachment=?').run(JSON.stringify(incoming), key);
           await saveGitCacheBase(local.rootPath, incoming);
           synced(local);
@@ -684,11 +711,25 @@ export async function createMachineExecutor(options: {
     const canonicalPath = canonicalPathOf(attachment);
     const source = assignment.source;
     const sourceCheckpoint = source?.checkpoint ?? assignment.checkpoint;
-    const signal = AbortSignal.any([stopping.signal, timeoutSignal(30 * 60_000, 'Preparing the checkout took longer than 30 minutes')]);
-    const deadlineAt = new Date(Date.now() + 30 * 60_000).toISOString();
+    const attachMs = options.attachDeadlineMs ?? ATTACH_DEADLINE_MS;
+    const signal = AbortSignal.any([stopping.signal, timeoutSignal(attachMs, `Preparing the checkout took longer than ${attachMs % 60_000 ? `${attachMs / 1000} s` : `${attachMs / 60_000} minutes`}`)]);
+    const deadlineAt = new Date(Date.now() + attachMs).toISOString();
     const grant: LocalAttachment = { ...assignment.grant, rootPath: canonicalPath, prerequisitesComplete: false };
     const env = source?.remote ? credentialHelper.environment(grant, source.remote) : {};
     let setupFailure: unknown = null;
+    // Each phase is logged as it starts, with the time since the attach started.
+    const started = Date.now();
+    let phase = '';
+    const enter = (next: string) => {
+      phase = next;
+      console.log(JSON.stringify({ event: 'attach_step', attachmentId: attachment.attachmentId, generation: attachment.generation, step: phase, ms: Date.now() - started }));
+    };
+    /** A failure after the deadline names the phase it stopped: the deadline's message alone cannot. */
+    const failedAttaching = (error: unknown): never => {
+      if (error instanceof AttachmentOperationFailure) throw error;
+      throw new AttachmentOperationFailure('materialize', signal.aborted && !stopping.signal.aborted ? new Error(`${message(signal.reason)}, while ${phase}`, { cause: error }) : error);
+    };
+    enter('acquiring the checkout');
     const local = await prepareMachineAttachment(journal, {
       enrolled: assignment.grant, canonicalPath, deadlineAt, signal,
       source: source?.remote ? {
@@ -731,10 +772,12 @@ export async function createMachineExecutor(options: {
         if (!durable?.committed && !durable?.pending) {
           let base = await readGitCacheBase(prepared.rootPath);
           if (!base && sourceCheckpoint && acquired) {
+            enter('restoring the cloud version');
             await restoreGitIntermediateCheckpoint({ repositoryPath: prepared.rootPath, checkpoint: sourceCheckpoint, branch: attachment.checkout.branch, lfs: await lfs?.read(prepared) });
             base = sourceCheckpoint;
           }
           if (!base && assignment.checkpoint) {
+            enter('capturing the existing checkout');
             const captureId = `admission-${createHash('sha256').update(attachment.attachmentId).digest('hex')}`;
             const revision = Date.now();
             // Admission only compares trees; its publication pins nothing beyond the comparison.
@@ -744,8 +787,10 @@ export async function createMachineExecutor(options: {
             const cloud = assignment.checkpoint;
             if (observed.headCommit !== cloud.headCommit || observed.branch !== cloud.branch || observed.indexTree !== cloud.indexTree || observed.worktreeTree !== cloud.worktreeTree) {
               // A checkout holding nothing the cloud lacks takes the cloud's version, so nothing in it is published as a change.
+              enter('checking the existing checkout against the cloud version');
               const unsynced = await gitCheckoutUnsyncedWork({ repositoryPath: prepared.rootPath, observed, cloud, remote: source?.remote ?? null, env });
               if (unsynced) throw new Error(`The checkout at ${prepared.rootPath} ${unsynced}; move it aside to attach`);
+              enter('restoring the cloud version over the existing checkout');
               await restoreGitIntermediateCheckpoint({ repositoryPath: prepared.rootPath, checkpoint: cloud, branch: attachment.checkout.branch, lfs: await lfs?.read(prepared) });
               console.log(JSON.stringify({ event: 'checkout_admitted_at_cloud_version', directory: prepared.rootPath, from: observed.headCommit, to: cloud.headCommit }));
             }
@@ -756,7 +801,12 @@ export async function createMachineExecutor(options: {
             snapshots.query('INSERT OR REPLACE INTO snapshots(attachment,revision,committed) VALUES(?,?,?)').run(key, Date.now(), JSON.stringify(base));
           }
         }
-        await reconcile(prepared, assignment.checkpoint);
+        // The checkout is admitted, on its durable base: a materialize failure an earlier attempt recorded describes a
+        // phase this attempt has passed or runs again, and this attempt records its own.
+        clearMaterializeFailure(attachment);
+        enter('sending the checkout\'s changes and applying the cloud version');
+        await reconcile(prepared, assignment.checkpoint, prepareSignal);
+        enter('running setup');
         // Setup scripts record their own results; a failed script never blocks the checkout.
         await options.prepareAttachment(prepared, prepareSignal, async step => {
           const current = journal.attachment(attachment.attachmentId) ?? prepared;
@@ -764,12 +814,14 @@ export async function createMachineExecutor(options: {
           saveCache(current, { ...cache, state: 'setup', setup: [...cache.setup.filter(item => item.phase !== step.phase), step] });
         }).catch((error: unknown) => { setupFailure = error; });
       },
-    }).catch(failedDuring('materialize'));
+    }).catch(failedAttaching);
     const commit = committedOf(key)?.worktreeCommit ?? sourceCheckpoint?.worktreeCommit ?? source?.commit;
     if (!commit) throw new AttachmentOperationFailure('materialize', new Error('The checkout has no version to report'));
     const live = saveCache(local, { ...cacheFor(journal.attachment(attachment.attachmentId) ?? local), state: 'live' });
     // Announcing the checkout ready is the last step of attaching it.
-    const ready = await announceReady(live, commit, signal).catch(failedDuring('materialize'));
+    enter('announcing the checkout ready');
+    const ready = await announceReady(live, commit, signal).catch(failedAttaching);
+    enter('ready');
     clearMaterializeFailure(ready.attachment);
     if (setupFailure !== null) recordFailure(ready, new AttachmentOperationFailure('setup', setupFailure));
     if (ready.attachment.state === 'ready') await keepSyncing(ready).catch(failedDuring('sync'));
@@ -784,6 +836,7 @@ export async function createMachineExecutor(options: {
       recordFailure({ ...assignment.grant, rootPath: canonicalPathOf(attachment), prerequisitesComplete: false }, error);
       // A failing sync keeps its own bounded retries; only an attach that failed is tried again here.
       if (error instanceof AttachmentOperationFailure && error.operation === 'materialize') retryLater(attachment.attachmentId);
+      else attachPauses.delete(attachment.attachmentId);
       return;
     }
     attachPauses.delete(attachment.attachmentId);
@@ -800,7 +853,13 @@ export async function createMachineExecutor(options: {
     retryScheduled = true;
     cancelRetry = clock.schedule(pause, () => {
       retryScheduled = false;
-      if (!stopped) void sync().catch(error => console.error('[runtime-attachments]', message(error)));
+      if (stopped) return;
+      const waiting = [...attachPauses];
+      void sync().catch(error => console.error('[runtime-attachments]', message(error))).finally(() => {
+        // An attach this retry did not run, its read having failed or left its workspace unread, is tried again: an
+        // attach that runs schedules its own next try or ends its pauses.
+        for (const [attachmentId, entry] of waiting) if (attachPauses.get(attachmentId) === entry) retryLater(attachmentId);
+      });
     });
   };
   /** Work on one checkout stays serialized while different checkouts proceed independently. A lane busy with

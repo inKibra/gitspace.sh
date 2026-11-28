@@ -347,22 +347,24 @@ export class ArtifactsGitRemote {
 
   /** `remoteHead` is a HEAD the remote already holds (the last accepted one), or null when unknown. A HEAD
    * descending from it is a plain push: git sends only what the remote lacks and history stays linked. Any other
-   * HEAD, or new commits carrying a file Artifacts cannot store, is pushed from HEAD only (a shallow boundary). */
-  async publishCheckpoint(input: { binding: ArtifactsRepositoryBinding; repositoryPath: string; checkpointRef: string; headCommit: string | null; remoteHead: string | null }): Promise<void> {
+   * HEAD, or new commits carrying a file Artifacts cannot store, is pushed from HEAD only (a shallow boundary). `watch`
+   * follows the publication. */
+  async publishCheckpoint(input: { binding: ArtifactsRepositoryBinding; repositoryPath: string; checkpointRef: string; headCommit: string | null; remoteHead: string | null; watch?: ArtifactsWatch }): Promise<void> {
+    const watch = input.watch ?? {};
     this.checkRef(input.checkpointRef);
     // Resolve once: a concurrently advanced local ref must not change the object
     // graph after validation or make the final push publish unchecked bytes.
     const commit = await git(input.repositoryPath, ['rev-parse', '--verify', `${input.checkpointRef}^{commit}`]);
-    await checkCurrentLayers(input.repositoryPath, commit, input.headCommit);
+    await checkCurrentLayers(input.repositoryPath, commit, input.headCommit, {}, watch);
     let boundary = input.headCommit;
     if (boundary !== null && input.remoteHead !== null) {
       const ancestry = Bun.spawn(['git', 'merge-base', '--is-ancestor', input.remoteHead, boundary], { cwd: input.repositoryPath, stdout: 'ignore', stderr: 'ignore' });
       // Only the new commits are listed; git's size filter reports oversized files with a `~` prefix.
-      const oversizedHistory = await ancestry.exited === 0 && (await git(input.repositoryPath, ['rev-list', '--objects', '--no-object-names', `--filter=blob:limit=${MAX_BLOB_BYTES + 1}`, '--filter-print-omitted', boundary, '--not', input.remoteHead])).split('\n').some(line => line.startsWith('~'));
+      const oversizedHistory = await ancestry.exited === 0 && (await git(input.repositoryPath, ['rev-list', '--objects', '--no-object-names', `--filter=blob:limit=${MAX_BLOB_BYTES + 1}`, '--filter-print-omitted', boundary, '--not', input.remoteHead], {}, { signal: watch.signal })).split('\n').some(line => line.startsWith('~'));
       // A boundary at a commit the remote holds would make it record that commit as having no parents.
       if (await ancestry.exited === 0 && !oversizedHistory) boundary = null;
     }
-    const auth = await this.auth(input.binding, 'write');
+    const auth = await this.auth(input.binding, 'write', watch);
     // A forced push whose remote ref holds a commit this checkout has checks whether it fast-forwards, walking the new
     // commit's whole history whatever the remote holds. A checkout of a project copied in from its tip stops at that
     // tip (its own shallow boundary), and the walk read the tip's missing parent: git 2.54 failed the push ("Could not
@@ -370,9 +372,9 @@ export class ArtifactsGitRemote {
     // boundaries; any other may lie among the commits sent, where it would conceal a missing layer.
     const ownFile = await git(input.repositoryPath, ['rev-parse', '--path-format=absolute', '--git-path', 'shallow']);
     const own = boundary !== null && existsSync(ownFile) ? (await readFile(ownFile, 'utf8')).split('\n').filter(Boolean) : [];
-    const advertised = own.length ? new Set((await git(input.repositoryPath, ['ls-remote', auth.remote], auth.environment)).split('\n').map(line => line.split('\t')[0])) : new Set<string>();
+    const advertised = own.length ? new Set((await git(input.repositoryPath, ['ls-remote', auth.remote], auth.environment, { signal: watch.signal })).split('\n').map(line => line.split('\t')[0])) : new Set<string>();
     await withShallowBoundary(boundary, own.filter(commit => advertised.has(commit)), async shallow => {
-      await this.transfer(input.binding, pushToArtifacts({ repositoryPath: input.repositoryPath, refspec: `${commit}:${input.checkpointRef}`, update: 'force', shallow, watch: {}, lease: this.pushLease(input.binding, {}) }));
+      await this.transfer(input.binding, pushToArtifacts({ repositoryPath: input.repositoryPath, refspec: `${commit}:${input.checkpointRef}`, update: 'force', shallow, watch, lease: this.pushLease(input.binding, watch) }));
     });
   }
 
@@ -474,19 +476,21 @@ export class ArtifactsGitRemote {
    * workspace advances, so a cache can be handed a tip older than one it already holds (a long-poll or
    * dispatch snapshot its own publication overtook). The transfer lands on an owned ref, and the anchor
    * moves only to a commit it does not already reach: it never rewinds, so the newest checkpoint this
-   * checkout received stays reachable, and a replaced canonical history is followed rather than refused. */
-  async fetchCheckpoint(input: { binding: ArtifactsRepositoryBinding; repositoryPath: string; checkpointRef: string; commit?: string }): Promise<void> {
+   * checkout received stays reachable, and a replaced canonical history is followed rather than refused. `watch`
+   * follows the transfer. */
+  async fetchCheckpoint(input: { binding: ArtifactsRepositoryBinding; repositoryPath: string; checkpointRef: string; commit?: string; watch?: ArtifactsWatch }): Promise<void> {
+    const watch = input.watch ?? {};
     this.checkRef(input.checkpointRef);
     const { commit, checkpointRef, repositoryPath } = input;
     if (commit !== undefined && !/^[0-9a-f]{40}$/u.test(commit)) throw new ArtifactsGitError('checkpoint', 'Invalid immutable checkpoint commit');
-    const auth = await this.auth(input.binding, 'read');
+    const auth = await this.auth(input.binding, 'read', watch);
     const environment = { ...auth.environment, GIT_LFS_SKIP_SMUDGE: '1' };
     if (commit === undefined) {
-      await this.transfer(input.binding, git(repositoryPath, ['fetch', '--update-shallow', '--no-write-fetch-head', auth.remote, `${checkpointRef}:${checkpointRef}`], environment));
+      await this.transfer(input.binding, git(repositoryPath, ['fetch', '--update-shallow', '--no-write-fetch-head', auth.remote, `${checkpointRef}:${checkpointRef}`], environment, watch));
       return;
     }
     const owned = `refs/gitspace/fetch/${crypto.randomUUID()}`;
-    await this.transfer(input.binding, git(repositoryPath, ['fetch', '--update-shallow', '--no-write-fetch-head', auth.remote, `${commit}:${owned}`], environment));
+    await this.transfer(input.binding, git(repositoryPath, ['fetch', '--update-shallow', '--no-write-fetch-head', auth.remote, `${commit}:${owned}`], environment, watch));
     // Exact match: for-each-ref patterns also match refs below `checkpointRef/`.
     const anchor = async () => (await git(repositoryPath, ['for-each-ref', '--format=%(objectname) %(refname)', checkpointRef])).split('\n').map(line => line.split(' ')).find(([, name]) => name === checkpointRef)?.[0] ?? null;
     try {

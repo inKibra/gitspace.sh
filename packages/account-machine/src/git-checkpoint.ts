@@ -514,9 +514,12 @@ export class IncrementalGitSnapshots {
     }
     // The committed snapshot came back through the cloud, which keeps each LFS object's keys in its schema's order and
     // its objects in the order its merges added them, while a capture sorts them by oid; compared as listed, an
-    // unchanged checkout always looked changed and was published again, forever.
+    // unchanged checkout always looked changed and was published again, forever. A base branch's checkpoint, which the
+    // cloud writes from the branch head, carries no LFS listing at all: a capture of the same files lists the objects
+    // they point to and changes nothing unless it holds a change back. Compared as listed, every checkout admitted or
+    // updated at such a checkpoint published a snapshot of nothing before it could attach.
     if (committed && committed.headCommit === checkpoint.headCommit && committed.branch === checkpoint.branch && committed.indexTree === checkpoint.indexTree && committed.worktreeTree === checkpoint.worktreeTree
-      && sameGitLfsSnapshot(committed.lfs, checkpoint.lfs)) {
+      && (committed.lfs === undefined ? !checkpoint.lfs?.heldBack.length : sameGitLfsSnapshot(committed.lfs, checkpoint.lfs))) {
       // A stored snapshot can match what was committed after it (a restore, an applied cloud version) and its ref may
       // be gone already: it is dropped, not replayed, or every later capture would fail on it.
       if (committed.checkpointRef !== checkpoint.checkpointRef) await runGit(this.options.repositoryPath, ['update-ref', '-d', checkpoint.checkpointRef, checkpoint.worktreeCommit], { allowMissingRef: true });
