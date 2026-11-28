@@ -757,7 +757,9 @@ const ProjectCopyCodec = wire.object({ baseBranch: wire.string, previous: wire.n
  * had none yet); `filledFrom` names the checkout it filled an empty cache from. `then` is what the machine does after a
  * copy that moved or was current: `updateBase` asks the account for Update base with that copy (`project.updateBase`
  * with `copied`) itself, so the update finishes with no page or session left waiting; `updatedBase` is how that went
- * (`done`: queued, its operation named in `message`; `failed`: `message` says why), null until then. Times are ISO 8601.
+ * (`done`: queued, its operation named in `message`; `failed`: `message` says why), null until then. While it runs,
+ * `previous` is what the project's copy held when read (null until read, and when it holds no such branch) and `commit`
+ * the origin's tip once fetched; `progress` names the step it is on, publishing's included. Times are ISO 8601.
  */
 const ProjectCopyOperationCodec = wire.object({
   operationId: wire.string,

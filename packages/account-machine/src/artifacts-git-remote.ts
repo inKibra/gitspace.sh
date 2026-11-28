@@ -7,8 +7,15 @@ import { artifactsPushRefusal, smallerArtifactsPush } from '@gitspace/protocol-w
 export type ArtifactsRepositoryBinding = { projectId: string; repository: string };
 export type ArtifactsRepositoryCredentials = { remote: string; plaintext: string; expiresAt: string };
 export type ArtifactsGitRemoteOptions = {
-  credentials(binding: ArtifactsRepositoryBinding, scope: 'read' | 'write'): Promise<ArtifactsRepositoryCredentials>;
+  /** Asks the account for a lease on the repository; stops when `signal` aborts. */
+  credentials(binding: ArtifactsRepositoryBinding, scope: 'read' | 'write', signal: AbortSignal): Promise<ArtifactsRepositoryCredentials>;
+  /** How long a lease request may take before it fails: `LEASE_REQUEST_MS` unless given. */
+  leaseTimeoutMs?: number;
 };
+
+/** Who follows a publication: `progress` hears each step it takes and git's own progress lines, and `signal` kills the
+ * git it runs. */
+export type ArtifactsWatch = { signal?: AbortSignal; progress?(step: string): void };
 
 export class ArtifactsGitError extends Error {
   constructor(readonly operation: string, message: string) {
@@ -53,9 +60,36 @@ export class ArtifactsRefDivergedError extends ArtifactsGitError {
   }
 }
 
-async function git(repositoryPath: string, args: string[], environment: Record<string, string> = {}): Promise<string> {
-  const child = Bun.spawn(['git', ...args], { cwd: repositoryPath, env: { ...Bun.env, ...environment, GIT_NO_REPLACE_OBJECTS: '1' }, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' });
-  const [exitCode, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
+async function git(repositoryPath: string, args: string[], environment: Record<string, string> = {}, watch: ArtifactsWatch & { input?: string } = {}): Promise<string> {
+  watch.signal?.throwIfAborted();
+  const child = Bun.spawn(['git', ...args], { cwd: repositoryPath, env: { ...Bun.env, ...environment, GIT_NO_REPLACE_OBJECTS: '1' }, stdin: watch.input === undefined ? 'ignore' : new Blob([watch.input]), stdout: 'pipe', stderr: 'pipe' });
+  const kill = () => child.kill();
+  watch.signal?.addEventListener('abort', kill, { once: true });
+  const readStderr = async () => {
+    if (!watch.progress) return new Response(child.stderr).text();
+    const decoder = new TextDecoder();
+    let text = '';
+    let partial = '';
+    for await (const chunk of child.stderr) {
+      const piece = decoder.decode(chunk, { stream: true });
+      text += piece;
+      // git's progress meter rewrites its line with `\r`; each rewrite is a step here.
+      const lines = (partial + piece).split(/[\r\n]/u);
+      partial = lines.pop() ?? '';
+      for (const line of lines) if (line.trim()) watch.progress(line.trim());
+    }
+    return text;
+  };
+  const output = Promise.all([new Response(child.stdout).text(), readStderr()]);
+  let exitCode: number;
+  try { exitCode = await child.exited; }
+  finally { watch.signal?.removeEventListener('abort', kill); }
+  if (watch.signal?.aborted) {
+    // A transport git started can hold its pipes open after it was killed.
+    void output.catch(() => undefined);
+    throw watch.signal.reason;
+  }
+  const [stdout, stderr] = await output;
   if (exitCode !== 0) throw new ArtifactsGitError(args[0] ?? 'git', stderr.trim() || `exited with ${exitCode}`);
   return stdout.trim();
 }
@@ -74,13 +108,23 @@ async function withShallowBoundary<T>(boundary: string | null, held: string[], r
 }
 
 /** Every current layer of `commit` (the commits down to and including `head`) must fit Artifacts' 32 MB file
- * limit. Reads tree listings only, never file contents. */
-async function checkCurrentLayers(repositoryPath: string, commit: string, head: string | null, environment: Record<string, string> = {}): Promise<void> {
-  const issues = new Map<string, ArtifactsRepositoryIssue>();
+ * limit. One git pass reads the size of every object in those commits' trees (each commit's tree whole, never file
+ * contents) and reports none over it; only then are the trees listed one by one to name every path such a file has. */
+async function checkCurrentLayers(repositoryPath: string, commit: string, head: string | null, environment: Record<string, string> = {}, watch: ArtifactsWatch = {}): Promise<void> {
   const range = head === null ? [commit] : [commit, '--not', `${head}^@`];
-  const trees = new Set((await git(repositoryPath, ['log', '--format=%T', ...range], environment)).split('\n').filter(Boolean));
+  watch.progress?.('Listing the commits whose file sizes to check');
+  const commits = await git(repositoryPath, ['rev-list', ...range], environment, { signal: watch.signal });
+  watch.progress?.(`Checking file sizes in ${commits.split('\n').filter(Boolean).length} commits`);
+  // `--no-walk`: each listed commit's tree, whole, and nothing of its parents'. The size filter names each file over the
+  // limit with a `~` prefix.
+  const sizes = await git(repositoryPath, ['rev-list', '--objects', '--no-object-names', '--no-walk', '--stdin', `--filter=blob:limit=${MAX_BLOB_BYTES + 1}`, '--filter-print-omitted'], environment, { signal: watch.signal, input: commits });
+  if (!sizes.split('\n').some(line => line.startsWith('~'))) return;
+  const issues = new Map<string, ArtifactsRepositoryIssue>();
+  const trees = new Set((await git(repositoryPath, ['log', '--format=%T', ...range], environment, { signal: watch.signal })).split('\n').filter(Boolean));
+  let checked = 0;
   for (const tree of trees) {
-    for (const entry of (await git(repositoryPath, ['ls-tree', '-r', '-l', '-z', '--full-tree', tree], environment)).split('\0')) {
+    watch.progress?.(`Naming files over the size limit: tree ${++checked} of ${trees.size}`);
+    for (const entry of (await git(repositoryPath, ['ls-tree', '-r', '-l', '-z', '--full-tree', tree], environment, { signal: watch.signal })).split('\0')) {
       const tab = entry.indexOf('\t');
       if (tab < 0) continue;
       const [, kind, oid, rawSize] = entry.slice(0, tab).split(/ +/u);
@@ -100,11 +144,12 @@ const WHOLE_OBJECTS = ['-c', 'pack.window=0', '-c', 'pack.depth=0', '-c', 'pack.
 
 /** The commits `remote` holds without their parents. Artifacts advertises none, but a fetch reports those of the
  * history it sends; it refuses a commits-only (filtered) fetch with HTTP 400, so this downloads the tips' trees. */
-async function remoteShallowBoundaries(remote: string, auth: Record<string, string>): Promise<string[]> {
+async function remoteShallowBoundaries(remote: string, auth: Record<string, string>, watch: ArtifactsWatch): Promise<string[]> {
   const directory = await mkdtemp(join(tmpdir(), 'gitspace-boundaries-'));
   try {
     await git(directory, ['init', '--quiet', '--bare']);
-    await git(directory, ['fetch', '--quiet', '--update-shallow', '--no-tags', remote, '+refs/*:refs/remote/*'], auth);
+    watch.progress?.('Reading the shallow boundaries of the GitSpace repository');
+    await git(directory, ['fetch', '--quiet', '--update-shallow', '--no-tags', remote, '+refs/*:refs/remote/*'], auth, { signal: watch.signal });
     const shallow = join(directory, 'shallow');
     return existsSync(shallow) ? (await readFile(shallow, 'utf8')).split('\n').filter(Boolean) : [];
   } finally { await rm(directory, { recursive: true, force: true }); }
@@ -112,8 +157,9 @@ async function remoteShallowBoundaries(remote: string, auth: Record<string, stri
 
 /** One push to Artifacts: `refspec` from the checkout at `repositoryPath`, with the lease's credentials (`auth`) and
  * the publication's shallow boundaries (`shallow`), as git environment. `update` says whether the push may move a ref
- * the remote holds: only forward (`fast-forward`), to anything (`force`), or only while it still names `from`. */
-type ArtifactsPush = { repositoryPath: string; remote: string; refspec: string; update: 'fast-forward' | 'force' | { from: string }; auth: Record<string, string>; shallow: Record<string, string> };
+ * the remote holds: only forward (`fast-forward`), to anything (`force`), or only while it still names `from`. `watch`
+ * follows it. */
+type ArtifactsPush = { repositoryPath: string; remote: string; refspec: string; update: 'fast-forward' | 'force' | { from: string }; auth: Record<string, string>; shallow: Record<string, string>; watch: ArtifactsWatch };
 
 /**
  * Artifacts' receive-pack refuses some pushes that a differently built one passes (`artifactsPushRefusal`):
@@ -140,18 +186,20 @@ async function pushPack(input: ArtifactsPush): Promise<void> {
   const ref = input.refspec.slice(input.refspec.lastIndexOf(':') + 1);
   const update = input.update === 'fast-forward' ? [] : input.update === 'force' ? ['--force'] : [`--force-with-lease=${ref}:${input.update.from}`];
   const target = [...update, input.remote, input.refspec];
-  try { await git(input.repositoryPath, [...PUSH, ...target], { ...input.auth, ...input.shallow, GIT_LFS_SKIP_PUSH: '1' }); }
+  input.watch.progress?.(`Pushing ${input.refspec} to GitSpace`);
+  try { await git(input.repositoryPath, [...PUSH, ...input.watch.progress ? ['--progress'] : [], ...target], { ...input.auth, ...input.shallow, GIT_LFS_SKIP_PUSH: '1' }, input.watch); }
   catch (error) {
     if (!(error instanceof ArtifactsGitError) || artifactsPushRefusal(error.message) !== 'pack') throw error;
     // The push's own boundaries: the one publication set, or the checkout's.
     const ownFile = input.shallow.GIT_SHALLOW_FILE ?? await git(input.repositoryPath, ['rev-parse', '--path-format=absolute', '--git-path', 'shallow']);
     const own = existsSync(ownFile) ? (await readFile(ownFile, 'utf8')).split('\n') : [];
     // A remote whose tips cannot be fetched (it answers HTTP 500 for a missing object) gets the whole-object push alone.
-    const remote = await remoteShallowBoundaries(input.remote, input.auth).catch(() => []);
+    const remote = await remoteShallowBoundaries(input.remote, input.auth, input.watch).catch(() => []);
     const directory = await mkdtemp(join(tmpdir(), 'gitspace-push-'));
     try {
       await writeFile(join(directory, 'shallow'), [...new Set([...own, ...remote].filter(Boolean))].map(commit => `${commit}\n`).join(''));
-      await git(input.repositoryPath, [...WHOLE_OBJECTS, ...PUSH, '--no-thin', ...target], { ...input.auth, GIT_SHALLOW_FILE: join(directory, 'shallow'), GIT_LFS_SKIP_PUSH: '1' });
+      input.watch.progress?.(`Pushing ${input.refspec} to GitSpace again, as whole objects`);
+      await git(input.repositoryPath, [...WHOLE_OBJECTS, ...PUSH, ...input.watch.progress ? ['--progress'] : [], '--no-thin', ...target], { ...input.auth, GIT_SHALLOW_FILE: join(directory, 'shallow'), GIT_LFS_SKIP_PUSH: '1' }, input.watch);
     } finally { await rm(directory, { recursive: true, force: true }); }
   }
 }
@@ -167,13 +215,15 @@ async function pushPack(input: ArtifactsPush): Promise<void> {
 async function pushInSteps(input: ArtifactsPush): Promise<void> {
   const source = input.refspec.slice(input.refspec.startsWith('+') ? 1 : 0, input.refspec.lastIndexOf(':'));
   const commit = (await git(input.repositoryPath, ['rev-parse', '--verify', `${source}^{commit}`])).trim();
-  const held = (await git(input.repositoryPath, ['ls-remote', input.remote], input.auth)).split('\n')
+  input.watch.progress?.('Reading what the GitSpace repository holds, to push in steps');
+  const held = (await git(input.repositoryPath, ['ls-remote', input.remote], input.auth, { signal: input.watch.signal })).split('\n')
     .map(line => line.split('\t')[0] ?? '').filter(oid => /^[0-9a-f]{40}$/u.test(oid));
   // Each line: a commit, then its parents.
-  const commits = (await git(input.repositoryPath, ['rev-list', '--topo-order', '--reverse', '--parents', '--ignore-missing', commit, ...(held.length ? ['--not', ...held] : [])], input.shallow))
+  const commits = (await git(input.repositoryPath, ['rev-list', '--topo-order', '--reverse', '--parents', '--ignore-missing', commit, ...(held.length ? ['--not', ...held] : [])], input.shallow, { signal: input.watch.signal }))
     .split('\n').filter(Boolean).map(line => line.split(' '));
   let size = smallerArtifactsPush(commits.length) ?? 1;
-  const staging = `refs/gitspace/staging/${crypto.randomUUID()}`;
+  // Named by when it began, so `clearStaging` tells a publication's in-flight refs from those one cut short left.
+  const staging = `refs/gitspace/staging/${Date.now()}-${crypto.randomUUID()}`;
   const refs: string[] = [];
   // Commits whose blobs went ahead of them: a push of one refused again after that stands.
   const parted = new Set<string>();
@@ -203,8 +253,10 @@ async function pushInSteps(input: ArtifactsPush): Promise<void> {
     }
     await pushPack(input);
   } finally {
-    // Staging refs hold only objects the pushed ref holds too; one left behind changes nothing.
-    if (refs.length) await git(input.repositoryPath, [...PUSH, input.remote, ...refs.map(ref => `:${ref}`)], input.auth).catch(() => undefined);
+    // Staging refs hold only objects the pushed ref holds too. They are deleted even after the publication was stopped,
+    // under their own deadline; any a killed process leaves, the next copy deletes (`clearStaging`). A deletion sends no
+    // objects, so it sends no shallow boundaries either (`DELETE_SHALLOW`).
+    if (refs.length) await git(input.repositoryPath, [...PUSH, input.remote, ...refs.map(ref => `:${ref}`)], { ...input.auth, ...DELETE_SHALLOW }, { signal: AbortSignal.timeout(STAGING_CLEANUP_MS) }).catch(() => undefined);
   }
 }
 
@@ -220,7 +272,7 @@ const PART_BYTES = 32 * 1024 * 1024;
  */
 async function pushBlobsInParts(input: ArtifactsPush, [commit, ...parents]: string[], staging: string, refs: string[]): Promise<void> {
   const repository = input.repositoryPath;
-  const added = new Set((await git(repository, ['rev-list', '--objects', '--no-object-names', '--ignore-missing', commit!, ...(parents.length ? ['--not', ...parents] : [])], input.shallow)).split('\n'));
+  const added = new Set((await git(repository, ['rev-list', '--objects', '--no-object-names', '--ignore-missing', commit!, ...(parents.length ? ['--not', ...parents] : [])], input.shallow, { signal: input.watch.signal })).split('\n'));
   const blobs = new Map<string, number>();
   // `<mode> <type> <oid> <size>\t<path>`
   for (const entry of (await git(repository, ['ls-tree', '-r', '-l', '-z', '--full-tree', commit!], input.shallow)).split('\0')) {
@@ -261,6 +313,15 @@ export async function verifyArtifactsGitUpload(repositoryPath: string, commit: s
 
 /** A lease is renewed this long before it expires, so no git operation starts with a token about to lapse. */
 const LEASE_RENEWAL_MS = 60_000;
+/** A lease request the account has not answered in this long fails: it reaches a workspace object that may be stuck. */
+const LEASE_REQUEST_MS = 60_000;
+/** How long deleting a publication's staging refs may take. */
+const STAGING_CLEANUP_MS = 60_000;
+/** A staging ref older than this belongs to a publication that ended without deleting it. */
+const STAGING_STALE_MS = 60 * 60_000;
+/** A push that only deletes refs reads no shallow boundaries: git 2.43's receive-pack crashed (segfault) on a
+ * deletion-only push from a shallow repository into one accepting shallow updates. */
+const DELETE_SHALLOW = { GIT_SHALLOW_FILE: '/dev/null' };
 /** How git reports a token the remote refused: 401 without a prompt to fall back on, or 403. */
 const AUTHENTICATION_FAILURE = /could not read (?:Username|Password)|Authentication failed|returned error: 40[13]\b|\bHTTP 40[13]\b/u;
 type RepositoryLease = { remote: string; renewAt: number; environment: Record<string, string> };
@@ -298,19 +359,21 @@ export class ArtifactsGitRemote {
     const own = boundary !== null && existsSync(ownFile) ? (await readFile(ownFile, 'utf8')).split('\n').filter(Boolean) : [];
     const advertised = own.length ? new Set((await git(input.repositoryPath, ['ls-remote', auth.remote], auth.environment)).split('\n').map(line => line.split('\t')[0])) : new Set<string>();
     await withShallowBoundary(boundary, own.filter(commit => advertised.has(commit)), async shallow => {
-      await this.transfer(input.binding, pushToArtifacts({ repositoryPath: input.repositoryPath, remote: auth.remote, refspec: `${commit}:${input.checkpointRef}`, update: 'force', auth: auth.environment, shallow }));
+      await this.transfer(input.binding, pushToArtifacts({ repositoryPath: input.repositoryPath, remote: auth.remote, refspec: `${commit}:${input.checkpointRef}`, update: 'force', auth: auth.environment, shallow, watch: {} }));
     });
   }
 
   /** Publishes a new branch, tag, pull request head or kept commit (`refs/heads/*`, `refs/tags/*`, `refs/pull/<n>/head`,
    * `refs/gitspace/commits/<commit>`) from its tip only (a shallow boundary at the tip): older history, and any oversized
-   * file in it, stays on the origin. Never moves an existing remote ref: equal is a no-op, any other commit is refused. */
-  async publishRef(input: { binding: ArtifactsRepositoryBinding; repositoryPath: string; ref: string; commit: string }): Promise<void> {
+   * file in it, stays on the origin. Never moves an existing remote ref: equal is a no-op, any other commit is refused.
+   * `watch` hears each step. */
+  async publishRef(input: { binding: ArtifactsRepositoryBinding; repositoryPath: string; ref: string; commit: string; watch?: ArtifactsWatch }): Promise<void> {
+    const watch = input.watch ?? {};
     if (!/^[0-9a-f]{40}$/u.test(input.commit)) throw new ArtifactsGitError('ref', 'Invalid ref commit');
     await this.checkPublishedRef(input.repositoryPath, input.ref);
     await git(input.repositoryPath, ['cat-file', '-e', `${input.commit}^{commit}`]);
-    await withShallowBoundary(input.commit, [], shallow => checkCurrentLayers(input.repositoryPath, input.commit, null, shallow));
-    const refs = await this.remoteRefs(input);
+    await withShallowBoundary(input.commit, [], shallow => checkCurrentLayers(input.repositoryPath, input.commit, null, shallow, watch));
+    const refs = await this.remoteRefs(input, undefined, watch);
     const current = refs.get(input.ref) ?? null;
     if (current === input.commit) return;
     if (current !== null) throw new ArtifactsRefDivergedError(input.ref, current, input.commit);
@@ -320,22 +383,23 @@ export class ArtifactsGitRemote {
     const tips = [...new Set(refs.values())];
     const held = tips.length ? (await git(input.repositoryPath, ['rev-list', '--no-walk', '--ignore-missing', ...tips])).split('\n').filter(Boolean) : [];
     await withShallowBoundary(input.commit, held, async shallow => {
-      const auth = await this.auth(input.binding, 'write');
-      await this.transfer(input.binding, pushToArtifacts({ repositoryPath: input.repositoryPath, remote: auth.remote, refspec: `${input.commit}:${input.ref}`, update: 'fast-forward', auth: auth.environment, shallow }));
+      const auth = await this.auth(input.binding, 'write', watch);
+      await this.transfer(input.binding, pushToArtifacts({ repositoryPath: input.repositoryPath, remote: auth.remote, refspec: `${input.commit}:${input.ref}`, update: 'fast-forward', auth: auth.environment, shallow, watch }));
     });
   }
 
   /** The commit a ref of the kinds `publishRef` publishes names on the remote, or null while the remote lacks it. */
-  async readRef(input: { binding: ArtifactsRepositoryBinding; repositoryPath: string; ref: string }): Promise<string | null> {
+  async readRef(input: { binding: ArtifactsRepositoryBinding; repositoryPath: string; ref: string; watch?: ArtifactsWatch }): Promise<string | null> {
     await this.checkPublishedRef(input.repositoryPath, input.ref);
-    return (await this.remoteRefs(input, input.ref)).get(input.ref) ?? null;
+    return (await this.remoteRefs(input, input.ref, input.watch ?? {})).get(input.ref) ?? null;
   }
 
   /** Moves a ref of the kinds `publishRef` publishes from `from`, the commit the remote holds it at, to `commit`, a
    * descendant of `from` in the checkout at `repositoryPath`. `from` is the push's shallow boundary, so the push sends
    * only commits after it and the moved ref's history stays linked to it. The push moves the ref only while it still
-   * names `from`; a `commit` not descending from `from` is refused before any write. */
-  async advanceRef(input: { binding: ArtifactsRepositoryBinding; repositoryPath: string; ref: string; from: string; commit: string }): Promise<void> {
+   * names `from`; a `commit` not descending from `from` is refused before any write. `watch` hears each step. */
+  async advanceRef(input: { binding: ArtifactsRepositoryBinding; repositoryPath: string; ref: string; from: string; commit: string; watch?: ArtifactsWatch }): Promise<void> {
+    const watch = input.watch ?? {};
     if (!/^[0-9a-f]{40}$/u.test(input.commit) || !/^[0-9a-f]{40}$/u.test(input.from)) throw new ArtifactsGitError('ref', 'Invalid ref commit');
     await this.checkPublishedRef(input.repositoryPath, input.ref);
     await git(input.repositoryPath, ['cat-file', '-e', `${input.commit}^{commit}`]);
@@ -343,12 +407,39 @@ export class ArtifactsGitRemote {
     const ownFile = await git(input.repositoryPath, ['rev-parse', '--path-format=absolute', '--git-path', 'shallow']);
     const own = existsSync(ownFile) ? (await readFile(ownFile, 'utf8')).split('\n').filter(Boolean) : [];
     await withShallowBoundary(input.from, own, async shallow => {
+      watch.progress?.(`Checking that ${input.commit.slice(0, 7)} builds on ${input.from.slice(0, 7)}`);
+      watch.signal?.throwIfAborted();
       const ancestry = Bun.spawn(['git', 'merge-base', '--is-ancestor', input.from, input.commit], { cwd: input.repositoryPath, env: { ...Bun.env, ...shallow }, stdout: 'ignore', stderr: 'ignore' });
-      if (await ancestry.exited !== 0) throw new ArtifactsRefDivergedError(input.ref, input.from, input.commit);
-      await checkCurrentLayers(input.repositoryPath, input.commit, input.from, shallow);
-      const auth = await this.auth(input.binding, 'write');
-      await this.transfer(input.binding, pushToArtifacts({ repositoryPath: input.repositoryPath, remote: auth.remote, refspec: `${input.commit}:${input.ref}`, update: { from: input.from }, auth: auth.environment, shallow }));
+      const kill = () => ancestry.kill();
+      watch.signal?.addEventListener('abort', kill, { once: true });
+      const exitCode = await ancestry.exited;
+      watch.signal?.removeEventListener('abort', kill);
+      watch.signal?.throwIfAborted();
+      if (exitCode !== 0) throw new ArtifactsRefDivergedError(input.ref, input.from, input.commit);
+      await checkCurrentLayers(input.repositoryPath, input.commit, input.from, shallow, watch);
+      const auth = await this.auth(input.binding, 'write', watch);
+      await this.transfer(input.binding, pushToArtifacts({ repositoryPath: input.repositoryPath, remote: auth.remote, refspec: `${input.commit}:${input.ref}`, update: { from: input.from }, auth: auth.environment, shallow, watch }));
     });
+  }
+
+  /** Deletes the staging refs (`refs/gitspace/staging/<startedMs>-<uuid>/<n>`) publications cut short left in the
+   * repository: begun over `STAGING_STALE_MS` ago, or named before staging refs carried their start (no time). A machine
+   * killed mid-push leaves them, and they hold objects nothing else reaches; a publication still running keeps its own.
+   * Returns how many it deleted. */
+  async clearStaging(input: { binding: ArtifactsRepositoryBinding; repositoryPath: string; watch?: ArtifactsWatch }): Promise<number> {
+    const watch = input.watch ?? {};
+    const auth = await this.auth(input.binding, 'write', watch);
+    const stale = Date.now() - STAGING_STALE_MS;
+    const staging = (await this.transfer(input.binding, git(input.repositoryPath, ['ls-remote', '--refs', auth.remote, 'refs/gitspace/staging/*'], auth.environment, { signal: watch.signal })))
+      .split('\n').map(line => line.split('\t')[1] ?? '').filter(ref => {
+        if (!ref.startsWith('refs/gitspace/staging/')) return false;
+        const started = /^refs\/gitspace\/staging\/(\d+)-/u.exec(ref);
+        return started === null || Number(started[1]) < stale;
+      });
+    if (!staging.length) return 0;
+    watch.progress?.(`Deleting ${staging.length} staging refs cut-short publications left in ${input.binding.repository}`);
+    await this.transfer(input.binding, git(input.repositoryPath, [...PUSH, auth.remote, ...staging.map(ref => `:${ref}`)], { ...auth.environment, ...DELETE_SHALLOW }, { signal: watch.signal }));
+    return staging.length;
   }
 
   private async checkPublishedRef(repositoryPath: string, ref: string): Promise<void> {
@@ -358,9 +449,10 @@ export class ArtifactsGitRemote {
 
   /** The remote's refs (those matching `pattern` when given) and their commits. Asks with read credentials first: even
    * those may create the remote repository. ls-remote patterns match ref suffixes, so callers look up exact names. */
-  private async remoteRefs(input: { binding: ArtifactsRepositoryBinding; repositoryPath: string }, pattern?: string): Promise<Map<string, string>> {
-    const probe = await this.auth(input.binding, 'read');
-    const advertised = await this.transfer(input.binding, git(input.repositoryPath, ['ls-remote', '--refs', probe.remote, ...pattern === undefined ? [] : [pattern]], probe.environment));
+  private async remoteRefs(input: { binding: ArtifactsRepositoryBinding; repositoryPath: string }, pattern: string | undefined, watch: ArtifactsWatch): Promise<Map<string, string>> {
+    const probe = await this.auth(input.binding, 'read', watch);
+    watch.progress?.(`Reading the refs of ${input.binding.repository}`);
+    const advertised = await this.transfer(input.binding, git(input.repositoryPath, ['ls-remote', '--refs', probe.remote, ...pattern === undefined ? [] : [pattern]], probe.environment, { signal: watch.signal }));
     return new Map(advertised.split('\n').filter(Boolean).map(line => {
       const [commit = '', name = ''] = line.split('\t');
       return [name, commit];
@@ -409,14 +501,25 @@ export class ArtifactsGitRemote {
   }
 
   /** A lease is reused until a minute before it expires, and a write lease also serves reads: every lease costs the
-   * cloud a workspace wake-up, and sync runs git several times a minute. */
-  private async auth(binding: ArtifactsRepositoryBinding, scope: 'read' | 'write'): Promise<RepositoryLease> {
+   * cloud a workspace wake-up, and sync runs git several times a minute. A request the account does not answer within
+   * `leaseTimeoutMs` fails, and `watch` hears that one is being asked for. */
+  private async auth(binding: ArtifactsRepositoryBinding, scope: 'read' | 'write', watch: ArtifactsWatch = {}): Promise<RepositoryLease> {
     const key = JSON.stringify([binding.projectId, binding.repository]);
     const held = this.leases.get(key);
     const now = Date.now();
     if (held?.write && held.write.renewAt > now) return held.write;
     if (scope === 'read' && held?.read && held.read.renewAt > now) return held.read;
-    const credential = await this.options.credentials(binding, scope);
+    const timeoutMs = this.options.leaseTimeoutMs ?? LEASE_REQUEST_MS;
+    watch.progress?.(`Requesting a ${scope} lease on ${binding.repository} from the account`);
+    const deadline = AbortSignal.timeout(timeoutMs);
+    const signal = watch.signal ? AbortSignal.any([watch.signal, deadline]) : deadline;
+    // The deadline holds even for a request that ignores its signal.
+    const { promise: ended, reject } = Promise.withResolvers<never>();
+    const end = () => reject(deadline.aborted ? new ArtifactsGitError('credentials', `The account did not answer a ${scope} lease request for ${binding.repository} within ${Math.round(timeoutMs / 1000)} s`) : signal.reason);
+    signal.addEventListener('abort', end, { once: true });
+    let credential: ArtifactsRepositoryCredentials;
+    try { credential = await Promise.race([this.options.credentials(binding, scope, signal), ended]); }
+    finally { signal.removeEventListener('abort', end); }
     const remote = new URL(credential.remote);
     if (remote.protocol !== 'https:' || remote.username || remote.password || remote.search || remote.hash) throw new ArtifactsGitError('credentials', 'Invalid credential-free repository URL');
     if (Date.parse(credential.expiresAt) <= Date.now() + LEASE_RENEWAL_MS || !Number.isFinite(Date.parse(credential.expiresAt))) throw new ArtifactsGitError('credentials', 'Repository token expires too soon');

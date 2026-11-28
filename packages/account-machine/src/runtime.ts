@@ -152,7 +152,7 @@ export async function startMachineRuntime() {
   }
   const repositoryCredentialsSchema = z.object({ remote: z.url(), plaintext: z.string().min(1), expiresAt: z.iso.datetime() });
   const gitRemote = new ArtifactsGitRemote({
-    credentials: (binding, scope) => cloudRuntime.call('runtime.repository.credentials', { ...binding, scope }, repositoryCredentialsSchema),
+    credentials: (binding, scope, signal) => cloudRuntime.call('runtime.repository.credentials', { ...binding, scope }, repositoryCredentialsSchema, signal),
   });
   const lfsOrigin = async (checkout: LocalAttachment) => {
     const project = await authority.getProject(checkout.attachment.projectId);

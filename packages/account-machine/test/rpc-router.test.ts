@@ -57,6 +57,7 @@ test('starts a project copy on the machine it was sent to and answers at once, t
       gitEnvironment: url => ({ GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: `url.${reached[url]}.insteadOf`, GIT_CONFIG_VALUE_0: url }),
       projectRepository: {
         async readRef() { return null; },
+        async clearStaging() { return 0; },
         async publishRef(input) { await publishing.promise; published.push({ repository: input.binding.repository, ref: input.ref, commit: input.commit }); },
         async advanceRef() { throw new Error('An empty project repository is never advanced'); },
       },

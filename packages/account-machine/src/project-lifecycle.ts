@@ -125,7 +125,7 @@ export interface SeedProjectRepositoryInput {
   verify: boolean;
   /** SSH environment for the account's shared git identity. */
   gitEnvironment: Record<string, string>;
-  projectRepository: Pick<ArtifactsGitRemote, 'readRef' | 'publishRef' | 'advanceRef'>;
+  projectRepository: Pick<ArtifactsGitRemote, 'readRef' | 'publishRef' | 'advanceRef' | 'clearStaging'>;
   /** Receives each change to the copy while it runs. */
   report(change: Partial<ProjectCopyOperation>): void;
   /** Kills the git the copy runs. */
@@ -199,7 +199,10 @@ export async function seedProjectRepository(input: SeedProjectRepositoryInput): 
   if (created) await createCache(cache, repositoryUrl);
   if (fresh !== null) report({ fresh });
   const binding = { projectId: input.projectId, repository: `project-${input.projectId}` };
-  const previous = await input.projectRepository.readRef({ binding, repositoryPath: cache, ref });
+  /** The publication's steps, and git's own progress lines, reach the copy; aborting kills its git. */
+  const watch = { signal, progress: (step: string) => report({ progress: step }) };
+  const previous = await input.projectRepository.readRef({ binding, repositoryPath: cache, ref, watch });
+  report({ previous, progress: previous === null ? `${binding.repository} has no ${ref} yet` : `${binding.repository} holds ${baseBranch} at ${previous}` });
   if (previous === head) return { state: 'current', baseBranch, previous, commit: head };
   if (created) {
     report({ phase: 'filling-cache' });
@@ -235,8 +238,8 @@ export async function seedProjectRepository(input: SeedProjectRepositoryInput): 
     report({ phase: 'fetching' });
     if (previous !== null && !await gitSucceeds(['cat-file', '-e', `${previous}^{commit}`], cache)) {
       // The copy's commit alone, then the tip: a fetch into a repository holding the copy's commit brings only the
-      // commits after it.
-      try { await fromOrigin(['--depth', '1', '--', repositoryUrl, previous]); }
+      // commits after it. It lands on a ref, since only commits refs reach are offered to the origin as held.
+      try { await fromOrigin(['--depth', '1', '--', repositoryUrl, `+${previous}:refs/gitspace/previous`]); }
       catch (error) { if (error instanceof OriginCommitMissingError) return null; throw error; }
     }
     // A first copy publishes the tip alone, so an empty cache fetches only the tip.
@@ -244,8 +247,8 @@ export async function seedProjectRepository(input: SeedProjectRepositoryInput): 
     await fromOrigin([...previous === null && empty ? ['--depth', '1'] : [], '--', repositoryUrl, `+${ref}:${ref}`]);
     // The tip as fetched: the branch may have moved since it was listed.
     const tip = await runGit(['rev-parse', '--verify', `${ref}^{commit}`], { cwd: cache, environment: {}, signal });
-    // The filled objects are the fetched tip's history now, or unrelated to it.
-    for (const filled of (await runGit(['for-each-ref', '--format=%(refname)', 'refs/gitspace/fill/'], { cwd: cache, environment: {}, signal })).split('\n').filter(Boolean)) {
+    // The filled objects and the copy's commit are the fetched tip's history now, or unrelated to it.
+    for (const filled of (await runGit(['for-each-ref', '--format=%(refname)', 'refs/gitspace/'], { cwd: cache, environment: {}, signal })).split('\n').filter(Boolean)) {
       await runGit(['update-ref', '-d', filled], { cwd: cache, environment: {}, signal });
     }
     return tip;
@@ -254,9 +257,13 @@ export async function seedProjectRepository(input: SeedProjectRepositoryInput): 
   let tip = await fetchTip();
   if (tip === null) return diverged(head);
   if (previous === tip) return { state: 'current', baseBranch, previous, commit: tip };
+  // A publication cut short (a stopped copy, a killed machine) leaves staging refs only the next one deletes.
+  report({ phase: 'publishing' });
+  await input.projectRepository.clearStaging({ binding, repositoryPath: cache, watch });
   if (previous === null) {
-    report({ phase: 'publishing' });
-    await input.projectRepository.publishRef({ binding, repositoryPath: cache, ref, commit: tip });
+    const objects = await runGit(['rev-list', '--objects', '--count', '--no-walk', tip], { cwd: cache, environment: {}, signal });
+    report({ phase: 'publishing', commit: tip, progress: `Publishing ${baseBranch} at ${tip.slice(0, 7)} into ${binding.repository}, its tree alone: ${objects} objects` });
+    await input.projectRepository.publishRef({ binding, repositoryPath: cache, ref, commit: tip, watch });
     return { state: 'moved', baseBranch, previous, commit: tip };
   }
   if (!await gitSucceeds(['merge-base', '--is-ancestor', previous, tip], cache)) {
@@ -275,8 +282,9 @@ export async function seedProjectRepository(input: SeedProjectRepositoryInput): 
     if (previous === tip) return { state: 'current', baseBranch, previous, commit: tip };
     if (!await gitSucceeds(['merge-base', '--is-ancestor', previous, tip], cache)) return diverged(tip);
   }
-  report({ phase: 'publishing' });
-  try { await input.projectRepository.advanceRef({ binding, repositoryPath: cache, ref, from: previous, commit: tip }); }
+  const objects = await runGit(['rev-list', '--objects', '--count', tip, '--not', previous], { cwd: cache, environment: {}, signal });
+  report({ phase: 'publishing', commit: tip, progress: `Publishing ${baseBranch} into ${binding.repository}: ${previous.slice(0, 7)} → ${tip.slice(0, 7)}, ${objects} objects` });
+  try { await input.projectRepository.advanceRef({ binding, repositoryPath: cache, ref, from: previous, commit: tip, watch }); }
   catch (error) { if (error instanceof ArtifactsRefDivergedError) return diverged(tip); throw error; }
   return { state: 'moved', baseBranch, previous, commit: tip };
 }
@@ -291,7 +299,7 @@ export interface ProjectCopyOptions {
   checkouts(projectId: string): readonly string[];
   /** How Git reaches an origin address with the account's shared git identity. */
   gitEnvironment(repositoryUrl: string): Record<string, string>;
-  projectRepository: Pick<ArtifactsGitRemote, 'readRef' | 'publishRef' | 'advanceRef'>;
+  projectRepository: Pick<ArtifactsGitRemote, 'readRef' | 'publishRef' | 'advanceRef' | 'clearStaging'>;
   /** Asks the account for Update base with a copy that moved or was current (`project.base.update`); the queued
    * operation's id. */
   updateBase(projectId: string, copied: ProjectCopy): Promise<string>;
@@ -305,6 +313,8 @@ const STALL_MS = 10 * 60_000;
 const RECORD_INTERVAL_MS = 5_000;
 /** How long a stopped copy's git gets to exit before its leftovers are cleared. */
 const GIT_EXIT_MS = 5_000;
+/** How many copies that ended stay readable per project. */
+const KEPT_COPIES = 5;
 
 const PHASES: Record<NonNullable<ProjectCopyOperation['phase']>, string> = {
   'reading-origin': 'reading the origin', 'checking-cache': 'checking the cache of the origin', 'filling-cache': 'filling the cache from a checkout',
@@ -334,11 +344,12 @@ type RunningCopy = { view: ProjectCopyOperation; controller: AbortController; st
 
 /**
  * The machine's project copies (`project.seed`): each runs in the background, one per project at a time, and its record
- * (`origins/<projectId>.copy.json`) keeps its step, progress and outcome for `project.seedOperation`. A copy has no time
- * limit; it fails only after `stallMs` without progress. A machine stopping (a release update) leaves its running copies
- * recorded as running, and the next start continues them from the origin cache (`resume`). The record's `state` also
- * says whether the last copy finished cleanly: after one that `failed` (the watchdog's stops included) or was left
- * `running`, the next copy checks the cache with `git fsck` first; after any other it continues the cache unchecked.
+ * (`origins/<projectId>.copy.json`) keeps its step, progress and outcome for `project.seedOperation`; the last
+ * `KEPT_COPIES` copies that ended stay readable (`origins/<projectId>.copies.json`). A copy has no time limit; it fails
+ * only after `stallMs` without progress. A machine stopping (a release update) leaves its running copies recorded as
+ * running, and the next start continues them from the origin cache (`resume`). The record's `state` also says whether
+ * the last copy finished cleanly: after one that `failed` (the watchdog's stops included) or was left `running`, the
+ * next copy checks the cache with `git fsck` first; after any other it continues the cache unchecked.
  */
 export class ProjectCopies {
   private readonly running = new Map<string, RunningCopy>();
@@ -351,8 +362,11 @@ export class ProjectCopies {
   /** Starts copying the project, or returns its copy already running, which takes on `then`. */
   async start(projectId: string, then: 'updateBase' | null = null): Promise<ProjectCopyOperation> {
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(projectId)) throw new Error(`Invalid project id ${projectId}`);
+    let held = this.running.get(projectId);
+    // A copy that ended clears what its git left before the next one starts.
+    if (held && held.view.state !== 'running') await held.done;
     const previous = this.running.has(projectId) ? null : await this.record(join(this.origins, `${projectId}.copy.json`));
-    const held = this.running.get(projectId);
+    held = this.running.get(projectId);
     if (held) {
       if (then !== null) held.view = { ...held.view, then };
       return held.view;
@@ -366,13 +380,23 @@ export class ProjectCopies {
     return copy.view;
   }
 
-  /** The project's copy `operationId` as it stands, or null when this machine holds no such copy. */
+  /** The project's copy `operationId` as it stands, or null when this machine holds no such copy, running or among the
+   * last `KEPT_COPIES` that ended. */
   async read(projectId: string, operationId: string): Promise<ProjectCopyOperation | null> {
     const held = this.running.get(projectId);
-    if (held) return held.view.operationId === operationId ? held.view : null;
+    if (held?.view.operationId === operationId) return held.view;
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(projectId)) return null;
     const record = await this.record(join(this.origins, `${projectId}.copy.json`));
-    return record?.operationId === operationId ? record : null;
+    if (record?.operationId === operationId) return record;
+    return (await this.ended(projectId)).find(copy => copy.operationId === operationId) ?? null;
+  }
+
+  /** The project's last `KEPT_COPIES` copies that ended, newest first. */
+  private async ended(projectId: string): Promise<ProjectCopyOperation[]> {
+    try {
+      const parsed = z.array(ProjectCopyRecordSchema).safeParse(JSON.parse(await readFile(join(this.origins, `${projectId}.copies.json`), 'utf8')));
+      return parsed.success ? parsed.data : [];
+    } catch { return []; }
   }
 
   /** At machine start: removes what copies cut short left behind, and continues every copy recorded as running. */
@@ -385,8 +409,8 @@ export class ProjectCopies {
     for (const entry of await readdir(this.origins, { withFileTypes: true })) {
       const path = join(this.origins, entry.name);
       if (entry.isDirectory() && entry.name.endsWith('.git') && !this.running.has(entry.name.slice(0, -'.git'.length))) await clearInterruptedGit(path);
-      // A record write cut short.
-      else if (entry.isFile() && entry.name.includes('.copy.json.')) await rm(path, { force: true });
+      // A record write cut short (`atomicJson` writes `<name>.<uuid>` first).
+      else if (entry.isFile() && /\.(?:copy|copies)\.json\./u.test(entry.name)) await rm(path, { force: true });
     }
     for (const entry of await readdir(this.origins, { withFileTypes: true })) {
       if (!entry.isFile() || !entry.name.endsWith('.copy.json')) continue;
@@ -442,7 +466,8 @@ export class ProjectCopies {
         if (Date.now() - lastProgress < stallMs) return;
         const phase = copy.view.phase === null ? 'copying' : PHASES[copy.view.phase];
         const quiet = stallMs >= 60_000 ? `${Math.round(stallMs / 60_000)} minutes` : `${Math.round(stallMs / 1000)} seconds`;
-        controller.abort(new Error(`No progress for ${quiet} while ${phase}, so GitSpace stopped the copy. What it fetched stays in this machine's cache of the origin: copy again to continue from there.`));
+        const last = copy.view.progress === null ? '' : ` (last: ${copy.view.progress})`;
+        controller.abort(new Error(`No progress for ${quiet} while ${phase}${last}, so GitSpace stopped the copy. What it fetched stays in this machine's cache of the origin: copy again to continue from there.`));
       }, Math.max(50, Math.min(30_000, stallMs / 4)));
       const { promise: aborted, reject } = Promise.withResolvers<never>();
       controller.signal.addEventListener('abort', () => reject(controller.signal.reason), { once: true });
@@ -469,20 +494,25 @@ export class ProjectCopies {
         }
       } catch (error) {
         // A stopped copy stays recorded as running.
-        if (!copy.stopping) {
-          ending = { state: 'failed', error: error instanceof Error ? error.message : String(error) };
+        if (!copy.stopping) ending = { state: 'failed', error: error instanceof Error ? error.message : String(error) };
+      } finally {
+        clearInterval(watchdog);
+        ended = true;
+        // Readers see the end once it is recorded, before anything else is awaited.
+        const final: ProjectCopyOperation = ending === null ? copy.view : { ...copy.view, ...ending, phase: null, updatedAt: new Date().toISOString() };
+        await record(final);
+        copy.view = final;
+        if (ending !== null) {
+          const kept = [final, ...(await this.ended(projectId)).filter(other => other.operationId !== final.operationId)].slice(0, KEPT_COPIES);
+          await atomicJson(join(this.origins, `${projectId}.copies.json`), kept).catch((error: unknown) => console.error('[gitspace-project-copy] ended copies not written', error));
+          if (final.state === 'failed') console.warn(`[gitspace-project-copy] copy ${final.operationId} of ${projectId} failed: ${final.error}`);
+        }
+        if (final.state === 'failed') {
           // A git that outlived the stop (killed, or a push the watchdog cannot kill) gets a moment to exit first.
           controller.abort();
           await Promise.race([copying.catch(() => undefined), Bun.sleep(GIT_EXIT_MS)]);
           await clearInterruptedGit(cachePath);
         }
-      } finally {
-        clearInterval(watchdog);
-        ended = true;
-        // Readers see the end only once it is recorded.
-        const final: ProjectCopyOperation = ending === null ? copy.view : { ...copy.view, ...ending, phase: null, updatedAt: new Date().toISOString() };
-        await record(final);
-        copy.view = final;
         this.running.delete(projectId);
       }
     })();

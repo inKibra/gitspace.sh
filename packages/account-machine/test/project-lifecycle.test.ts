@@ -60,14 +60,16 @@ function fixture() {
   const checkouts: string[] = [];
   const reach: Record<string, string> = { [ORIGIN_URL]: `file://${origin}`, [MOVED_URL]: `file://${origin}` };
   const project = { repositoryReference: ORIGIN_URL, baseBranch: 'HEAD' };
-  /** The machine as a fresh process sees it: a remote holding no lease requests and records every credential. */
+  /** The project's GitSpace repository as a fresh process reaches it: holding no lease, it requests and records every
+   * credential. */
+  const remote = () => new ArtifactsGitRemote({ credentials: async (_binding, scope) => {
+    scopes.push(scope);
+    return { remote: ARTIFACTS_URL, plaintext: 'offline', expiresAt: new Date(Date.now() + 3_600_000).toISOString() };
+  } });
   const machineCopies = (options: Partial<ProjectCopyOptions> = {}) => new ProjectCopies({
     project: async () => project, root: machine, checkouts: () => checkouts,
     gitEnvironment: url => ({ GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: `url.${reach[url]}.insteadOf`, GIT_CONFIG_VALUE_0: url }),
-    projectRepository: new ArtifactsGitRemote({ credentials: async (_binding, scope) => {
-      scopes.push(scope);
-      return { remote: ARTIFACTS_URL, plaintext: 'offline', expiresAt: new Date(Date.now() + 3_600_000).toISOString() };
-    } }),
+    projectRepository: remote(),
     updateBase: async () => { throw new Error('Only copies are asked for here'); },
     ...options,
   });
@@ -82,7 +84,7 @@ function fixture() {
     ...readdirSync(join(cache, 'objects', 'pack')).filter(name => name.startsWith('tmp_')),
     ...readdirSync(cache, { recursive: true }).map(String).filter(name => name.endsWith('.lock')),
   ];
-  return { root, origin, artifacts, machine, cache, commit, copy, machineCopies, scopes, checkouts, project, reach, copied, leftovers };
+  return { root, origin, artifacts, machine, cache, commit, copy, machineCopies, remote, scopes, checkouts, project, reach, copied, leftovers };
 }
 
 it('fast-forwards a copy behind its origin, sending only the commits after it, with history linked', async () => {
@@ -228,10 +230,12 @@ it('fails a copy that stops making progress, leaving nothing of a git cut short 
   chmodSync(stall, 0o755);
   const stalled = await f.copy({
     // The watchdog measures real time against a real silent git; a fake clock would not reach it.
-    stallMs: 400,
+    stallMs: 1500,
     gitEnvironment: url => ({ GIT_CONFIG_COUNT: '2', GIT_CONFIG_KEY_0: `url.ext::${stall} %s.insteadOf`, GIT_CONFIG_VALUE_0: url, GIT_CONFIG_KEY_1: 'protocol.ext.allow', GIT_CONFIG_VALUE_1: 'always' }),
   });
-  expect(stalled).toMatchObject({ state: 'failed', phase: null, error: expect.stringContaining('No progress for 0 seconds while fetching from the origin') });
+  expect(stalled).toMatchObject({ state: 'failed', phase: null, error: expect.stringContaining('No progress for 2 seconds while fetching from the origin') });
+  // The partial pack and the lock go once the killed git has exited, after the failure is recorded.
+  while (f.leftovers().length > 1) await Bun.sleep(20);
   expect(f.leftovers()).toEqual(['seed-old']);
   // The next machine start removes copies from before the cache.
   await f.machineCopies().resume();
@@ -263,4 +267,127 @@ it('continues a copy a machine stop left running when the machine starts again',
   expect(await finished(copies, 'copy-1')).toMatchObject({ state: 'moved', previous: null, commit: tip, startedAt: stamp });
   expect(existsSync(join(f.machine, 'origins', 'widgets.copy.json'))).toBe(true);
   expect(await f.machineCopies().read('widgets', 'copy-1')).toMatchObject({ state: 'moved', commit: tip });
+});
+
+it('fetches only what came after the project\'s copy into a new cache, offering the copy\'s commit as held', async () => {
+  const f = fixture();
+  f.commit('first');
+  f.commit('second');
+  const copiedAt = f.commit('third');
+  await f.copy();
+  rmSync(f.cache, { recursive: true, force: true });
+  f.commit('fourth');
+  const tip = f.commit('fifth');
+
+  const copy = await f.copy();
+  expect(copy).toMatchObject({ state: 'moved', previous: copiedAt, commit: tip });
+  // The copy's commit with its tree, then the new commits' objects: none of the history before it.
+  const expected = Number(git(f.origin, 'rev-list', '--objects', '--count', '--no-walk', copiedAt)) + Number(git(f.origin, 'rev-list', '--objects', '--count', tip, '--not', copiedAt));
+  expect(copy.received.objects).toBe(expected);
+});
+
+it('reports what it publishes, from and to, while it publishes', async () => {
+  const f = fixture();
+  f.commit('first');
+  const copiedAt = f.commit('second');
+  await f.copy();
+  const tip = f.commit('third');
+  const publishing = Promise.withResolvers<void>();
+  const reached = Promise.withResolvers<void>();
+  const repository = f.remote();
+  const copies = f.machineCopies({ projectRepository: {
+    readRef: input => repository.readRef(input),
+    clearStaging: input => repository.clearStaging(input),
+    publishRef: input => repository.publishRef(input),
+    advanceRef: async input => { reached.resolve(); await publishing.promise; return repository.advanceRef(input); },
+  } });
+  const started = await copies.start('widgets');
+  await reached.promise;
+  const objects = git(f.origin, 'rev-list', '--objects', '--count', tip, '--not', copiedAt);
+  expect(await copies.read('widgets', started.operationId)).toMatchObject({
+    state: 'running', phase: 'publishing', previous: copiedAt, commit: tip,
+    progress: `Publishing main into project-widgets: ${copiedAt.slice(0, 7)} → ${tip.slice(0, 7)}, ${objects} objects`,
+  });
+  publishing.resolve();
+  expect(await finished(copies, started.operationId)).toMatchObject({ state: 'moved', previous: copiedAt, commit: tip });
+});
+
+it('hears each step of a publication, the lease request and git\'s push meter included', async () => {
+  const f = fixture();
+  const tip = f.commit('first');
+  const steps: string[] = [];
+  await f.remote().publishRef({ binding: { projectId: 'widgets', repository: 'project-widgets' }, repositoryPath: f.origin, ref: 'refs/heads/main', commit: tip, watch: { progress: step => steps.push(step) } });
+  expect(steps).toContain('Requesting a write lease on project-widgets from the account');
+  expect(steps).toContain(`Pushing ${tip}:refs/heads/main to GitSpace`);
+  expect(steps.some(step => step.startsWith('Writing objects: 100%'))).toBe(true);
+});
+
+it('fails a copy whose publication goes quiet, saying what it was waiting on', async () => {
+  const f = fixture();
+  f.commit('first');
+  const failed = await f.copy({
+    // The watchdog measures real time against a publication that never answers; a fake clock would not reach it.
+    stallMs: 1500,
+    projectRepository: { readRef: async () => null, clearStaging: async () => 0, advanceRef: async () => {}, publishRef: async input => {
+      input.watch?.progress?.('Requesting a write lease on project-widgets from the account');
+      await Promise.withResolvers<void>().promise;
+    } },
+  });
+  expect(failed).toMatchObject({ state: 'failed', phase: null, error: expect.stringContaining('No progress for 2 seconds while publishing into GitSpace (last: Requesting a write lease on project-widgets from the account)') });
+});
+
+it('fails a copy whose lease request the account never answers', async () => {
+  const f = fixture();
+  f.commit('first');
+  const failed = await f.copy({ projectRepository: new ArtifactsGitRemote({ leaseTimeoutMs: 1000, credentials: () => Promise.withResolvers<never>().promise }) });
+  expect(failed).toMatchObject({ state: 'failed', error: 'credentials: The account did not answer a read lease request for project-widgets within 1 s' });
+});
+
+it('records a publication that throws as failed with its reason, and keeps the copies that ended readable', async () => {
+  const f = fixture();
+  f.commit('first');
+  const refused = await f.copy({ projectRepository: { readRef: async () => null, clearStaging: async () => 0, advanceRef: async () => {}, publishRef: async () => { throw new Error('Artifacts refused the push'); } } });
+  expect(refused).toMatchObject({ state: 'failed', phase: null, error: 'Artifacts refused the push' });
+  const moved = await f.copy();
+  const current = await f.copy();
+  // A later copy leaves earlier ones readable.
+  const copies = f.machineCopies();
+  expect(await copies.read('widgets', refused.operationId)).toMatchObject({ state: 'failed', error: 'Artifacts refused the push' });
+  expect(await copies.read('widgets', moved.operationId)).toMatchObject({ state: 'moved' });
+  expect(await copies.read('widgets', current.operationId)).toMatchObject({ state: 'current' });
+});
+
+it('publishes nothing once the watchdog stopped a copy, even when its lease request answers afterwards', async () => {
+  const f = fixture();
+  const tip = f.commit('first');
+  // The account answers read leases at once and the write lease only after the copy was stopped.
+  const lease = { remote: ARTIFACTS_URL, plaintext: 'offline', expiresAt: new Date(Date.now() + 3_600_000).toISOString() };
+  const writeLease = Promise.withResolvers<typeof lease>();
+  const repository = new ArtifactsGitRemote({ credentials: async (_binding, scope) => scope === 'write' ? writeLease.promise : lease });
+  const published = Promise.withResolvers<void>();
+  const stopped = await f.copy({
+    // The watchdog measures real time against a lease request that does not answer; a fake clock would not reach it.
+    stallMs: 1500,
+    projectRepository: {
+      readRef: input => repository.readRef(input), clearStaging: async () => 0, advanceRef: input => repository.advanceRef(input),
+      publishRef: input => repository.publishRef(input).finally(() => published.resolve()),
+    },
+  });
+  expect(stopped).toMatchObject({ state: 'failed', error: expect.stringContaining('(last: Requesting a write lease on project-widgets from the account)') });
+  writeLease.resolve(lease);
+  await published.promise;
+  // A later copy would otherwise find the branch, published by the stopped one, already there.
+  expect(fails(f.artifacts, 'rev-parse', '--verify', 'refs/heads/main')).toBe(true);
+  expect(await f.copy()).toMatchObject({ state: 'moved', previous: null, commit: tip });
+});
+
+it('deletes the staging refs cut-short publications left before publishing, and keeps those of one still running', async () => {
+  const f = fixture();
+  f.commit('first');
+  const tip = f.commit('second');
+  const running = `refs/gitspace/staging/${Date.now()}-running/0`;
+  const cutShort = `refs/gitspace/staging/${Date.now() - 2 * 60 * 60_000}-cut-short/0`;
+  git(f.origin, 'push', '-q', f.artifacts, `${tip}:${running}`, `${tip}:${cutShort}`, `${tip}:refs/gitspace/staging/untimed/0`);
+  expect(await f.copy()).toMatchObject({ state: 'moved', commit: tip });
+  expect(f.copied().split('\n').sort()).toEqual([`${running} ${tip}`, `refs/heads/main ${tip}`].sort());
 });
