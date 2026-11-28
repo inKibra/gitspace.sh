@@ -1,4 +1,4 @@
-import { accountUrl, domainsFromSettings, handleOfAccountHostname, relayUrl, siteUrl, type GitSpaceDomains } from '@gitspace/protocol-environment/domains';
+import { accountUrl, domainsFromSettings, handleOfAccountHostname, handleOfRelayHostname, relayUrl, siteUrl, type GitSpaceDomains } from '@gitspace/protocol-environment/domains';
 import { credentialProtocolBase64 } from '@gitspace/protocol/credential-vault';
 import { verifyRelayAuthorization } from '@gitspace/protocol/relay';
 import { PlatformStorageActionSchema, platformObjectStorage } from './storage-quarantine.js';
@@ -32,14 +32,17 @@ interface TenantDispatchTarget {
   service: boolean;
 }
 
-function tenantFromHostname(hostname: string, suffix: string): TenantDispatchTarget | null {
-  const normalized = hostname.toLowerCase();
-  const expectedSuffix = suffix.toLowerCase();
-  if (!normalized.endsWith(expectedSuffix)) return null;
-  const label = normalized.slice(0, -expectedSuffix.length);
-  const service = /^.+--.+--([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)-srv$/u.exec(label);
-  if (service) return tenantIdSchema.safeParse(service[1]).success ? { tenant: service[1]!, service: true } : null;
-  return tenantIdSchema.safeParse(label).success ? { tenant: label, service: false } : null;
+/** The tenant a hostname of the install dispatches to: a hosted service (`<name>--<workspace>--<tenant>-srv`), a relay
+ * (`relayHostname`) or an account (`<handle>.<account>`); null for any other host. */
+function tenantFromHostname(hostname: string, domains: GitSpaceDomains): TenantDispatchTarget | null {
+  const host = hostname.toLowerCase();
+  for (const domain of new Set([domains.service, domains.account])) {
+    if (!host.endsWith(`.${domain}`)) continue;
+    const service = /^.+--.+--([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)-srv$/u.exec(host.slice(0, -(domain.length + 1)));
+    if (service) return tenantIdSchema.safeParse(service[1]).success ? { tenant: service[1]!, service: true } : null;
+  }
+  const handle = handleOfRelayHostname(domains, host) ?? handleOfAccountHostname(domains, host);
+  return handle !== null && tenantIdSchema.safeParse(handle).success ? { tenant: handle, service: false } : null;
 }
 
 /**
@@ -479,7 +482,7 @@ export default {
     const canonical = canonicalPlatformRedirect(url, domains);
     if (canonical) return canonical;
 
-    const target = tenantFromHostname(url.hostname, `.${domains.service}`) ?? tenantFromHostname(url.hostname, `.${domains.account}`);
+    const target = tenantFromHostname(url.hostname, domains);
     if (!target) return platformError(404, 'TENANT_NOT_FOUND', 'Tenant hostname is not registered');
     const tenant = target.tenant;
     try {

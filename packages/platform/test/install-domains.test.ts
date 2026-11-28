@@ -56,3 +56,30 @@ describe('an install at its own domains', () => {
     ]);
   });
 });
+
+describe('an install on one domain (account and service domains alike)', () => {
+  const oneDomain = { ACCOUNT_DOMAIN: 'studio.test', SERVICE_DOMAIN: 'studio.test' };
+  const platformAt = (): Env => ({ ...platform(), ...oneDomain });
+
+  it.each(['work.studio.test', 'work-relay.studio.test', 'web--space-a--work-srv.studio.test'])('dispatches %s to the tenant work', async (hostname) => {
+    const tenants: string[] = [];
+    const bindings = { ...platformAt(), DISPATCHER: { get(name: string) { tenants.push(name); return { async fetch() { return new Response('tenant response', { status: 201 }); } }; } } as unknown as DispatchNamespace };
+    const response = await worker.fetch(new Request(`https://${hostname}/health`), bindings, createExecutionContext());
+    expect(response.status).toBe(201);
+    expect(tenants).toEqual([`${bindings.DISPATCH_NAMESPACE}-tenant-work`]);
+  });
+
+  it('deploys account Workers whose relay is <handle>-relay.<domain>', () => {
+    const metadata = scriptUploadMetadata({
+      mainModule: 'worker.mjs', compatibilityDate: '2026-08-27', compatibilityFlags: [], durableObjects: [], migrations: [],
+      resources: [{ name: 'ACCOUNT_URL', source: 'application-url' }, { name: 'RELAY_URL', source: 'transport-url' }],
+    }, null, [], {
+      id: 'work', accountId: 'u-work', rootPublicKey: 'key', blobBucket: 'bucket', platformUrl: 'https://platform.studio.test', platformService: 'platform',
+      token: 'token', publicAssetsService: 'assets', releaseChannelService: 'channel', domains: domainsFromSettings(oneDomain),
+    });
+    expect(metadata.bindings).toEqual([
+      { type: 'plain_text', name: 'ACCOUNT_URL', text: 'https://work.studio.test' },
+      { type: 'plain_text', name: 'RELAY_URL', text: 'https://work-relay.studio.test' },
+    ]);
+  });
+});

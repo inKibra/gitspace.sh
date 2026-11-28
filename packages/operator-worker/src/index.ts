@@ -1,4 +1,4 @@
-import { accountUrl as accountUrlOf, DOMAINS_PATH, domainsFromSettings, relayUrl, siteUrl, withDomainsPage } from '@gitspace/protocol-environment/domains';
+import { accountUrl as accountUrlOf, DOMAINS_PATH, domainsFromSettings, isInstallHandle, relayUrl, siteUrl, withDomainsPage } from '@gitspace/protocol-environment/domains';
 import { credentialProtocolBase64, SIGNED_REQUEST_MAX_AGE_MS } from '@gitspace/protocol/credential-vault';
 import { verifyRelayAuthorization } from '@gitspace/protocol/relay';
 import { SIGNED_REQUEST_EXPIRED_CODE, SIGNED_REQUEST_EXPIRED_MESSAGE } from '@gitspace/protocol/server-clock';
@@ -202,7 +202,7 @@ const operatorWorker = {
       const payload = await readBoundedJson(request) as { rootPublicKey?: unknown; handle?: unknown; invite?: unknown };
       if (typeof payload.rootPublicKey !== 'string' || typeof payload.handle !== 'string' || typeof payload.invite !== 'string') return Response.json(publicError('INVALID_BOOTSTRAP', 'Invitation, root key and handle are required'), { status: 400 });
       const handle = payload.handle.trim().toLowerCase();
-      if (handle.length > 30 || !tenantIdSchema.safeParse(handle).success) return Response.json(publicError('INVALID_HANDLE', 'Handle is invalid or reserved'), { status: 400 });
+      if (handle.length > 30 || !tenantIdSchema.safeParse(handle).success || !isInstallHandle(domainsFromSettings(env), handle)) return Response.json(publicError('INVALID_HANDLE', 'Handle is invalid or reserved'), { status: 400 });
       const userId = await accountIdForRootPublicKey(payload.rootPublicKey);
       if (!userId) return Response.json(publicError('INVALID_ROOT', 'Root key is invalid'), { status: 400 });
       const verified = verifyRelayAuthorization({ header: request.headers.get('authorization'), signingPublicKey: payload.rootPublicKey, target: url.pathname + url.search, maxSkewMs: SIGNED_REQUEST_MAX_AGE_MS });
