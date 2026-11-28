@@ -1,9 +1,11 @@
+import type { ProjectCopyOperation } from '@gitspace/protocol';
 import type { GitHubInstallationView, GitHubProjectAccess, GitHubProjectBridge } from '@gitspace/protocol/github';
 import { Badge, Button, Select, SelectContent, SelectItem, SelectTrigger, useShape } from '@gitspace/ui';
 import { Check, Clock, Copy01, LinkExternal01, Lock01, Monitor01 } from '@untitledui/icons';
 import { useState, type ReactElement, type ReactNode } from 'react';
 import { z } from 'zod';
 import { glyph } from './glyph.js';
+import { MachineCopyProgress } from './OperationProgress.js';
 import { formatRelativeTime } from './relative-time.js';
 import { rpcErrorMessage } from './rpc-error-message.js';
 import { useToasts, type Toast } from './toasts.js';
@@ -128,9 +130,10 @@ function MachineWayIn({ repository, onAttachMachine }: { repository: string; onA
 /** An online machine of the account a project's repository can be copied through. */
 export interface CopyMachine { id: string; label: string }
 
-/** Copying a repository the cloud could not import through one of the person's online machines; `onCopy` resolves once
- * the machine copied the base branch in, and rejects with the reason it could not. */
-export interface MachineCopyProps { machines: readonly CopyMachine[]; onCopy(machineId: string): Promise<void> }
+/** Copying a repository the cloud could not import through one of the person's online machines; `onCopy` hands the
+ * machine's copy to `progress` as it runs, resolves once the machine copied the base branch in, and rejects with the
+ * reason it could not. */
+export interface MachineCopyProps { machines: readonly CopyMachine[]; onCopy(machineId: string, progress: (copy: ProjectCopyOperation) => void): Promise<void> }
 
 /** The way in for a project whose cloud import was refused: one of the person's online machines that can read the
  * repository copies its base branch in with their own access. A failed copy shows its reason, with `alternative` naming
@@ -140,13 +143,14 @@ function MachineCopy({ target, lead, alternative, machines, onCopy }: MachineCop
   const [chosen, setChosen] = useState<string | null>(null);
   const [copying, setCopying] = useState(false);
   const [failure, setFailure] = useState<{ label: string; message: string } | null>(null);
+  const [progress, setProgress] = useState<ProjectCopyOperation | null>(null);
   const machine = machines.find((candidate) => candidate.id === chosen) ?? machines[0] ?? null;
   const copy = async (through: CopyMachine) => {
     setCopying(true);
     setFailure(null);
-    try { await onCopy(through.id); }
+    try { await onCopy(through.id, setProgress); }
     catch (cause) { setFailure({ label: through.label, message: rpcErrorMessage(cause, `Copy through ${through.label}`) }); }
-    finally { setCopying(false); }
+    finally { setCopying(false); setProgress(null); }
   };
   return <div className={`flex flex-col gap-2 bg-surface-2 p-3 ${shape.container}`}>
     <span className="text-caption font-medium text-foreground">{lead}</span>
@@ -157,6 +161,7 @@ function MachineCopy({ target, lead, alternative, machines, onCopy }: MachineCop
         {machines.length > 1 ? <div className="w-48"><Select size="compact" value={machine.id} disabled={copying} onValueChange={setChosen}><SelectTrigger aria-label="Machine to copy through" /><SelectContent>{machines.map((candidate, index) => <SelectItem key={candidate.id} value={candidate.id} index={index}>{candidate.label}</SelectItem>)}</SelectContent></Select></div> : null}
         <Button variant="secondary" size="compact" type="button" loading={copying} leadingIcon={glyph(Monitor01)} onClick={() => void copy(machine)}>Copy through {machine.label}</Button>
       </div>}
+    {progress?.state === 'running' ? <MachineCopyProgress copy={progress} /> : null}
     {failure ? <div role="alert" className="flex flex-col gap-1 text-caption">
       <span className="text-destructive">Copying through {failure.label} failed: {failure.message}</span>
       <span className="text-muted-foreground">{alternative}</span>

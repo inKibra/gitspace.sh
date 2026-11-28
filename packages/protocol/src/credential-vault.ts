@@ -49,6 +49,9 @@ export const controlOperationSchema = z.enum([
   'mcp.connections.status',
   'mcp.audit.append',
   'project.get',
+  /** Update base with the copy of the base branch this machine just brought to the origin's tip (`project.seed` with
+   *  `then: 'updateBase'`): fast-forward only, and only for the machine with a ready checkout of the base workspace. */
+  'project.base.update',
   'project.environment.get',
   'project.environment.mutate',
   'project.environment.runLog',

@@ -1,8 +1,8 @@
 import {
-  gitspaceContract, deploymentLaunchContract, projectOriginBranchesContract, projectSeedContract, createWorkspaceTerminalContract,
+  gitspaceContract, deploymentLaunchContract, projectOriginBranchesContract, projectSeedContract, projectSeedOperationContract, createWorkspaceTerminalContract,
   listWorkspaceTerminalsContract, readWorkspaceTerminalContract, sendWorkspaceTerminalContract,
   stopWorkspaceTerminalContract, terminalEventsContract, terminalLiveContract,
-  type GitSpaceRpcContext,
+  type GitSpaceRpcContext, type ProjectCopyOperation,
 } from '@gitspace/protocol/rpc-contract';
 import { contractDigest, err, ok, type AnyRouter } from 'result-rpc';
 import { createFetchHandler, serverRpc } from 'result-rpc/server';
@@ -10,7 +10,6 @@ import { deviceCanAdminister } from '@gitspace/protocol/device-grant';
 import { DeploymentLaunchError, type DeploymentLauncher } from './deployment-launcher.js';
 import { callerFor } from './signed-rpc.js';
 import { WorkspaceHubSpaceUnavailable, WorkspaceHubTerminalUnavailable, type WorkspaceHubTerminalCoordinator } from './workspace-hub.js';
-import type { ProjectCopy } from './project-lifecycle.js';
 import type { WorkspaceEnvironmentManager } from './workspace-environment.js';
 
 /** Machines expose only explicitly addressed tools, never account authority. */
@@ -18,9 +17,14 @@ export type GitSpaceRpcRouterOptions = {
   terminals: WorkspaceHubTerminalCoordinator;
   environments?: WorkspaceEnvironmentManager;
   deployment?: Pick<DeploymentLauncher, 'launch'>;
-  /** Copies a project's base branch from its origin into the project's repository with this machine's git identity, or
-   * fast-forwards the copy there; and reads every branch of the origin with that identity. */
-  projects?: { seed(projectId: string): Promise<ProjectCopy>; originBranches(projectId: string): Promise<Array<{ branch: string; commit: string }>> };
+  /** Starts copying a project's base branch from its origin into the project's repository with this machine's git
+   * identity, or fast-forwarding the copy there, in the background, and reads that copy as it stands (null: this machine
+   * holds no such copy); and reads every branch of the origin with that identity. */
+  projects?: {
+    seed(projectId: string, then: 'updateBase' | null): Promise<ProjectCopyOperation>;
+    seedOperation(projectId: string, operationId: string): Promise<ProjectCopyOperation | null>;
+    originBranches(projectId: string): Promise<Array<{ branch: string; commit: string }>>;
+  };
   machineId: string;
   onInternalError?: (input: { incidentId: string; phase: string; cause: unknown; procedurePath?: string }) => void;
 };
@@ -47,9 +51,20 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
     // The account forwards a copy to the machine the person chose; no other machine reads the origin for it.
     if (input.machineId !== options.machineId) return err(errors.OperationFailed({ operation: 'copy project repository', message: `Copy for machine ${input.machineId} reached machine ${options.machineId}` }));
     try {
-      return ok(await options.projects.seed(input.projectId));
+      return ok(await options.projects.seed(input.projectId, input.then ?? null));
     } catch (error) {
       return err(errors.OperationFailed({ operation: 'copy project repository', message: error instanceof Error ? error.message : 'Unable to copy the project repository' }));
+    }
+  });
+  const projectSeedOperation = server.implement(projectSeedOperationContract).handler(async ({ input, errors }) => {
+    if (!options.projects) return err(errors.OperationFailed({ operation: 'read project copy', message: 'This machine cannot copy project repositories' }));
+    if (input.machineId !== options.machineId) return err(errors.OperationFailed({ operation: 'read project copy', message: `Copy read for machine ${input.machineId} reached machine ${options.machineId}` }));
+    try {
+      const copy = await options.projects.seedOperation(input.projectId, input.operationId);
+      if (copy === null) return err(errors.OperationFailed({ operation: 'read project copy', message: `Machine ${options.machineId} holds no copy ${input.operationId} of project ${input.projectId}: copy again` }));
+      return ok(copy);
+    } catch (error) {
+      return err(errors.OperationFailed({ operation: 'read project copy', message: error instanceof Error ? error.message : 'Unable to read the project copy' }));
     }
   });
   const projectOriginBranches = server.implement(projectOriginBranchesContract).handler(async ({ input, errors }) => {
@@ -144,7 +159,7 @@ export function createGitSpaceRpcRouter(options: GitSpaceRpcRouterOptions) {
   });
   return server.router({
     deployment: { launch: deploymentLaunch },
-    project: { seed: projectSeed, remote: { branches: projectOriginBranches } },
+    project: { seed: projectSeed, seedOperation: projectSeedOperation, remote: { branches: projectOriginBranches } },
     terminals: { events: terminalEvents, live: terminalLive, list: listTerminals, create: createTerminal, read: readTerminal, send: sendTerminal, stop: stopTerminal },
   });
 }

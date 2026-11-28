@@ -440,6 +440,12 @@ export class CloudSpaceCheckpointAuthority implements EnvironmentLifecycleAuthor
     return this.call('project.get', { projectId });
   }
 
+  /** Update base with the copy of the base branch this machine brought to the origin's tip (`project.base.update`);
+   * the queued operation's id. */
+  updateProjectBase(projectId: string, copied: { baseBranch: string; previous: string | null; commit: string }): Promise<{ operationId: string }> {
+    return this.call('project.base.update', { projectId, copied });
+  }
+
 
   getLifecycleState(projectId: string, spaceId: string): Promise<LifecycleState> {
     return this.call('project.environment.get', { projectId, spaceId });

@@ -40,7 +40,7 @@ import { createGitHubCredentialHelper } from './github-credential-helper.js';
 import { RuntimeSnapshotCommitInputSchema, RuntimeSnapshotCommitResultSchema } from '@gitspace/protocol-runtime';
 import type { LocalAttachment } from '@gitspace/runtime-machine';
 import { reconcileBrokers } from '@gitspace/supervisor';
-import { copyProjectThroughMachine, readProjectOriginBranches, type ProjectCopyOptions } from './project-lifecycle.js';
+import { ProjectCopies, readProjectOriginBranches, type ProjectCopyOptions } from './project-lifecycle.js';
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name];
@@ -265,16 +265,24 @@ export async function startMachineRuntime() {
     buildRoot: join(environmentRoot, 'builds'),
   });
   const projectCopy: ProjectCopyOptions = {
-    project: id => authority.getProject(id), scratchRoot: environmentRoot,
+    project: id => authority.getProject(id), root: environmentRoot,
+    // The base checkout (workspace id = project id) first: it holds the base branch's history.
+    checkouts: projectId => machineCheckouts()
+      .filter(local => local.attachment.projectId === projectId && local.attachment.state === 'ready')
+      .toSorted((left, right) => Number(right.attachment.workspaceId === projectId) - Number(left.attachment.workspaceId === projectId))
+      .map(local => local.rootPath),
     gitEnvironment: repositoryUrl => gitIdentity.gitEnvironment(repositoryUrl), projectRepository: gitRemote,
+    updateBase: async (projectId, copied) => (await authority.updateProjectBase(projectId, copied)).operationId,
   };
+  const projectCopies = new ProjectCopies(projectCopy);
   const rpc = createGitSpaceRpcHandler({
     machineId,
     terminals,
     environments,
     deployment: { launch: (input) => launcher.launch(input) },
     projects: {
-      seed: projectId => copyProjectThroughMachine(projectCopy, projectId),
+      seed: (projectId, then) => projectCopies.start(projectId, then),
+      seedOperation: (projectId, operationId) => projectCopies.read(projectId, operationId),
       originBranches: projectId => readProjectOriginBranches(projectCopy, projectId),
     },
     onInternalError: ({ incidentId, phase, cause, procedurePath }) => {
@@ -289,12 +297,14 @@ export async function startMachineRuntime() {
     preparingReplacement = true;
     while (activeRpcRequests > 0) await Bun.sleep(25);
     for (const spaceId of checkouts.list()) await terminals.stopOwned(spaceId);
+    await projectCopies.stop();
     await serviceManager.dispose();
     await executorRuntime?.sync();
     return { prepared: true, machineId };
   };
   const cancelReplacement = async () => {
     await rehydrateServices();
+    await projectCopies.resume();
     preparingReplacement = false;
     return { prepared: false, machineId };
   };
@@ -391,6 +401,8 @@ export async function startMachineRuntime() {
     },
   });
   startup('executor');
+  // Copies a stop cut short continue from the origin cache, once checkouts that can fill one are known.
+  void projectCopies.resume().catch((error: unknown) => console.error('[gitspace-project-copy] copies were not resumed', error));
   // After the journal is restored: checkouts that survived a restart get the account's Git identity and origin access
   // (a new release may configure them differently, e.g. a repository that became reachable through the GitHub App).
   // It reads each checkout's origin access from the account, so it runs after startup instead of holding readiness:
@@ -413,6 +425,7 @@ export async function startMachineRuntime() {
       await Bun.sleep(150);
     }
     releases.stop();
+    await projectCopies.stop();
     await serviceManager.dispose();
     await executorRuntime?.close();
     await github.close();

@@ -1,7 +1,7 @@
 import { accountHostname, accountUrl, domainsFromSettings, handleOfAccountHostname, hostedServiceSuffix, relayUrl as relayUrlOf, withDomainsPage } from '@gitspace/protocol-environment/domains';
 import { setBedrockProviderModule } from '@earendil-works/pi-ai/api/bedrock-converse-stream.lazy';
 import { bedrockProviderModule } from '@earendil-works/pi-ai/bedrock-provider';
-import { runtimeMachineControl } from './account-runtime-control.js';
+import { machineProjectBaseUpdate, runtimeMachineControl } from './account-runtime-control.js';
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import { storedVaultCredentialSchema } from '@gitspace/provider-auth';
 import { z } from 'zod';
@@ -4395,7 +4395,8 @@ const worker = {
             || body.operation.startsWith('lfs.')
             || body.operation.startsWith('project.environment.')
             || body.operation.startsWith('project.mcp.')
-            || body.operation === 'project.services.token' ? 'space.control'
+            || body.operation === 'project.services.token'
+            || body.operation === 'project.base.update' ? 'space.control'
           : 'storage.access';
         if (diagnostics) diagnostics.stage = 'authorize';
         const authorized = await authorizeControl(env, body, capability);
@@ -4647,6 +4648,9 @@ const worker = {
               value = state;
               break;
             }
+            case 'project.base.update':
+              value = await machineProjectBaseUpdate(env, body.userId, body.machineId, body.payload);
+              break;
             case 'project.get':
               value = await authority.getProject();
               break;

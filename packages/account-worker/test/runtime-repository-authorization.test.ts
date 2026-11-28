@@ -295,3 +295,27 @@ describe('signed checkout origin access', () => {
     expect(f.tokens).not.toHaveBeenCalled();
   });
 });
+
+describe('signed machine Update base', () => {
+  it('runs Update base with a copy only for the machine with a ready checkout of the base workspace', async () => {
+    const f = await fixture(['storage.access', 'space.control'], 'https://github.com/acme-labs/widgets.git', false);
+    const base = env.SPACE_AUTHORITY.getByName(`${env.ACCOUNT_ID}:${projectId}`);
+    await base.runtimeSnapshot({ projectId, workspaceId: projectId });
+    // `assigned` checks out the base workspace; `unassigned` only a worktree workspace.
+    await attach('unassigned', 1);
+    await runInDurableObject(base, async (_instance, state) => {
+      const attachments = new AttachmentStore(state.storage, services);
+      const { attachment } = await attachments.attach(RuntimeAttachInputSchema.parse({ projectId, workspaceId: projectId, machineId: 'assigned', generation: 1, checkout: { kind: 'shared', branch: 'main' }, capabilities: [] }), true);
+      attachments.ready(RuntimeAttachmentReadyInputSchema.parse({ projectId, workspaceId: projectId, machineId: 'assigned', attachmentId: attachment.attachmentId, generation: 1, commit: 'a'.repeat(40), prerequisitesComplete: true, capabilities: [] }));
+    });
+    const copied = { baseBranch: 'main', previous: 'a'.repeat(40), commit: 'b'.repeat(40) };
+    const refused = await f.request({ copied }, 'unassigned', 'project.base.update');
+    expect(refused.status).toBe(400);
+    expect(JSON.stringify(await refused.json())).toContain('Update base from a machine requires a ready checkout of the base workspace on this machine');
+    expect((await f.project.visibleOperations()).filter(operation => operation.kind === 'project.updateBase')).toEqual([]);
+    const queued = await f.request({ copied }, 'assigned', 'project.base.update');
+    const body = await queued.json();
+    expect({ status: queued.status, body }).toMatchObject({ status: 200, body: { status: 'ok', value: { operationId: expect.any(String) } } });
+    expect((await f.project.visibleOperations()).filter(operation => operation.kind === 'project.updateBase')).toHaveLength(1);
+  });
+});

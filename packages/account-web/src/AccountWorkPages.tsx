@@ -3,7 +3,7 @@ import { rpcClient } from './rpc-client.js';
 import { Badge, Button, Card, CardContent, CardDescription, CardFooter, CardGroup, CardHeader, CardTitle, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, InputField, InputGroup, Select, SelectContent, SelectItem, SelectTrigger, TabsSubtle, TabsSubtleItem, Tooltip } from '@gitspace/ui';
 import { Archive, Plus, RefreshCcw01, Trash01, XClose } from '@untitledui/icons';
 import { useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { isGitSpaceSourceRepository, type CloudProjectOperation, type OriginCheckInterval } from '@gitspace/protocol';
+import { isGitSpaceSourceRepository, type CloudProjectOperation, type OriginCheckInterval, type ProjectCopyOperation } from '@gitspace/protocol';
 import { AccountSidebarContext, type SidebarSpaceSummary } from './AppSidebar.js';
 import { CreateProjectDialog, CreateWorkspaceDialog, EmptyState, PageCanvas, PageHeader, PHASE_LABEL, PHASES, spaceHolderLabel, workspacePhaseLabel, workspaceStatusLabel, WorkspaceStatusDot, type GitSpaceShellProps, type ProjectLifecycleView, type SpaceHolderView, type WorkspaceView } from './GitSpaceShell.js';
 import { WorkspaceGraph, type WorkspaceGraphItem } from './WorkspaceGraph.js';
@@ -12,7 +12,7 @@ import { glyph } from './glyph.js';
 import { browserPluginsUrl, navigateProductUrl, setProductRoute } from './routes.js';
 import { useInference } from './InferenceContext.js';
 import { ProjectInferenceSelector } from './InferencePage.js';
-import { latestOperation, OperationCardActions, operationActive, OperationProgress, OperationStatusLine } from './OperationProgress.js';
+import { latestOperation, MachineCopyProgress, OperationCardActions, operationActive, OperationProgress, OperationStatusLine } from './OperationProgress.js';
 import { useToasts, type Toast } from './toasts.js';
 import { checkProjectOrigin, updateProjectBase } from './project-origin.js';
 
@@ -394,6 +394,7 @@ function ProjectOrigin({ project, operations }: { project: ProjectLifecycleView;
   const [pending, setPending] = useState<'update' | 'check' | null>(null);
   const pendingRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
+  const [copy, setCopy] = useState<ProjectCopyOperation | null>(null);
   if (project.repositoryReference === null || project.lifecycle === 'deleting') return null;
   const remote = project.remote;
   const projectOperation = latestOperation(operations, null);
@@ -402,9 +403,9 @@ function ProjectOrigin({ project, operations }: { project: ProjectLifecycleView;
   const run = async (action: 'update' | 'check') => {
     if (pendingRef.current) return;
     pendingRef.current = true; setPending(action); setError(null);
-    try { await (action === 'update' ? updateProjectBase(project.id) : checkProjectOrigin(project.id)); }
+    try { await (action === 'update' ? updateProjectBase(project.id, setCopy) : checkProjectOrigin(project.id)); }
     catch (failure) { setError(rpcErrorMessage(failure, action === 'update' ? 'Update base' : 'Check origin')); }
-    finally { pendingRef.current = false; setPending(null); }
+    finally { pendingRef.current = false; setPending(null); setCopy(null); }
   };
   return <div className="flex flex-col gap-2">
     <div className="flex flex-wrap items-center gap-2 text-caption text-muted-foreground">
@@ -414,6 +415,7 @@ function ProjectOrigin({ project, operations }: { project: ProjectLifecycleView;
       {busy ? null : <Button variant="ghost" size="compact" loading={pending === 'check'} disabled={pending !== null} onClick={() => void run('check')} leadingIcon={glyph(RefreshCcw01)}>Check origin</Button>}
       {error ? <p role="alert" className="w-full text-caption text-destructive">{error}</p> : null}
     </div>
+    {copy?.state === 'running' ? <MachineCopyProgress copy={copy} /> : null}
     {updating && updating.state !== 'succeeded' ? <OperationProgress operation={updating} /> : null}
   </div>;
 }

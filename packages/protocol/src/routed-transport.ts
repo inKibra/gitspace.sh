@@ -60,12 +60,11 @@ export function tagRpcProcedures(fetch: typeof globalThis.fetch): typeof globalT
 
 /**
  * The budget of a call that outlasts an ordinary one, in ms; null for an ordinary call. Repository provisioning, image
- * startup, waking a paused cache for an environment run, a machine's sync capture and a machine copying a project's
- * repository in (`project.seed`: an 870 MB repository takes about two minutes) get 300 s; a narration clip 120 s.
+ * startup, waking a paused cache for an environment run and a machine's sync capture get 300 s; a narration clip 120 s.
  * The web app and the MCP server both read it, so a call never has a shorter budget through one than the other.
  */
 export function longRpcTimeoutMs(path: string): number | null {
-  if (path === 'project.create' || path === 'project.seed' || path === 'workspace.create' || path === 'workspace.retryCreate' || path === 'machine.createSandbox' ||
+  if (path === 'project.create' || path === 'workspace.create' || path === 'workspace.retryCreate' || path === 'machine.createSandbox' ||
       path === 'machine.resume' || path === 'machine.sleep' || path === 'machine.destroy' || path === 'environment.runChecks' || path === 'environment.runPhase' || path === 'runtime.sync' ||
       (path.startsWith('machine.image.') && path !== 'machine.image.list')) return 300_000;
   if (path === 'speech.clip') return 120_000;
@@ -93,11 +92,10 @@ export function createRoutedTransport(options: RoutedTransportOptions): ClientTr
   // reports skew (the "GitSpace was updated" prompt). A reply this page cannot read still fails to decode.
   const contract = contractDigest(gitspaceContract);
   const targets = new Map<string, ClientTransport>();
-  const queue = (key: string, long: boolean): ClientTransport => {
+  const queue = (key: string): ClientTransport => {
     let transport = targets.get(key);
     if (!transport) {
-      // A machine copying a project's repository in clones and publishes it in one call, outlasting a batch's budget.
-      const machine = long ? fetchTransport({ url: options.homeUrl, fetch, timeoutMs: 300_000 }) : batch();
+      const machine = batch();
       const stream = machine.stream;
       transport = {
         request: async (envelope, requestOptions) => {
@@ -118,8 +116,7 @@ export function createRoutedTransport(options: RoutedTransportOptions): ClientTr
 
   const resolve = (path: string, input: unknown): ClientTransport => {
     if (path === 'speech.clip') return speech;
-    // `project.seed` runs on its machine (below).
-    if (path !== 'project.seed' && longRpcTimeoutMs(path) !== null) return provisioning;
+    if (longRpcTimeoutMs(path) !== null) return provisioning;
     if (path === 'inspector.view' || path === 'inspector.transcript' || path === 'inspector.transcriptPage' || path === 'inspector.transcriptContent' || path === 'inspector.availability') return inspectorContext;
     if (path === 'settings.state' || path === 'inference.list' || path === 'machine.image.list') return accountState;
     if (path === 'runtime.watch' || path === 'runtime.session') {
@@ -131,9 +128,8 @@ export function createRoutedTransport(options: RoutedTransportOptions): ClientTr
     if (accountRpcAuthority(path) === 'cloud') return account;
     const target = rpcCallTarget(path, input);
     if (!target) return home;
-    if (target.kind === 'terminal') return queue(`terminal:${target.spaceId}:${target.machineId}`, false);
-    const long = longRpcTimeoutMs(path) !== null;
-    return queue(`${long ? 'machine-long' : 'machine'}:${target.machineId}`, long);
+    if (target.kind === 'terminal') return queue(`terminal:${target.spaceId}:${target.machineId}`);
+    return queue(`machine:${target.machineId}`);
   };
 
   return {

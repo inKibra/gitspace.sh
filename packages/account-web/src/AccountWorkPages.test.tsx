@@ -12,11 +12,11 @@ import type { Directory } from './useAccountDirectory.js';
 import { Toasts } from './toasts.js';
 const rpc = vi.hoisted(() => ({
   updateBase: vi.fn(), refresh: vi.fn(), checkInterval: vi.fn(async () => ({ status: 'ok', value: { interval: 'daily' } })),
-  projectAccess: vi.fn<() => Promise<unknown>>(async () => ({ status: 'ok', value: { state: 'ready' } })), seed: vi.fn(), branches: vi.fn(), retry: vi.fn(), dismiss: vi.fn(),
+  projectAccess: vi.fn<() => Promise<unknown>>(async () => ({ status: 'ok', value: { state: 'ready' } })), seed: vi.fn(), seedOperation: vi.fn(), branches: vi.fn(), retry: vi.fn(), dismiss: vi.fn(),
 }));
 vi.mock('./rpc-client.js', () => ({ rpcClient: {
   github: { projectAccess: rpc.projectAccess },
-  project: { updateBase: rpc.updateBase, seed: rpc.seed, remote: { refresh: rpc.refresh, branches: rpc.branches, checkInterval: rpc.checkInterval }, operations: { retry: rpc.retry, dismiss: rpc.dismiss } },
+  project: { updateBase: rpc.updateBase, seed: rpc.seed, seedOperation: rpc.seedOperation, remote: { refresh: rpc.refresh, branches: rpc.branches, checkInterval: rpc.checkInterval }, operations: { retry: rpc.retry, dismiss: rpc.dismiss } },
 } }));
 
 const stamp = '2026-09-12T00:00:00.000Z';
@@ -163,8 +163,13 @@ it('checks the origin, updates the base and retries a failed update in project S
   rpc.projectAccess.mockResolvedValue({ status: 'ok', value: access });
   rpc.branches.mockResolvedValue({ status: 'ok', value: [{ branch: 'main', commit: head }] });
   rpc.refresh.mockResolvedValue({ status: 'ok', value: {} });
-  rpc.seed.mockResolvedValue({ status: 'ok', value: copied });
-  rpc.updateBase.mockResolvedValue({ status: 'ok', value: {} });
+  // The machine's copy runs in the background and runs Update base itself: the first is still fetching when it answers;
+  // the retry's already ended, its Update base refused.
+  const running = { operationId: 'copy-1', projectId: 'alpha', state: 'running', phase: 'fetching', progress: 'Receiving objects:  45% (9/20)', received: { objects: 0, bytes: 0 }, fresh: null, filledFrom: null, baseBranch: 'main', previous: null, commit: null, error: null, then: 'updateBase', updatedBase: null, startedAt: stamp, updatedAt: stamp };
+  const moved = { ...running, state: 'moved', phase: null, progress: null, ...copied, updatedBase: { state: 'done', message: 'Update base is moving the base workspace (operation update-1)' } };
+  const refused = { ...moved, operationId: 'copy-2', state: 'current', updatedBase: { state: 'failed', message: 'Commit or discard the base workspace changes first' } };
+  rpc.seed.mockResolvedValueOnce({ status: 'ok', value: running }).mockResolvedValue({ status: 'ok', value: refused });
+  rpc.seedOperation.mockResolvedValue({ status: 'ok', value: moved });
   rpc.updateBase.mockClear();
   rpc.refresh.mockClear();
   await act(() => root.render(<Toasts><AccountWorkPages projects={[bridged, projects[1]!]} directory={directory} loading={false} onRefresh={vi.fn()} onOpenWorkspace={onOpenWorkspace} onOpenProject={onOpenProject} actions={{}} operations={[failed]} settingsProjectId="alpha" onSettingsProjectChange={vi.fn()} /></Toasts>));
@@ -176,14 +181,19 @@ it('checks the origin, updates the base and retries a failed update in project S
   expect(rpc.branches).toHaveBeenCalledExactlyOnceWith({ projectId: 'alpha', machineId: 'laptop' });
 
   await press('Update base');
-  await vi.waitFor(() => expect(rpc.updateBase).toHaveBeenCalledExactlyOnceWith({ projectId: 'alpha', copied }));
-  expect(rpc.seed).toHaveBeenCalledExactlyOnceWith({ projectId: 'alpha', machineId: 'laptop' });
+  await vi.waitFor(() => expect(dialog.textContent).toContain('Copying through the machine: fetching from the origin'));
+  expect(dialog.textContent).toContain('Receiving objects:  45% (9/20)');
+  // The page reads the copy every two seconds until it ends; the machine, not the page, asked for Update base.
+  await vi.waitFor(() => expect(rpc.seedOperation).toHaveBeenCalledExactlyOnceWith({ projectId: 'alpha', machineId: 'laptop', operationId: 'copy-1' }), { timeout: 4_000 });
+  await vi.waitFor(() => expect(dialog.textContent).not.toContain('Copying through the machine'));
+  expect(rpc.seed).toHaveBeenCalledExactlyOnceWith({ projectId: 'alpha', machineId: 'laptop', then: 'updateBase' });
 
-  // The failed card's Retry is Update base again, through the machine, never a cloud retry without its copy.
+  // The failed card's Retry is Update base again, through the machine, never a cloud retry without its copy; the
+  // machine's refused Update base shows its reason.
   await press('Retry');
-  await vi.waitFor(() => expect(rpc.updateBase).toHaveBeenCalledTimes(2));
-  expect(rpc.updateBase).toHaveBeenLastCalledWith({ projectId: 'alpha', copied });
-  expect(rpc.seed).toHaveBeenCalledTimes(2);
+  await vi.waitFor(() => expect(dialog.textContent).toContain('Commit or discard the base workspace changes first'));
+  expect(rpc.seed).toHaveBeenLastCalledWith({ projectId: 'alpha', machineId: 'laptop', then: 'updateBase' });
+  expect(rpc.updateBase).not.toHaveBeenCalled();
   expect(rpc.retry).not.toHaveBeenCalled();
 
   // With the machine offline, nothing is asked of it or the cloud, and the error names it.

@@ -145,7 +145,7 @@ it('offers to copy a repository whose import was refused through the chosen onli
   const garage = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find((option) => option.textContent === 'garage-box');
   await act(() => garage!.click());
   await act(() => button('Copy through garage-box').click());
-  expect(onCopy).toHaveBeenCalledWith('machine-2');
+  expect(onCopy).toHaveBeenCalledWith('machine-2', expect.any(Function));
   expect(container.querySelector('[role="alert"]')).toBeNull();
 });
 

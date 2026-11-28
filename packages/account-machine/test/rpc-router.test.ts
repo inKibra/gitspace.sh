@@ -2,12 +2,12 @@ import { expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { gitspaceContract, terminalStreamResource } from '@gitspace/protocol/rpc-contract';
+import { gitspaceContract, terminalStreamResource, type ProjectCopyOperation } from '@gitspace/protocol/rpc-contract';
 import { createBrowserClient, fetchTransport } from 'result-rpc/client';
 import { closeDaemonClients, daemonClientForProject } from '@gitspace/supervisor';
 import { WorkspaceHubTerminalCoordinator } from '../src/workspace-hub.js';
 import { createGitSpaceRpcHandler } from '../src/rpc-router.js';
-import { copyProjectThroughMachine, readProjectOriginBranches } from '../src/project-lifecycle.js';
+import { ProjectCopies, readProjectOriginBranches } from '../src/project-lifecycle.js';
 
 function git(cwd: string, ...args: string[]): string {
   const result = Bun.spawnSync(['git', ...args], { cwd, env: { ...Bun.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } });
@@ -34,7 +34,7 @@ test('refuses a launch addressed to another machine before running the builder',
   expect(builds).toBe(1);
 });
 
-test('copies a project base branch from its origin into the project repository, only on the machine it was sent to', async () => {
+test('starts a project copy on the machine it was sent to and answers at once, then reports how it ended', async () => {
   const root = mkdtempSync(join(tmpdir(), 'gitspace-project-copy-'));
   try {
     const origin = join(root, 'origin');
@@ -49,31 +49,57 @@ test('copies a project base branch from its origin into the project repository, 
     const origins: Record<string, string> = { widgets: 'https://github.com/acme-labs/widgets.git', blank: 'https://github.com/acme-labs/blank.git' };
     const reached: Record<string, string> = { 'https://github.com/acme-labs/widgets.git': origin, 'https://github.com/acme-labs/blank.git': blank };
     const published: Array<{ repository: string; ref: string; commit: string }> = [];
+    // Publishing waits until the test lets it finish.
+    const publishing = Promise.withResolvers<void>();
+    const copies = new ProjectCopies({
+      project: async id => ({ repositoryReference: origins[id] ?? null, baseBranch: 'HEAD' }),
+      root, checkouts: () => [],
+      gitEnvironment: url => ({ GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: `url.${reached[url]}.insteadOf`, GIT_CONFIG_VALUE_0: url }),
+      projectRepository: {
+        async readRef() { return null; },
+        async publishRef(input) { await publishing.promise; published.push({ repository: input.binding.repository, ref: input.ref, commit: input.commit }); },
+        async advanceRef() { throw new Error('An empty project repository is never advanced'); },
+      },
+      updateBase: async () => { throw new Error('Only copies are asked for here'); },
+    });
     const rpc = createGitSpaceRpcHandler({
       machineId: 'machine-a', terminals: new WorkspaceHubTerminalCoordinator('machine-a', { path: () => null, projectId: () => null, list: () => [], use: async () => {} }),
       projects: {
-        seed: projectId => copyProjectThroughMachine({
-          project: async id => ({ repositoryReference: origins[id] ?? null, baseBranch: 'HEAD' }),
-          scratchRoot: root,
-          gitEnvironment: url => ({ GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: `url.${reached[url]}.insteadOf`, GIT_CONFIG_VALUE_0: url }),
-          projectRepository: {
-            async readRef() { return null; },
-            async publishRef(input) { published.push({ repository: input.binding.repository, ref: input.ref, commit: input.commit }); },
-            async advanceRef() { throw new Error('An empty project repository is never advanced'); },
-          },
-        }, projectId),
+        seed: projectId => copies.start(projectId),
+        seedOperation: (projectId, operationId) => copies.read(projectId, operationId),
         originBranches: async () => { throw new Error('Only copies are asked for here'); },
       },
     });
     const client = createBrowserClient({ contract: gitspaceContract, transport: fetchTransport({
       url: 'https://machine.test/rpc', fetch: Object.assign(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => rpc.handler(new Request(input, init)), { preconnect: fetch.preconnect }),
     }) });
+    /** The copy as the machine reports it, once `until` holds. */
+    const follow = async (projectId: string, operationId: string, until: (copy: ProjectCopyOperation) => boolean): Promise<ProjectCopyOperation> => {
+      for (;;) {
+        const read = await client.project.seedOperation({ projectId, machineId: 'machine-a', operationId });
+        if (read.status === 'error') throw read.error;
+        if (until(read.value)) return read.value;
+        // The copy runs real git in the background; callers follow it by reading it.
+        await Bun.sleep(10);
+      }
+    };
     expect(await client.project.seed({ projectId: 'widgets', machineId: 'machine-b' })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('machine-b') } } });
+    const started = await client.project.seed({ projectId: 'widgets', machineId: 'machine-a' });
+    if (started.status === 'error') throw started.error;
+    expect(started.value).toMatchObject({ projectId: 'widgets', state: 'running', commit: null, error: null });
+    const { operationId } = started.value;
+    expect(await follow('widgets', operationId, copy => copy.phase === 'publishing')).toMatchObject({ state: 'running', baseBranch: 'trunk' });
+    // A second copy while one runs is the same copy.
+    expect(await client.project.seed({ projectId: 'widgets', machineId: 'machine-a' })).toMatchObject({ status: 'ok', value: { operationId, state: 'running' } });
     expect(published).toEqual([]);
-    expect(await client.project.seed({ projectId: 'widgets', machineId: 'machine-a' })).toEqual({ status: 'ok', value: { baseBranch: 'trunk', previous: null, commit: head } });
+    publishing.resolve();
+    expect(await follow('widgets', operationId, copy => copy.state !== 'running')).toMatchObject({ state: 'moved', phase: null, baseBranch: 'trunk', previous: null, commit: head, error: null });
     expect(published).toEqual([{ repository: 'project-widgets', ref: 'refs/heads/trunk', commit: head }]);
+    expect(await client.project.seedOperation({ projectId: 'widgets', machineId: 'machine-a', operationId: 'another' })).toMatchObject({ status: 'error', error: { data: { message: expect.stringContaining('holds no copy another') } } });
     // A repository with nothing in it has nothing to copy, and says so.
-    expect(await client.project.seed({ projectId: 'blank', machineId: 'machine-a' })).toMatchObject({ status: 'error', error: { data: { message: 'https://github.com/acme-labs/blank.git has no commits for GitSpace to copy yet: push a first commit to it, then copy again' } } });
+    const blankCopy = await client.project.seed({ projectId: 'blank', machineId: 'machine-a' });
+    if (blankCopy.status === 'error') throw blankCopy.error;
+    expect(await follow('blank', blankCopy.value.operationId, copy => copy.state !== 'running')).toMatchObject({ state: 'failed', error: 'https://github.com/acme-labs/blank.git has no commits for GitSpace to copy yet: push a first commit to it, then copy again' });
     expect(published).toHaveLength(1);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
@@ -97,6 +123,7 @@ test('reads every branch of a project origin with the machine git identity, only
       machineId: 'machine-a', terminals: new WorkspaceHubTerminalCoordinator('machine-a', { path: () => null, projectId: () => null, list: () => [], use: async () => {} }),
       projects: {
         seed: async () => { throw new Error('Only origin reads are asked for here'); },
+        seedOperation: async () => { throw new Error('Only origin reads are asked for here'); },
         originBranches: projectId => readProjectOriginBranches(project, projectId),
       },
     });

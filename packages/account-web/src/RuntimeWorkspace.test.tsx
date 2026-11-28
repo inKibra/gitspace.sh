@@ -15,8 +15,16 @@ import { LAUNCHED_STORAGE_KEY } from './LaunchSheet.js';
 
 const mocks = vi.hoisted((): { setRelations: Mock; refresh: Mock; cancelRun: Mock; session: { result: RuntimeSessionResult | null; run: Mock }; shell: GitSpaceShellProps | null; saved: SpaceView | null; access: unknown; deployment: unknown; failed: boolean; pending: boolean } => ({ setRelations: vi.fn(), refresh: vi.fn(), cancelRun: vi.fn(), session: { result: null, run: vi.fn() }, shell: null, saved: null, access: undefined, deployment: undefined, failed: false, pending: false }));
 const createTerminal = vi.hoisted(() => vi.fn(async (_input: { spaceId: string; machineId: string }) => ({ status: 'ok' as const, value: {} })));
-const copyCalls = vi.hoisted(() => ({ seed: vi.fn(async (_input: { projectId: string; machineId: string }) => ({ status: 'ok' as const, value: { baseBranch: 'main', commit: 'c'.repeat(40) } })), attach: vi.fn(async (_input: { projectId: string; workspaceId: string; machineId: string }) => ({ status: 'ok' as const, value: {} })) }));
-vi.mock('./rpc-client.js', () => ({ rpcClient: { deployment: { status: 'deployment' }, github: { projectAccess: 'projectAccess' }, workspace: { setRelations: mocks.setRelations }, terminals: { create: createTerminal }, project: { seed: copyCalls.seed }, runtime: { attachment: { cache: { request: copyCalls.attach } } }, automations: { cancelRun: mocks.cancelRun } } }));
+const copyCalls = vi.hoisted(() => {
+  // The machine's copy runs in the background: still fetching when `project.seed` answers, moved when next read.
+  const running = { operationId: 'copy-1', projectId: 'project', state: 'running', phase: 'fetching', progress: 'Receiving objects:  45% (9/20)', received: { objects: 0, bytes: 0 }, fresh: null, filledFrom: null, baseBranch: 'main', previous: null, commit: null, error: null, then: null, updatedBase: null, startedAt: '2026-10-03T00:00:00.000Z', updatedAt: '2026-10-03T00:00:00.000Z' };
+  return {
+    seed: vi.fn(async (_input: { projectId: string; machineId: string }) => ({ status: 'ok' as const, value: running })),
+    seedOperation: vi.fn(async (_input: { projectId: string; machineId: string; operationId: string }) => ({ status: 'ok' as const, value: { ...running, state: 'moved', phase: null, progress: null, commit: 'c'.repeat(40) } })),
+    attach: vi.fn(async (_input: { projectId: string; workspaceId: string; machineId: string }) => ({ status: 'ok' as const, value: {} })),
+  };
+});
+vi.mock('./rpc-client.js', () => ({ rpcClient: { deployment: { status: 'deployment' }, github: { projectAccess: 'projectAccess' }, workspace: { setRelations: mocks.setRelations }, terminals: { create: createTerminal }, project: { seed: copyCalls.seed, seedOperation: copyCalls.seedOperation }, runtime: { attachment: { cache: { request: copyCalls.attach } } }, automations: { cancelRun: mocks.cancelRun } } }));
 vi.mock('result-rpc/react', () => ({ useResultQuery: (procedure: string) => ({ state: 'success', value: procedure === 'projectAccess' ? mocks.access : procedure === 'deployment' ? mocks.deployment : undefined, refetch: mocks.refresh }) }));
 vi.mock('./InferenceContext.js', () => ({ useInference: () => null }));
 vi.mock('./useCloudSessionControls.js', () => ({ useCloudSessionControls: () => ({ result: mocks.session.result, run: mocks.session.run, error: null }) }));
@@ -236,8 +244,13 @@ it('copies a refused repository in through the chosen online machine, then attac
   expect(labels).not.toContain('Copy through attic-box');
   await act(async () => { [...container.querySelectorAll<HTMLButtonElement>('[aria-label="Repository access"] button')].find(button => button.textContent === 'Copy through studio-mac')?.click(); });
   expect(copyCalls.seed).toHaveBeenCalledWith({ projectId: project.id, machineId: 'machine-on' });
-  expect(copyCalls.attach).toHaveBeenCalledWith({ projectId: project.id, workspaceId: project.id, machineId: 'machine-on' });
-  expect(mocks.refresh).toHaveBeenCalled();
+  // While the copy runs the card shows its progress, and the machine is not attached yet.
+  await vi.waitFor(() => expect(container.textContent).toContain('Copying through the machine: fetching from the origin'));
+  expect(copyCalls.attach).not.toHaveBeenCalled();
+  // The page reads the copy every two seconds; once it moved, the machine is attached to the project.
+  await vi.waitFor(() => expect(copyCalls.attach).toHaveBeenCalledWith({ projectId: project.id, workspaceId: project.id, machineId: 'machine-on' }), { timeout: 4_000 });
+  expect(copyCalls.seedOperation).toHaveBeenCalledWith({ projectId: project.id, machineId: 'machine-on', operationId: 'copy-1' });
+  await vi.waitFor(() => expect(mocks.refresh).toHaveBeenCalled());
 });
 
 it('rereads the queue only once a dismissed automation run is cancelled, and not when the cancel is refused', async () => {

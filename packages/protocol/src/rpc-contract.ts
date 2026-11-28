@@ -740,9 +740,44 @@ export const projectOriginBranchesContract = gitspaceRpc
   .errors({ OperationFailed: rpcErrors.operationFailed })
   .query();
 
-/** A project's copy of its base branch as a machine left it (`project.seed`): the commit it held before (`previous`,
- * null when it had none) and the origin's tip it holds now (`commit`, equal to `previous` when it was already current). */
+/** A project's copy of its base branch as a machine left it (`project.seedOperation` once it moved or was current): the
+ * commit it held before (`previous`, null when it had none) and the origin's tip it holds now (`commit`, equal to
+ * `previous` when it was already current). */
 const ProjectCopyCodec = wire.object({ baseBranch: wire.string, previous: wire.nullable(wire.string), commit: wire.string });
+
+/**
+ * A machine's copy of a project's base branch (`project.seed`), running in the background on that machine.
+ * `state`: `running`; `moved` (the copy moved from `previous`, null on a first copy, to `commit`); `current` (it was
+ * already at the origin's tip, `previous` equal to `commit`); `diverged` (the copy is at `previous`, which origin's tip
+ * `commit` does not build on, so it was not moved); `failed` (`error` says why, ending with git's own words when git
+ * failed). `phase` is the step a running copy is on: `reading-origin`, `checking-cache` (the machine's cache of the
+ * origin), `filling-cache` (from a checkout of the project on that machine), `fetching` (from the origin), `publishing`
+ * (into GitSpace) or `updating-base`; null once it ended. `progress` is git's latest progress line; `received` counts
+ * what the origin sent. `fresh` says why the machine's cache of the origin started over (null when it continued it or
+ * had none yet); `filledFrom` names the checkout it filled an empty cache from. `then` is what the machine does after a
+ * copy that moved or was current: `updateBase` asks the account for Update base with that copy (`project.updateBase`
+ * with `copied`) itself, so the update finishes with no page or session left waiting; `updatedBase` is how that went
+ * (`done`: queued, its operation named in `message`; `failed`: `message` says why), null until then. Times are ISO 8601.
+ */
+const ProjectCopyOperationCodec = wire.object({
+  operationId: wire.string,
+  projectId: wire.string,
+  state: wire.enum(['running', 'moved', 'current', 'diverged', 'failed']),
+  phase: wire.nullable(wire.enum(['reading-origin', 'checking-cache', 'filling-cache', 'fetching', 'publishing', 'updating-base'])),
+  progress: wire.nullable(wire.string),
+  received: wire.object({ objects: wire.number, bytes: wire.number }),
+  fresh: wire.nullable(wire.string),
+  filledFrom: wire.nullable(wire.string),
+  baseBranch: wire.nullable(wire.string),
+  previous: wire.nullable(wire.string),
+  commit: wire.nullable(wire.string),
+  error: wire.nullable(wire.string),
+  then: wire.nullable(wire.enum(['updateBase'])),
+  updatedBase: wire.nullable(wire.object({ state: wire.enum(['done', 'failed']), message: wire.string })),
+  startedAt: wire.string,
+  updatedAt: wire.string,
+});
+export type ProjectCopyOperation = InputOf<typeof ProjectCopyOperationCodec>;
 
 /** Bring the project's copy of its base branch, and its clean idle base workspace, up to the origin's base branch. With
  * `copied`, a machine already brought the copy to the origin's tip (`project.seed`, for an origin only that machine
@@ -754,17 +789,29 @@ export const updateProjectBaseContract = gitspaceRpc
   .errors({ ProjectNotFound: rpcErrors.projectNotFound, OperationFailed: rpcErrors.operationFailed })
   .mutation();
 
-/** Copy the project's base branch from its origin into the project's repository through the named machine, with that
- * machine's git identity (the account SSH key), or fast-forward the copy already there to the origin's tip (a copy at
- * any other commit is refused). The account forwards it to that machine only; the cloud lets any of the account's
- * machines write the project's repository while it waits, empty, for a copy (its import was refused), and otherwise only
- * a machine attached to the project's base workspace. */
+/** Start copying the project's base branch from its origin into the project's repository through the named machine,
+ * with that machine's git identity (the account SSH key), or fast-forwarding the copy already there to the origin's tip
+ * (a copy at any other commit is refused). Returns at once with the copy, which runs on that machine until it ends;
+ * one already running for the project is returned instead of starting another (it takes on `then`). With
+ * `then: 'updateBase'` the machine runs Update base itself once the copy moved or was current. `project.seedOperation`
+ * follows it.
+ * The account forwards it to that machine only; the cloud lets any of the account's machines write the project's
+ * repository while it waits, empty, for a copy (its import was refused), and otherwise only a machine attached to the
+ * project's base workspace. */
 export const projectSeedContract = gitspaceRpc
   .procedure()
-  .input(wire.object({ projectId: wire.string, machineId: wire.string }))
-  .output(ProjectCopyCodec)
+  .input(wire.object({ projectId: wire.string, machineId: wire.string, then: wire.optional(wire.enum(['updateBase'])) }))
+  .output(ProjectCopyOperationCodec)
   .errors({ OperationFailed: rpcErrors.operationFailed })
   .mutation();
+
+/** A copy `project.seed` started on the named machine, as it stands. */
+export const projectSeedOperationContract = gitspaceRpc
+  .procedure()
+  .input(wire.object({ projectId: wire.string, machineId: wire.string, operationId: wire.string }))
+  .output(ProjectCopyOperationCodec)
+  .errors({ OperationFailed: rpcErrors.operationFailed })
+  .query();
 
 export const deleteProjectContract = gitspaceRpc
   .procedure()
@@ -2933,6 +2980,7 @@ export const gitspaceContract = gitspaceRpc.contract({
     setRepository: setProjectRepositoryContract,
     updateBase: updateProjectBaseContract,
     seed: projectSeedContract,
+    seedOperation: projectSeedOperationContract,
     remote: { refresh: refreshProjectRemoteContract, branches: projectOriginBranchesContract, checkInterval: projectOriginCheckContract, setCheckInterval: setProjectOriginCheckContract },
     delete: deleteProjectContract,
     operation: projectOperationContract,

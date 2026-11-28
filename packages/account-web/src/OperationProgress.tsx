@@ -1,7 +1,7 @@
 // Long project and workspace changes run in the background: the request records the operation, the project's own object
 // runs it, and the account directory carries every project's operations to each page. These show one where the change
 // it makes shows, until it ends; a failure stays on its step with Retry and Dismiss.
-import type { CloudProjectOperation } from '@gitspace/protocol';
+import type { CloudProjectOperation, ProjectCopyOperation } from '@gitspace/protocol';
 import { Badge, Button, ThinkingIndicator, Tooltip, useShape } from '@gitspace/ui';
 import { RefreshCcw01, XClose } from '@untitledui/icons';
 import { useEffect, useMemo, useState, type ReactElement } from 'react';
@@ -64,25 +64,26 @@ function useSeconds(operation: CloudProjectOperation): number {
 }
 
 /** Retry and Dismiss of a failed operation, with the reason either was refused. A failed Update base runs again as Update
- * base itself does, through the bridge machine for an origin only that machine reads; the operation it queues hides the
- * failure, as a retry's does. */
+ * base itself does, through the bridge machine for an origin only that machine reads, whose copy shows as it runs
+ * (`copy`); the operation it queues hides the failure, as a retry's does. */
 function useOperationActions(operation: CloudProjectOperation) {
   const [pending, setPending] = useState<'retry' | 'dismiss' | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [copy, setCopy] = useState<ProjectCopyOperation | null>(null);
   const act = async (action: 'retry' | 'dismiss') => {
     if (pending) return;
     setPending(action); setError(null);
     const input = { projectId: operation.projectId, operationId: operation.id };
     try {
-      if (action === 'retry' && operation.kind === 'project.updateBase') await updateProjectBase(operation.projectId);
+      if (action === 'retry' && operation.kind === 'project.updateBase') await updateProjectBase(operation.projectId, setCopy);
       else {
         const result = action === 'retry' ? await rpcClient.project.operations.retry(input) : await rpcClient.project.operations.dismiss(input);
         if (result.status === 'error') throw result.error;
       }
     } catch (failure) { setError(rpcErrorMessage(failure, action === 'retry' ? 'Retry' : 'Dismiss')); }
-    finally { setPending(null); }
+    finally { setPending(null); setCopy(null); }
   };
-  return { pending, error, retry: () => void act('retry'), dismiss: () => void act('dismiss') };
+  return { pending, error, copy, retry: () => void act('retry'), dismiss: () => void act('dismiss') };
 }
 
 const STEP_BADGE: Record<CloudProjectOperation['state'], { label: string; color: 'gray' | 'amber' | 'green' | 'red' }> = {
@@ -115,12 +116,36 @@ export function OperationProgress({ operation }: { operation: CloudProjectOperat
       ? <>
           <p role="alert" className="text-caption text-destructive">{operation.error}</p>
           {actions.error ? <p role="alert" className="text-caption text-destructive">{actions.error}</p> : null}
+          {actions.copy?.state === 'running' ? <MachineCopyProgress copy={actions.copy} /> : null}
           <div className="flex gap-2">
             <Button variant="secondary" size="compact" leadingIcon={glyph(RefreshCcw01)} loading={actions.pending === 'retry'} disabled={actions.pending !== null} onClick={actions.retry}>Retry</Button>
             <Button variant="ghost" size="compact" leadingIcon={glyph(XClose)} loading={actions.pending === 'dismiss'} disabled={actions.pending !== null} onClick={actions.dismiss}>Dismiss</Button>
           </div>
         </>
       : <span className="text-caption text-muted-foreground">Runs in the background: you can close this.</span>}
+  </section>;
+}
+
+const COPY_PHASES: Record<NonNullable<ProjectCopyOperation['phase']>, string> = {
+  'reading-origin': 'reading the origin', 'checking-cache': 'checking its cache of the origin', 'filling-cache': 'filling its cache from a checkout',
+  fetching: 'fetching from the origin', publishing: 'publishing into GitSpace', 'updating-base': 'asking the account for Update base',
+};
+
+/** A machine's copy of a project's base branch while a page waits on it (`copyProjectThroughMachine`): its step, git's
+ * latest progress line, what the origin sent so far, and why the machine's cache of the origin started over. It runs on
+ * with the page closed. */
+export function MachineCopyProgress({ copy }: { copy: ProjectCopyOperation }): ReactElement {
+  const shape = useShape();
+  const mebibytes = copy.received.bytes / 1024 ** 2;
+  return <section aria-label="Copying through the machine" className={`flex flex-col gap-1 bg-surface-2 p-3 ${shape.container} [overflow-wrap:anywhere]`}>
+    <div className="flex items-center gap-2">
+      <ThinkingIndicator size="compact" className="shrink-0 p-0 [&>span[aria-hidden]]:hidden" />
+      <span className="text-body font-medium text-foreground">Copying through the machine{copy.phase === null ? '' : `: ${COPY_PHASES[copy.phase]}`}</span>
+    </div>
+    {copy.progress ? <span className="font-mono text-caption text-muted-foreground">{copy.progress}</span> : null}
+    {copy.received.objects > 0 ? <span className="text-caption text-muted-foreground tabular-nums">{copy.received.objects.toLocaleString()} objects{mebibytes > 0 ? `, ${mebibytes.toFixed(1)} MiB` : ''} received</span> : null}
+    {copy.fresh ? <span className="text-caption text-muted-foreground">The machine started its cache of the origin over: {copy.fresh}.</span> : null}
+    <span className="text-caption text-muted-foreground">Runs on the machine: you can close this. Starting it again picks the copy up.</span>
   </section>;
 }
 

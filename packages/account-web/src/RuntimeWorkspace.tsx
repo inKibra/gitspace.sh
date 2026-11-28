@@ -3,7 +3,7 @@ import { canonicalDriveResourceUrl, parseResourceUri, resourceMediaType } from '
 import type { ResourceFile } from './resource-files.js';
 import { APPROVAL_DECISION, APPROVE, REJECT } from '@gitspace/blocks';
 import { useResultQuery } from 'result-rpc/react';
-import type { CloudProjectOperation, InspectorView, LaunchSourceView, SpaceView } from '@gitspace/protocol';
+import type { CloudProjectOperation, InspectorView, LaunchSourceView, ProjectCopyOperation, SpaceView } from '@gitspace/protocol';
 import { InspectorViewCodec, rpcErrors, SpaceViewCodec } from '@gitspace/protocol/rpc-contract';
 import { questionState, RuntimeIdentitySchema, RuntimeMachineIdSchema, RuntimeSnapshotSchema, type RuntimeSnapshot } from '@gitspace/protocol-runtime';
 import { Button, ThinkingIndicator } from '@gitspace/ui';
@@ -40,7 +40,7 @@ import { useEventRefresh, useProjectChanges } from './SynchronizationProvider.js
 import { RepositoryAccessCard, rememberGitHubInstall, useRepositoryBridgeToasts } from './GitHubAccess.js';
 import { useToasts } from './toasts.js';
 import { operationActive, OperationStatusLine } from './OperationProgress.js';
-import { updateProjectBase } from './project-origin.js';
+import { copyProjectThroughMachine, updateProjectBase } from './project-origin.js';
 
 export interface RuntimeInspectorContext {
   snapshot: RuntimeSnapshot;
@@ -197,9 +197,8 @@ export function RuntimeWorkspaceShell({ snapshot, inspection, connected, reads, 
     return result.value.url;
   };
   // The chosen machine copies the base branch in, then is attached to the base workspace to keep it in sync.
-  const copyThroughMachine = async (machineId: string) => {
-    const copied = await rpcClient.project.seed({ projectId: props.projectId, machineId });
-    if (copied.status === 'error') throw copied.error;
+  const copyThroughMachine = async (machineId: string, progress: (copy: ProjectCopyOperation) => void) => {
+    await copyProjectThroughMachine(props.projectId, machineId, progress);
     const base = RuntimeIdentitySchema.parse({ projectId: props.projectId, workspaceId: props.projectId });
     const attached = await rpcClient.runtime.attachment.cache.request({ ...base, machineId: RuntimeMachineIdSchema.parse(machineId) });
     if (attached.status === 'error') throw attached.error;

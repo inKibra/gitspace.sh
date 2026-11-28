@@ -184,26 +184,6 @@ it('sends each speech.clip alone: a clip answers when it is made, not with the c
   expect(settled).toEqual(['Two. ok', 'One. ok']);
 });
 
-it('lets a machine copying a project in answer after the batch timeout', async () => {
-  vi.useFakeTimers();
-  const answers: Array<(response: Response) => void> = [];
-  async function fetcher(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-    const request = new Request(input, init);
-    const { promise, resolve, reject } = Promise.withResolvers<Response>();
-    answers.push(resolve);
-    request.signal.addEventListener('abort', () => reject(request.signal.reason), { once: true });
-    return promise;
-  }
-  const transport = createRoutedTransport({ homeUrl: 'https://account.test/rpc', fetch: fetcher });
-  const settled: string[] = [];
-  void transport.request({ v: 1, path: 'project.seed', input: { projectId: 'large', machineId: 'machine' } }).then((outcome) => { settled.push(outcome.ok ? 'ok' : 'failed'); });
-  await vi.advanceTimersByTimeAsync(120_000);
-  expect(settled).toEqual([]);
-  answers[0]?.(new Response('copied'));
-  await vi.advanceTimersByTimeAsync(0);
-  expect(settled).toEqual(['ok']);
-});
-
 it('prompts a reload only for an account reply from another release, never for a machine reply a reload cannot change', async () => {
   const events: string[] = [];
   const machineRelease = 'machine-release-contract';
