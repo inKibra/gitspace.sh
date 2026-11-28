@@ -1,0 +1,2 @@
+/* The mock's own sources, for Tailwind's class scan (the theme already scans account-web and the kit). */
+@source "./**/*.{ts,tsx}";
