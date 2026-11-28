@@ -51,7 +51,10 @@ export async function machineProjectBaseUpdate(env: Env, userId: string, machine
   const base = RuntimeIdentitySchema.parse({ projectId: input.projectId, workspaceId: input.projectId });
   const access = await requireWorkspaceAccess(env, userId, base, false);
   const attachments = await access.authority.runtimeAttachmentRecords(base);
-  if (!attachments.some(item => item.machineId === machine && item.state === 'ready')) throw new Error('Update base from a machine requires a ready checkout of the base workspace on this machine');
+  // The same machines the project repository's write lease admits: any not detached from the base workspace. A ready
+  // checkout can't be required: a base whose copy is behind may be uncheckable until this update moves it (a branch
+  // with stray gitlinks, 2026-11-28).
+  if (!attachments.some(item => item.machineId === machine && item.state !== 'detached')) throw new Error('Update base from a machine requires its attachment to the base workspace');
   const operation = await updateCloudProjectBase(env, userId, input.projectId, input.copied);
   return { operationId: operation.id };
 }

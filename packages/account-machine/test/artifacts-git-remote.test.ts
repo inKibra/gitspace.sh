@@ -279,6 +279,24 @@ it('acquires the assigned commit even after its checkpoint ref moved on', async 
   expect(readFileSync(join(directory, 'file'), 'utf8')).toBe('assigned');
 }, 60_000);
 
+it('checks out a commit carrying gitlinks no .gitmodules declares, leaving them empty', async () => {
+  const f = fixture();
+  writeFileSync(join(f.root, 'file'), 'tracked'); git(f.root, 'add', 'file');
+  // A worktree's commit recorded as a gitlink, as `git add .worktrees/<name>` does, with no `.gitmodules` entry.
+  git(f.root, 'update-index', '--add', '--cacheinfo', `160000,${'c'.repeat(40)},.worktrees/stray`);
+  git(f.root, 'commit', '-m', 'stray gitlink');
+  const commit = git(f.root, 'rev-parse', 'HEAD');
+  git(f.root, 'push', f.remote, `${commit}:${f.checkpointRef}`);
+  const directory = join(f.root, 'stray-gitlink');
+  const acquired = await acquireCheckout({
+    name: 'stray-gitlink', directory, source: { remote: 'https://artifacts.invalid/repository', ref: f.checkpointRef, commit, layers: [] },
+    fixed: true, requiresFiltersOrSubmodules: true, signal: new AbortController().signal, hydrateLfs: async () => {}, submoduleEnvironment: async () => ({}),
+    host: { root: f.root, ensureDaemon: async () => { throw new Error('Git acquisition must not start a daemon'); }, gitEnvironment: async () => ({ GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: `url.${f.remote}.insteadOf`, GIT_CONFIG_VALUE_0: 'https://artifacts.invalid/repository' }) },
+  });
+  expect(acquired.commit).toBe(commit);
+  expect(readFileSync(join(directory, 'file'), 'utf8')).toBe('tracked');
+}, 60_000);
+
 it('materializes and restores a shallow checkpoint, preserves full caches, and can deepen through origin', async () => {
   const f = fixture();
   writeFileSync(join(f.root, 'old.bin'), Buffer.alloc(32_000_001));

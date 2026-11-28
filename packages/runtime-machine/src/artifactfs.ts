@@ -1,5 +1,5 @@
 import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
-import { constants } from 'node:fs';
+import { constants, existsSync } from 'node:fs';
 import { join } from 'node:path';
 
 /** `layers`: other commits the checkout needs objects for (a checkpoint's head, index and tracked-worktree commits). */
@@ -70,7 +70,19 @@ export async function acquireCheckout(input: {
     const branch = input.source.ref.startsWith('refs/heads/') ? input.source.ref.slice('refs/heads/'.length) : input.source.ref;
     await command('git', input.fixed || /^[0-9a-f]{40}$/u.test(input.source.ref) ? ['checkout', '--detach', input.source.commit] : ['checkout', '-b', branch, input.source.commit], { ...env, GIT_LFS_SKIP_SMUDGE: '1' }, input.directory);
     await input.hydrateLfs(input.directory);
-    if (input.requiresFiltersOrSubmodules) await command('git', ['submodule', 'update', '--init', '--recursive'], await input.submoduleEnvironment(input.directory), input.directory);
+    if (input.requiresFiltersOrSubmodules) {
+      // Only submodules `.gitmodules` declares are initialized. A gitlink it doesn't declare has no URL to fetch, and
+      // `git submodule update` fails the whole checkout on it ("No url found for submodule path"): a branch carrying
+      // stray `.worktrees/*` gitlinks could not be checked out at all (2026-11-28). Those stay empty directories.
+      const declared = existsSync(join(input.directory, '.gitmodules'))
+        ? (await command('git', ['config', '--file', '.gitmodules', '--get-regexp', '^submodule\\..*\\.path$'], env, input.directory).catch(() => '')).split('\n').filter(Boolean).map(line => line.slice(line.indexOf(' ') + 1))
+        : [];
+      const gitlinks = (await command('git', ['ls-files', '--stage', '-z'], env, input.directory)).split('\0').filter(entry => entry.startsWith('160000 ')).map(entry => entry.slice(entry.indexOf('\t') + 1));
+      const stray = gitlinks.filter(path => !declared.includes(path));
+      if (stray.length) console.warn(JSON.stringify({ event: 'checkout_stray_gitlinks', directory: input.directory, paths: stray }));
+      const initialized = gitlinks.filter(path => declared.includes(path));
+      if (initialized.length) await command('git', ['submodule', 'update', '--init', '--recursive', '--', ...initialized], await input.submoduleEnvironment(input.directory), input.directory);
+    }
     input.signal.throwIfAborted();
     return { mode: 'git', directory: input.directory, commit: acquired };
   }
