@@ -73,7 +73,8 @@ ours already has one.
 
 A project the cloud can't read (no GitHub App) is read through a **bridge** machine attached to its base workspace:
 
-- **Check origin** uses `project.remote.branches`.
+- **Check origin** uses `project.remote.branches` with the branches `github.projectAccess` names (the base branch and
+  the live workspaces' branches); the machine returns only those, so neither request grows with the origin's branches.
 - **Update base** uses `project.seed`, a background operation from a per-machine origin cache
   (`origins/<projectId>.git`), with progress and a 10-minute no-progress watchdog.
 - With `then: updateBase`, the machine finishes Update base itself through the control op `project.base.update`.
@@ -93,8 +94,8 @@ In a multi-repo project this applies per repository whose access is "a machine w
    named, is not decided.
 3. What a workspace created with a subset does when an agent needs a repository that wasn't cloned (clone on demand, or
    refuse) is not decided.
-4. How the CI gate into Review (`ENVIRONMENT-DESIGN.md`) combines several pull requests: all must pass is assumed, not
-   decided.
+4. ~~How the CI gate into Review combines several pull requests.~~ Decided: there is no gate; each repository's pull
+   request shows its own checks where the workspace moves into Review (`ENVIRONMENT-DESIGN.md`).
 
 ## 13. Build order
 

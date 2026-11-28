@@ -4,7 +4,7 @@
 > clickable mock in `packages/account-web/src/teams-mock/` (entry `mock-teams.html`; see its README). It uses an
 > invented team, Crumb & Co, with projects Crumb, Ledger and Field notes. Where this doc and the mock name a page, field
 > or refusal, they use the same words. The project environment (Instructions, machine profiles, approved scripts, CI
-> gating Review) is in `ENVIRONMENT-DESIGN.md`; projects with several repositories are in `MULTI-REPO-DESIGN.md`.
+> shown at Review) is in `ENVIRONMENT-DESIGN.md`; projects with several repositories are in `MULTI-REPO-DESIGN.md`.
 
 Today a GitSpace account is one person: every check that matters is `userId === env.ACCOUNT_ID`, and the account's
 `USER_*` objects are keyed by the account. Teams turns an account into a **team**: several **principals** act inside
@@ -166,8 +166,8 @@ resources a turn uses.
   archived. No "Clear all".
 - **The agent's questions go to the holders.** In a free workspace they go to the project roles that may assign holders.
 - **Phase moves and approvals** are checked against the project role of whoever approves them or started the turn.
-  Otherwise the agent proposes and a holder whose role allows it accepts. The move into Review is also held by the pull
-  request's CI checks (`ENVIRONMENT-DESIGN.md`).
+  Otherwise the agent proposes and a holder whose role allows it accepts. CI never holds a phase move; the pull
+  request's checks show where the move is made (`ENVIRONMENT-DESIGN.md`).
 - **Leaving:** "Let go" releases the handle. A removed person's work stays; their handles are released.
 
 ## 7. Resources: team and personal

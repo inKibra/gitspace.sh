@@ -9,7 +9,7 @@
 Today a repository describes its workspace environment in `.gitspace/`: a `bundle.json` of profiles, checks, values and
 secret names, ordered lifecycle scripts run per phase, a services list, and approvals of each script's content. A new
 workspace runs an automatic prepare turn. This design replaces that with project configuration held by GitSpace,
-machine profiles held by the team, approved scripts, and the pull request's CI as the gate into Review.
+machine profiles held by the team, approved scripts, and the pull request's CI shown where a workspace moves into Review.
 
 ## 1. What is removed
 
@@ -42,8 +42,8 @@ Environment is a section of Project settings. It holds:
 - **Written by "Set up with an agent"**: an agent inspects the repositories and writes the first Instructions, listing
   the approved scripts to use and, before pushing, the tests CI runs.
 - **Edited by Leads**, proposed by any member (section 2).
-- When a repository has no CI, the Instructions tell agents to say in their report which checks they ran, since Review
-  then relies on it (section 7).
+- When a repository has no CI, the Instructions tell agents to say in their report which checks they ran, since whoever
+  moves the workspace into Review then relies on it (section 7).
 
 ## 4. Machine profiles
 
@@ -100,18 +100,23 @@ Secrets reach work only by the delivery their rule allows (`TEAMS-DESIGN.md` ›
 There is no network-secret or proxy delivery. Known values are redacted from command output, best effort: values derived
 from a secret are not covered.
 
-## 7. CI gates Review
+## 7. CI shown at Review
 
-- **The move into Review is gated by the pull request's CI checks** on GitHub, read through the team's GitHub App.
-- **Failing or running checks hold the move** to Review.
+- **CI never blocks a phase move.** Whoever moves a workspace into Review, a person or its agent, can always move it.
+- **The pull request's CI checks show where the move is made**, read through the team's GitHub App: the phase menu and
+  the workspace card show passing, failing and running checks, so a red or running PR is visible before it lands in
+  Review.
 - A project with no CI, or whose checks GitSpace can't read, shows **"No CI checks: Review relies on the agent's
   report"**.
-- GitSpace no longer runs its own checks for this gate.
+- A team that wants merges blocked on CI uses GitHub's branch protection; GitSpace does not duplicate it.
+- GitSpace no longer runs its own checks before Review.
 
 ## 8. Importing `.gitspace/`
 
-A repository's existing `.gitspace/`, `AGENTS.md` or `CLAUDE.md` is **imported as a proposal**, never replacing the
-current revision directly. The proposal goes to the project's Leads like any other (section 2).
+A repository's existing `.gitspace/`, `AGENTS.md` or `CLAUDE.md` is **imported once, as a proposal**, when the project
+migrates (section 9), never replacing the current revision directly. The proposal goes to the project's Leads like any
+other (section 2). GitSpace does not read `.gitspace/` again afterwards: later changes to the repository's copy are not
+offered, and the Environment section is the only source.
 
 ## 9. Migration from today's lifecycle
 
@@ -172,7 +177,8 @@ Read from `packages/protocol-environment` and this repository's own `.gitspace/`
    something when a workspace is retired, once `cloud/destroy` scripts are gone?
 4. Which mapping rows above are done automatically by the importer and which are left for "Set up with an agent" is not
    decided; the mapping is a proposal of this doc.
-5. Whether the importer reads `.gitspace/` again when the repository's copy changes later, or only once.
+5. ~~Whether the importer reads `.gitspace/` again when the repository's copy changes later, or only once.~~ Decided: once,
+   at migration (section 8).
 
 ## 11. Build order
 
@@ -180,7 +186,7 @@ Read from `packages/protocol-environment` and this repository's own `.gitspace/`
    revision).
 2. **Instructions** delivered to agents, and "Set up with an agent".
 3. **Import** of `.gitspace/`, `AGENTS.md` and `CLAUDE.md` as a proposal.
-4. **CI gating Review** through the GitHub App, with the "No CI checks" state.
+4. **CI status at Review** through the GitHub App, with the "No CI checks" state.
 5. **Machine profiles:** library, approvals, per-machine approve or decline, readiness and Run setup, placement.
 6. **Approved scripts with interactive prompts** (after the library in `TEAMS-DESIGN.md`), including the MCP URL
    elicitation.
