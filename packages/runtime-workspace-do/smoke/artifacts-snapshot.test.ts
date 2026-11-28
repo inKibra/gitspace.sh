@@ -1235,6 +1235,11 @@ function artifactsLog(directory: string, ref: string) {
   }));
 }
 
+/** Whether a bare repository holds a commit, as Artifacts' `readCommit` answers it. */
+function holdsCommit(directory: string) {
+  return async (commit: string) => Bun.spawnSync(['git', 'cat-file', '-e', `${commit}^{commit}`], { cwd: directory }).exitCode === 0;
+}
+
 for (const protocolVersion of [0, 2] as const) test(`a transfer sends objects only older history holds when the destination is shallow at its have, over Git v${protocolVersion}`, async () => {
   // C restores a tree that only A holds, below the destination's shallow boundary B. Artifacts advertises no shallow
   // boundaries, so the copy declares B, where the destination's history stops, and the source sends A's tree.
@@ -1281,7 +1286,7 @@ for (const protocolVersion of [0, 2] as const) test(`a transfer sends objects on
     run(root, 'init', '-q', '--bare', '-b', 'main', destination);
     run(destination, '-c', 'protocol.file.allow=always', 'fetch', '-q', '--depth', '1', `file://${source}`, `${b}:refs/heads/main`);
     expect(Bun.spawnSync(['git', 'cat-file', '-e', restored], { cwd: destination }).exitCode).not.toBe(0);
-    await transferCommit({ source: { remote: 'https://source.invalid/repo.git', auth: null }, destination: { remote: 'https://destination.invalid/repo.git', auth: { kind: 'bearer', token: 'write' } }, ref: 'refs/heads/main', previous: b, commit: c, negotiation: copyNegotiation(artifactsLog(destination, 'refs/heads/main')), held: async commit => Bun.spawnSync(['git', 'cat-file', '-e', `${commit}^{commit}`], { cwd: destination }).exitCode === 0 });
+    await transferCommit({ source: { remote: 'https://source.invalid/repo.git', auth: null }, destination: { remote: 'https://destination.invalid/repo.git', auth: { kind: 'bearer', token: 'write' } }, ref: 'refs/heads/main', previous: b, commit: c, negotiation: await copyNegotiation(artifactsLog(destination, 'refs/heads/main'), holdsCommit(source)), held: async commit => Bun.spawnSync(['git', 'cat-file', '-e', `${commit}^{commit}`], { cwd: destination }).exitCode === 0 });
     expect(run(destination, 'rev-parse', 'refs/heads/main')).toBe(c);
     expect(run(destination, 'cat-file', '-t', restored)).toBe('tree');
   } finally { request.mockRestore(); await rm(root, { recursive: true, force: true }); }
@@ -1398,9 +1403,9 @@ for (const protocolVersion of [0, 2] as const) test(`a copy with nothing to nego
     }
     const head = run(work, 'rev-parse', 'HEAD');
     run(root, 'clone', '-q', '--bare', work, repositories.source!);
-    const copy = (destination: string) => transferCommit({
+    const copy = async (destination: string) => transferCommit({
       source: { remote: 'https://source.invalid/repo.git', auth: null }, destination: { remote: `https://${destination}.invalid/repo.git`, auth: { kind: 'bearer', token: 'write' } },
-      ref: 'refs/heads/main', previous: null, commit: head, negotiation: copyNegotiation(artifactsLog(repositories[destination]!, 'HEAD')),
+      ref: 'refs/heads/main', previous: null, commit: head, negotiation: await copyNegotiation(artifactsLog(repositories[destination]!, 'HEAD'), holdsCommit(repositories.source!)),
       held: async commit => Bun.spawnSync(['git', 'cat-file', '-e', `${commit}^{commit}`], { cwd: repositories[destination] }).exitCode === 0,
     });
 
@@ -1483,7 +1488,7 @@ test('a switch to a diverged branch sends only what the destination lacks, as Gi
     run(destination, '-c', 'protocol.file.allow=always', 'fetch', '-q', `file://${source}`, 'refs/heads/old:refs/heads/old');
     await transferCommit({
       source: { remote: 'https://source.invalid/repo.git', auth: null }, destination: { remote: 'https://destination.invalid/repo.git', auth: { kind: 'bearer', token: 'write' } },
-      ref: 'refs/heads/new', previous: null, commit: want, negotiation: copyNegotiation(artifactsLog(destination, 'HEAD')),
+      ref: 'refs/heads/new', previous: null, commit: want, negotiation: await copyNegotiation(artifactsLog(destination, 'HEAD'), holdsCommit(source)),
       held: async held => Bun.spawnSync(['git', 'cat-file', '-e', `${held}^{commit}`], { cwd: destination }).exitCode === 0,
     });
     expect(run(destination, 'rev-parse', 'refs/heads/new')).toBe(want);
@@ -1491,6 +1496,91 @@ test('a switch to a diverged branch sends only what the destination lacks, as Gi
     // The three new files: the 20 base files (320 KiB) the destination holds were not sent again.
     expect(pushes).toHaveLength(1);
     expect(pushes[0]).toBeLessThan(120 * 1024);
+    expect(run(destination, 'fsck', '--strict', '--no-dangling')).toBe('');
+  } finally { request.mockRestore(); await rm(root, { recursive: true, force: true }); }
+}, 30_000);
+
+for (const protocolVersion of [0, 2] as const) test(`a copy the source cannot negotiate is sent limited, its have kept where the source's history stops too, over Git v${protocolVersion}`, async () => {
+  // As Artifacts on 2026-11-28 (an 870 MB monorepo): it answers 500 to a request with haves and no depth, whose history
+  // walk it cannot finish, and drops a have it is told is shallow from a request that deepens. The source is shallow at
+  // W, which the destination holds alone, 20 commits below the copied one; W's tree carries a 256 KiB file nothing
+  // compresses, and the destination, like Artifacts with its 64 MiB, takes 128 KiB a push.
+  const root = await mkdtemp(join(tmpdir(), 'unbounded-walk-'));
+  const identity = { GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.com', GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.com' };
+  const run = (cwd: string, ...args: string[]) => {
+    const result = Bun.spawnSync(['git', ...args], { cwd, env: { ...process.env, ...identity } });
+    if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+    return result.stdout.toString().trim();
+  };
+  const limit = 128 * 1024;
+  const work = join(root, 'work');
+  const source = join(root, 'source.git');
+  const destination = join(root, 'destination.git');
+  const fetches: { lines: string[]; status: number }[] = [];
+  const pushes: number[] = [];
+  const line = (text: string) => (text.length + 4).toString(16).padStart(4, '0') + text;
+  const request = spyOn(globalThis, 'fetch').mockImplementation(Object.assign(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    const url = new URL(String(input));
+    const advertise = url.pathname.endsWith('/info/refs');
+    const service = (advertise ? url.searchParams.get('service') : url.pathname.split('/').at(-1)) === 'git-upload-pack' ? 'upload-pack' : 'receive-pack';
+    let body = advertise ? null : new Uint8Array(await new Response(init?.body).arrayBuffer());
+    if (service === 'receive-pack' && body) {
+      pushes.push(body.length);
+      if (body.length > limit) return new Response(TOO_LARGE_REFUSALS.code(body.length, limit).split(/(?<=\n)/u).map(line).join('') + '0000');
+    }
+    if (service === 'upload-pack' && body) {
+      const lines: string[] = [];
+      for (let offset = 0; offset < body.length;) {
+        const size = Number.parseInt(new TextDecoder().decode(body.subarray(offset, offset + 4)), 16);
+        lines.push(size < 4 ? new TextDecoder().decode(body.subarray(offset, offset + 4)) : new TextDecoder().decode(body.subarray(offset + 4, offset + size)));
+        offset += size < 4 ? 4 : size;
+      }
+      const commits = (prefix: string) => lines.filter(entry => entry.startsWith(prefix)).map(entry => entry.slice(prefix.length).trim());
+      const deepens = commits('deepen ').length > 0;
+      fetches.push({ lines: lines.filter(entry => /^(?:have|shallow|deepen) /u.test(entry)).map(entry => entry.trim()), status: commits('have ').length && !deepens ? 500 : 200 });
+      if (commits('have ').length && !deepens) return new Response('Internal Server Error', { status: 500 });
+      const declared = new Set(commits('shallow '));
+      body = new TextEncoder().encode(lines.filter(entry => !(deepens && entry.startsWith('have ') && declared.has(entry.slice('have '.length).trim()))).map(entry => /^000[01]$/u.test(entry) ? entry : line(entry)).join(''));
+    }
+    const child = Bun.spawn(['git', '-c', 'receive.shallowUpdate=true', service, '--stateless-rpc', ...(advertise ? ['--advertise-refs'] : []), url.hostname === 'source.invalid' ? source : destination], {
+      stdin: body ?? 'ignore', stdout: 'pipe', stderr: 'pipe',
+      env: { ...process.env, GIT_PROTOCOL: protocolVersion === 2 ? new Headers(init?.headers).get('git-protocol') ?? 'version=0' : 'version=0' },
+    });
+    const bytes = new Uint8Array(await new Response(child.stdout).arrayBuffer());
+    const error = await new Response(child.stderr).text();
+    if (await child.exited !== 0) return new Response(error, { status: 500 });
+    return new Response(bytes);
+  }, { preconnect: fetch.preconnect }));
+  try {
+    run(root, 'init', '-q', '-b', 'main', work);
+    await Bun.write(join(work, 'count.txt'), 'seed\n');
+    run(work, 'add', '-A'); run(work, 'commit', '-q', '-m', 'below the source');
+    await Bun.write(join(work, 'base.bin'), crypto.getRandomValues(new Uint8Array(256 * 1024)));
+    run(work, 'add', '-A'); run(work, 'commit', '-q', '-m', 'W');
+    const w = run(work, 'rev-parse', 'HEAD');
+    for (let index = 0; index < 20; index++) {
+      await Bun.write(join(work, 'count.txt'), `${index}\n`);
+      run(work, 'add', '-A'); run(work, 'commit', '-q', '-m', `after W ${index}`);
+    }
+    const head = run(work, 'rev-parse', 'HEAD');
+    run(root, 'init', '-q', '--bare', '-b', 'main', source);
+    run(source, '-c', 'protocol.file.allow=always', 'fetch', '-q', '--depth', '21', `file://${work}`, 'refs/heads/main:refs/heads/main');
+    expect(await Bun.file(join(source, 'shallow')).text()).toBe(`${w}\n`);
+    expect(await holdsCommit(source)(run(work, 'rev-parse', `${w}~1`))).toBe(false);
+    run(root, 'init', '-q', '--bare', '-b', 'main', destination);
+    run(destination, '-c', 'protocol.file.allow=always', 'fetch', '-q', '--depth', '1', `file://${source}`, `${w}:refs/heads/main`);
+    await transferCommit({
+      source: { remote: 'https://source.invalid/repo.git', auth: null }, destination: { remote: 'https://destination.invalid/repo.git', auth: { kind: 'bearer', token: 'write' } },
+      ref: 'refs/heads/main', previous: w, commit: head, negotiation: await copyNegotiation(artifactsLog(destination, 'refs/heads/main'), holdsCommit(source)),
+      held: holdsCommit(destination),
+    });
+    // The negotiated request failed; the same haves, limited to 64 commits, did not, and W was never declared shallow.
+    expect(fetches).toEqual([{ lines: [`have ${w}`], status: 500 }, { lines: ['deepen 64', `have ${w}`], status: 200 }]);
+    expect(run(destination, 'rev-parse', 'refs/heads/main')).toBe(head);
+    expect(run(destination, 'rev-list', '--count', 'refs/heads/main')).toBe('21');
+    // W's 256 KiB file, which the destination holds, was not sent again.
+    expect(pushes).toHaveLength(1);
+    expect(pushes[0]).toBeLessThanOrEqual(limit);
     expect(run(destination, 'fsck', '--strict', '--no-dangling')).toBe('');
   } finally { request.mockRestore(); await rm(root, { recursive: true, force: true }); }
 }, 30_000);

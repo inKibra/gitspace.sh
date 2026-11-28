@@ -359,21 +359,35 @@ const NEGOTIATION_HAVES = 32;
  * the destination's history stops (a machine seed's base, a shallow copy's cut; Artifacts advertises none), or the
  * window's edge, which costs at most objects the destination already holds. Without boundaries a source omits every
  * object older history holds (SIMPLIFICATION 55). Declaring each have a boundary instead made GitHub ignore the haves
- * unless one was in the copied commit's history, so a switch to a diverged branch sent its whole history (139). */
-export function copyNegotiation(window: readonly { hash: string; parents: readonly string[] }[]): CopyNegotiation {
+ * unless one was in the copied commit's history, so a switch to a diverged branch sent its whole history (139). A
+ * boundary is declared only where `sourceHolds` one of its parents outside the window: below a commit the source holds
+ * no parent of, it has no history to omit objects from. Artifacts drops a have declared shallow from a request that
+ * deepens, which a copy falls back to (`transferCommit`): measured 2026-11-28 on an 870 MB monorepo, a destination
+ * holding only the source's shallow root got 173 MB with the root declared and 39 MB without. */
+export async function copyNegotiation(window: readonly { hash: string; parents: readonly string[] }[], sourceHolds: (commit: string) => Promise<boolean>): Promise<CopyNegotiation> {
   const listed = new Set(window.map(entry => entry.hash));
-  return {
-    haves: window.slice(0, NEGOTIATION_HAVES).map(entry => entry.hash),
-    boundaries: window.filter(entry => entry.parents.some(parent => !listed.has(parent))).map(entry => entry.hash),
-  };
+  const boundaries = await Promise.all(window.map(async entry => {
+    const outside = entry.parents.filter(parent => !listed.has(parent));
+    return outside.length && (await Promise.all(outside.map(sourceHolds))).some(Boolean) ? [entry.hash] : [];
+  }));
+  return { haves: window.slice(0, NEGOTIATION_HAVES).map(entry => entry.hash), boundaries: boundaries.flat() };
 }
+
+/** A source's upload-pack refused a pack request. `limitable`: it answered 5xx to a request carrying haves without a
+ * depth, which Artifacts does when the history walk the request needs is too long (`transferCommit`). */
+class GitFetchError extends Error {
+  constructor(message: string, readonly limitable: boolean) { super(message); }
+}
+
+type CommitPack = { shallow: string[]; limited: boolean; pack: ReadableStream<Uint8Array> };
 
 /** Requests the reachable graph of `commit` without thin packs, with the destination's `negotiation`. A source that
  * cannot take shallow lines gets no haves: without the boundaries it would omit objects only older history holds. With
- * no haves, history is limited to `depth` commits from `commit` when the source takes shallow lines (`limited`); GitHub
- * ignores every have in a request that deepens, so one with haves never does. The source reports where it cut, and its
- * shallow boundaries precede its pack, so they are known before the first pack byte is forwarded. */
-async function openCommitPack(input: { remote: string; auth: GitHttpAuth | null; commit: string; negotiation: CopyNegotiation; depth: number; signal: AbortSignal }, request: ArtifactsFetch): Promise<{ shallow: string[]; limited: boolean; pack: ReadableStream<Uint8Array> }> {
+ * no haves, or with `limit`, history is limited to `depth` commits from `commit` when the source takes shallow lines
+ * (`limited`); GitHub ignores every have in a request that deepens, so one with haves deepens only with `limit`. The
+ * source reports where it cut, and its shallow boundaries precede its pack, so they are known before the first pack
+ * byte is forwarded. */
+async function openCommitPack(input: { remote: string; auth: GitHttpAuth | null; commit: string; negotiation: CopyNegotiation; depth: number; limit: boolean; signal: AbortSignal }, request: ArtifactsFetch): Promise<CommitPack> {
   const remote = gitRemote(input.remote);
   if (!/^[0-9a-f]{40}$/u.test(input.commit)) throw new Error('Invalid Git commit');
   const { haves: offered, boundaries: stops } = input.negotiation;
@@ -397,7 +411,7 @@ async function openCommitPack(input: { remote: string; auth: GitHttpAuth | null;
   }
   const haves = new Set(shallowCapable ? offered : []);
   const declared = new Set(haves.size ? stops : []);
-  const limited = shallowCapable && haves.size === 0;
+  const limited = shallowCapable && (haves.size === 0 || input.limit);
   const shallow = [...declared].map(oid => packet(`shallow ${oid}\n`));
   const deepen = limited ? [packet(`deepen ${input.depth}\n`)] : [];
   const parts = version2
@@ -407,7 +421,7 @@ async function openCommitPack(input: { remote: string; auth: GitHttpAuth | null;
     method: 'POST', headers: { ...gitAuthorizationHeaders(input.auth), ...(version2 ? { 'Git-Protocol': 'version=2' } : {}), 'Content-Type': 'application/x-git-upload-pack-request', Accept: 'application/x-git-upload-pack-result' },
     body: concatBytes(parts), signal: input.signal, redirect: 'manual',
   });
-  if (!response.ok) throw new Error(await gitHttpFailure('Git fetch', response));
+  if (!response.ok) throw new GitFetchError(await gitHttpFailure('Git fetch', response), response.status >= 500 && shallowCapable && !limited);
   if (!response.body) throw new Error('Git fetch returned no pack');
   const chunks = streamBytes(response.body, input.signal);
   const reader = new PacketReader(chunks);
@@ -425,21 +439,32 @@ async function openCommitPack(input: { remote: string; auth: GitHttpAuth | null;
 const TRANSFER_TIMEOUT_MS = 10 * 60_000;
 /** History a cloud copy into a destination holding none of it carries, in commits from the copied commit: Artifacts
  * holds recent history only, checkouts read depth 1, and older history stays on the origin. A copy onto history the
- * destination holds sends what it lacks instead, however deep (GitHub ignores haves in a limited request). */
+ * destination holds sends what it lacks instead, however deep (GitHub ignores haves in a limited request), unless the
+ * source cannot walk that far. */
 export const ARTIFACTS_COPY_DEPTH = 64;
 
 /** Copies the graph of `commit` into a destination ref, streaming the source's upload-pack response straight into the
  * destination's receive-pack request: no pack is held in memory, so a history larger than a Worker's memory still
  * transfers. The ref moves only from `previous` (null: absent). The source sends what the destination's `negotiation`
  * says it lacks; with nothing to negotiate, at most `ARTIFACTS_COPY_DEPTH` commits, and a copy Artifacts refuses as too
- * large is sent with less, as `smallerArtifactsPush` steps it, down to `commit` alone. Source shallow boundaries travel
- * with the pack so a copy never invents complete ancestry, except one the destination already `held`: declaring it
- * would cut the destination's own history there. No credentials follow redirects, and an interrupted download fails the
- * push (receive-pack verifies the pack before moving the ref), so it has no destination-side effect. */
+ * large is sent with less, as `smallerArtifactsPush` steps it, down to `commit` alone. A source that answers the
+ * negotiation with 5xx is asked again with the same negotiation, limited the same way: Artifacts walks the whole history
+ * a request with haves and no depth needs, and fails one it cannot finish with a bare 500 after 12–35 s (2026-11-28: an
+ * update base whose new tip merges thousands of commits the destination lacks). Source shallow
+ * boundaries travel with the pack so a copy never invents complete ancestry, except one the destination already `held`:
+ * declaring it would cut the destination's own history there. No credentials follow redirects, and an interrupted
+ * download fails the push (receive-pack verifies the pack before moving the ref), so it has no destination-side effect. */
 export async function transferCommit(input: { source: { remote: string; auth: GitHttpAuth | null }; destination: { remote: string; auth: GitHttpAuth }; ref: string; previous: string | null; commit: string; negotiation: CopyNegotiation; held: (commit: string) => Promise<boolean> }, request: ArtifactsFetch = fetch): Promise<void> {
+  let limit = false;
   for (let depth = ARTIFACTS_COPY_DEPTH; ;) {
     const signal = AbortSignal.timeout(TRANSFER_TIMEOUT_MS);
-    const opened = await openCommitPack({ ...input.source, commit: input.commit, negotiation: input.negotiation, depth, signal }, request);
+    let opened: CommitPack;
+    try { opened = await openCommitPack({ ...input.source, commit: input.commit, negotiation: input.negotiation, depth, limit, signal }, request); }
+    catch (error) {
+      if (!(error instanceof GitFetchError) || !error.limitable) throw error;
+      limit = true;
+      continue;
+    }
     try {
       const shallow: string[] = [];
       for (const boundary of opened.shallow) if (!await input.held(boundary)) shallow.push(boundary);

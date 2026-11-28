@@ -380,7 +380,8 @@ export class ArtifactsCodeStore {
   private async fetchIntoRepository(repository: string, origin: { remote: string; auth: GitHttpAuth | null }, ref: string, commit: string, previous: string | null | 'replace'): Promise<void> {
     const repo = await this.binding.get(repositorySchema.parse(repository));
     try {
-      const negotiation = copyNegotiation(await repo.log({ limit: NEGOTIATION_WINDOW }));
+      // An origin's history is not read here: every boundary is declared, as if it holds every parent.
+      const negotiation = await copyNegotiation(await repo.log({ limit: NEGOTIATION_WINDOW }), async () => true);
       const [info, token] = await Promise.all([repo.info(), repo.createToken('write', TRANSFER_LEASE_SECONDS)]);
       const auth: GitHttpAuth = { kind: 'bearer', token: token.plaintext };
       try {
@@ -506,7 +507,7 @@ export class ArtifactsCodeStore {
             const sourceInfo = await origin.info();
             const readToken = await origin.createToken('read', TRANSFER_LEASE_SECONDS);
             try {
-              const negotiation = copyNegotiation(await target.log({ ...(previous === null ? {} : { ref: previous }), limit: NEGOTIATION_WINDOW }));
+              const negotiation = await copyNegotiation(await target.log({ ...(previous === null ? {} : { ref: previous }), limit: NEGOTIATION_WINDOW }), async parent => await origin.readCommit(parent) !== null);
               await transferCommit({ source: { remote: sourceInfo.remote, auth: { kind: 'bearer', token: readToken.plaintext } }, destination: { remote: info.remote, auth }, ref, previous, commit, negotiation, held: async held => await target.readCommit(held) !== null });
             } finally { await origin.revokeToken(readToken.id); }
           } finally { await disposeArtifactsRepository(origin); }
