@@ -318,7 +318,7 @@ it('hears each step of a publication, the lease request and git\'s push meter in
   const steps: string[] = [];
   await f.remote().publishRef({ binding: { projectId: 'widgets', repository: 'project-widgets' }, repositoryPath: f.origin, ref: 'refs/heads/main', commit: tip, watch: { progress: step => steps.push(step) } });
   expect(steps).toContain('Requesting a write lease on project-widgets from the account');
-  expect(steps).toContain(`Pushing ${tip}:refs/heads/main to GitSpace`);
+  expect(steps).toContain(`Pushing ${tip}:refs/heads/main to GitSpace in one push`);
   expect(steps.some(step => step.startsWith('Writing objects: 100%'))).toBe(true);
 });
 

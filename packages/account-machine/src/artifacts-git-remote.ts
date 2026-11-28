@@ -144,22 +144,29 @@ const WHOLE_OBJECTS = ['-c', 'pack.window=0', '-c', 'pack.depth=0', '-c', 'pack.
 
 /** The commits `remote` holds without their parents. Artifacts advertises none, but a fetch reports those of the
  * history it sends; it refuses a commits-only (filtered) fetch with HTTP 400, so this downloads the tips' trees. */
-async function remoteShallowBoundaries(remote: string, auth: Record<string, string>, watch: ArtifactsWatch): Promise<string[]> {
+async function remoteShallowBoundaries(input: ArtifactsPush): Promise<string[]> {
   const directory = await mkdtemp(join(tmpdir(), 'gitspace-boundaries-'));
   try {
     await git(directory, ['init', '--quiet', '--bare']);
-    watch.progress?.('Reading the shallow boundaries of the GitSpace repository');
-    await git(directory, ['fetch', '--quiet', '--update-shallow', '--no-tags', remote, '+refs/*:refs/remote/*'], auth, { signal: watch.signal });
+    input.watch.progress?.('Reading the shallow boundaries of the GitSpace repository');
+    await input.lease(lease => git(directory, ['fetch', '--quiet', '--update-shallow', '--no-tags', lease.remote, '+refs/*:refs/remote/*'], lease.environment, { signal: input.watch.signal }));
     const shallow = join(directory, 'shallow');
     return existsSync(shallow) ? (await readFile(shallow, 'utf8')).split('\n').filter(Boolean) : [];
   } finally { await rm(directory, { recursive: true, force: true }); }
 }
 
-/** One push to Artifacts: `refspec` from the checkout at `repositoryPath`, with the lease's credentials (`auth`) and
- * the publication's shallow boundaries (`shallow`), as git environment. `update` says whether the push may move a ref
- * the remote holds: only forward (`fast-forward`), to anything (`force`), or only while it still names `from`. `watch`
- * follows it. */
-type ArtifactsPush = { repositoryPath: string; remote: string; refspec: string; update: 'fast-forward' | 'force' | { from: string }; auth: Record<string, string>; shallow: Record<string, string>; watch: ArtifactsWatch };
+/** A lease's remote and the git environment carrying its token. */
+type PushLease = Pick<RepositoryLease, 'remote' | 'environment'>;
+
+/** One push to Artifacts: `refspec` from the checkout at `repositoryPath`, with the publication's shallow boundaries
+ * (`shallow`) as git environment. `update` says whether the push may move a ref the remote holds: only forward
+ * (`fast-forward`), to anything (`force`), or only while it still names `from`. `lease` runs one git invocation against
+ * the remote with a write lease current for it, renewing a lease the remote refuses and running it once more; `watch`
+ * (its own when given to `lease`) follows it. */
+type ArtifactsPush = {
+  repositoryPath: string; refspec: string; update: 'fast-forward' | 'force' | { from: string }; shallow: Record<string, string>; watch: ArtifactsWatch;
+  lease<T>(run: (lease: PushLease) => Promise<T>, watch?: ArtifactsWatch): Promise<T>;
+};
 
 /**
  * Artifacts' receive-pack refuses some pushes that a differently built one passes (`artifactsPushRefusal`):
@@ -178,6 +185,7 @@ async function pushToArtifacts(input: ArtifactsPush): Promise<void> {
   try { await pushPack(input); }
   catch (error) {
     if (!(error instanceof ArtifactsGitError) || artifactsPushRefusal(error.message) !== 'too-large') throw error;
+    input.watch.progress?.(`GitSpace refused ${input.refspec} in one push as too large (${error.message.split('\n').map(line => line.trim()).filter(Boolean).at(-1)?.slice(0, 200)}); pushing it in steps`);
     await pushInSteps(input);
   }
 }
@@ -185,21 +193,20 @@ async function pushToArtifacts(input: ArtifactsPush): Promise<void> {
 async function pushPack(input: ArtifactsPush): Promise<void> {
   const ref = input.refspec.slice(input.refspec.lastIndexOf(':') + 1);
   const update = input.update === 'fast-forward' ? [] : input.update === 'force' ? ['--force'] : [`--force-with-lease=${ref}:${input.update.from}`];
-  const target = [...update, input.remote, input.refspec];
-  input.watch.progress?.(`Pushing ${input.refspec} to GitSpace`);
-  try { await git(input.repositoryPath, [...PUSH, ...input.watch.progress ? ['--progress'] : [], ...target], { ...input.auth, ...input.shallow, GIT_LFS_SKIP_PUSH: '1' }, input.watch); }
+  input.watch.progress?.(`Pushing ${input.refspec} to GitSpace in one push`);
+  try { await input.lease(lease => git(input.repositoryPath, [...PUSH, ...input.watch.progress ? ['--progress'] : [], ...update, lease.remote, input.refspec], { ...lease.environment, ...input.shallow, GIT_LFS_SKIP_PUSH: '1' }, input.watch)); }
   catch (error) {
     if (!(error instanceof ArtifactsGitError) || artifactsPushRefusal(error.message) !== 'pack') throw error;
     // The push's own boundaries: the one publication set, or the checkout's.
     const ownFile = input.shallow.GIT_SHALLOW_FILE ?? await git(input.repositoryPath, ['rev-parse', '--path-format=absolute', '--git-path', 'shallow']);
     const own = existsSync(ownFile) ? (await readFile(ownFile, 'utf8')).split('\n') : [];
     // A remote whose tips cannot be fetched (it answers HTTP 500 for a missing object) gets the whole-object push alone.
-    const remote = await remoteShallowBoundaries(input.remote, input.auth, input.watch).catch(() => []);
+    const remote = await remoteShallowBoundaries(input).catch(() => []);
     const directory = await mkdtemp(join(tmpdir(), 'gitspace-push-'));
     try {
       await writeFile(join(directory, 'shallow'), [...new Set([...own, ...remote].filter(Boolean))].map(commit => `${commit}\n`).join(''));
-      input.watch.progress?.(`Pushing ${input.refspec} to GitSpace again, as whole objects`);
-      await git(input.repositoryPath, [...WHOLE_OBJECTS, ...PUSH, ...input.watch.progress ? ['--progress'] : [], '--no-thin', ...target], { ...input.auth, GIT_SHALLOW_FILE: join(directory, 'shallow'), GIT_LFS_SKIP_PUSH: '1' }, input.watch);
+      input.watch.progress?.(`GitSpace refused the pack for ${input.refspec} (${error.message.split('\n').map(line => line.trim()).filter(Boolean).at(-1)?.slice(0, 200)}); pushing it again as whole objects`);
+      await input.lease(lease => git(input.repositoryPath, [...WHOLE_OBJECTS, ...PUSH, ...input.watch.progress ? ['--progress'] : [], '--no-thin', ...update, lease.remote, input.refspec], { ...lease.environment, GIT_SHALLOW_FILE: join(directory, 'shallow'), GIT_LFS_SKIP_PUSH: '1' }, input.watch));
     } finally { await rm(directory, { recursive: true, force: true }); }
   }
 }
@@ -216,12 +223,13 @@ async function pushInSteps(input: ArtifactsPush): Promise<void> {
   const source = input.refspec.slice(input.refspec.startsWith('+') ? 1 : 0, input.refspec.lastIndexOf(':'));
   const commit = (await git(input.repositoryPath, ['rev-parse', '--verify', `${source}^{commit}`])).trim();
   input.watch.progress?.('Reading what the GitSpace repository holds, to push in steps');
-  const held = (await git(input.repositoryPath, ['ls-remote', input.remote], input.auth, { signal: input.watch.signal })).split('\n')
+  const held = (await input.lease(lease => git(input.repositoryPath, ['ls-remote', lease.remote], lease.environment, { signal: input.watch.signal }))).split('\n')
     .map(line => line.split('\t')[0] ?? '').filter(oid => /^[0-9a-f]{40}$/u.test(oid));
   // Each line: a commit, then its parents.
   const commits = (await git(input.repositoryPath, ['rev-list', '--topo-order', '--reverse', '--parents', '--ignore-missing', commit, ...(held.length ? ['--not', ...held] : [])], input.shallow, { signal: input.watch.signal }))
     .split('\n').filter(Boolean).map(line => line.split(' '));
   let size = smallerArtifactsPush(commits.length) ?? 1;
+  input.watch.progress?.(`Pushing ${commits.length} commits in steps of at most ${size}`);
   // Named by when it began, so `clearStaging` tells a publication's in-flight refs from those one cut short left.
   const staging = `refs/gitspace/staging/${Date.now()}-${crypto.randomUUID()}`;
   const refs: string[] = [];
@@ -233,6 +241,7 @@ async function pushInSteps(input: ArtifactsPush): Promise<void> {
     if (commits.length === 1 && lone) { await pushBlobsInParts(input, lone, staging, refs); parted.add(lone[0]!); }
     for (let sent = 0; sent < commits.length;) {
       const step = commits.slice(sent, sent + size);
+      input.watch.progress?.(`Pushing step: commits ${sent + 1}–${sent + step.length} of ${commits.length}`);
       const parents = new Set(step.flatMap(([, ...of]) => of));
       try {
         for (const [tip] of step.filter(([oid]) => !parents.has(oid!))) {
@@ -256,7 +265,8 @@ async function pushInSteps(input: ArtifactsPush): Promise<void> {
     // Staging refs hold only objects the pushed ref holds too. They are deleted even after the publication was stopped,
     // under their own deadline; any a killed process leaves, the next copy deletes (`clearStaging`). A deletion sends no
     // objects, so it sends no shallow boundaries either (`DELETE_SHALLOW`).
-    if (refs.length) await git(input.repositoryPath, [...PUSH, input.remote, ...refs.map(ref => `:${ref}`)], { ...input.auth, ...DELETE_SHALLOW }, { signal: AbortSignal.timeout(STAGING_CLEANUP_MS) }).catch(() => undefined);
+    const cleanup = { signal: AbortSignal.timeout(STAGING_CLEANUP_MS) };
+    if (refs.length) await input.lease(lease => git(input.repositoryPath, [...PUSH, lease.remote, ...refs.map(ref => `:${ref}`)], { ...lease.environment, ...DELETE_SHALLOW }, cleanup), cleanup).catch(() => undefined);
   }
 }
 
@@ -313,6 +323,9 @@ export async function verifyArtifactsGitUpload(repositoryPath: string, commit: s
 
 /** A lease is renewed this long before it expires, so no git operation starts with a token about to lapse. */
 const LEASE_RENEWAL_MS = 60_000;
+/** A push starts only with a lease this long from expiring: pushes of a large publication run for minutes, and a token
+ * that lapsed mid-push failed one (403 "Invalid or expired token", 2026-11-28). */
+const PUSH_LEASE_MS = 10 * 60_000;
 /** A lease request the account has not answered in this long fails: it reaches a workspace object that may be stuck. */
 const LEASE_REQUEST_MS = 60_000;
 /** How long deleting a publication's staging refs may take. */
@@ -324,7 +337,7 @@ const STAGING_STALE_MS = 60 * 60_000;
 const DELETE_SHALLOW = { GIT_SHALLOW_FILE: '/dev/null' };
 /** How git reports a token the remote refused: 401 without a prompt to fall back on, or 403. */
 const AUTHENTICATION_FAILURE = /could not read (?:Username|Password)|Authentication failed|returned error: 40[13]\b|\bHTTP 40[13]\b/u;
-type RepositoryLease = { remote: string; renewAt: number; environment: Record<string, string> };
+type RepositoryLease = { remote: string; expiresAt: number; environment: Record<string, string> };
 
 /** No daemon, S3 authority, or persisted credential URL. Leases live in memory only. */
 export class ArtifactsGitRemote {
@@ -359,7 +372,7 @@ export class ArtifactsGitRemote {
     const own = boundary !== null && existsSync(ownFile) ? (await readFile(ownFile, 'utf8')).split('\n').filter(Boolean) : [];
     const advertised = own.length ? new Set((await git(input.repositoryPath, ['ls-remote', auth.remote], auth.environment)).split('\n').map(line => line.split('\t')[0])) : new Set<string>();
     await withShallowBoundary(boundary, own.filter(commit => advertised.has(commit)), async shallow => {
-      await this.transfer(input.binding, pushToArtifacts({ repositoryPath: input.repositoryPath, remote: auth.remote, refspec: `${commit}:${input.checkpointRef}`, update: 'force', auth: auth.environment, shallow, watch: {} }));
+      await this.transfer(input.binding, pushToArtifacts({ repositoryPath: input.repositoryPath, refspec: `${commit}:${input.checkpointRef}`, update: 'force', shallow, watch: {}, lease: this.pushLease(input.binding, {}) }));
     });
   }
 
@@ -383,8 +396,7 @@ export class ArtifactsGitRemote {
     const tips = [...new Set(refs.values())];
     const held = tips.length ? (await git(input.repositoryPath, ['rev-list', '--no-walk', '--ignore-missing', ...tips])).split('\n').filter(Boolean) : [];
     await withShallowBoundary(input.commit, held, async shallow => {
-      const auth = await this.auth(input.binding, 'write', watch);
-      await this.transfer(input.binding, pushToArtifacts({ repositoryPath: input.repositoryPath, remote: auth.remote, refspec: `${input.commit}:${input.ref}`, update: 'fast-forward', auth: auth.environment, shallow, watch }));
+      await this.transfer(input.binding, pushToArtifacts({ repositoryPath: input.repositoryPath, refspec: `${input.commit}:${input.ref}`, update: 'fast-forward', shallow, watch, lease: this.pushLease(input.binding, watch) }));
     });
   }
 
@@ -417,8 +429,7 @@ export class ArtifactsGitRemote {
       watch.signal?.throwIfAborted();
       if (exitCode !== 0) throw new ArtifactsRefDivergedError(input.ref, input.from, input.commit);
       await checkCurrentLayers(input.repositoryPath, input.commit, input.from, shallow, watch);
-      const auth = await this.auth(input.binding, 'write', watch);
-      await this.transfer(input.binding, pushToArtifacts({ repositoryPath: input.repositoryPath, remote: auth.remote, refspec: `${input.commit}:${input.ref}`, update: { from: input.from }, auth: auth.environment, shallow, watch }));
+      await this.transfer(input.binding, pushToArtifacts({ repositoryPath: input.repositoryPath, refspec: `${input.commit}:${input.ref}`, update: { from: input.from }, shallow, watch, lease: this.pushLease(input.binding, watch) }));
     });
   }
 
@@ -500,15 +511,15 @@ export class ArtifactsGitRemote {
     if (!ref.startsWith('refs/gitspace/') || ref.includes('..') || !/^[A-Za-z0-9._/-]+$/u.test(ref)) throw new ArtifactsGitError('checkpoint', 'Invalid private checkpoint ref');
   }
 
-  /** A lease is reused until a minute before it expires, and a write lease also serves reads: every lease costs the
-   * cloud a workspace wake-up, and sync runs git several times a minute. A request the account does not answer within
-   * `leaseTimeoutMs` fails, and `watch` hears that one is being asked for. */
-  private async auth(binding: ArtifactsRepositoryBinding, scope: 'read' | 'write', watch: ArtifactsWatch = {}): Promise<RepositoryLease> {
+  /** A lease is reused until `headroomMs` (a minute unless given) before it expires, and a write lease also serves
+   * reads: every lease costs the cloud a workspace wake-up, and sync runs git several times a minute. A request the
+   * account does not answer within `leaseTimeoutMs` fails, and `watch` hears that one is being asked for. */
+  private async auth(binding: ArtifactsRepositoryBinding, scope: 'read' | 'write', watch: ArtifactsWatch = {}, headroomMs = LEASE_RENEWAL_MS): Promise<RepositoryLease> {
     const key = JSON.stringify([binding.projectId, binding.repository]);
     const held = this.leases.get(key);
     const now = Date.now();
-    if (held?.write && held.write.renewAt > now) return held.write;
-    if (scope === 'read' && held?.read && held.read.renewAt > now) return held.read;
+    if (held?.write && held.write.expiresAt - now > headroomMs) return held.write;
+    if (scope === 'read' && held?.read && held.read.expiresAt - now > headroomMs) return held.read;
     const timeoutMs = this.options.leaseTimeoutMs ?? LEASE_REQUEST_MS;
     watch.progress?.(`Requesting a ${scope} lease on ${binding.repository} from the account`);
     const deadline = AbortSignal.timeout(timeoutMs);
@@ -524,12 +535,27 @@ export class ArtifactsGitRemote {
     if (remote.protocol !== 'https:' || remote.username || remote.password || remote.search || remote.hash) throw new ArtifactsGitError('credentials', 'Invalid credential-free repository URL');
     if (Date.parse(credential.expiresAt) <= Date.now() + LEASE_RENEWAL_MS || !Number.isFinite(Date.parse(credential.expiresAt))) throw new ArtifactsGitError('credentials', 'Repository token expires too soon');
     if (!credential.plaintext || /[\r\n]/u.test(credential.plaintext)) throw new ArtifactsGitError('credentials', 'Invalid repository token');
-    const lease = { remote: remote.href, renewAt: Date.parse(credential.expiresAt) - LEASE_RENEWAL_MS, environment: {
+    const lease = { remote: remote.href, expiresAt: Date.parse(credential.expiresAt), environment: {
       GIT_CONFIG_COUNT: '3', GIT_CONFIG_KEY_0: `http.${remote.href}.extraHeader`, GIT_CONFIG_VALUE_0: `Authorization: Bearer ${credential.plaintext}`,
       GIT_CONFIG_KEY_1: 'http.followRedirects', GIT_CONFIG_VALUE_1: 'false', GIT_CONFIG_KEY_2: 'credential.helper', GIT_CONFIG_VALUE_2: '', GIT_TERMINAL_PROMPT: '0',
     } };
     this.leases.set(key, { ...this.leases.get(key), [scope]: lease });
     return lease;
+  }
+
+  /** Runs each git invocation of a push with a write lease at least `PUSH_LEASE_MS` from expiring, asked for when the
+   * held one is not; a lease the remote refuses (it expired, or was revoked) is replaced and the invocation run once
+   * more. `watch` asks for leases unless the invocation brings its own. */
+  private pushLease(binding: ArtifactsRepositoryBinding, watch: ArtifactsWatch): ArtifactsPush['lease'] {
+    return async (run, own = watch) => {
+      try { return await run(await this.auth(binding, 'write', own, PUSH_LEASE_MS)); }
+      catch (error) {
+        if (!(error instanceof ArtifactsGitError) || !AUTHENTICATION_FAILURE.test(error.message)) throw error;
+        this.leases.delete(JSON.stringify([binding.projectId, binding.repository]));
+        own.progress?.(`${binding.repository} refused the write lease (${error.message.split('\n').map(line => line.trim()).filter(Boolean).at(-1)?.slice(0, 200)}); asking for a new one and running that step again`);
+        return run(await this.auth(binding, 'write', own, PUSH_LEASE_MS));
+      }
+    };
   }
 
   /** A remote that refuses a lease (revoked, or rotated by the cloud) makes the binding mint a fresh one next time. */

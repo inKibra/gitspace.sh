@@ -611,3 +611,107 @@ exec '${Bun.which('git')!}' "$@"
   } finally { process.env.PATH = path; }
   expect(git(f.remote, 'rev-parse', f.checkpointRef)).toBe(checkpoint);
 });
+
+/** A stand-in for Artifacts over HTTPS (git's own smart HTTP behind a self-signed certificate) whose write tokens each
+ * allow `pushesPerToken` pushes and are then refused as Artifacts refuses an expired one. Each lease the remote's
+ * client asks for (`lease`) gets a new token valid for `ttlMs`. */
+async function expiringTokenRemote(pushesPerToken: number, ttlMs = 3_600_000) {
+  const root = mkdtempSync(join(tmpdir(), 'gitspace-lease-')); roots.push(root);
+  const key = join(root, 'key.pem');
+  const cert = join(root, 'cert.pem');
+  const generated = Bun.spawnSync(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', key, '-out', cert, '-days', '1', '-subj', '/CN=127.0.0.1']);
+  if (generated.exitCode !== 0) throw new Error(generated.stderr.toString());
+  const served = join(root, 'served');
+  mkdirSync(served);
+  const repository = join(served, 'project.git');
+  git(served, 'init', '--quiet', '--bare', repository);
+  git(repository, 'config', 'receive.shallowUpdate', 'true');
+  const pushes = new Map<string, number>();
+  const refused = new Response('Invalid or expired token', { status: 403 });
+  const server = Bun.serve({ port: 0, hostname: '127.0.0.1', tls: { key: Bun.file(key), cert: Bun.file(cert) }, async fetch(request) {
+    const url = new URL(request.url);
+    const token = request.headers.get('authorization')?.replace(/^Bearer /u, '') ?? '';
+    const used = pushes.get(token);
+    if (used === undefined) return refused.clone();
+    // A push begins by asking for the receive-pack advertisement.
+    if (url.pathname.endsWith('/info/refs') && url.searchParams.get('service') === 'git-receive-pack') {
+      if (used >= pushesPerToken) return refused.clone();
+      pushes.set(token, used + 1);
+    }
+    const backend = Bun.spawn(['git', 'http-backend'], {
+      env: {
+        PATH: Bun.env.PATH ?? '', GIT_PROJECT_ROOT: served, GIT_HTTP_EXPORT_ALL: '1', REMOTE_USER: 'machine', REMOTE_ADDR: '127.0.0.1',
+        PATH_INFO: url.pathname, QUERY_STRING: url.search.slice(1), REQUEST_METHOD: request.method,
+        CONTENT_TYPE: request.headers.get('content-type') ?? '', HTTP_CONTENT_ENCODING: request.headers.get('content-encoding') ?? '', GIT_PROTOCOL: request.headers.get('git-protocol') ?? '',
+      },
+      stdin: new Blob([await request.arrayBuffer()]), stdout: 'pipe', stderr: 'ignore',
+    });
+    const output = Buffer.from(await new Response(backend.stdout).arrayBuffer());
+    await backend.exited;
+    // CGI: headers, a blank line, the body.
+    const split = output.indexOf('\r\n\r\n');
+    const headers = new Headers();
+    let status = 200;
+    for (const line of output.subarray(0, split).toString().split('\r\n')) {
+      const [name = '', ...value] = line.split(':');
+      if (name.toLowerCase() === 'status') status = Number.parseInt(value.join(':').trim(), 10);
+      else headers.set(name, value.join(':').trim());
+    }
+    return new Response(output.subarray(split + 4), { status, headers });
+  } });
+  const config = join(root, 'gitconfig');
+  writeFileSync(config, '[http]\n\tsslVerify = false\n');
+  const globalConfig = process.env.GIT_CONFIG_GLOBAL;
+  process.env.GIT_CONFIG_GLOBAL = config;
+  const remote = `https://127.0.0.1:${server.port}/project.git`;
+  const leases: string[] = [];
+  const publication = new ArtifactsGitRemote({ credentials: async (_binding, scope) => {
+    const token = `${scope}-${leases.length + 1}`;
+    leases.push(token);
+    pushes.set(token, 0);
+    return { remote, plaintext: token, expiresAt: new Date(Date.now() + ttlMs).toISOString() };
+  } });
+  const close = () => {
+    server.stop(true);
+    if (globalConfig === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+    else process.env.GIT_CONFIG_GLOBAL = globalConfig;
+  };
+  return { repository, publication, leases, close };
+}
+
+it('renews a write lease the remote refuses as expired partway through a publication and finishes it', async () => {
+  const stand = await expiringTokenRemote(1);
+  try {
+    const f = fixture();
+    writeFileSync(join(f.root, 'file'), 'first'); git(f.root, 'add', 'file'); git(f.root, 'commit', '-m', 'first');
+    const first = git(f.root, 'rev-parse', 'HEAD');
+    writeFileSync(join(f.root, 'file'), 'second'); git(f.root, 'commit', '-am', 'second');
+    const second = git(f.root, 'rev-parse', 'HEAD');
+    const binding = { projectId: 'test', repository: 'project-test' };
+    const steps: string[] = [];
+    await stand.publication.publishRef({ binding, repositoryPath: f.root, ref: 'refs/heads/main', commit: first });
+    // The write token allowed one push; the next is refused, and the publication asks for a new lease and pushes again.
+    await stand.publication.advanceRef({ binding, repositoryPath: f.root, ref: 'refs/heads/main', from: first, commit: second, watch: { progress: step => steps.push(step) } });
+    expect(git(stand.repository, 'rev-parse', 'refs/heads/main')).toBe(second);
+    expect(stand.leases.filter(lease => lease.startsWith('write'))).toHaveLength(2);
+    expect(steps.some(step => step.startsWith('project-test refused the write lease (') && step.endsWith('asking for a new one and running that step again'))).toBe(true);
+  } finally { stand.close(); }
+}, 60_000);
+
+it('asks for a new write lease before a push when the held one would lapse during it', async () => {
+  // Leases live five minutes: long enough to reuse for a read, too short to start a push with.
+  const stand = await expiringTokenRemote(1, 5 * 60_000);
+  try {
+    const f = fixture();
+    writeFileSync(join(f.root, 'file'), 'first'); git(f.root, 'add', 'file'); git(f.root, 'commit', '-m', 'first');
+    const first = git(f.root, 'rev-parse', 'HEAD');
+    writeFileSync(join(f.root, 'file'), 'second'); git(f.root, 'commit', '-am', 'second');
+    const second = git(f.root, 'rev-parse', 'HEAD');
+    const binding = { projectId: 'test', repository: 'project-test' };
+    const steps: string[] = [];
+    await stand.publication.publishRef({ binding, repositoryPath: f.root, ref: 'refs/heads/main', commit: first });
+    await stand.publication.advanceRef({ binding, repositoryPath: f.root, ref: 'refs/heads/main', from: first, commit: second, watch: { progress: step => steps.push(step) } });
+    expect(git(stand.repository, 'rev-parse', 'refs/heads/main')).toBe(second);
+    expect(steps.some(step => step.includes('refused the write lease'))).toBe(false);
+  } finally { stand.close(); }
+}, 60_000);
