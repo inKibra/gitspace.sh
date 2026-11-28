@@ -4,7 +4,7 @@
 
 ## 1. Problem
 
-Interactive cloud logins happen once per workspace. Ledger's `.gitspace/lifecycle/machine/prepare/30-aws-login.sh` reads the IAM key and MFA serial from project values, asks for a six-digit code, calls `sts:GetSessionToken` and saves the session to `.gitspace/local/aws-dev-session.env` inside that checkout. Every workspace has its own checkout, so every workspace asks again; Deedible's setup has the same shape. An agent with no terminal cannot answer the prompt, so automatic setup skips it.
+Interactive cloud logins happen once per workspace. Ledger's `.gitspace/lifecycle/machine/prepare/30-aws-login.sh` reads the IAM key and MFA serial from project values, asks for a six-digit code, calls `sts:GetSessionToken` and saves the session to `.gitspace/local/aws-dev-session.env` inside that checkout. Every workspace has its own checkout, so every workspace asks again; Northwind's setup has the same shape. An agent with no terminal cannot answer the prompt, so automatic setup skips it.
 
 ## 2. Project sign-ins
 

@@ -43,7 +43,7 @@ Make the streams package a generic keyed validation layer whose append/read/stre
    - `StreamFamilyMatcher`
    - `defineStreamFamilySchema`
    - `defineStreamFamily`
-2. Remove construct/router/recordless/zerbly/app-specific exports, schema maps, route names, construct runtime family helpers, and typia adapters from `@inkibra/streams`.
+2. Remove construct/router/riverbend/zerbly/app-specific exports, schema maps, route names, construct runtime family helpers, and typia adapters from `@inkibra/streams`.
 3. Implement schema resolution as exactly-one matching family for a stream key:
    - no schema: throw with stream key and failure kind;
    - multiple schemas: throw with stream key and matched schema/family names;
@@ -58,7 +58,7 @@ Make the streams package a generic keyed validation layer whose append/read/stre
 - Read/stream/replay accept valid stored events and reject no-schema, ambiguous-schema, unknown stored event key, and invalid stored payload.
 - Filtering for one event cannot validate another stored event with the wrong validator.
 - Error assertions include stream key, schema/family name where applicable, event name, and failure kind.
-- Dependency/import guardrail proves `packages/inkibra/streams/**` has no `typia`, ai-construct, zerbly, recordless, router, construct runtime, or app-host imports.
+- Dependency/import guardrail proves `packages/inkibra/streams/**` has no `typia`, ai-construct, zerbly, riverbend, router, construct runtime, or app-host imports.
 
 ### Verification commands
 - `bun test packages/inkibra/streams`
@@ -107,7 +107,7 @@ Centralize construct runtime transport schema, route schema, route-only protocol
 - `packages/inkibra/ai-construct/backend/stream-routes.ts`
 - `packages/inkibra/ai-construct/backend/stream-relay.ts`
 - `packages/inkibra/ai-construct/backend/**/*.test.ts`
-- `packages/inkibra/recordless.tempo-api/**/trainer-persona-runtime-events.schemas.ts`
+- `packages/acme/riverbend.tempo-api/**/trainer-persona-runtime-events.schemas.ts`
 - `docs/reviews/construct-runtime-stream-validation/final-verification.md`
 - `docs/reviews/construct-runtime-stream-validation/dispatch-matrix.md`
 
@@ -128,7 +128,7 @@ Centralize construct runtime transport schema, route schema, route-only protocol
 4. Ensure route-only keys are valid only at the SSE/route lifecycle boundary and cannot be appended, read, replayed, persisted, or relayed as runtime transport stream events.
 5. Derive `RELAYABLE_CONSTRUCT_STREAM_EVENTS` from `constructRuntimeStreamSchema.events` when practical; otherwise test exact equality with schema keys and `RUNTIME_TRANSPORT_STREAM_EVENT_KEYS`.
 6. Remove permissive route validators such as broad `Record<string, unknown>` construct route payloads or unguarded `typia.createValidate<Partial<...EventTypes>>()`.
-7. Ensure recordless trainer-persona runtime schemas reuse/adapt ai-construct-owned route/runtime schema rather than keeping a permissive copy.
+7. Ensure riverbend trainer-persona runtime schemas reuse/adapt ai-construct-owned route/runtime schema rather than keeping a permissive copy.
 
 ### Tests
 - Exact key equality between `constructRuntimeStreamSchema.events`, `RUNTIME_TRANSPORT_STREAM_EVENT_KEYS`, and relayable keys.
@@ -141,7 +141,7 @@ Centralize construct runtime transport schema, route schema, route-only protocol
 ### Verification commands
 - `bun test packages/inkibra/ai-construct/backend`
 - `bun run --filter @inkibra/ai-construct typecheck`
-- `bun test packages/inkibra/recordless.tempo-api --filter trainer-persona-runtime-events`
+- `bun test packages/acme/riverbend.tempo-api --filter trainer-persona-runtime-events`
 - `bun run lint:stream-boundaries`
 
 ## Phase 4 — Make ai-construct derive runtime stream keys and own runtime stream client composition
@@ -157,7 +157,7 @@ Runtime stream keys and validators are derived inside ai-construct from namespac
 - `packages/inkibra/ai-construct/index.ts`
 - `packages/inkibra/ai-construct/backend/index.ts`
 - `packages/inkibra/zerbly-app/**/*.{ts,tsx}`
-- `packages/inkibra/recordless.web/**/*.{ts,tsx}`
+- `packages/acme/riverbend.web/**/*.{ts,tsx}`
 - `docs/reviews/construct-runtime-stream-validation/final-verification.md`
 
 ### Changes
@@ -177,10 +177,10 @@ Runtime stream keys and validators are derived inside ai-construct from namespac
 ### Verification commands
 - `bun test packages/inkibra/ai-construct/runtime`
 - `bun test packages/inkibra/zerbly-app --filter runtime`
-- `bun test packages/inkibra/recordless.web --filter runtime`
+- `bun test packages/acme/riverbend.web --filter runtime`
 - `bun run --filter @inkibra/ai-construct typecheck`
 - `bun run --filter @inkibra/zerbly-app typecheck`
-- `bun run --filter @inkibra/recordless.web typecheck`
+- `bun run --filter @acme/riverbend.web typecheck`
 - `bun run lint:construct-graph`
 - `bun run lint:stream-boundaries`
 
@@ -259,14 +259,14 @@ Browser snapshot durable event types, schemas, validators, reducer/domain defini
 Non-ai-construct streams, including ToneTempo generation-status streams, continue to use `@inkibra/streams` directly with owner-local validators and generic stream family primitives.
 
 ### Files
-- `packages/inkibra/recordless.tempo-api/**/*generation-status*.schemas.ts`
-- `packages/inkibra/recordless.web/**/*generation-status*.ts`
-- `packages/inkibra/recordless.web/**/*.test.ts`
+- `packages/acme/riverbend.tempo-api/**/*generation-status*.schemas.ts`
+- `packages/acme/riverbend.web/**/*generation-status*.ts`
+- `packages/acme/riverbend.web/**/*.test.ts`
 - `packages/inkibra/streams/**`
 - `docs/reviews/construct-runtime-stream-validation/final-verification.md`
 
 ### Changes
-1. Keep ToneTempo generation-status schemas in the owning recordless package.
+1. Keep ToneTempo generation-status schemas in the owning riverbend package.
 2. Pass domain-owned validators directly to `createStreamsClient` for non-construct streams.
 3. Ensure ai-construct does not import ToneTempo validators and ToneTempo does not import ai-construct runtime schema/family helpers.
 
@@ -275,10 +275,10 @@ Non-ai-construct streams, including ToneTempo generation-status streams, continu
 - Cross-boundary import guardrail proves no ai-construct/ToneTempo validator coupling.
 
 ### Verification commands
-- `bun test packages/inkibra/recordless.web --filter generation-status`
-- `bun test packages/inkibra/recordless.tempo-api --filter generation-status`
-- `bun run --filter @inkibra/recordless.web typecheck`
-- `bun run --filter @inkibra/recordless.tempo-api typecheck`
+- `bun test packages/acme/riverbend.web --filter generation-status`
+- `bun test packages/acme/riverbend.tempo-api --filter generation-status`
+- `bun run --filter @acme/riverbend.web typecheck`
+- `bun run --filter @acme/riverbend.tempo-api typecheck`
 - `bun run lint:construct-graph`
 - `bun run lint:stream-boundaries`
 
@@ -291,8 +291,8 @@ Before enforcing validation, inventory every runtime stream producer/wrapper/scr
 - `docs/reviews/construct-runtime-stream-validation/producer-inventory.md`
 - `docs/reviews/construct-runtime-stream-validation/dispatch-matrix.md`
 - `packages/inkibra/zerbly-app/**`
-- `packages/inkibra/recordless.web/**`
-- `packages/inkibra/recordless.tempo-api/**`
+- `packages/acme/riverbend.web/**`
+- `packages/acme/riverbend.tempo-api/**`
 - `packages/inkibra/ai-construct/runtime/**`
 - `packages/inkibra/ai-construct/backend/**`
 - `packages/inkibra/zerbly/construct/browser/**`
@@ -307,15 +307,15 @@ Before enforcing validation, inventory every runtime stream producer/wrapper/scr
 
 ### Tests
 - Zerbly runtime `constructEvent` and `frontierAdvanced` producer valid/invalid coverage.
-- Recordless runtime publisher valid/invalid coverage.
+- Riverbend runtime publisher valid/invalid coverage.
 - Durable-runtime ingress `ingressAccepted`, `ingressCommitted`, and `ingressStalled` producer valid/invalid coverage.
 - Tests prove each runtime transport key is produced, validated, routed or explicitly route-only handled, relayed or intentionally non-relayable, and not silently dropped.
 - Tests prove each durable kind is collected, validated, applied/reduced or intentionally ignored with explicit behavior, and never treated as a top-level runtime key.
 
 ### Verification commands
 - `bun test packages/inkibra/zerbly-app --filter runtime`
-- `bun test packages/inkibra/recordless.web --filter runtime`
-- `bun test packages/inkibra/recordless.tempo-api --filter runtime`
+- `bun test packages/acme/riverbend.web --filter runtime`
+- `bun test packages/acme/riverbend.tempo-api --filter runtime`
 - `bun test packages/inkibra/ai-construct/runtime`
 - `bun test packages/inkibra/ai-construct/backend`
 
@@ -364,8 +364,8 @@ Every affected package that owns generated typia artifacts has regenerated `.sch
 ### Files
 - `packages/inkibra/ai-construct/**/*.schemas.ts`
 - `packages/inkibra/ai-construct/**/*.schemas.js`
-- `packages/inkibra/recordless.tempo-api/**/*.schemas.ts`
-- `packages/inkibra/recordless.tempo-api/**/*.schemas.js`
+- `packages/acme/riverbend.tempo-api/**/*.schemas.ts`
+- `packages/acme/riverbend.tempo-api/**/*.schemas.js`
 - `packages/inkibra/**/index.ts`
 - `docs/reviews/construct-runtime-stream-validation/final-verification.md`
 
@@ -380,11 +380,11 @@ Every affected package that owns generated typia artifacts has regenerated `.sch
 
 ### Verification commands
 - `bun run --filter @inkibra/ai-construct generate:schemas`
-- `bun run --filter @inkibra/recordless.tempo-api generate:schemas`
+- `bun run --filter @acme/riverbend.tempo-api generate:schemas`
 - `bun test packages/inkibra/ai-construct --filter schemas`
-- `bun test packages/inkibra/recordless.tempo-api --filter schemas`
+- `bun test packages/acme/riverbend.tempo-api --filter schemas`
 - `bun run --filter @inkibra/ai-construct typecheck`
-- `bun run --filter @inkibra/recordless.tempo-api typecheck`
+- `bun run --filter @acme/riverbend.tempo-api typecheck`
 
 ## Phase 11 — Final verification evidence
 
@@ -401,7 +401,7 @@ Record exact targeted commands, exit status, and relevant test files for every a
    - generic streams tests/typecheck;
    - ai-construct backend/runtime/domain tests/typecheck;
    - Zerbly browser module and zerbly-app runtime setup tests/typecheck;
-   - recordless runtime publisher and ToneTempo generation-status tests/typecheck;
+   - riverbend runtime publisher and ToneTempo generation-status tests/typecheck;
    - schema generation commands;
    - guardrail commands.
 2. `producer-inventory.md` and `dispatch-matrix.md` are complete checked artifacts outside tmp.
@@ -414,17 +414,17 @@ Record exact targeted commands, exit status, and relevant test files for every a
 - `bun test packages/inkibra/ai-construct --filter construct-event-domain`
 - `bun test packages/inkibra/zerbly/construct/browser`
 - `bun test packages/inkibra/zerbly-app --filter runtime`
-- `bun test packages/inkibra/recordless.web --filter runtime`
-- `bun test packages/inkibra/recordless.web --filter generation-status`
-- `bun test packages/inkibra/recordless.tempo-api --filter generation-status`
+- `bun test packages/acme/riverbend.web --filter runtime`
+- `bun test packages/acme/riverbend.web --filter generation-status`
+- `bun test packages/acme/riverbend.tempo-api --filter generation-status`
 - `bun run --filter @inkibra/streams typecheck`
 - `bun run --filter @inkibra/ai-construct typecheck`
 - `bun run --filter @inkibra/zerbly typecheck`
 - `bun run --filter @inkibra/zerbly-app typecheck`
-- `bun run --filter @inkibra/recordless.web typecheck`
-- `bun run --filter @inkibra/recordless.tempo-api typecheck`
+- `bun run --filter @acme/riverbend.web typecheck`
+- `bun run --filter @acme/riverbend.tempo-api typecheck`
 - `bun run --filter @inkibra/ai-construct generate:schemas`
-- `bun run --filter @inkibra/recordless.tempo-api generate:schemas`
+- `bun run --filter @acme/riverbend.tempo-api generate:schemas`
 - `bun run lint:stream-boundaries`
 - `bun run lint:construct-graph`
 - `bun run bypass:check`

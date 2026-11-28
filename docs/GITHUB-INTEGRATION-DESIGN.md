@@ -23,7 +23,7 @@ Each GitSpace account (tenant) creates its own GitHub App from GitSpace in one c
 
 - **Create:** Settings → GitHub → **Create GitHub App** runs GitHub's App manifest flow. GitSpace fills in the name (`GitSpace <handle>`), the webhook URL (`https://<tenant-host>/github/webhook`), the callback and setup URLs, the permissions and events for the features the tenant turned on, and **public** installability. GitHub returns the App id, private key, webhook secret and client credentials; they go into the tenant's vault.
 - **Owner:** the App belongs to the tenant owner's personal GitHub account by default (decided 2026-10-17); the create screen also offers an organization they administer. One personal App installs into every organization the tenant works in, each organization's admin approving the install once; GitHub can transfer the App to an organization later.
-- **Public, but only GitSpace-started installs count.** A public App can be installed on any account, which is what lets one App serve your personal repositories and every organization (Deedible, Ledger, Inkibra) across all your projects. To keep strangers from pointing your App at their repositories:
+- **Public, but only GitSpace-started installs count.** A public App can be installed on any account, which is what lets one App serve your personal repositories and every organization (Northwind, Ledger, Inkibra) across all your projects. To keep strangers from pointing your App at their repositories:
   - every install starts from GitSpace with a signed, expiring `state`;
   - the setup callback records the installation only when the `state` verifies;
   - any installation GitSpace did not start is ignored, and GitSpace uninstalls it through the API;
@@ -45,7 +45,7 @@ Default permissions: `metadata: read`, `contents: write`, `workflows: write`, `p
 ## 4. Routing inside a tenant
 
 - Webhook → verify `X-Hub-Signature-256` with the tenant's secret → record the delivery id once (duplicates are dropped) → route by repository.
-- A repository maps to every project in the tenant whose remote is that repository (several projects may share one, as Deedible's did).
+- A repository maps to every project in the tenant whose remote is that repository (several projects may share one, as Northwind's did).
 - **Mentions:** a comment acts on the tenant only when it mentions `@gitspace-<handle>` (the App's bot name). Target: the workspace already attached to that pull request or issue; otherwise the project marked as the default for the repository; otherwise GitSpace replies asking which project.
 - An event no automation matches is recorded and dropped.
 

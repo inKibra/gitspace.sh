@@ -266,12 +266,12 @@ describe('cloud workspace lifecycle with no machines', () => {
   });
 
   it('imports a branch a private origin refuses through a machine holding the base checkout, and says so when none is ready', async () => {
-    const { client, project, authority, ready } = await cloudProject('Private branches', 'https://github.com/Deedible/Private.git');
+    const { client, project, authority, ready } = await cloudProject('Private branches', 'https://github.com/Northwind/Private.git');
     const importRef = vi.spyOn(ArtifactsCodeStore.prototype, 'importSourceRef').mockRejectedValue(new GitDiscoveryError(401));
     try {
       const created = await ready(client.workspace.create({ projectId: project.id, name: 'Staging work', branch: 'work', sourceKind: 'branch', sourceRef: 'staging' }));
       expect(created.operation).toMatchObject({ state: 'failed', error: expect.stringContaining('The project repository is private') });
-      expect(importRef).toHaveBeenCalledWith(project.id, 'https://github.com/Deedible/Private.git', 'refs/heads/staging', null);
+      expect(importRef).toHaveBeenCalledWith(project.id, 'https://github.com/Northwind/Private.git', 'refs/heads/staging', null);
       expect(await authority.getWorkspace(created.workspace.id)).toMatchObject({ lifecycle: 'failed', sourceCommit: null });
       // Any other refusal is the origin's answer, not a reason to involve a machine.
       importRef.mockRejectedValue(new GitDiscoveryError(500));

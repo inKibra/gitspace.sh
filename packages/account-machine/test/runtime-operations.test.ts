@@ -56,7 +56,7 @@ test('import_ref publishes the origin ref the base checkout fetched, leaving its
     git(origin, 'add', '.'); git(origin, 'commit', '-qm', 'main');
     git(root, 'clone', '-q', origin, 'base');
     const base = join(root, 'base');
-    // The branch exists only on the origin, as `staging` did for Deedible.
+    // The branch exists only on the origin, as `staging` did for Northwind.
     git(origin, 'checkout', '-qb', 'staging');
     writeFileSync(join(origin, 'a.txt'), 'staging');
     git(origin, 'commit', '-qam', 'staging');
